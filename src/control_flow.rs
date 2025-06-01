@@ -320,8 +320,8 @@ impl ControlFlowAnalyzer {
         let mut result = Vec::new();
 
         for insn in instructions.as_ref() {
-            let instruction_type = self.classify_instruction(&insn);
-            let flow_control = self.analyze_flow_control(&insn);
+            let instruction_type = self.classify_instruction(insn);
+            let flow_control = self.analyze_flow_control(insn);
 
             result.push(Instruction {
                 address: insn.address(),
@@ -903,7 +903,7 @@ mod tests {
             let disassembled = analyzer.capstone.disasm_all(&bytes, 0x1000).unwrap();
             if let Some(insn) = disassembled.as_ref().iter().next() {
                 assert_eq!(insn.mnemonic().unwrap(), expected_mnemonic);
-                let flow = analyzer.analyze_flow_control(&insn);
+                let flow = analyzer.analyze_flow_control(insn);
                 // Flow control analysis depends on operand parsing which varies
                 match expected_mnemonic {
                     "ret" => assert!(matches!(flow, FlowControl::Return)),

@@ -98,8 +98,8 @@ pub struct McpTransportServer {
     string_tracker: Arc<StringTracker>,
 }
 
-impl McpTransportServer {
-    pub fn new() -> Self {
+impl Default for McpTransportServer {
+    fn default() -> Self {
         let cache_dir = std::env::temp_dir().join("file-scanner-cache");
         let cache = Arc::new(AnalysisCache::new(cache_dir).expect("Failed to create cache"));
         let string_tracker = Arc::new(StringTracker::new());
@@ -109,6 +109,12 @@ impl McpTransportServer {
             cache,
             string_tracker,
         }
+    }
+}
+
+impl McpTransportServer {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Run MCP server with stdio transport

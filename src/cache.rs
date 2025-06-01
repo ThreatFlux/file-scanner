@@ -60,7 +60,7 @@ impl AnalysisCache {
         // Use file hash as key for better cache hits
         let key = entry.file_hash.clone();
 
-        let file_entries = entries.entry(key).or_insert_with(Vec::new);
+        let file_entries = entries.entry(key).or_default();
         file_entries.push(entry);
 
         // Limit entries per file

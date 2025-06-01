@@ -727,14 +727,14 @@ fn detect_file_operations(
         ("GetTempPath", FileOpType::FileCreation),
     ];
 
-    let mut found_ops = HashMap::new();
+    let mut found_ops: HashMap<FileOpType, Vec<String>> = HashMap::new();
 
     if let Some(symbols) = symbols {
         for (api, op_type) in &file_apis {
             if symbols.functions.iter().any(|f| f.name.contains(api)) {
                 found_ops
                     .entry(op_type.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(api.to_string());
             }
         }
@@ -965,7 +965,7 @@ fn detect_process_operations(
             if symbols.functions.iter().any(|f| f.name.contains(api)) {
                 found_by_type
                     .entry(op_type.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .extend(techniques.iter().map(|s| s.to_string()));
             }
         }

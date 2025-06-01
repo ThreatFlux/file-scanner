@@ -79,6 +79,7 @@ pub struct LicenseInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum LicenseFamily {
     MIT,
     Apache,
@@ -203,8 +204,8 @@ struct LicenseDetector {
     license_patterns: HashMap<String, Regex>,
 }
 
-impl DependencyAnalyzer {
-    pub fn new() -> Self {
+impl Default for DependencyAnalyzer {
+    fn default() -> Self {
         let mut analyzer = Self {
             vulnerability_db: VulnerabilityDatabase::new(),
             license_detector: LicenseDetector::new(),
@@ -212,6 +213,12 @@ impl DependencyAnalyzer {
 
         analyzer.load_vulnerability_database();
         analyzer
+    }
+}
+
+impl DependencyAnalyzer {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     fn load_vulnerability_database(&mut self) {
@@ -366,8 +373,8 @@ impl DependencyAnalyzer {
         }
 
         // Handle Windows-style imports (e.g., "kernel32.dll")
-        if import_name.ends_with(".dll") {
-            return import_name[..import_name.len() - 4].to_lowercase();
+        if let Some(base_name) = import_name.strip_suffix(".dll") {
+            return base_name.to_lowercase();
         }
 
         // Handle lib prefix (e.g., "libssl.so.1.1" -> "ssl")
@@ -779,7 +786,7 @@ impl VulnerabilityDatabase {
     fn add_vulnerability(&mut self, library: &str, vulnerability: KnownVulnerability) {
         self.known_vulnerabilities
             .entry(library.to_string())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(vulnerability);
     }
 

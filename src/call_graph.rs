@@ -179,7 +179,7 @@ pub fn generate_call_graph(
     let mut graph = graph_builder.build();
 
     // Detect entry points
-    graph.detect_entry_points(&symbols);
+    graph.detect_entry_points(symbols);
 
     // Find unreachable functions
     graph.find_unreachable_functions();
@@ -255,7 +255,7 @@ impl CallGraphBuilder {
 
     fn build(self) -> CallGraph {
         CallGraph {
-            nodes: self.nodes.into_iter().map(|(_, node)| node).collect(),
+            nodes: self.nodes.into_values().collect(),
             edges: self.edges,
             entry_points: Vec::new(),
             unreachable_functions: Vec::new(),
@@ -331,7 +331,7 @@ impl CallGraph {
         for edge in &self.edges {
             adjacency
                 .entry(edge.caller)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(edge.callee);
         }
 
@@ -360,6 +360,7 @@ impl CallGraph {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn dfs_detect_cycles(
         &self,
         current: u64,

@@ -119,6 +119,12 @@ pub struct QualityAnalysisStats {
 
 pub struct CodeQualityAnalyzer;
 
+impl Default for CodeQualityAnalyzer {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl CodeQualityAnalyzer {
     pub fn new() -> Self {
         Self
@@ -309,7 +315,7 @@ impl CodeQualityAnalyzer {
         let mi = 171.0 - 5.2 * volume.ln() - 0.23 * cc - 16.2 * loc.ln();
 
         // Normalize to 0-100 scale
-        ((mi * 100.0 / 171.0).max(0.0)).min(100.0)
+        (mi * 100.0 / 171.0).clamp(0.0, 100.0)
     }
 
     fn estimate_technical_debt(

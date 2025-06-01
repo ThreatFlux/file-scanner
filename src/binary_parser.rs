@@ -185,7 +185,7 @@ fn parse_mach(mach: goblin::mach::Mach) -> Result<BinaryInfo> {
     match mach {
         Mach::Binary(mach_o) => {
             info.architecture = if mach_o.is_64 { "x86_64" } else { "x86" }.to_string();
-            info.entry_point = Some(mach_o.entry as u64);
+            info.entry_point = Some(mach_o.entry);
             for segment in &mach_o.segments {
                 for (section, _) in &segment.sections()? {
                     info.sections.push(SectionInfo {

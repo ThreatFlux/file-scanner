@@ -75,8 +75,8 @@ pub struct StringTracker {
     suspicious_patterns: Vec<regex::Regex>,
 }
 
-impl StringTracker {
-    pub fn new() -> Self {
+impl Default for StringTracker {
+    fn default() -> Self {
         let suspicious_patterns = vec![
             // Network indicators
             regex::Regex::new(r"(?i)(https?|ftp|ssh|telnet|rdp)://").unwrap(),
@@ -100,6 +100,12 @@ impl StringTracker {
             entries: Arc::new(Mutex::new(HashMap::new())),
             suspicious_patterns,
         }
+    }
+}
+
+impl StringTracker {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn track_string(
