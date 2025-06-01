@@ -948,7 +948,7 @@ fn generate_graph_data(functions: &[DisassembledFunction]) -> GraphVisualization
 mod tests {
     use super::*;
     use crate::function_analysis::{
-        FunctionInfo, SymbolTable, FunctionType, CallingConvention, SymbolCounts,
+        CallingConvention, FunctionInfo, FunctionType, SymbolCounts, SymbolTable,
     };
 
     // Helper function to create a mock capstone instruction
@@ -1016,9 +1016,7 @@ mod tests {
             "aesenc" | "aesdec" | "aesimc" | "aeskeygen" | "sha256" | "pclmulqdq" => {
                 InstructionType::Crypto
             }
-            m if m.starts_with("v") || m.starts_with("p") => {
-                InstructionType::Vector
-            }
+            m if m.starts_with("v") || m.starts_with("p") => InstructionType::Vector,
             _ => InstructionType::Other,
         }
     }
@@ -1033,10 +1031,7 @@ mod tests {
             format_architecture(Arch::X86, Mode::Mode32),
             "x86".to_string()
         );
-        assert_eq!(
-            format_architecture(Arch::ARM, Mode::Arm),
-            "ARM".to_string()
-        );
+        assert_eq!(format_architecture(Arch::ARM, Mode::Arm), "ARM".to_string());
         assert_eq!(
             format_architecture(Arch::ARM64, Mode::Arm),
             "ARM64".to_string()
@@ -1115,7 +1110,11 @@ mod tests {
 
         for (mnemonic, expected) in test_cases {
             let insn = create_mock_instruction(0x1000, mnemonic, "", vec![0x90]);
-            assert_eq!(insn.instruction_type, expected, "Failed for mnemonic: {}", mnemonic);
+            assert_eq!(
+                insn.instruction_type, expected,
+                "Failed for mnemonic: {}",
+                mnemonic
+            );
         }
     }
 
@@ -1141,7 +1140,8 @@ mod tests {
         ));
 
         // Test call instructions
-        let call_insn = create_mock_instruction(0x1000, "call", "0x1234", vec![0xe8, 0x30, 0x02, 0x00, 0x00]);
+        let call_insn =
+            create_mock_instruction(0x1000, "call", "0x1234", vec![0xe8, 0x30, 0x02, 0x00, 0x00]);
         assert!(matches!(
             call_insn.flow_control,
             Some(FlowControl::Call {
@@ -1171,7 +1171,8 @@ mod tests {
         ));
 
         // Test conditional move
-        let cmov_insn = create_mock_instruction(0x1000, "cmovz", "eax, ebx", vec![0x0f, 0x44, 0xc3]);
+        let cmov_insn =
+            create_mock_instruction(0x1000, "cmovz", "eax, ebx", vec![0x0f, 0x44, 0xc3]);
         assert!(matches!(
             cmov_insn.flow_control,
             Some(FlowControl::ConditionalMove)
@@ -1192,7 +1193,12 @@ mod tests {
             create_mock_instruction(0x100a, "call", "0x2000", vec![0xe8, 0xf1, 0x0f, 0x00, 0x00]),
             create_mock_instruction(0x100f, "ret", "", vec![0xc3]),
             create_mock_instruction(0x1010, "syscall", "", vec![0x0f, 0x05]),
-            create_mock_instruction(0x1012, "aesenc", "xmm0, xmm1", vec![0x66, 0x0f, 0x38, 0xdc, 0xc1]),
+            create_mock_instruction(
+                0x1012,
+                "aesenc",
+                "xmm0, xmm1",
+                vec![0x66, 0x0f, 0x38, 0xdc, 0xc1],
+            ),
             create_mock_instruction(0x1017, "nop", "", vec![0x90]),
             create_mock_instruction(0x1018, "xor", "xmm0, xmm1", vec![0x66, 0x0f, 0xef, 0xc1]),
         ];
@@ -1253,7 +1259,8 @@ mod tests {
     #[test]
     fn test_crypto_operation_detection() {
         // Test AES operations
-        let aes_insn = create_mock_instruction(0x1000, "aesenc", "xmm0, xmm1", vec![0x66, 0x0f, 0x38, 0xdc]);
+        let aes_insn =
+            create_mock_instruction(0x1000, "aesenc", "xmm0, xmm1", vec![0x66, 0x0f, 0x38, 0xdc]);
         let crypto_op = detect_crypto_operation(&aes_insn);
         assert!(crypto_op.is_some());
         assert!(matches!(
@@ -1262,7 +1269,8 @@ mod tests {
         ));
 
         // Test SHA256 operations
-        let sha_insn = create_mock_instruction(0x1000, "sha256rnds2", "xmm0, xmm1", vec![0x0f, 0x38, 0xcb]);
+        let sha_insn =
+            create_mock_instruction(0x1000, "sha256rnds2", "xmm0, xmm1", vec![0x0f, 0x38, 0xcb]);
         let crypto_op = detect_crypto_operation(&sha_insn);
         assert!(crypto_op.is_some());
         assert!(matches!(
@@ -1331,13 +1339,19 @@ mod tests {
         let patterns = detect_suspicious_patterns(&all_instructions);
 
         // Should detect anti-debug pattern
-        assert!(patterns.iter().any(|p| matches!(p.pattern_type, PatternType::AntiDebug)));
+        assert!(patterns
+            .iter()
+            .any(|p| matches!(p.pattern_type, PatternType::AntiDebug)));
 
         // Should detect NOP sled
-        assert!(patterns.iter().any(|p| matches!(p.pattern_type, PatternType::NopSled)));
+        assert!(patterns
+            .iter()
+            .any(|p| matches!(p.pattern_type, PatternType::NopSled)));
 
         // Should detect excessive indirect jumps
-        assert!(patterns.iter().any(|p| matches!(p.pattern_type, PatternType::IndirectJumps)));
+        assert!(patterns
+            .iter()
+            .any(|p| matches!(p.pattern_type, PatternType::IndirectJumps)));
     }
 
     #[test]
@@ -1553,13 +1567,15 @@ mod tests {
         let output_formats = generate_output_formats(&instructions, &functions, architecture);
 
         assert!(!output_formats.assembly.is_empty());
-        assert!(output_formats
-            .json_structured
-            .get("architecture")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            == "x86_64");
+        assert!(
+            output_formats
+                .json_structured
+                .get("architecture")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                == "x86_64"
+        );
         assert_eq!(
             output_formats
                 .json_structured
@@ -1703,7 +1719,7 @@ mod tests {
             create_mock_instruction(0x1003, "jz", "0x1010", vec![0x74, 0x0b]), // Conditional jump
             create_mock_instruction(0x1005, "call", "[rax+8]", vec![0xff, 0x50, 0x08]), // Indirect call
             create_mock_instruction(0x1008, "jmp", "0x1020", vec![0xeb, 0x16]), // Unconditional jump
-            create_mock_instruction(0x1010, "ret", "", vec![0xc3]), // Return
+            create_mock_instruction(0x1010, "ret", "", vec![0xc3]),             // Return
         ];
 
         let analysis = analyze_instructions(&instructions);

@@ -849,7 +849,7 @@ mod tests {
     #[test]
     fn test_classify_instruction() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         // We'll need to use the actual disassembler for this test
         // Create a simple x86-64 instruction sequence
         let instructions = vec![
@@ -858,22 +858,22 @@ mod tests {
             0xe8, 0x00, 0x00, 0x00, 0x00, // call relative
             0xc3, // ret
         ];
-        
+
         let disassembled = analyzer.capstone.disasm_all(&instructions, 0x1000).unwrap();
         let insns: Vec<_> = disassembled.as_ref().iter().collect();
-        
+
         // Test classification of mov instruction
         let mov_type = analyzer.classify_instruction(&insns[0]);
         assert!(matches!(mov_type, InstructionType::Memory));
-        
+
         // Test classification of sub instruction
         let sub_type = analyzer.classify_instruction(&insns[1]);
         assert!(matches!(sub_type, InstructionType::Arithmetic));
-        
+
         // Test classification of call instruction
         let call_type = analyzer.classify_instruction(&insns[2]);
         assert!(matches!(call_type, InstructionType::Call));
-        
+
         // Test classification of ret instruction
         let ret_type = analyzer.classify_instruction(&insns[3]);
         assert!(matches!(ret_type, InstructionType::Return));
@@ -882,15 +882,23 @@ mod tests {
     #[test]
     fn test_analyze_flow_control() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         // Test different flow control patterns
         let test_cases = vec![
             (vec![0xc3], "ret", FlowControl::Return), // ret
-            (vec![0xe9, 0x00, 0x00, 0x00, 0x00], "jmp", FlowControl::Jump(0x1005)), // jmp
+            (
+                vec![0xe9, 0x00, 0x00, 0x00, 0x00],
+                "jmp",
+                FlowControl::Jump(0x1005),
+            ), // jmp
             (vec![0x74, 0x10], "je", FlowControl::Branch(0x1012)), // je +16
-            (vec![0xe8, 0x00, 0x00, 0x00, 0x00], "call", FlowControl::Call(0x1005)), // call
+            (
+                vec![0xe8, 0x00, 0x00, 0x00, 0x00],
+                "call",
+                FlowControl::Call(0x1005),
+            ), // call
         ];
-        
+
         for (bytes, expected_mnemonic, _expected_flow) in test_cases {
             let disassembled = analyzer.capstone.disasm_all(&bytes, 0x1000).unwrap();
             if let Some(insn) = disassembled.as_ref().iter().next() {
@@ -900,7 +908,10 @@ mod tests {
                 match expected_mnemonic {
                     "ret" => assert!(matches!(flow, FlowControl::Return)),
                     "jmp" => assert!(matches!(flow, FlowControl::Jump(_) | FlowControl::Indirect)),
-                    "je" => assert!(matches!(flow, FlowControl::Branch(_) | FlowControl::Indirect)),
+                    "je" => assert!(matches!(
+                        flow,
+                        FlowControl::Branch(_) | FlowControl::Indirect
+                    )),
                     "call" => assert!(matches!(flow, FlowControl::Call(_) | FlowControl::Indirect)),
                     _ => {}
                 }
@@ -911,7 +922,7 @@ mod tests {
     #[test]
     fn test_find_basic_block_boundaries() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         let instructions = vec![
             create_test_instruction(0x1000, "push", "rbp", FlowControl::Fall),
             create_test_instruction(0x1001, "mov", "rbp, rsp", FlowControl::Fall),
@@ -922,9 +933,9 @@ mod tests {
             create_test_instruction(0x1010, "mov", "eax, 0", FlowControl::Fall),
             create_test_instruction(0x1015, "ret", "", FlowControl::Return),
         ];
-        
+
         let boundaries = analyzer.find_basic_block_boundaries(&instructions);
-        
+
         // Should have boundaries at:
         // - 0x1000 (first instruction)
         // - 0x1008 (after conditional branch)
@@ -939,16 +950,16 @@ mod tests {
     #[test]
     fn test_create_basic_blocks() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         let instructions = vec![
             create_test_instruction(0x1000, "push", "rbp", FlowControl::Fall),
             create_test_instruction(0x1001, "mov", "rbp, rsp", FlowControl::Fall),
             create_test_instruction(0x1004, "ret", "", FlowControl::Return),
         ];
-        
+
         let boundaries = analyzer.find_basic_block_boundaries(&instructions);
         let blocks = analyzer.create_basic_blocks(&instructions, &boundaries);
-        
+
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].id, 0);
         assert_eq!(blocks[0].start_address, 0x1000);
@@ -960,16 +971,19 @@ mod tests {
     #[test]
     fn test_build_control_flow_edges() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         // Create a simple CFG with conditional branch
         let blocks = vec![
             BasicBlock {
                 id: 0,
                 start_address: 0x1000,
                 end_address: 0x1008,
-                instructions: vec![
-                    create_test_instruction(0x1006, "je", "0x1010", FlowControl::Branch(0x1010)),
-                ],
+                instructions: vec![create_test_instruction(
+                    0x1006,
+                    "je",
+                    "0x1010",
+                    FlowControl::Branch(0x1010),
+                )],
                 successors: vec![],
                 predecessors: vec![],
                 block_type: BlockType::Conditional,
@@ -979,9 +993,12 @@ mod tests {
                 id: 1,
                 start_address: 0x1008,
                 end_address: 0x1010,
-                instructions: vec![
-                    create_test_instruction(0x100b, "jmp", "0x1015", FlowControl::Jump(0x1015)),
-                ],
+                instructions: vec![create_test_instruction(
+                    0x100b,
+                    "jmp",
+                    "0x1015",
+                    FlowControl::Jump(0x1015),
+                )],
                 successors: vec![],
                 predecessors: vec![],
                 block_type: BlockType::Normal,
@@ -991,9 +1008,12 @@ mod tests {
                 id: 2,
                 start_address: 0x1010,
                 end_address: 0x1015,
-                instructions: vec![
-                    create_test_instruction(0x1014, "nop", "", FlowControl::Fall),
-                ],
+                instructions: vec![create_test_instruction(
+                    0x1014,
+                    "nop",
+                    "",
+                    FlowControl::Fall,
+                )],
                 successors: vec![],
                 predecessors: vec![],
                 block_type: BlockType::Normal,
@@ -1003,30 +1023,33 @@ mod tests {
                 id: 3,
                 start_address: 0x1015,
                 end_address: 0x1016,
-                instructions: vec![
-                    create_test_instruction(0x1015, "ret", "", FlowControl::Return),
-                ],
+                instructions: vec![create_test_instruction(
+                    0x1015,
+                    "ret",
+                    "",
+                    FlowControl::Return,
+                )],
                 successors: vec![],
                 predecessors: vec![],
                 block_type: BlockType::Return,
                 instruction_count: 1,
             },
         ];
-        
+
         let edges = analyzer.build_control_flow_edges(&blocks);
-        
+
         // Should have edges:
         // - Block 0 -> Block 2 (branch taken)
         // - Block 0 -> Block 1 (fall through)
         // - Block 1 -> Block 3 (jump)
         // - Block 2 -> Block 3 (fall through)
         assert_eq!(edges.len(), 4);
-        
+
         // Verify edge types
         let branch_edge = edges.iter().find(|e| e.from_block == 0 && e.to_block == 2);
         assert!(branch_edge.is_some());
         assert!(matches!(branch_edge.unwrap().edge_type, EdgeType::Branch));
-        
+
         let fall_edge = edges.iter().find(|e| e.from_block == 0 && e.to_block == 1);
         assert!(fall_edge.is_some());
         assert!(matches!(fall_edge.unwrap().edge_type, EdgeType::Fall));
@@ -1035,7 +1058,7 @@ mod tests {
     #[test]
     fn test_detect_loops() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         let blocks = vec![
             BasicBlock {
                 id: 0,
@@ -1058,7 +1081,7 @@ mod tests {
                 instruction_count: 1,
             },
         ];
-        
+
         // Create a back edge from block 1 to block 0 (loop)
         let edges = vec![
             CfgEdge {
@@ -1072,9 +1095,9 @@ mod tests {
                 edge_type: EdgeType::Branch,
             },
         ];
-        
+
         let loops = analyzer.detect_loops(&blocks, &edges);
-        
+
         assert_eq!(loops.len(), 1);
         assert_eq!(loops[0].header_block, 0);
         assert!(loops[0].body_blocks.contains(&1));
@@ -1084,7 +1107,7 @@ mod tests {
     #[test]
     fn test_calculate_complexity_metrics() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         // Create a simple CFG
         let blocks = vec![
             BasicBlock {
@@ -1118,7 +1141,7 @@ mod tests {
                 instruction_count: 1,
             },
         ];
-        
+
         let edges = vec![
             CfgEdge {
                 from_block: 0,
@@ -1131,11 +1154,11 @@ mod tests {
                 edge_type: EdgeType::Fall,
             },
         ];
-        
+
         let loops = vec![];
-        
+
         let metrics = analyzer.calculate_complexity_metrics(&blocks, &edges, &loops);
-        
+
         // Cyclomatic complexity: E - N + 2 = 2 - 3 + 2 = 1
         assert_eq!(metrics.cyclomatic_complexity, 1);
         assert_eq!(metrics.basic_block_count, 3);
@@ -1147,7 +1170,7 @@ mod tests {
     #[test]
     fn test_find_unreachable_blocks() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         let blocks = vec![
             BasicBlock {
                 id: 0,
@@ -1180,18 +1203,16 @@ mod tests {
                 instruction_count: 1,
             },
         ];
-        
+
         // Only connect block 0 to block 1, leaving block 2 unreachable
-        let edges = vec![
-            CfgEdge {
-                from_block: 0,
-                to_block: 1,
-                edge_type: EdgeType::Fall,
-            },
-        ];
-        
+        let edges = vec![CfgEdge {
+            from_block: 0,
+            to_block: 1,
+            edge_type: EdgeType::Fall,
+        }];
+
         let unreachable = analyzer.find_unreachable_blocks(&blocks, &edges);
-        
+
         assert_eq!(unreachable.len(), 1);
         assert_eq!(unreachable[0], 2);
     }
@@ -1199,7 +1220,7 @@ mod tests {
     #[test]
     fn test_find_exit_blocks() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         let blocks = vec![
             BasicBlock {
                 id: 0,
@@ -1232,9 +1253,9 @@ mod tests {
                 instruction_count: 1,
             },
         ];
-        
+
         let exit_blocks = analyzer.find_exit_blocks(&blocks);
-        
+
         assert_eq!(exit_blocks.len(), 2);
         assert!(exit_blocks.contains(&1));
         assert!(exit_blocks.contains(&2));
@@ -1243,35 +1264,47 @@ mod tests {
     #[test]
     fn test_determine_block_type() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         // Test with return instruction
-        let ret_instructions = vec![
-            create_test_instruction(0x1000, "ret", "", FlowControl::Return),
-        ];
+        let ret_instructions = vec![create_test_instruction(
+            0x1000,
+            "ret",
+            "",
+            FlowControl::Return,
+        )];
         let ret_type = analyzer.determine_block_type(&ret_instructions);
         assert!(matches!(ret_type, BlockType::Return));
-        
+
         // Test with call instruction
-        let call_instructions = vec![
-            create_test_instruction(0x1000, "call", "0x2000", FlowControl::Call(0x2000)),
-        ];
+        let call_instructions = vec![create_test_instruction(
+            0x1000,
+            "call",
+            "0x2000",
+            FlowControl::Call(0x2000),
+        )];
         let call_type = analyzer.determine_block_type(&call_instructions);
         assert!(matches!(call_type, BlockType::Call));
-        
+
         // Test with conditional branch
-        let branch_instructions = vec![
-            create_test_instruction(0x1000, "je", "0x2000", FlowControl::Branch(0x2000)),
-        ];
+        let branch_instructions = vec![create_test_instruction(
+            0x1000,
+            "je",
+            "0x2000",
+            FlowControl::Branch(0x2000),
+        )];
         let branch_type = analyzer.determine_block_type(&branch_instructions);
         assert!(matches!(branch_type, BlockType::Conditional));
-        
+
         // Test with normal instruction
-        let normal_instructions = vec![
-            create_test_instruction(0x1000, "mov", "eax, ebx", FlowControl::Fall),
-        ];
+        let normal_instructions = vec![create_test_instruction(
+            0x1000,
+            "mov",
+            "eax, ebx",
+            FlowControl::Fall,
+        )];
         let normal_type = analyzer.determine_block_type(&normal_instructions);
         assert!(matches!(normal_type, BlockType::Normal));
-        
+
         // Test with empty instructions
         let empty_instructions: Vec<Instruction> = vec![];
         let empty_type = analyzer.determine_block_type(&empty_instructions);
@@ -1281,7 +1314,7 @@ mod tests {
     #[test]
     fn test_analyze_function_empty() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         let function = FunctionInfo {
             name: "test_func".to_string(),
             address: 0x1000,
@@ -1293,17 +1326,17 @@ mod tests {
             is_exported: true,
             is_imported: false,
         };
-        
+
         let empty_bytes = vec![];
         let result = analyzer.analyze_function(&function, &empty_bytes);
-        
+
         assert!(result.is_err());
     }
 
     #[test]
     fn test_cognitive_complexity_calculation() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         let blocks = vec![
             BasicBlock {
                 id: 0,
@@ -1346,9 +1379,9 @@ mod tests {
                 instruction_count: 1,
             },
         ];
-        
+
         let complexity = analyzer.calculate_cognitive_complexity(&blocks);
-        
+
         // Conditional: +1, LoopHeader: +2, LoopBody: +2 = 5
         assert_eq!(complexity, 5);
     }
@@ -1356,7 +1389,7 @@ mod tests {
     #[test]
     fn test_nesting_depth_calculation() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         let blocks = vec![
             BasicBlock {
                 id: 0,
@@ -1389,9 +1422,9 @@ mod tests {
                 instruction_count: 1,
             },
         ];
-        
+
         let depth = analyzer.calculate_nesting_depth(&blocks);
-        
+
         // Two nested conditionals should give depth of 2
         assert_eq!(depth, 2);
     }
@@ -1401,7 +1434,7 @@ mod tests {
         // Create a minimal ELF file for testing
         // This is a simplified test that would need a proper ELF file in a real scenario
         let mut temp_file = NamedTempFile::new().unwrap();
-        
+
         // Write a minimal ELF header (this is not a valid ELF, just for testing error handling)
         let elf_header = vec![
             0x7f, 0x45, 0x4c, 0x46, // ELF magic
@@ -1410,7 +1443,7 @@ mod tests {
         ];
         temp_file.write_all(&elf_header).unwrap();
         temp_file.flush().unwrap();
-        
+
         let symbol_table = SymbolTable {
             functions: vec![],
             global_variables: vec![],
@@ -1426,9 +1459,9 @@ mod tests {
                 cross_references: 0,
             },
         };
-        
+
         let result = analyze_control_flow(temp_file.path(), &symbol_table);
-        
+
         // This should fail because we don't have a valid ELF with .text section
         assert!(result.is_err());
     }
@@ -1443,17 +1476,17 @@ mod tests {
             EdgeType::Call,
             EdgeType::Return,
         ];
-        
+
         for edge_type in edge_types {
             let serialized = serde_json::to_string(&edge_type).unwrap();
             let deserialized: EdgeType = serde_json::from_str(&serialized).unwrap();
-            
+
             match (edge_type, deserialized) {
-                (EdgeType::Fall, EdgeType::Fall) => {},
-                (EdgeType::Jump, EdgeType::Jump) => {},
-                (EdgeType::Branch, EdgeType::Branch) => {},
-                (EdgeType::Call, EdgeType::Call) => {},
-                (EdgeType::Return, EdgeType::Return) => {},
+                (EdgeType::Fall, EdgeType::Fall) => {}
+                (EdgeType::Jump, EdgeType::Jump) => {}
+                (EdgeType::Branch, EdgeType::Branch) => {}
+                (EdgeType::Call, EdgeType::Call) => {}
+                (EdgeType::Return, EdgeType::Return) => {}
                 _ => panic!("Edge type serialization mismatch"),
             }
         }
@@ -1469,17 +1502,17 @@ mod tests {
             LoopType::While,
             LoopType::For,
         ];
-        
+
         for loop_type in loop_types {
             let serialized = serde_json::to_string(&loop_type).unwrap();
             let deserialized: LoopType = serde_json::from_str(&serialized).unwrap();
-            
+
             match (loop_type, deserialized) {
-                (LoopType::Natural, LoopType::Natural) => {},
-                (LoopType::Irreducible, LoopType::Irreducible) => {},
-                (LoopType::DoWhile, LoopType::DoWhile) => {},
-                (LoopType::While, LoopType::While) => {},
-                (LoopType::For, LoopType::For) => {},
+                (LoopType::Natural, LoopType::Natural) => {}
+                (LoopType::Irreducible, LoopType::Irreducible) => {}
+                (LoopType::DoWhile, LoopType::DoWhile) => {}
+                (LoopType::While, LoopType::While) => {}
+                (LoopType::For, LoopType::For) => {}
                 _ => panic!("Loop type serialization mismatch"),
             }
         }
@@ -1488,7 +1521,7 @@ mod tests {
     #[test]
     fn test_complex_cfg_construction() {
         let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
-        
+
         // Create a more complex function with multiple paths
         let _function = FunctionInfo {
             name: "complex_func".to_string(),
@@ -1501,7 +1534,7 @@ mod tests {
             is_exported: true,
             is_imported: false,
         };
-        
+
         // Simulate disassembled instructions for a complex function
         let instructions = vec![
             create_test_instruction(0x1000, "push", "rbp", FlowControl::Fall),
@@ -1521,23 +1554,23 @@ mod tests {
             create_test_instruction(0x1040, "pop", "rbp", FlowControl::Fall),
             create_test_instruction(0x1041, "ret", "", FlowControl::Return),
         ];
-        
+
         // Find basic blocks
         let boundaries = analyzer.find_basic_block_boundaries(&instructions);
         assert!(boundaries.len() >= 5); // Should have multiple boundaries
-        
+
         // Create basic blocks
         let blocks = analyzer.create_basic_blocks(&instructions, &boundaries);
         assert!(blocks.len() >= 5); // Should create multiple blocks
-        
+
         // Build edges
         let edges = analyzer.build_control_flow_edges(&blocks);
         assert!(edges.len() >= 6); // Should have multiple edges
-        
+
         // Detect loops
         let loops = analyzer.detect_loops(&blocks, &edges);
         assert!(loops.len() >= 1); // Should detect the back edge as a loop
-        
+
         // Calculate metrics
         let metrics = analyzer.calculate_complexity_metrics(&blocks, &edges, &loops);
         assert!(metrics.cyclomatic_complexity > 1); // Complex function should have higher complexity

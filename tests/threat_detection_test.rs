@@ -11,7 +11,7 @@ fn create_test_file_with_content(content: &[u8]) -> std::path::PathBuf {
     let file_path = temp_dir.path().join("test_file.bin");
     let mut file = File::create(&file_path).unwrap();
     file.write_all(content).unwrap();
-    
+
     // Prevent tempdir from being dropped
     std::mem::forget(temp_dir);
     file_path
@@ -98,7 +98,10 @@ fn test_threat_indicator_creation() {
         confidence: 0.9,
     };
 
-    assert!(matches!(indicator.indicator_type, IndicatorType::KnownMalwareFamily));
+    assert!(matches!(
+        indicator.indicator_type,
+        IndicatorType::KnownMalwareFamily
+    ));
     assert!(matches!(indicator.severity, Severity::High));
     assert_eq!(indicator.confidence, 0.9);
 }
@@ -124,7 +127,10 @@ fn test_all_indicator_types() {
             confidence: 0.8,
         };
 
-        assert!(std::mem::discriminant(&indicator.indicator_type) == std::mem::discriminant(&indicator_type));
+        assert!(
+            std::mem::discriminant(&indicator.indicator_type)
+                == std::mem::discriminant(&indicator_type)
+        );
     }
 }
 
@@ -177,7 +183,9 @@ fn test_analyze_threats_with_api_calls() {
     assert!(!analysis.matches.is_empty());
 
     // Should detect suspicious_api_calls rule
-    let api_match = analysis.matches.iter()
+    let api_match = analysis
+        .matches
+        .iter()
         .find(|m| m.rule_identifier == "suspicious_api_calls");
     assert!(api_match.is_some());
 }
@@ -192,9 +200,11 @@ fn test_analyze_threats_with_crypto_operations() {
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    
+
     // Should detect crypto_operations rule
-    let crypto_match = analysis.matches.iter()
+    let crypto_match = analysis
+        .matches
+        .iter()
         .find(|m| m.rule_identifier == "crypto_operations");
     assert!(crypto_match.is_some());
 }
@@ -209,9 +219,11 @@ fn test_analyze_threats_with_network_communication() {
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    
+
     // Should detect network_communication rule
-    let network_match = analysis.matches.iter()
+    let network_match = analysis
+        .matches
+        .iter()
         .find(|m| m.rule_identifier == "network_communication");
     assert!(network_match.is_some());
 }
@@ -277,14 +289,12 @@ fn test_threat_level_calculation_malicious() {
         metadata: HashMap::new(),
     }];
 
-    let indicators = vec![
-        ThreatIndicator {
-            indicator_type: IndicatorType::KnownMalwareFamily,
-            description: "Known malware".to_string(),
-            severity: Severity::High,
-            confidence: 0.8,
-        },
-    ];
+    let indicators = vec![ThreatIndicator {
+        indicator_type: IndicatorType::KnownMalwareFamily,
+        description: "Known malware".to_string(),
+        severity: Severity::High,
+        confidence: 0.8,
+    }];
 
     let level = calculate_threat_level(&matches, &indicators);
     assert!(matches!(level, ThreatLevel::Malicious));
@@ -356,8 +366,9 @@ fn test_recommendations_for_critical_threat() {
 
     let recommendations = generate_recommendations(&threat_level, &matches, &classifications);
     assert!(!recommendations.is_empty());
-    
-    let has_critical_recommendation = recommendations.iter()
+
+    let has_critical_recommendation = recommendations
+        .iter()
         .any(|r| r.contains("CRITICAL") || r.contains("isolate"));
     assert!(has_critical_recommendation);
 }
@@ -370,8 +381,9 @@ fn test_recommendations_for_malicious_threat() {
 
     let recommendations = generate_recommendations(&threat_level, &matches, &classifications);
     assert!(!recommendations.is_empty());
-    
-    let has_malicious_recommendation = recommendations.iter()
+
+    let has_malicious_recommendation = recommendations
+        .iter()
         .any(|r| r.contains("Malicious") || r.contains("Quarantine"));
     assert!(has_malicious_recommendation);
 }
@@ -384,8 +396,9 @@ fn test_recommendations_for_suspicious_threat() {
 
     let recommendations = generate_recommendations(&threat_level, &matches, &classifications);
     assert!(!recommendations.is_empty());
-    
-    let has_suspicious_recommendation = recommendations.iter()
+
+    let has_suspicious_recommendation = recommendations
+        .iter()
         .any(|r| r.contains("Suspicious") || r.contains("sandboxed"));
     assert!(has_suspicious_recommendation);
 }
@@ -398,8 +411,9 @@ fn test_recommendations_for_clean_file() {
 
     let recommendations = generate_recommendations(&threat_level, &matches, &classifications);
     assert!(!recommendations.is_empty());
-    
-    let has_clean_recommendation = recommendations.iter()
+
+    let has_clean_recommendation = recommendations
+        .iter()
         .any(|r| r.contains("No significant threats"));
     assert!(has_clean_recommendation);
 }
@@ -411,8 +425,9 @@ fn test_recommendations_for_ransomware() {
     let classifications = vec![ThreatClassification::Ransomware];
 
     let recommendations = generate_recommendations(&threat_level, &matches, &classifications);
-    
-    let has_ransomware_recommendation = recommendations.iter()
+
+    let has_ransomware_recommendation = recommendations
+        .iter()
         .any(|r| r.contains("Backup") || r.contains("encrypted"));
     assert!(has_ransomware_recommendation);
 }
@@ -424,8 +439,9 @@ fn test_recommendations_for_infostealer() {
     let classifications = vec![ThreatClassification::InfoStealer];
 
     let recommendations = generate_recommendations(&threat_level, &matches, &classifications);
-    
-    let has_infostealer_recommendation = recommendations.iter()
+
+    let has_infostealer_recommendation = recommendations
+        .iter()
         .any(|r| r.contains("password") || r.contains("credential"));
     assert!(has_infostealer_recommendation);
 }
@@ -437,8 +453,9 @@ fn test_recommendations_for_backdoor() {
     let classifications = vec![ThreatClassification::Backdoor];
 
     let recommendations = generate_recommendations(&threat_level, &matches, &classifications);
-    
-    let has_backdoor_recommendation = recommendations.iter()
+
+    let has_backdoor_recommendation = recommendations
+        .iter()
         .any(|r| r.contains("network") || r.contains("remote access"));
     assert!(has_backdoor_recommendation);
 }
@@ -450,8 +467,9 @@ fn test_recommendations_for_cryptominer() {
     let classifications = vec![ThreatClassification::Cryptominer];
 
     let recommendations = generate_recommendations(&threat_level, &matches, &classifications);
-    
-    let has_cryptominer_recommendation = recommendations.iter()
+
+    let has_cryptominer_recommendation = recommendations
+        .iter()
         .any(|r| r.contains("CPU") || r.contains("mining"));
     assert!(has_cryptominer_recommendation);
 }
@@ -467,8 +485,9 @@ fn test_recommendations_for_anti_analysis() {
     let classifications = vec![];
 
     let recommendations = generate_recommendations(&threat_level, &matches, &classifications);
-    
-    let has_anti_analysis_recommendation = recommendations.iter()
+
+    let has_anti_analysis_recommendation = recommendations
+        .iter()
         .any(|r| r.contains("anti-analysis") || r.contains("sandbox"));
     assert!(has_anti_analysis_recommendation);
 }
@@ -484,8 +503,9 @@ fn test_recommendations_for_persistence() {
     let classifications = vec![];
 
     let recommendations = generate_recommendations(&threat_level, &matches, &classifications);
-    
-    let has_persistence_recommendation = recommendations.iter()
+
+    let has_persistence_recommendation = recommendations
+        .iter()
         .any(|r| r.contains("startup") || r.contains("persistence"));
     assert!(has_persistence_recommendation);
 }
@@ -493,11 +513,20 @@ fn test_recommendations_for_persistence() {
 #[test]
 fn test_extract_rule_name() {
     let test_cases = vec![
-        ("rule test_rule : suspicious {", Some("test_rule".to_string())),
-        ("rule malware_family : trojan malware {", Some("malware_family".to_string())),
+        (
+            "rule test_rule : suspicious {",
+            Some("test_rule".to_string()),
+        ),
+        (
+            "rule malware_family : trojan malware {",
+            Some("malware_family".to_string()),
+        ),
         ("rule simple_rule {", Some("simple_rule".to_string())),
         ("invalid rule format", None),
-        ("rule  spaced_name  : tag {", Some("spaced_name".to_string())),
+        (
+            "rule  spaced_name  : tag {",
+            Some("spaced_name".to_string()),
+        ),
     ];
 
     for (input, expected) in test_cases {
@@ -509,11 +538,17 @@ fn test_extract_rule_name() {
 #[test]
 fn test_extract_tags_from_rule() {
     let test_cases = vec![
-        ("rule test : tag1 tag2 {", vec!["tag1".to_string(), "tag2".to_string()]),
+        (
+            "rule test : tag1 tag2 {",
+            vec!["tag1".to_string(), "tag2".to_string()],
+        ),
         ("rule test : single_tag {", vec!["single_tag".to_string()]),
         ("rule test {", vec![]),
         ("rule test : {", vec![]),
-        ("rule test : tag1  tag2   tag3 {", vec!["tag1".to_string(), "tag2".to_string(), "tag3".to_string()]),
+        (
+            "rule test : tag1  tag2   tag3 {",
+            vec!["tag1".to_string(), "tag2".to_string(), "tag3".to_string()],
+        ),
     ];
 
     for (input, expected) in test_cases {
@@ -538,7 +573,10 @@ rule test_rule : suspicious {
 
     let metadata = extract_metadata_from_rule(rule_text);
     assert_eq!(metadata.len(), 3);
-    assert_eq!(metadata.get("description").unwrap(), "Test rule for analysis");
+    assert_eq!(
+        metadata.get("description").unwrap(),
+        "Test rule for analysis"
+    );
     assert_eq!(metadata.get("author").unwrap(), "Security Team");
     assert_eq!(metadata.get("severity").unwrap(), "high");
 }
@@ -546,7 +584,7 @@ rule test_rule : suspicious {
 #[test]
 fn test_contains_string() {
     let data = b"This is test data with VirtualAlloc function call";
-    
+
     assert!(contains_string(data, "VirtualAlloc"));
     assert!(contains_string(data, "test"));
     assert!(contains_string(data, "This"));
@@ -624,7 +662,10 @@ fn test_should_include_match_network() {
 #[test]
 fn test_create_threat_indicator() {
     let mut metadata = HashMap::new();
-    metadata.insert("description".to_string(), "Test threat indicator".to_string());
+    metadata.insert(
+        "description".to_string(),
+        "Test threat indicator".to_string(),
+    );
     metadata.insert("severity".to_string(), "high".to_string());
 
     let rule_match = YaraMatch {
@@ -636,14 +677,20 @@ fn test_create_threat_indicator() {
     let indicator = create_threat_indicator(&rule_match).unwrap();
     assert_eq!(indicator.description, "Test threat indicator");
     assert!(matches!(indicator.severity, Severity::High));
-    assert!(matches!(indicator.indicator_type, IndicatorType::AntiAnalysis));
+    assert!(matches!(
+        indicator.indicator_type,
+        IndicatorType::AntiAnalysis
+    ));
 }
 
 #[test]
 fn test_create_threat_indicator_different_tags() {
     let test_cases = vec![
         (vec!["network".to_string()], IndicatorType::NetworkIndicator),
-        (vec!["persistence".to_string()], IndicatorType::PersistenceMechanism),
+        (
+            vec!["persistence".to_string()],
+            IndicatorType::PersistenceMechanism,
+        ),
         (vec!["exploit".to_string()], IndicatorType::ExploitTechnique),
         (vec!["crypto".to_string()], IndicatorType::CryptoOperation),
         (vec!["other".to_string()], IndicatorType::SuspiciousBehavior),
@@ -657,7 +704,10 @@ fn test_create_threat_indicator_different_tags() {
         };
 
         let indicator = create_threat_indicator(&rule_match).unwrap();
-        assert!(std::mem::discriminant(&indicator.indicator_type) == std::mem::discriminant(&expected_type));
+        assert!(
+            std::mem::discriminant(&indicator.indicator_type)
+                == std::mem::discriminant(&expected_type)
+        );
     }
 }
 
@@ -673,7 +723,10 @@ fn test_create_threat_indicator_with_family() {
     };
 
     let indicator = create_threat_indicator(&rule_match).unwrap();
-    assert!(matches!(indicator.indicator_type, IndicatorType::KnownMalwareFamily));
+    assert!(matches!(
+        indicator.indicator_type,
+        IndicatorType::KnownMalwareFamily
+    ));
 }
 
 #[test]
@@ -706,7 +759,13 @@ fn test_serialization_deserialization() {
     let deserialized: ThreatAnalysis = serde_json::from_str(&json).unwrap();
 
     assert_eq!(analysis.matches.len(), deserialized.matches.len());
-    assert_eq!(analysis.classifications.len(), deserialized.classifications.len());
+    assert_eq!(
+        analysis.classifications.len(),
+        deserialized.classifications.len()
+    );
     assert_eq!(analysis.indicators.len(), deserialized.indicators.len());
-    assert_eq!(analysis.recommendations.len(), deserialized.recommendations.len());
+    assert_eq!(
+        analysis.recommendations.len(),
+        deserialized.recommendations.len()
+    );
 }

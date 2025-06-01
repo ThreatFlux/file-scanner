@@ -1,7 +1,7 @@
+use file_scanner::mcp_server::FileScannerMcp;
 use file_scanner::mcp_transport::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpServerState, McpTransportServer, SseEvent,
 };
-use file_scanner::mcp_server::FileScannerMcp;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -67,10 +67,7 @@ mod tests {
         assert_eq!(tools.len(), 2);
 
         // Check tool names
-        let tool_names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(tool_names.contains(&"analyze_file"));
         assert!(tool_names.contains(&"llm_analyze_file"));
     }
@@ -343,19 +340,12 @@ mod tests {
         );
         let string_tracker = Arc::new(file_scanner::string_tracker::StringTracker::new());
 
-        let state = McpServerState::new_for_testing(
-            handler,
-            sse_clients.clone(),
-            cache,
-            string_tracker,
-        );
+        let state =
+            McpServerState::new_for_testing(handler, sse_clients.clone(), cache, string_tracker);
 
         // Test that state can be cloned
         let _cloned_state = state.clone();
-        assert_eq!(
-            Arc::strong_count(&sse_clients),
-            2
-        ); // Original + clone
+        assert_eq!(Arc::strong_count(&sse_clients), 2); // Original + clone
     }
 
     #[tokio::test]

@@ -45,7 +45,7 @@ impl TestFixture {
         mode: u32,
     ) -> anyhow::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
-        
+
         let path = self.create_binary_file(name, content)?;
         let permissions = std::fs::Permissions::from_mode(mode);
         fs::set_permissions(&path, permissions)?;
@@ -87,21 +87,21 @@ impl TestFixture {
         ];
         pe_data.extend_from_slice(&[0x90; 58]); // Padding
         pe_data.extend_from_slice(&[0x3c, 0x00, 0x00, 0x00]); // PE header offset at 0x3c
-        
+
         // Pad to PE header (should be at 0x3c = 60 bytes total)
         let current_len = pe_data.len();
         if current_len < 0x3c {
             let padding_size = 0x3c - current_len;
             pe_data.extend_from_slice(&vec![0x00; padding_size]);
         }
-        
+
         // PE header
         pe_data.extend_from_slice(b"PE\x00\x00"); // PE signature
         pe_data.extend_from_slice(&[
             0x64, 0x86, // Machine (x64)
             0x01, 0x00, // Number of sections
         ]);
-        
+
         self.create_binary_file(name, &pe_data)
     }
 
@@ -123,7 +123,7 @@ impl TestFixture {
         for s in strings {
             content.extend_from_slice(s.as_bytes());
             content.push(0); // Null terminator
-            // Add some random bytes between strings
+                             // Add some random bytes between strings
             content.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
         }
         self.create_binary_file(name, &content)
@@ -162,9 +162,11 @@ mod tests {
     #[test]
     fn test_fixture_creation() {
         let mut fixture = TestFixture::new().unwrap();
-        let path = fixture.create_text_file("test.txt", "Hello, World!").unwrap();
+        let path = fixture
+            .create_text_file("test.txt", "Hello, World!")
+            .unwrap();
         assert!(path.exists());
-        
+
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "Hello, World!");
     }
@@ -174,7 +176,7 @@ mod tests {
         let mut fixture = TestFixture::new().unwrap();
         let data = vec![0x00, 0x01, 0x02, 0x03];
         let path = fixture.create_binary_file("test.bin", &data).unwrap();
-        
+
         let read_data = std::fs::read(&path).unwrap();
         assert_eq!(read_data, data);
     }

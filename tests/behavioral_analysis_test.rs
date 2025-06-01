@@ -62,7 +62,10 @@ fn test_anti_analysis_technique_creation() {
         description: "Debugger detection found".to_string(),
     };
 
-    assert!(matches!(technique.technique_type, AntiAnalysisType::AntiDebug));
+    assert!(matches!(
+        technique.technique_type,
+        AntiAnalysisType::AntiDebug
+    ));
     assert_eq!(technique.indicators.len(), 1);
     assert_eq!(technique.confidence, 0.9);
     assert_eq!(technique.description, "Debugger detection found");
@@ -90,7 +93,9 @@ fn test_all_anti_analysis_types() {
             description: "Test technique".to_string(),
         };
 
-        assert!(std::mem::discriminant(&technique.technique_type) == std::mem::discriminant(&anti_type));
+        assert!(
+            std::mem::discriminant(&technique.technique_type) == std::mem::discriminant(&anti_type)
+        );
     }
 }
 
@@ -98,14 +103,15 @@ fn test_all_anti_analysis_types() {
 fn test_persistence_mechanism_creation() {
     let mechanism = PersistenceMechanism {
         mechanism_type: PersistenceType::RegistryKeys,
-        target_locations: vec![
-            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run".to_string(),
-        ],
+        target_locations: vec!["SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run".to_string()],
         severity: Severity::High,
         description: "Registry persistence detected".to_string(),
     };
 
-    assert!(matches!(mechanism.mechanism_type, PersistenceType::RegistryKeys));
+    assert!(matches!(
+        mechanism.mechanism_type,
+        PersistenceType::RegistryKeys
+    ));
     assert_eq!(mechanism.target_locations.len(), 1);
     assert!(matches!(mechanism.severity, Severity::High));
 }
@@ -133,7 +139,9 @@ fn test_all_persistence_types() {
             description: "Test persistence".to_string(),
         };
 
-        assert!(std::mem::discriminant(&mechanism.mechanism_type) == std::mem::discriminant(&pers_type));
+        assert!(
+            std::mem::discriminant(&mechanism.mechanism_type) == std::mem::discriminant(&pers_type)
+        );
     }
 }
 
@@ -147,7 +155,10 @@ fn test_network_pattern_creation() {
         suspicious_level: SuspicionLevel::High,
     };
 
-    assert!(matches!(pattern.pattern_type, NetworkPatternType::CommandAndControl));
+    assert!(matches!(
+        pattern.pattern_type,
+        NetworkPatternType::CommandAndControl
+    ));
     assert_eq!(pattern.indicators.len(), 1);
     assert_eq!(pattern.protocols.len(), 1);
     assert_eq!(pattern.ports.len(), 2);
@@ -176,7 +187,9 @@ fn test_all_network_pattern_types() {
             suspicious_level: SuspicionLevel::Medium,
         };
 
-        assert!(std::mem::discriminant(&pattern.pattern_type) == std::mem::discriminant(&pattern_type));
+        assert!(
+            std::mem::discriminant(&pattern.pattern_type) == std::mem::discriminant(&pattern_type)
+        );
     }
 }
 
@@ -188,7 +201,10 @@ fn test_file_operation_creation() {
         suspicious: true,
     };
 
-    assert!(matches!(operation.operation_type, FileOpType::FileEncryption));
+    assert!(matches!(
+        operation.operation_type,
+        FileOpType::FileEncryption
+    ));
     assert_eq!(operation.targets.len(), 1);
     assert!(operation.suspicious);
 }
@@ -211,7 +227,9 @@ fn test_all_file_operation_types() {
             suspicious: false,
         };
 
-        assert!(std::mem::discriminant(&operation.operation_type) == std::mem::discriminant(&op_type));
+        assert!(
+            std::mem::discriminant(&operation.operation_type) == std::mem::discriminant(&op_type)
+        );
     }
 }
 
@@ -223,7 +241,10 @@ fn test_registry_operation_creation() {
         purpose: "Test registry operation".to_string(),
     };
 
-    assert!(matches!(operation.operation_type, RegistryOpType::KeyCreation));
+    assert!(matches!(
+        operation.operation_type,
+        RegistryOpType::KeyCreation
+    ));
     assert_eq!(operation.keys.len(), 1);
     assert_eq!(operation.purpose, "Test registry operation");
 }
@@ -236,7 +257,10 @@ fn test_process_operation_creation() {
         techniques: vec!["CreateRemoteThread".to_string()],
     };
 
-    assert!(matches!(operation.operation_type, ProcessOpType::ProcessInjection));
+    assert!(matches!(
+        operation.operation_type,
+        ProcessOpType::ProcessInjection
+    ));
     assert_eq!(operation.targets.len(), 1);
     assert_eq!(operation.techniques.len(), 1);
 }
@@ -259,7 +283,9 @@ fn test_all_process_operation_types() {
             techniques: vec![],
         };
 
-        assert!(std::mem::discriminant(&operation.operation_type) == std::mem::discriminant(&op_type));
+        assert!(
+            std::mem::discriminant(&operation.operation_type) == std::mem::discriminant(&op_type)
+        );
     }
 }
 
@@ -269,7 +295,10 @@ fn test_suspicious_behavior_creation() {
         behavior_type: "Ransomware".to_string(),
         description: "File encryption with ransom note".to_string(),
         severity: Severity::Critical,
-        evidence: vec!["CryptEncrypt API".to_string(), "Ransom note text".to_string()],
+        evidence: vec![
+            "CryptEncrypt API".to_string(),
+            "Ransom note text".to_string(),
+        ],
     };
 
     assert_eq!(behavior.behavior_type, "Ransomware");
@@ -318,7 +347,9 @@ fn test_anti_debug_detection() {
     let analysis = result.unwrap();
     assert!(!analysis.anti_analysis.is_empty());
 
-    let anti_debug = analysis.anti_analysis.iter()
+    let anti_debug = analysis
+        .anti_analysis
+        .iter()
         .find(|t| matches!(t.technique_type, AntiAnalysisType::AntiDebug));
     assert!(anti_debug.is_some());
     assert!(anti_debug.unwrap().indicators.len() >= 3);
@@ -329,18 +360,15 @@ fn test_anti_vm_detection() {
     let temp_dir = tempdir().unwrap();
     let test_path = temp_dir.path().join("test.exe");
 
-    let strings = create_test_strings_with_patterns(vec![
-        "VMware",
-        "VirtualBox",
-        "QEMU",
-        "vmci",
-    ]);
+    let strings = create_test_strings_with_patterns(vec!["VMware", "VirtualBox", "QEMU", "vmci"]);
 
     let result = analyze_behavior(&test_path, Some(&strings), None, None);
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let anti_vm = analysis.anti_analysis.iter()
+    let anti_vm = analysis
+        .anti_analysis
+        .iter()
         .find(|t| matches!(t.technique_type, AntiAnalysisType::AntiVM));
     assert!(anti_vm.is_some());
 }
@@ -350,18 +378,16 @@ fn test_anti_sandbox_detection() {
     let temp_dir = tempdir().unwrap();
     let test_path = temp_dir.path().join("test.exe");
 
-    let strings = create_test_strings_with_patterns(vec![
-        "SbieDll",
-        "sandbox",
-        "sample",
-        "GetCursorPos",
-    ]);
+    let strings =
+        create_test_strings_with_patterns(vec!["SbieDll", "sandbox", "sample", "GetCursorPos"]);
 
     let result = analyze_behavior(&test_path, Some(&strings), None, None);
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let anti_sandbox = analysis.anti_analysis.iter()
+    let anti_sandbox = analysis
+        .anti_analysis
+        .iter()
         .find(|t| matches!(t.technique_type, AntiAnalysisType::AntiSandbox));
     assert!(anti_sandbox.is_some());
 }
@@ -382,7 +408,9 @@ fn test_registry_persistence_detection() {
     let analysis = result.unwrap();
     assert!(!analysis.persistence.is_empty());
 
-    let registry_persistence = analysis.persistence.iter()
+    let registry_persistence = analysis
+        .persistence
+        .iter()
         .find(|p| matches!(p.mechanism_type, PersistenceType::RegistryKeys));
     assert!(registry_persistence.is_some());
 }
@@ -392,17 +420,16 @@ fn test_service_persistence_detection() {
     let temp_dir = tempdir().unwrap();
     let test_path = temp_dir.path().join("test.exe");
 
-    let symbols = create_test_symbols_with_functions(vec![
-        "CreateService",
-        "OpenSCManager",
-        "StartService",
-    ]);
+    let symbols =
+        create_test_symbols_with_functions(vec!["CreateService", "OpenSCManager", "StartService"]);
 
     let result = analyze_behavior(&test_path, None, Some(&symbols), None);
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let service_persistence = analysis.persistence.iter()
+    let service_persistence = analysis
+        .persistence
+        .iter()
         .find(|p| matches!(p.mechanism_type, PersistenceType::ServiceInstallation));
     assert!(service_persistence.is_some());
 }
@@ -419,12 +446,7 @@ fn test_network_communication_detection() {
         "malicious.com",
     ]);
 
-    let symbols = create_test_symbols_with_functions(vec![
-        "socket",
-        "connect",
-        "send",
-        "recv",
-    ]);
+    let symbols = create_test_symbols_with_functions(vec!["socket", "connect", "send", "recv"]);
 
     let result = analyze_behavior(&test_path, Some(&strings), Some(&symbols), None);
     assert!(result.is_ok());
@@ -438,17 +460,15 @@ fn test_tor_usage_detection() {
     let temp_dir = tempdir().unwrap();
     let test_path = temp_dir.path().join("test.exe");
 
-    let strings = create_test_strings_with_patterns(vec![
-        ".onion",
-        "tor.exe",
-        "9050",
-    ]);
+    let strings = create_test_strings_with_patterns(vec![".onion", "tor.exe", "9050"]);
 
     let result = analyze_behavior(&test_path, Some(&strings), None, None);
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let tor_pattern = analysis.network_behavior.iter()
+    let tor_pattern = analysis
+        .network_behavior
+        .iter()
         .find(|n| matches!(n.pattern_type, NetworkPatternType::TorUsage));
     assert!(tor_pattern.is_some());
 }
@@ -458,18 +478,16 @@ fn test_file_encryption_detection() {
     let temp_dir = tempdir().unwrap();
     let test_path = temp_dir.path().join("test.exe");
 
-    let strings = create_test_strings_with_patterns(vec![
-        "CryptEncrypt",
-        "AES",
-        ".encrypted",
-        "ransom",
-    ]);
+    let strings =
+        create_test_strings_with_patterns(vec!["CryptEncrypt", "AES", ".encrypted", "ransom"]);
 
     let result = analyze_behavior(&test_path, Some(&strings), None, None);
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let encryption_op = analysis.file_operations.iter()
+    let encryption_op = analysis
+        .file_operations
+        .iter()
         .find(|op| matches!(op.operation_type, FileOpType::FileEncryption));
     assert!(encryption_op.is_some());
     assert!(encryption_op.unwrap().suspicious);
@@ -491,7 +509,9 @@ fn test_process_injection_detection() {
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let injection_op = analysis.process_operations.iter()
+    let injection_op = analysis
+        .process_operations
+        .iter()
         .find(|op| matches!(op.operation_type, ProcessOpType::ProcessInjection));
     assert!(injection_op.is_some());
 }
@@ -513,7 +533,9 @@ fn test_process_hollowing_detection() {
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let hollowing_op = analysis.process_operations.iter()
+    let hollowing_op = analysis
+        .process_operations
+        .iter()
         .find(|op| matches!(op.operation_type, ProcessOpType::ProcessHollowing));
     assert!(hollowing_op.is_some());
 }
@@ -533,7 +555,9 @@ fn test_privilege_escalation_detection() {
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let priv_esc_op = analysis.process_operations.iter()
+    let priv_esc_op = analysis
+        .process_operations
+        .iter()
         .find(|op| matches!(op.operation_type, ProcessOpType::PrivilegeEscalation));
     assert!(priv_esc_op.is_some());
 }
@@ -546,24 +570,29 @@ fn test_ransomware_behavior_identification() {
     // Need at least 2 crypto indicators to trigger FileEncryption operation
     let strings = create_test_strings_with_patterns(vec![
         "CryptEncrypt",
-        "AES",  // Add second crypto indicator
+        "AES", // Add second crypto indicator
     ]);
 
     // File operations need to be detected via symbols, not strings
     let symbols = create_test_symbols_with_functions(vec![
-        "FindFirstFile",  // File enumeration API
-        "DeleteFile",     // File deletion API
+        "FindFirstFile", // File enumeration API
+        "DeleteFile",    // File deletion API
     ]);
 
     let result = analyze_behavior(&test_path, Some(&strings), Some(&symbols), None);
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    
-    let ransomware_behavior = analysis.suspicious_behaviors.iter()
+
+    let ransomware_behavior = analysis
+        .suspicious_behaviors
+        .iter()
         .find(|b| b.behavior_type == "Ransomware");
     assert!(ransomware_behavior.is_some());
-    assert!(matches!(ransomware_behavior.unwrap().severity, Severity::Critical));
+    assert!(matches!(
+        ransomware_behavior.unwrap().severity,
+        Severity::Critical
+    ));
 }
 
 #[test]
@@ -574,21 +603,23 @@ fn test_rootkit_behavior_identification() {
     // Need both native APIs and process injection/service functions
     // Use process hollowing APIs that put "Nt" functions in techniques
     let symbols = create_test_symbols_with_functions(vec![
-        "NtUnmapViewOfSection",      // Native API that gets put in techniques (contains "Nt")
-        "CreateProcess",             // Process creation for hollowing
-        "WriteProcessMemory",        // Memory writing for hollowing
-        "SetThreadContext",          // Thread context for hollowing
-        "ResumeThread",              // Resume thread for hollowing (need >= 4 for hollowing)
-        "CreateService",             // Service installation API  
-        "OpenSCManager",             // Additional service API to trigger service persistence
+        "NtUnmapViewOfSection", // Native API that gets put in techniques (contains "Nt")
+        "CreateProcess",        // Process creation for hollowing
+        "WriteProcessMemory",   // Memory writing for hollowing
+        "SetThreadContext",     // Thread context for hollowing
+        "ResumeThread",         // Resume thread for hollowing (need >= 4 for hollowing)
+        "CreateService",        // Service installation API
+        "OpenSCManager",        // Additional service API to trigger service persistence
     ]);
 
     let result = analyze_behavior(&test_path, None, Some(&symbols), None);
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    
-    let rootkit_behavior = analysis.suspicious_behaviors.iter()
+
+    let rootkit_behavior = analysis
+        .suspicious_behaviors
+        .iter()
         .find(|b| b.behavior_type == "Rootkit");
     assert!(rootkit_behavior.is_some());
 }
@@ -603,16 +634,15 @@ fn test_backdoor_behavior_identification() {
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
     ]);
 
-    let symbols = create_test_symbols_with_functions(vec![
-        "CreateProcess",
-        "socket",
-    ]);
+    let symbols = create_test_symbols_with_functions(vec!["CreateProcess", "socket"]);
 
     let result = analyze_behavior(&test_path, Some(&strings), Some(&symbols), None);
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let backdoor_behavior = analysis.suspicious_behaviors.iter()
+    let backdoor_behavior = analysis
+        .suspicious_behaviors
+        .iter()
         .find(|b| b.behavior_type == "Backdoor");
     assert!(backdoor_behavior.is_some());
 }
@@ -622,20 +652,17 @@ fn test_data_theft_behavior_identification() {
     let temp_dir = tempdir().unwrap();
     let test_path = temp_dir.path().join("test.exe");
 
-    let strings = create_test_strings_with_patterns(vec![
-        "https://",
-    ]);
+    let strings = create_test_strings_with_patterns(vec!["https://"]);
 
-    let symbols = create_test_symbols_with_functions(vec![
-        "CopyFile",
-        "socket",
-    ]);
+    let symbols = create_test_symbols_with_functions(vec!["CopyFile", "socket"]);
 
     let result = analyze_behavior(&test_path, Some(&strings), Some(&symbols), None);
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let data_theft_behavior = analysis.suspicious_behaviors.iter()
+    let data_theft_behavior = analysis
+        .suspicious_behaviors
+        .iter()
         .find(|b| b.behavior_type == "DataTheft");
     assert!(data_theft_behavior.is_some());
 }
@@ -647,16 +674,18 @@ fn test_dropper_behavior_identification() {
 
     // URLDownloadToFile needs to be in symbols to be detected as network API
     let symbols = create_test_symbols_with_functions(vec![
-        "URLDownloadToFile",  // Network download API - needs to be in symbols
-        "CreateFile",         // File creation API
-        "CreateProcess",      // Process creation API
+        "URLDownloadToFile", // Network download API - needs to be in symbols
+        "CreateFile",        // File creation API
+        "CreateProcess",     // Process creation API
     ]);
 
     let result = analyze_behavior(&test_path, None, Some(&symbols), None);
     assert!(result.is_ok());
 
     let analysis = result.unwrap();
-    let dropper_behavior = analysis.suspicious_behaviors.iter()
+    let dropper_behavior = analysis
+        .suspicious_behaviors
+        .iter()
         .find(|b| b.behavior_type == "Dropper");
     assert!(dropper_behavior.is_some());
 }
@@ -678,14 +707,12 @@ fn test_evasion_score_calculation() {
         },
     ];
 
-    let _suspicious_behaviors = vec![
-        SuspiciousBehavior {
-            behavior_type: "Ransomware".to_string(),
-            description: "File encryption".to_string(),
-            severity: Severity::Critical,
-            evidence: vec![],
-        },
-    ];
+    let _suspicious_behaviors = vec![SuspiciousBehavior {
+        behavior_type: "Ransomware".to_string(),
+        description: "File encryption".to_string(),
+        severity: Severity::Critical,
+        evidence: vec![],
+    }];
 
     let temp_dir = tempdir().unwrap();
     let test_path = temp_dir.path().join("test.exe");
@@ -706,14 +733,14 @@ fn test_behavioral_recommendations_generation() {
     let strings = create_test_strings_with_patterns(vec![
         "IsDebuggerPresent",
         "CryptEncrypt",
-        "ransom",  // This is also a crypto indicator
-        "AES",     // Add another crypto indicator to trigger FileEncryption
+        "ransom", // This is also a crypto indicator
+        "AES",    // Add another crypto indicator to trigger FileEncryption
     ]);
 
     // File operations need to be detected via symbols, not strings
     let symbols = create_test_symbols_with_functions(vec![
         "FindFirstFile", // File enumeration API
-        "DeleteFile",    // File deletion API  
+        "DeleteFile",    // File deletion API
     ]);
 
     let result = analyze_behavior(&test_path, Some(&strings), Some(&symbols), None);
@@ -723,7 +750,9 @@ fn test_behavioral_recommendations_generation() {
     assert!(!analysis.recommendations.is_empty());
 
     // Should contain ransomware-specific recommendations
-    let has_ransomware_recommendation = analysis.recommendations.iter()
+    let has_ransomware_recommendation = analysis
+        .recommendations
+        .iter()
         .any(|r| r.contains("RANSOMWARE") || r.contains("encrypt"));
     assert!(has_ransomware_recommendation);
 }
@@ -771,7 +800,13 @@ fn test_serialization_deserialization() {
     let json = serde_json::to_string(&analysis).unwrap();
     let deserialized: BehavioralAnalysis = serde_json::from_str(&json).unwrap();
 
-    assert_eq!(analysis.anti_analysis.len(), deserialized.anti_analysis.len());
+    assert_eq!(
+        analysis.anti_analysis.len(),
+        deserialized.anti_analysis.len()
+    );
     assert_eq!(analysis.evasion_score, deserialized.evasion_score);
-    assert_eq!(analysis.recommendations.len(), deserialized.recommendations.len());
+    assert_eq!(
+        analysis.recommendations.len(),
+        deserialized.recommendations.len()
+    );
 }

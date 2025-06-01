@@ -760,9 +760,9 @@ impl ServerHandler for FileScannerMcp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
     use std::io::Write;
+    use tempfile::TempDir;
 
     fn create_test_file(content: &[u8]) -> Result<(TempDir, std::path::PathBuf), std::io::Error> {
         let temp_dir = TempDir::new()?;
@@ -781,7 +781,7 @@ mod tests {
         ];
         // Add some padding to make it a minimal valid ELF-like file
         elf_data.extend(vec![0u8; 56]); // Pad to 64 bytes
-        
+
         let mut file = fs::File::create(&file_path)?;
         file.write_all(&elf_data)?;
         Ok((temp_dir, file_path))
@@ -815,7 +815,7 @@ mod tests {
         // Test JSON serialization
         let json = serde_json::to_string(&request).unwrap();
         let deserialized: FileAnalysisRequest = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.file_path, request.file_path);
         assert_eq!(deserialized.metadata, request.metadata);
         assert_eq!(deserialized.hashes, request.hashes);
@@ -838,7 +838,7 @@ mod tests {
         // Test JSON serialization
         let json = serde_json::to_string(&request).unwrap();
         let deserialized: LlmFileAnalysisRequest = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.file_path, request.file_path);
         assert_eq!(deserialized.token_limit, request.token_limit);
         assert_eq!(deserialized.max_strings, request.max_strings);
@@ -861,7 +861,7 @@ mod tests {
         // Test JSON serialization
         let json = serde_json::to_string(&indicators).unwrap();
         let deserialized: YaraIndicators = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.sha256, indicators.sha256);
         assert_eq!(deserialized.file_size, indicators.file_size);
         assert_eq!(deserialized.unique_strings, indicators.unique_strings);
@@ -980,7 +980,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_analyze_file_strings() {
-        let test_content = b"Hello World! This is a test string for extraction. Another string here.";
+        let test_content =
+            b"Hello World! This is a test string for extraction. Another string here.";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
         let mcp = FileScannerMcp;
@@ -1070,7 +1071,7 @@ mod tests {
             hex_dump_size: Some(32),
             hex_dump_offset: Some(0),
             binary_info: Some(true), // Will fail but shouldn't error
-            signatures: Some(true),   // Will show no signature
+            signatures: Some(true),  // Will show no signature
             symbols: None,
             control_flow: None,
             vulnerabilities: None,
@@ -1149,7 +1150,7 @@ mod tests {
     #[test]
     fn test_extract_key_strings() {
         let mcp = FileScannerMcp;
-        
+
         // Create mock extracted strings
         let extracted_strings = crate::strings::ExtractedStrings {
             total_count: 10,
@@ -1176,10 +1177,10 @@ mod tests {
         };
 
         let key_strings = mcp.extract_key_strings(&extracted_strings, 5);
-        
+
         assert!(!key_strings.is_empty());
         assert!(key_strings.len() <= 5);
-        
+
         // Should prioritize interesting strings
         assert!(key_strings.contains(&"https://example.com/malware".to_string()));
         assert!(key_strings.contains(&"/usr/bin/suspicious".to_string()));
@@ -1192,11 +1193,11 @@ mod tests {
 
         let mcp = FileScannerMcp;
         let result = mcp.extract_hex_patterns(&file_path, 16);
-        
+
         assert!(result.is_ok());
         let patterns = result.unwrap();
         assert!(!patterns.is_empty());
-        
+
         // Should contain header pattern
         let header_pattern = &patterns[0];
         assert!(header_pattern.contains("41 42 43")); // ABC in hex
@@ -1206,15 +1207,15 @@ mod tests {
     fn test_extract_key_opcodes() {
         let test_content = vec![
             0xE8, 0x00, 0x00, 0x00, 0x00, // CALL instruction
-            0x48, 0x8B, 0x05, 0x00,       // MOV instruction
-            0x55, 0x48, 0x89, 0xE5,       // Function prologue
-            0xFF, 0x15, 0x00, 0x00,       // Indirect call
+            0x48, 0x8B, 0x05, 0x00, // MOV instruction
+            0x55, 0x48, 0x89, 0xE5, // Function prologue
+            0xFF, 0x15, 0x00, 0x00, // Indirect call
         ];
         let (_temp_dir, file_path) = create_test_file(&test_content).unwrap();
 
         let mcp = FileScannerMcp;
         let result = mcp.extract_key_opcodes(&file_path, 5);
-        
+
         // This test might not find opcodes since it looks at offset 0x1000
         // But it should not error
         assert!(result.is_ok());
@@ -1223,7 +1224,7 @@ mod tests {
     #[test]
     fn test_generate_yara_rule_suggestion() {
         let mcp = FileScannerMcp;
-        
+
         let analysis = LlmFileAnalysisResult {
             md5: "abc123def456".to_string(),
             file_size: 1024,
@@ -1240,7 +1241,7 @@ mod tests {
         };
 
         let yara_rule = mcp.generate_yara_rule_suggestion(&analysis, "test_malware.exe");
-        
+
         assert!(yara_rule.contains("rule test_malware_exe"));
         assert!(yara_rule.contains("md5 = \"abc123def456\""));
         assert!(yara_rule.contains("filesize = 1024"));
@@ -1253,7 +1254,7 @@ mod tests {
     #[test]
     fn test_trim_results_to_token_limit() {
         let mcp = FileScannerMcp;
-        
+
         let result = LlmFileAnalysisResult {
             md5: "abc123".to_string(),
             file_size: 1024,
@@ -1266,7 +1267,7 @@ mod tests {
         };
 
         let trimmed = mcp.trim_results_to_token_limit(result, 500);
-        
+
         // Should have fewer strings/imports/opcodes
         assert!(trimmed.key_strings.len() < 50);
         assert!(trimmed.imports.len() < 40);
@@ -1277,7 +1278,7 @@ mod tests {
     fn test_server_handler_get_info() {
         let mcp = FileScannerMcp;
         let info = mcp.get_info();
-        
+
         assert_eq!(info.server_info.name, "file-scanner");
         assert_eq!(info.server_info.version, "0.1.0");
         assert!(info.instructions.is_some());
@@ -1328,7 +1329,7 @@ mod tests {
         // Test JSON serialization
         let json = serde_json::to_string(&result).unwrap();
         let deserialized: LlmFileAnalysisResult = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.md5, result.md5);
         assert_eq!(deserialized.file_size, result.file_size);
         assert_eq!(deserialized.entropy, result.entropy);

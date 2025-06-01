@@ -64,7 +64,7 @@ impl FileMetadata {
         let metadata = fs::metadata(&self.file_path)?;
 
         self.file_size = metadata.len();
-        
+
         #[cfg(unix)]
         {
             self.owner_uid = metadata.uid();
@@ -74,20 +74,26 @@ impl FileMetadata {
             self.permissions = format!("{:o}", mode & 0o777);
             self.is_executable = mode & 0o111 != 0;
         }
-        
+
         #[cfg(windows)]
         {
             // Windows doesn't have uid/gid, use default values
             self.owner_uid = 0;
             self.group_gid = 0;
-            
+
             // Use file attributes to determine if executable
-            self.is_executable = self.file_path
+            self.is_executable = self
+                .file_path
                 .extension()
                 .and_then(|ext| ext.to_str())
-                .map(|ext| matches!(ext.to_lowercase().as_str(), "exe" | "bat" | "cmd" | "com" | "ps1"))
+                .map(|ext| {
+                    matches!(
+                        ext.to_lowercase().as_str(),
+                        "exe" | "bat" | "cmd" | "com" | "ps1"
+                    )
+                })
                 .unwrap_or(false);
-            
+
             // Windows permissions are more complex, use a simplified representation
             self.permissions = if metadata.permissions().readonly() {
                 "r--".to_string()
@@ -151,11 +157,11 @@ impl FileMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs::File;
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
     use test_case::test_case;
 
     fn create_test_file(content: &[u8]) -> Result<(TempDir, PathBuf)> {
@@ -170,7 +176,7 @@ mod tests {
     fn test_new_metadata() {
         let path = Path::new("/tmp/test.txt");
         let metadata = FileMetadata::new(path).unwrap();
-        
+
         assert_eq!(metadata.file_path, PathBuf::from("/tmp/test.txt"));
         assert_eq!(metadata.file_name, "test.txt");
         assert_eq!(metadata.file_size, 0);
@@ -200,9 +206,9 @@ mod tests {
     fn test_extract_basic_info() {
         let (_temp_dir, file_path) = create_test_file(b"Hello, World!").unwrap();
         let mut metadata = FileMetadata::new(&file_path).unwrap();
-        
+
         metadata.extract_basic_info().unwrap();
-        
+
         assert_eq!(metadata.file_size, 13);
         #[cfg(unix)]
         {
@@ -219,21 +225,24 @@ mod tests {
         assert!(metadata.modified.is_some());
         assert!(metadata.accessed.is_some());
         // created might not be available on all filesystems
-        assert_eq!(metadata.mime_type, Some("application/octet-stream".to_string()));
+        assert_eq!(
+            metadata.mime_type,
+            Some("application/octet-stream".to_string())
+        );
     }
 
     #[test]
     #[cfg(unix)]
     fn test_extract_basic_info_executable() {
         let (_temp_dir, file_path) = create_test_file(b"#!/bin/bash\necho hello").unwrap();
-        
+
         // Set executable permissions
         let perms = fs::Permissions::from_mode(0o755);
         fs::set_permissions(&file_path, perms).unwrap();
-        
+
         let mut metadata = FileMetadata::new(&file_path).unwrap();
         metadata.extract_basic_info().unwrap();
-        
+
         assert!(metadata.is_executable);
         assert_eq!(metadata.permissions, "755");
         assert_eq!(metadata.mime_type, Some("text/x-shellscript".to_string()));
@@ -263,7 +272,7 @@ mod tests {
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
         let mut metadata = FileMetadata::new(&file_path).unwrap();
         metadata.extract_basic_info().unwrap();
-        
+
         assert_eq!(metadata.mime_type, Some(expected_mime.to_string()));
     }
 
@@ -271,7 +280,7 @@ mod tests {
     #[cfg(unix)]
     fn test_permissions_format() {
         let (_temp_dir, file_path) = create_test_file(b"test").unwrap();
-        
+
         // Test different permission modes
         let test_modes = vec![
             (0o644, "644", false),
@@ -281,14 +290,14 @@ mod tests {
             (0o400, "400", false),
             (0o500, "500", true),
         ];
-        
+
         for (mode, expected_perm, expected_exec) in test_modes {
             let perms = fs::Permissions::from_mode(mode);
             fs::set_permissions(&file_path, perms).unwrap();
-            
+
             let mut metadata = FileMetadata::new(&file_path).unwrap();
             metadata.extract_basic_info().unwrap();
-            
+
             assert_eq!(metadata.permissions, expected_perm, "Mode: {:#o}", mode);
             assert_eq!(metadata.is_executable, expected_exec, "Mode: {:#o}", mode);
         }
@@ -299,11 +308,11 @@ mod tests {
         // Test that MIME detection works with files larger than 512 bytes
         let mut content = vec![0u8; 1024];
         content[0..4].copy_from_slice(b"\x89PNG");
-        
+
         let (_temp_dir, file_path) = create_test_file(&content).unwrap();
         let mut metadata = FileMetadata::new(&file_path).unwrap();
         metadata.extract_basic_info().unwrap();
-        
+
         assert_eq!(metadata.mime_type, Some("image/png".to_string()));
     }
 
@@ -312,9 +321,12 @@ mod tests {
         let (_temp_dir, file_path) = create_test_file(b"").unwrap();
         let mut metadata = FileMetadata::new(&file_path).unwrap();
         metadata.extract_basic_info().unwrap();
-        
+
         assert_eq!(metadata.file_size, 0);
-        assert_eq!(metadata.mime_type, Some("application/octet-stream".to_string()));
+        assert_eq!(
+            metadata.mime_type,
+            Some("application/octet-stream".to_string())
+        );
     }
 
     #[tokio::test]
@@ -322,13 +334,13 @@ mod tests {
         let content = b"Hello, World!";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
         let mut metadata = FileMetadata::new(&file_path).unwrap();
-        
+
         metadata.extract_basic_info().unwrap();
         metadata.calculate_hashes().await.unwrap();
-        
+
         assert!(metadata.hashes.is_some());
         let hashes = metadata.hashes.unwrap();
-        
+
         // Verify the hashes are calculated (exact values depend on hash implementation)
         assert!(!hashes.md5.is_empty());
         assert!(!hashes.sha256.is_empty());
@@ -341,11 +353,11 @@ mod tests {
         let (_temp_dir, file_path) = create_test_file(b"test").unwrap();
         let mut metadata = FileMetadata::new(&file_path).unwrap();
         metadata.extract_basic_info().unwrap();
-        
+
         // All files should have at least modified and accessed times
         assert!(metadata.modified.is_some());
         assert!(metadata.accessed.is_some());
-        
+
         // Verify timestamps are recent (within last minute)
         let now = Utc::now();
         if let Some(modified) = metadata.modified {
@@ -360,16 +372,19 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let target_path = temp_dir.path().join("target");
         let symlink_path = temp_dir.path().join("symlink");
-        
+
         // Create target file
-        File::create(&target_path).unwrap().write_all(b"target content").unwrap();
-        
+        File::create(&target_path)
+            .unwrap()
+            .write_all(b"target content")
+            .unwrap();
+
         // Create symlink
         std::os::unix::fs::symlink(&target_path, &symlink_path).unwrap();
-        
+
         let mut metadata = FileMetadata::new(&symlink_path).unwrap();
         let result = metadata.extract_basic_info();
-        
+
         // Should successfully read through the symlink
         assert!(result.is_ok());
         assert_eq!(metadata.file_size, 14); // "target content"

@@ -604,11 +604,17 @@ pub fn analyze_code_quality(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control_flow::{ControlFlowMetrics, FlowControl, AnalysisStats, OverallMetrics, Instruction, BlockType};
+    use crate::control_flow::{
+        AnalysisStats, BlockType, ControlFlowMetrics, FlowControl, Instruction, OverallMetrics,
+    };
     use crate::function_analysis::SymbolCounts;
     use std::collections::HashSet;
-    
-    fn create_test_instruction(mnemonic: &str, operands: &str, instruction_type: InstructionType) -> Instruction {
+
+    fn create_test_instruction(
+        mnemonic: &str,
+        operands: &str,
+        instruction_type: InstructionType,
+    ) -> Instruction {
         Instruction {
             address: 0x1000,
             bytes: vec![0x48, 0x89, 0xe5],
@@ -685,9 +691,9 @@ mod tests {
     fn test_calculate_halstead_metrics_empty() {
         let analyzer = CodeQualityAnalyzer::new();
         let basic_blocks = vec![];
-        
+
         let result = analyzer.calculate_halstead_metrics(&basic_blocks).unwrap();
-        
+
         assert_eq!(result.distinct_operators, 0);
         assert_eq!(result.distinct_operands, 0);
         assert_eq!(result.total_operators, 0);
@@ -710,9 +716,9 @@ mod tests {
             create_test_instruction("cmp", "rax, rcx", InstructionType::Logic),
         ];
         let basic_blocks = vec![create_test_basic_block(0, instructions)];
-        
+
         let result = analyzer.calculate_halstead_metrics(&basic_blocks).unwrap();
-        
+
         assert_eq!(result.distinct_operators, 3); // mov, add, cmp
         assert!(result.distinct_operands > 0); // rax, rbx, 5, rcx
         assert_eq!(result.total_operators, 3);
@@ -725,16 +731,16 @@ mod tests {
     #[test]
     fn test_extract_operand_tokens() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         let tokens = analyzer.extract_operand_tokens("rax, rbx");
         assert_eq!(tokens, vec!["rax", "rbx"]);
-        
+
         let tokens = analyzer.extract_operand_tokens("[rsp + 8]");
         assert_eq!(tokens, vec!["rsp", "8"]);
-        
+
         let tokens = analyzer.extract_operand_tokens("dword ptr [rbp - 4]");
         assert_eq!(tokens, vec!["dword", "ptr", "rbp", "4"]);
-        
+
         let tokens = analyzer.extract_operand_tokens("");
         assert!(tokens.is_empty());
     }
@@ -742,7 +748,7 @@ mod tests {
     #[test]
     fn test_calculate_maintainability_index() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         let halstead = HalsteadMetrics {
             distinct_operators: 10,
             distinct_operands: 15,
@@ -756,10 +762,10 @@ mod tests {
             time_to_program: 462.96,
             delivered_bugs: 0.167,
         };
-        
+
         let mi = analyzer.calculate_maintainability_index(&halstead, 5, 20);
         assert!(mi >= 0.0 && mi <= 100.0);
-        
+
         // Test edge cases
         let mi_low_complexity = analyzer.calculate_maintainability_index(&halstead, 1, 5);
         let mi_high_complexity = analyzer.calculate_maintainability_index(&halstead, 30, 200);
@@ -769,16 +775,19 @@ mod tests {
     #[test]
     fn test_estimate_technical_debt() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         // No debt case
         let debt = analyzer.estimate_technical_debt(5, 10, 30, 2);
         assert_eq!(debt, 0);
-        
+
         // High complexity case
         let debt = analyzer.estimate_technical_debt(15, 20, 100, 6);
         assert!(debt > 0);
-        assert_eq!(debt, (15 - 10) * 10 + (20 - 15) * 8 + (100 - 50) * 2 + (6 - 4) * 15);
-        
+        assert_eq!(
+            debt,
+            (15 - 10) * 10 + (20 - 15) * 8 + (100 - 50) * 2 + (6 - 4) * 15
+        );
+
         // Partial violations
         let debt = analyzer.estimate_technical_debt(12, 10, 30, 2);
         assert_eq!(debt, (12 - 10) * 10); // Only complexity penalty
@@ -787,11 +796,11 @@ mod tests {
     #[test]
     fn test_estimate_parameter_count() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         // Empty blocks
         let count = analyzer.estimate_parameter_count(&[]);
         assert_eq!(count, 0);
-        
+
         // Block with parameter registers
         let instructions = vec![
             create_test_instruction("mov", "rax, rdi", InstructionType::Memory),
@@ -799,17 +808,17 @@ mod tests {
             create_test_instruction("mov", "rcx, rdx", InstructionType::Memory),
         ];
         let basic_blocks = vec![create_test_basic_block(0, instructions)];
-        
+
         let count = analyzer.estimate_parameter_count(&basic_blocks);
         assert!(count > 0);
-        
+
         // Block without parameter registers
         let instructions = vec![
             create_test_instruction("mov", "rax, rbx", InstructionType::Memory),
             create_test_instruction("add", "rax, 5", InstructionType::Arithmetic),
         ];
         let basic_blocks = vec![create_test_basic_block(0, instructions)];
-        
+
         let count = analyzer.estimate_parameter_count(&basic_blocks);
         assert_eq!(count, 0);
     }
@@ -817,7 +826,7 @@ mod tests {
     #[test]
     fn test_calculate_overall_metrics() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         let function_metrics = vec![
             FunctionMetrics {
                 function_name: "func1".to_string(),
@@ -872,9 +881,9 @@ mod tests {
                 technical_debt_minutes: 20,
             },
         ];
-        
+
         let overall = analyzer.calculate_overall_metrics(&function_metrics, 80);
-        
+
         assert_eq!(overall.total_functions, 2);
         assert_eq!(overall.total_instructions, 80);
         assert_eq!(overall.average_complexity, 7.5);
@@ -889,9 +898,9 @@ mod tests {
     fn test_calculate_overall_metrics_empty() {
         let analyzer = CodeQualityAnalyzer::new();
         let function_metrics = vec![];
-        
+
         let overall = analyzer.calculate_overall_metrics(&function_metrics, 0);
-        
+
         assert_eq!(overall.total_functions, 0);
         assert_eq!(overall.total_instructions, 0);
         assert_eq!(overall.average_complexity, 0.0);
@@ -905,7 +914,7 @@ mod tests {
     #[test]
     fn test_calculate_complexity_score() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         assert_eq!(analyzer.calculate_complexity_score(3.0), 100.0);
         assert_eq!(analyzer.calculate_complexity_score(5.0), 100.0);
         assert_eq!(analyzer.calculate_complexity_score(7.5), 80.0);
@@ -918,7 +927,7 @@ mod tests {
     #[test]
     fn test_generate_quality_report() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         let function_metrics = vec![
             FunctionMetrics {
                 function_name: "simple_func".to_string(),
@@ -973,7 +982,7 @@ mod tests {
                 technical_debt_minutes: 315,
             },
         ];
-        
+
         let overall_metrics = OverallCodeMetrics {
             total_functions: 2,
             total_instructions: 170,
@@ -984,9 +993,9 @@ mod tests {
             most_complex_function: Some("complex_func".to_string()),
             highest_complexity: 25,
         };
-        
+
         let report = analyzer.generate_quality_report(&function_metrics, &overall_metrics);
-        
+
         assert!(report.overall_quality_score >= 0.0 && report.overall_quality_score <= 100.0);
         assert!(report.complexity_score >= 0.0 && report.complexity_score <= 100.0);
         assert!(report.maintainability_score >= 0.0 && report.maintainability_score <= 100.0);
@@ -994,14 +1003,18 @@ mod tests {
         assert!(!report.quality_issues.is_empty());
         assert!(!report.recommendations.is_empty());
         assert_eq!(report.technical_debt_hours, 5.25); // 315 / 60
-        
+
         // Check for specific issues in complex function
-        let high_complexity_issues: Vec<_> = report.quality_issues.iter()
+        let high_complexity_issues: Vec<_> = report
+            .quality_issues
+            .iter()
             .filter(|issue| matches!(issue.issue_type, QualityIssueType::HighComplexity))
             .collect();
         assert!(!high_complexity_issues.is_empty());
-        
-        let god_function_issues: Vec<_> = report.quality_issues.iter()
+
+        let god_function_issues: Vec<_> = report
+            .quality_issues
+            .iter()
             .filter(|issue| matches!(issue.issue_type, QualityIssueType::GodFunction))
             .collect();
         assert!(!god_function_issues.is_empty());
@@ -1010,37 +1023,35 @@ mod tests {
     #[test]
     fn test_code_health_classification() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         // Test excellent code
-        let function_metrics = vec![
-            FunctionMetrics {
-                function_name: "excellent_func".to_string(),
-                function_address: 0x1000,
-                cyclomatic_complexity: 2,
-                cognitive_complexity: 3,
-                nesting_depth: 1,
-                function_length: 15,
-                basic_block_count: 2,
-                parameter_count: 1,
-                return_paths: 1,
-                halstead_metrics: HalsteadMetrics {
-                    distinct_operators: 3,
-                    distinct_operands: 5,
-                    total_operators: 8,
-                    total_operands: 12,
-                    vocabulary: 8,
-                    length: 20,
-                    volume: 60.0,
-                    difficulty: 3.6,
-                    effort: 216.0,
-                    time_to_program: 12.0,
-                    delivered_bugs: 0.02,
-                },
-                maintainability_index: 95.0,
-                technical_debt_minutes: 0,
-            }
-        ];
-        
+        let function_metrics = vec![FunctionMetrics {
+            function_name: "excellent_func".to_string(),
+            function_address: 0x1000,
+            cyclomatic_complexity: 2,
+            cognitive_complexity: 3,
+            nesting_depth: 1,
+            function_length: 15,
+            basic_block_count: 2,
+            parameter_count: 1,
+            return_paths: 1,
+            halstead_metrics: HalsteadMetrics {
+                distinct_operators: 3,
+                distinct_operands: 5,
+                total_operators: 8,
+                total_operands: 12,
+                vocabulary: 8,
+                length: 20,
+                volume: 60.0,
+                difficulty: 3.6,
+                effort: 216.0,
+                time_to_program: 12.0,
+                delivered_bugs: 0.02,
+            },
+            maintainability_index: 95.0,
+            technical_debt_minutes: 0,
+        }];
+
         let overall_metrics = OverallCodeMetrics {
             total_functions: 1,
             total_instructions: 15,
@@ -1051,7 +1062,7 @@ mod tests {
             most_complex_function: Some("excellent_func".to_string()),
             highest_complexity: 2,
         };
-        
+
         let report = analyzer.generate_quality_report(&function_metrics, &overall_metrics);
         assert!(matches!(report.code_health, CodeHealth::Excellent));
     }
@@ -1059,37 +1070,35 @@ mod tests {
     #[test]
     fn test_quality_issue_types() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         // Create function with multiple issues
-        let function_metrics = vec![
-            FunctionMetrics {
-                function_name: "problematic_func".to_string(),
-                function_address: 0x1000,
-                cyclomatic_complexity: 15,
-                cognitive_complexity: 20,
-                nesting_depth: 6,
-                function_length: 80,
-                basic_block_count: 15,
-                parameter_count: 3,
-                return_paths: 8,
-                halstead_metrics: HalsteadMetrics {
-                    distinct_operators: 15,
-                    distinct_operands: 25,
-                    total_operators: 80,
-                    total_operands: 120,
-                    vocabulary: 40,
-                    length: 200,
-                    volume: 1064.39,
-                    difficulty: 24.0,
-                    effort: 25545.36,
-                    time_to_program: 1419.18,
-                    delivered_bugs: 0.35,
-                },
-                maintainability_index: 45.0,
-                technical_debt_minutes: 150,
-            }
-        ];
-        
+        let function_metrics = vec![FunctionMetrics {
+            function_name: "problematic_func".to_string(),
+            function_address: 0x1000,
+            cyclomatic_complexity: 15,
+            cognitive_complexity: 20,
+            nesting_depth: 6,
+            function_length: 80,
+            basic_block_count: 15,
+            parameter_count: 3,
+            return_paths: 8,
+            halstead_metrics: HalsteadMetrics {
+                distinct_operators: 15,
+                distinct_operands: 25,
+                total_operators: 80,
+                total_operands: 120,
+                vocabulary: 40,
+                length: 200,
+                volume: 1064.39,
+                difficulty: 24.0,
+                effort: 25545.36,
+                time_to_program: 1419.18,
+                delivered_bugs: 0.35,
+            },
+            maintainability_index: 45.0,
+            technical_debt_minutes: 150,
+        }];
+
         let overall_metrics = OverallCodeMetrics {
             total_functions: 1,
             total_instructions: 80,
@@ -1100,14 +1109,16 @@ mod tests {
             most_complex_function: Some("problematic_func".to_string()),
             highest_complexity: 15,
         };
-        
+
         let report = analyzer.generate_quality_report(&function_metrics, &overall_metrics);
-        
+
         // Should have multiple issue types
-        let issue_types: HashSet<_> = report.quality_issues.iter()
+        let issue_types: HashSet<_> = report
+            .quality_issues
+            .iter()
             .map(|issue| &issue.issue_type)
             .collect();
-        
+
         assert!(issue_types.contains(&QualityIssueType::HighComplexity));
         assert!(issue_types.contains(&QualityIssueType::LongFunction));
         assert!(issue_types.contains(&QualityIssueType::DeepNesting));
@@ -1117,7 +1128,7 @@ mod tests {
     #[test]
     fn test_analyze_function() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         let instructions = vec![
             create_test_instruction("mov", "rax, rdi", InstructionType::Memory),
             create_test_instruction("add", "rax, 5", InstructionType::Arithmetic),
@@ -1125,12 +1136,12 @@ mod tests {
             create_test_instruction("jne", "0x1020", InstructionType::Conditional),
             create_test_instruction("ret", "", InstructionType::Return),
         ];
-        
+
         let basic_blocks = vec![create_test_basic_block(0, instructions)];
         let cfg = create_test_cfg("test_function", basic_blocks);
-        
+
         let result = analyzer.analyze_function(&cfg).unwrap();
-        
+
         assert_eq!(result.function_name, "test_function");
         assert_eq!(result.function_address, 0x1000);
         assert_eq!(result.cyclomatic_complexity, 5);
@@ -1144,20 +1155,20 @@ mod tests {
     #[test]
     fn test_full_analysis() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         let instructions = vec![
             create_test_instruction("push", "rbp", InstructionType::Memory),
             create_test_instruction("mov", "rbp, rsp", InstructionType::Memory),
             create_test_instruction("mov", "rax, rdi", InstructionType::Memory),
             create_test_instruction("ret", "", InstructionType::Return),
         ];
-        
+
         let basic_blocks = vec![create_test_basic_block(0, instructions)];
         let cfg = create_test_cfg("main", basic_blocks);
-        
+
         let mut cfg_analysis = create_test_cfg_analysis();
         cfg_analysis.cfgs.push(cfg);
-        
+
         let symbol_table = SymbolTable {
             functions: vec![],
             global_variables: vec![],
@@ -1173,9 +1184,9 @@ mod tests {
                 cross_references: 0,
             },
         };
-        
+
         let result = analyzer.analyze(&cfg_analysis, &symbol_table).unwrap();
-        
+
         assert_eq!(result.function_metrics.len(), 1);
         assert_eq!(result.function_metrics[0].function_name, "main");
         // Analysis duration should be tracked
@@ -1194,11 +1205,12 @@ mod tests {
         let vocabulary = distinct_operators + distinct_operands;
         let length = total_operators + total_operands;
         let volume = length as f64 * (vocabulary as f64).log2();
-        let difficulty = (distinct_operators as f64 / 2.0) * (total_operands as f64 / distinct_operands as f64);
+        let difficulty =
+            (distinct_operators as f64 / 2.0) * (total_operands as f64 / distinct_operands as f64);
         let effort = difficulty * volume;
         let time_to_program = effort / 18.0;
         let delivered_bugs = volume / 3000.0;
-        
+
         let halstead = HalsteadMetrics {
             distinct_operators,
             distinct_operands,
@@ -1212,13 +1224,13 @@ mod tests {
             time_to_program,
             delivered_bugs,
         };
-        
+
         assert!(halstead.vocabulary == halstead.distinct_operators + halstead.distinct_operands);
         assert!(halstead.length == halstead.total_operators + halstead.total_operands);
         assert!((halstead.effort - halstead.difficulty * halstead.volume).abs() < f64::EPSILON);
         assert!((halstead.time_to_program - halstead.effort / 18.0).abs() < f64::EPSILON);
         assert!((halstead.delivered_bugs - halstead.volume / 3000.0).abs() < f64::EPSILON);
-        
+
         // Test QualityIssue structure
         let issue = QualityIssue {
             issue_type: QualityIssueType::HighComplexity,
@@ -1228,7 +1240,7 @@ mod tests {
             recommendation: "Refactor function".to_string(),
             debt_minutes: 30,
         };
-        
+
         assert!(matches!(issue.issue_type, QualityIssueType::HighComplexity));
         assert!(matches!(issue.severity, IssueSeverity::Major));
         assert_eq!(issue.debt_minutes, 30);
@@ -1237,7 +1249,7 @@ mod tests {
     #[test]
     fn test_edge_cases() {
         let analyzer = CodeQualityAnalyzer::new();
-        
+
         // Test with minimal valid Halstead metrics
         let minimal_halstead = HalsteadMetrics {
             distinct_operators: 1,
@@ -1252,10 +1264,10 @@ mod tests {
             time_to_program: 0.056,
             delivered_bugs: 0.0007,
         };
-        
+
         let mi = analyzer.calculate_maintainability_index(&minimal_halstead, 1, 1);
         assert!(mi >= 0.0 && mi <= 100.0);
-        
+
         // Test with zero values
         let zero_halstead = HalsteadMetrics {
             distinct_operators: 0,
@@ -1270,10 +1282,10 @@ mod tests {
             time_to_program: 0.0,
             delivered_bugs: 0.0,
         };
-        
+
         let mi_zero = analyzer.calculate_maintainability_index(&zero_halstead, 0, 0);
         assert!(mi_zero >= 0.0 && mi_zero <= 100.0);
-        
+
         // Test debt calculation with zero values
         let debt = analyzer.estimate_technical_debt(0, 0, 0, 0);
         assert_eq!(debt, 0);

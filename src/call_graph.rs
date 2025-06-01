@@ -542,7 +542,7 @@ impl CallGraph {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-    
+
     #[test]
     fn test_call_graph_generation() {
         // Placeholder test

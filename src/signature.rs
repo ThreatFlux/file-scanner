@@ -236,9 +236,9 @@ fn extract_gpg_timestamp(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
     use std::io::Write;
+    use tempfile::TempDir;
 
     fn create_test_file(content: &[u8]) -> Result<(TempDir, std::path::PathBuf)> {
         let temp_dir = TempDir::new()?;
@@ -253,12 +253,12 @@ mod tests {
             // DOS header
             0x4d, 0x5a, // "MZ"
         ];
-        
+
         // Pad DOS header to 64 bytes
         while pe.len() < 64 {
             pe.push(0);
         }
-        
+
         pe
     }
 
@@ -269,18 +269,16 @@ mod tests {
             signature_type: Some("Test".to_string()),
             signer: Some("Test Signer".to_string()),
             timestamp: Some("2024-01-01".to_string()),
-            certificate_chain: vec![
-                CertificateInfo {
-                    subject: "CN=Test".to_string(),
-                    issuer: "CN=Test CA".to_string(),
-                    serial_number: "123456".to_string(),
-                    not_before: "2024-01-01".to_string(),
-                    not_after: "2025-01-01".to_string(),
-                }
-            ],
+            certificate_chain: vec![CertificateInfo {
+                subject: "CN=Test".to_string(),
+                issuer: "CN=Test CA".to_string(),
+                serial_number: "123456".to_string(),
+                not_before: "2024-01-01".to_string(),
+                not_after: "2025-01-01".to_string(),
+            }],
             verification_status: "Valid".to_string(),
         };
-        
+
         assert!(info.is_signed);
         assert_eq!(info.signature_type, Some("Test".to_string()));
         assert_eq!(info.signer, Some("Test Signer".to_string()));
@@ -296,7 +294,7 @@ mod tests {
             not_before: "2024-01-01T00:00:00Z".to_string(),
             not_after: "2025-01-01T00:00:00Z".to_string(),
         };
-        
+
         assert_eq!(cert.subject, "CN=Test Certificate");
         assert_eq!(cert.issuer, "CN=Test CA");
         assert_eq!(cert.serial_number, "ABCDEF123456");
@@ -306,9 +304,9 @@ mod tests {
     fn test_verify_signature_no_signature() {
         let content = b"Just plain text file";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
-        
+
         let result = verify_signature(&file_path).unwrap();
-        
+
         assert!(!result.is_signed);
         assert_eq!(result.signature_type, None);
         assert_eq!(result.signer, None);
@@ -321,7 +319,7 @@ mod tests {
     fn test_check_authenticode_signature_not_pe() {
         let content = b"Not a PE file";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
-        
+
         let result = check_authenticode_signature(&file_path);
         assert!(result.is_err());
     }
@@ -330,7 +328,7 @@ mod tests {
     fn test_check_authenticode_signature_pe_no_sig() {
         let pe_content = create_pe_file();
         let (_temp_dir, file_path) = create_test_file(&pe_content).unwrap();
-        
+
         let result = check_authenticode_signature(&file_path);
         // Should fail because osslsigncode is likely not available or PE has no signature
         assert!(result.is_err());
@@ -340,7 +338,7 @@ mod tests {
     fn test_check_gpg_signature_no_sig_file() {
         let content = b"Test file content";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
-        
+
         let result = check_gpg_signature(&file_path);
         assert!(result.is_err()); // No .sig or .asc file exists
     }
@@ -349,11 +347,11 @@ mod tests {
     fn test_check_gpg_signature_with_sig_file() {
         let content = b"Test file content";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
-        
+
         // Create a dummy .sig file
         let sig_path = file_path.with_extension("sig");
         fs::write(&sig_path, b"dummy signature").unwrap();
-        
+
         let result = check_gpg_signature(&file_path);
         // Should fail because gpg command will fail on dummy signature
         assert!(result.is_err());
@@ -363,11 +361,11 @@ mod tests {
     fn test_check_gpg_signature_with_asc_file() {
         let content = b"Test file content";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
-        
+
         // Create a dummy .asc file
         let asc_path = file_path.with_extension("asc");
         fs::write(&asc_path, b"dummy ascii signature").unwrap();
-        
+
         let result = check_gpg_signature(&file_path);
         // Should fail because gpg command will fail on dummy signature
         assert!(result.is_err());
@@ -378,7 +376,7 @@ mod tests {
     fn test_check_macos_codesign() {
         let content = b"Test binary content";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
-        
+
         let result = check_macos_codesign(&file_path);
         // Should fail because test file is not a proper macOS binary
         assert!(result.is_err());
@@ -421,14 +419,16 @@ mod tests {
 
     #[test]
     fn test_extract_gpg_signer_no_good_signature() {
-        let output = "gpg: Signature made Mon 01 Jan 2024\ngpg: BAD signature from someone\ngpg: checking";
+        let output =
+            "gpg: Signature made Mon 01 Jan 2024\ngpg: BAD signature from someone\ngpg: checking";
         let signer = extract_gpg_signer(output);
         assert_eq!(signer, None);
     }
 
     #[test]
     fn test_extract_gpg_timestamp() {
-        let output = "gpg: Signature made Mon 01 Jan 2024 12:00:00 UTC\ngpg: Good signature\ngpg: checking";
+        let output =
+            "gpg: Signature made Mon 01 Jan 2024 12:00:00 UTC\ngpg: Good signature\ngpg: checking";
         let timestamp = extract_gpg_timestamp(output);
         assert_eq!(timestamp, Some("Mon 01 Jan 2024 12:00:00 UTC".to_string()));
     }
@@ -447,22 +447,20 @@ mod tests {
             signature_type: Some("GPG".to_string()),
             signer: Some("Test User".to_string()),
             timestamp: Some("2024-01-01".to_string()),
-            certificate_chain: vec![
-                CertificateInfo {
-                    subject: "CN=Test".to_string(),
-                    issuer: "CN=CA".to_string(),
-                    serial_number: "123".to_string(),
-                    not_before: "2024-01-01".to_string(),
-                    not_after: "2025-01-01".to_string(),
-                }
-            ],
+            certificate_chain: vec![CertificateInfo {
+                subject: "CN=Test".to_string(),
+                issuer: "CN=CA".to_string(),
+                serial_number: "123".to_string(),
+                not_before: "2024-01-01".to_string(),
+                not_after: "2025-01-01".to_string(),
+            }],
             verification_status: "Valid".to_string(),
         };
-        
+
         // Test JSON serialization
         let json = serde_json::to_string(&info).unwrap();
         let deserialized: SignatureInfo = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.is_signed, info.is_signed);
         assert_eq!(deserialized.signature_type, info.signature_type);
         assert_eq!(deserialized.signer, info.signer);
@@ -478,11 +476,11 @@ mod tests {
             not_before: "2024-01-01T00:00:00Z".to_string(),
             not_after: "2025-01-01T00:00:00Z".to_string(),
         };
-        
+
         // Test JSON serialization
         let json = serde_json::to_string(&cert).unwrap();
         let deserialized: CertificateInfo = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.subject, cert.subject);
         assert_eq!(deserialized.issuer, cert.issuer);
         assert_eq!(deserialized.serial_number, cert.serial_number);
@@ -494,7 +492,7 @@ mod tests {
     fn test_verify_signature_nonexistent_file() {
         let path = std::path::Path::new("/nonexistent/file");
         let result = verify_signature(path);
-        
+
         // The function returns Ok with "No signature found" for nonexistent files
         // because the signature verification functions handle file errors internally
         if result.is_ok() {
@@ -510,9 +508,9 @@ mod tests {
     #[test]
     fn test_empty_file_signature() {
         let (_temp_dir, file_path) = create_test_file(b"").unwrap();
-        
+
         let result = verify_signature(&file_path).unwrap();
-        
+
         assert!(!result.is_signed);
         assert_eq!(result.verification_status, "No signature found");
     }
@@ -527,7 +525,7 @@ mod tests {
             certificate_chain: Vec::new(),
             verification_status: "Unknown".to_string(),
         };
-        
+
         assert!(!info.is_signed);
         assert!(info.signature_type.is_none());
         assert!(info.signer.is_none());
@@ -548,7 +546,10 @@ mod tests {
     fn test_extract_functions_with_partial_matches() {
         // Test partial matches that shouldn't trigger
         assert_eq!(extract_signer_from_output("Subject is missing colon"), None);
-        assert_eq!(extract_timestamp_from_output("Timestamp is missing colon"), None);
+        assert_eq!(
+            extract_timestamp_from_output("Timestamp is missing colon"),
+            None
+        );
         assert_eq!(extract_gpg_signer("Good signature is incomplete"), None);
         assert_eq!(extract_gpg_timestamp("Signature is incomplete"), None);
     }
@@ -564,19 +565,22 @@ gpg:                using RSA key FEDCBA0987654321
 gpg: Good signature from "John Doe <john@example.com>"
 gpg: WARNING: This key is not certified with a trusted signature!
 "#;
-        
+
         let signer = extract_gpg_signer(complex_output);
         assert_eq!(signer, Some("John Doe <john@example.com>".to_string()));
-        
+
         let timestamp = extract_gpg_timestamp(complex_output);
-        assert_eq!(timestamp, Some("Fri 15 Dec 2023 10:30:45 AM UTC".to_string()));
+        assert_eq!(
+            timestamp,
+            Some("Fri 15 Dec 2023 10:30:45 AM UTC".to_string())
+        );
     }
 
     #[test]
     fn test_pe_file_too_small() {
         let small_content = b"MZ"; // Too small to be valid PE
         let (_temp_dir, file_path) = create_test_file(small_content).unwrap();
-        
+
         let result = check_authenticode_signature(&file_path);
         assert!(result.is_err());
     }
@@ -590,7 +594,7 @@ gpg: WARNING: This key is not certified with a trusted signature!
             content.push(0);
         }
         let (_temp_dir, file_path) = create_test_file(&content).unwrap();
-        
+
         let result = check_authenticode_signature(&file_path);
         assert!(result.is_err()); // No signature in minimal PE
     }
@@ -610,7 +614,7 @@ gpg: WARNING: This key is not certified with a trusted signature!
             let temp_dir = TempDir::new().unwrap();
             let file_path = temp_dir.path().join(name);
             fs::write(&file_path, content).unwrap();
-            
+
             let result = verify_signature(&file_path).unwrap();
             assert!(!result.is_signed);
             assert_eq!(result.verification_status, "No signature found");
@@ -621,30 +625,30 @@ gpg: WARNING: This key is not certified with a trusted signature!
     fn test_gpg_signature_extensions() {
         let content = b"Test content";
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Test with different base extensions
         let extensions = vec!["txt", "bin", "exe", "tar.gz", ""];
-        
+
         for ext in extensions {
             let filename = if ext.is_empty() {
                 "file"
             } else {
                 &format!("file.{}", ext)
             };
-            
+
             let file_path = temp_dir.path().join(filename);
             fs::write(&file_path, content).unwrap();
-            
+
             // Create corresponding .sig file
             let sig_extension = if ext.is_empty() {
                 "sig".to_string()
             } else {
                 format!("{}.sig", ext)
             };
-            
+
             let sig_path = file_path.with_extension(&sig_extension);
             fs::write(&sig_path, b"dummy sig").unwrap();
-            
+
             let result = check_gpg_signature(&file_path);
             assert!(result.is_err()); // GPG will fail on dummy signature
         }
@@ -672,8 +676,11 @@ gpg: WARNING: This key is not certified with a trusted signature!
             ("Timestamp: 2024-01-01", "2024-01-01"),
             ("Timestamp:2024-01-01", "2024-01-01"), // No space
             ("Timestamp:    2024-01-01    ", "2024-01-01"), // Extra spaces
-            ("Timestamp: ", ""), // Empty timestamp
-            ("Timestamp: 2024-01-01T10:30:45.123Z", "2024-01-01T10:30:45.123Z"), // ISO format
+            ("Timestamp: ", ""),                    // Empty timestamp
+            (
+                "Timestamp: 2024-01-01T10:30:45.123Z",
+                "2024-01-01T10:30:45.123Z",
+            ), // ISO format
         ];
 
         for (input, expected) in test_cases {
@@ -687,11 +694,11 @@ gpg: WARNING: This key is not certified with a trusted signature!
         let test_cases = vec![
             (
                 "gpg: Good signature from \"Test \\\"Quoted\\\" User\"",
-                "Test \\\"Quoted\\\" User"
+                "Test \\\"Quoted\\\" User",
             ),
             (
                 "gpg: Good signature from \"\"", // Empty quotes
-                ""
+                "",
             ),
         ];
 
@@ -699,7 +706,7 @@ gpg: WARNING: This key is not certified with a trusted signature!
             let result = extract_gpg_signer(input);
             assert_eq!(result, Some(expected.to_string()));
         }
-        
+
         // Test newline case separately - extract_gpg_signer works line by line
         let input_with_newline = "gpg: Good signature from \"User with\nnewline\"";
         let result = extract_gpg_signer(input_with_newline);
@@ -772,7 +779,10 @@ gpg: WARNING: This key is not certified with a trusted signature!
         // Verify chain structure
         assert_eq!(info.certificate_chain.len(), 3);
         assert_eq!(info.certificate_chain[0].subject, info.signer.unwrap());
-        assert_eq!(info.certificate_chain[2].subject, info.certificate_chain[2].issuer); // Root is self-signed
+        assert_eq!(
+            info.certificate_chain[2].subject,
+            info.certificate_chain[2].issuer
+        ); // Root is self-signed
     }
 
     #[test]
@@ -781,7 +791,7 @@ gpg: WARNING: This key is not certified with a trusted signature!
         let temp_dir = TempDir::new().unwrap();
         let dir_path = temp_dir.path().join("testdir");
         fs::create_dir(&dir_path).unwrap();
-        
+
         let result = verify_signature(&dir_path);
         assert!(result.is_ok()); // Should handle gracefully
         let info = result.unwrap();
@@ -793,18 +803,18 @@ gpg: WARNING: This key is not certified with a trusted signature!
     #[cfg(unix)]
     fn test_file_permissions() {
         use std::os::unix::fs::PermissionsExt;
-        
+
         let content = b"Test file";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
-        
+
         // Make file unreadable
         fs::set_permissions(&file_path, fs::Permissions::from_mode(0o000)).unwrap();
-        
+
         let result = verify_signature(&file_path);
-        
+
         // Restore permissions for cleanup
         fs::set_permissions(&file_path, fs::Permissions::from_mode(0o644)).unwrap();
-        
+
         // Should handle permission errors gracefully
         assert!(result.is_ok());
         let info = result.unwrap();
@@ -818,15 +828,13 @@ gpg: WARNING: This key is not certified with a trusted signature!
             signature_type: Some("GPG".to_string()),
             signer: Some("Test User <test@example.com>".to_string()),
             timestamp: Some("2024-01-01T00:00:00Z".to_string()),
-            certificate_chain: vec![
-                CertificateInfo {
-                    subject: "CN=Test".to_string(),
-                    issuer: "CN=CA".to_string(),
-                    serial_number: "123456".to_string(),
-                    not_before: "2024-01-01".to_string(),
-                    not_after: "2025-01-01".to_string(),
-                }
-            ],
+            certificate_chain: vec![CertificateInfo {
+                subject: "CN=Test".to_string(),
+                issuer: "CN=CA".to_string(),
+                serial_number: "123456".to_string(),
+                not_before: "2024-01-01".to_string(),
+                not_after: "2025-01-01".to_string(),
+            }],
             verification_status: "Valid".to_string(),
         };
 
@@ -834,7 +842,7 @@ gpg: WARNING: This key is not certified with a trusted signature!
         assert!(yaml.contains("is_signed: true"));
         assert!(yaml.contains("signature_type: GPG"));
         assert!(yaml.contains("signer: Test User"));
-        
+
         let deserialized: SignatureInfo = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(deserialized.is_signed, info.is_signed);
         assert_eq!(deserialized.signature_type, info.signature_type);
@@ -883,8 +891,14 @@ Number of signatures  : 1
 "#;
 
         let signer = extract_signer_from_output(output);
-        assert_eq!(signer, Some("/C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Corporation".to_string()));
-        
+        assert_eq!(
+            signer,
+            Some(
+                "/C=US/ST=Washington/L=Redmond/O=Microsoft Corporation/CN=Microsoft Corporation"
+                    .to_string()
+            )
+        );
+
         let timestamp = extract_timestamp_from_output(output);
         assert_eq!(timestamp, Some("Jul 30 21:15:45 2021 GMT".to_string()));
     }
@@ -893,13 +907,13 @@ Number of signatures  : 1
     fn test_concurrent_access() {
         use std::sync::Arc;
         use std::thread;
-        
+
         let content = b"Test file";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
         let path = Arc::new(file_path);
-        
+
         let mut handles = vec![];
-        
+
         // Spawn multiple threads to verify signature concurrently
         for i in 0..10 {
             let path_clone = Arc::clone(&path);
@@ -911,7 +925,7 @@ Number of signatures  : 1
             });
             handles.push(handle);
         }
-        
+
         // Wait for all threads to complete
         for handle in handles {
             let thread_id = handle.join().unwrap();
@@ -924,12 +938,12 @@ Number of signatures  : 1
         // Test with various special characters
         let outputs = vec![
             "Subject: CN=Test\x00User", // Null byte
-            "Subject: CN=Test\tUser", // Tab
-            "Subject: CN=Test\rUser", // Carriage return
-            "Subject: CN=Test\\User", // Backslash
-            "Subject: CN=Test$User", // Dollar sign
+            "Subject: CN=Test\tUser",   // Tab
+            "Subject: CN=Test\rUser",   // Carriage return
+            "Subject: CN=Test\\User",   // Backslash
+            "Subject: CN=Test$User",    // Dollar sign
         ];
-        
+
         for output in outputs {
             let result = extract_signer_from_output(output);
             assert!(result.is_some());
@@ -943,7 +957,7 @@ Number of signatures  : 1
         for _ in 0..1000 {
             large_subject.push_str("VeryLongCertificateName");
         }
-        
+
         let cert = CertificateInfo {
             subject: large_subject.clone(),
             issuer: large_subject.clone(),
@@ -951,11 +965,11 @@ Number of signatures  : 1
             not_before: "2024-01-01T00:00:00Z".to_string(),
             not_after: "2025-01-01T00:00:00Z".to_string(),
         };
-        
+
         // Should handle large data without panic
         let json = serde_json::to_string(&cert).unwrap();
         assert!(json.len() > 40000); // Verify it's actually large
-        
+
         let deserialized: CertificateInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.subject.len(), cert.subject.len());
     }
@@ -969,7 +983,7 @@ Number of signatures  : 1
             (false, None, Some("User"), None, "Invalid"),
             (true, Some("Test"), Some("User"), Some("2024"), "Valid"),
         ];
-        
+
         for (is_signed, sig_type, signer, timestamp, status) in test_cases {
             let info = SignatureInfo {
                 is_signed,
@@ -979,7 +993,7 @@ Number of signatures  : 1
                 certificate_chain: vec![],
                 verification_status: status.to_string(),
             };
-            
+
             // Verify the structure is valid
             if is_signed {
                 // If it's signed, at least one of these should be present
@@ -999,14 +1013,14 @@ Number of signatures  : 1
             vec![0xCE, 0xFA, 0xED, 0xFE], // Mach-O
             vec![0x50, 0x4B, 0x03, 0x04], // ZIP/JAR
         ];
-        
+
         for header in binary_headers {
             let mut content = header.clone();
             content.extend_from_slice(&vec![0; 100]); // Pad with zeros
-            
+
             let (_temp_dir, file_path) = create_test_file(&content).unwrap();
             let result = verify_signature(&file_path).unwrap();
-            
+
             assert!(!result.is_signed);
             assert_eq!(result.verification_status, "No signature found");
         }

@@ -1,9 +1,9 @@
 use file_scanner::dependency_analysis::*;
-use file_scanner::function_analysis::{ImportInfo, SymbolTable, SymbolCounts};
+use file_scanner::function_analysis::{ImportInfo, SymbolCounts, SymbolTable};
 use file_scanner::strings::ExtractedStrings;
 use std::collections::HashMap;
-use tempfile::NamedTempFile;
 use std::io::Write;
+use tempfile::NamedTempFile;
 
 #[cfg(test)]
 mod dependency_analysis_tests {
@@ -79,21 +79,23 @@ mod dependency_analysis_tests {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&create_test_binary()).unwrap();
         file.flush().unwrap();
-        
+
         let symbol_table = create_test_symbol_table();
         let strings = create_test_strings();
-        
-        let result = analyze_dependencies(
-            file.path(),
-            &symbol_table,
-            Some(&strings),
-        );
-        
+
+        let result = analyze_dependencies(file.path(), &symbol_table, Some(&strings));
+
         match result {
             Ok(analysis) => {
                 assert!(analysis.dependencies.len() >= 3);
-                assert!(analysis.dependencies.iter().any(|d| d.name.contains("glibc") || d.name.contains("libc")));
-                assert!(analysis.dependencies.iter().any(|d| d.name.contains("openssl") || d.name.contains("ssl")));
+                assert!(analysis
+                    .dependencies
+                    .iter()
+                    .any(|d| d.name.contains("glibc") || d.name.contains("libc")));
+                assert!(analysis
+                    .dependencies
+                    .iter()
+                    .any(|d| d.name.contains("openssl") || d.name.contains("ssl")));
             }
             Err(e) => panic!("Analysis failed: {}", e),
         }
@@ -104,9 +106,9 @@ mod dependency_analysis_tests {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&create_test_binary()).unwrap();
         file.flush().unwrap();
-        
+
         let mut symbol_table = create_test_symbol_table();
-        
+
         // Add vulnerable OpenSSL version
         symbol_table.imports.push(ImportInfo {
             name: "SSL_read@OPENSSL_1.0.1e".to_string(),
@@ -115,7 +117,7 @@ mod dependency_analysis_tests {
             ordinal: None,
             is_delayed: false,
         });
-        
+
         let strings = ExtractedStrings {
             total_count: 1,
             unique_count: 1,
@@ -123,20 +125,20 @@ mod dependency_analysis_tests {
             unicode_strings: vec![],
             interesting_strings: vec![],
         };
-        
-        let result = analyze_dependencies(
-            file.path(),
-            &symbol_table,
-            Some(&strings),
-        );
-        
+
+        let result = analyze_dependencies(file.path(), &symbol_table, Some(&strings));
+
         match result {
             Ok(analysis) => {
                 // Check if vulnerabilities were detected
-                let has_vulnerable_deps = analysis.dependencies.iter()
+                let has_vulnerable_deps = analysis
+                    .dependencies
+                    .iter()
                     .any(|d| !d.vulnerabilities.is_empty());
-                
-                assert!(has_vulnerable_deps || analysis.security_assessment.total_vulnerabilities > 0);
+
+                assert!(
+                    has_vulnerable_deps || analysis.security_assessment.total_vulnerabilities > 0
+                );
             }
             Err(e) => panic!("Analysis failed: {}", e),
         }
@@ -147,7 +149,7 @@ mod dependency_analysis_tests {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&create_test_binary()).unwrap();
         file.flush().unwrap();
-        
+
         let symbol_table = SymbolTable {
             functions: vec![],
             global_variables: vec![],
@@ -163,7 +165,7 @@ mod dependency_analysis_tests {
                 cross_references: 0,
             },
         };
-        
+
         let strings = ExtractedStrings {
             total_count: 4,
             unique_count: 4,
@@ -176,13 +178,9 @@ mod dependency_analysis_tests {
             unicode_strings: vec![],
             interesting_strings: vec![],
         };
-        
-        let result = analyze_dependencies(
-            file.path(),
-            &symbol_table,
-            Some(&strings),
-        );
-        
+
+        let result = analyze_dependencies(file.path(), &symbol_table, Some(&strings));
+
         match result {
             Ok(analysis) => {
                 // Check that licenses were found
@@ -197,7 +195,7 @@ mod dependency_analysis_tests {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&create_test_binary()).unwrap();
         file.flush().unwrap();
-        
+
         let symbol_table = SymbolTable {
             functions: vec![],
             global_variables: vec![],
@@ -213,13 +211,9 @@ mod dependency_analysis_tests {
                 cross_references: 0,
             },
         };
-        
-        let result = analyze_dependencies(
-            file.path(),
-            &symbol_table,
-            None,
-        );
-        
+
+        let result = analyze_dependencies(file.path(), &symbol_table, None);
+
         match result {
             Ok(analysis) => {
                 assert_eq!(analysis.dependencies.len(), 0);
@@ -244,7 +238,7 @@ mod dependency_analysis_tests {
             is_system_library: false,
             imported_functions: vec!["func1".to_string(), "func2".to_string()],
         };
-        
+
         assert_eq!(dep.name, "test-lib");
         assert_eq!(dep.version.unwrap(), "1.0.0");
         assert!(matches!(dep.library_type, LibraryType::DynamicLibrary));
@@ -263,7 +257,7 @@ mod dependency_analysis_tests {
             cvss_score: Some(7.5),
             published_date: Some("2021-01-01".to_string()),
         };
-        
+
         assert_eq!(vuln.cve_id, "CVE-2021-12345");
         assert!(matches!(vuln.severity, VulnerabilitySeverity::High));
         assert_eq!(vuln.affected_versions.len(), 2);
@@ -281,7 +275,7 @@ mod dependency_analysis_tests {
             is_commercial_friendly: true,
             attribution_required: true,
         };
-        
+
         assert_eq!(license.license_type, "MIT");
         assert!(matches!(license.license_family, LicenseFamily::MIT));
         assert!(license.is_oss);
@@ -293,15 +287,13 @@ mod dependency_analysis_tests {
     #[test]
     fn test_security_assessment_structure() {
         let assessment = SecurityAssessment {
-            vulnerable_dependencies: vec![
-                VulnerableDependency {
-                    dependency_name: "vulnerable-lib".to_string(),
-                    current_version: Some("1.0.0".to_string()),
-                    vulnerabilities: vec!["CVE-2021-12345".to_string()],
-                    highest_severity: VulnerabilitySeverity::Critical,
-                    recommended_action: "Update immediately".to_string(),
-                }
-            ],
+            vulnerable_dependencies: vec![VulnerableDependency {
+                dependency_name: "vulnerable-lib".to_string(),
+                current_version: Some("1.0.0".to_string()),
+                vulnerabilities: vec!["CVE-2021-12345".to_string()],
+                highest_severity: VulnerabilitySeverity::Critical,
+                recommended_action: "Update immediately".to_string(),
+            }],
             total_vulnerabilities: 1,
             critical_vulnerabilities: 1,
             high_vulnerabilities: 0,
@@ -310,7 +302,7 @@ mod dependency_analysis_tests {
             risk_level: SecurityRiskLevel::Critical,
             recommendations: vec!["Update vulnerable-lib immediately".to_string()],
         };
-        
+
         assert_eq!(assessment.total_vulnerabilities, 1);
         assert_eq!(assessment.critical_vulnerabilities, 1);
         assert_eq!(assessment.vulnerable_dependencies.len(), 1);
@@ -325,17 +317,15 @@ mod dependency_analysis_tests {
             license_conflicts: vec![],
             copyleft_dependencies: vec![],
             proprietary_dependencies: vec![],
-            compliance_issues: vec![
-                ComplianceIssue {
-                    dependency: "unknown-lib".to_string(),
-                    issue_type: ComplianceIssueType::MissingLicense,
-                    description: "No license information found".to_string(),
-                    severity: ComplianceSeverity::High,
-                }
-            ],
+            compliance_issues: vec![ComplianceIssue {
+                dependency: "unknown-lib".to_string(),
+                issue_type: ComplianceIssueType::MissingLicense,
+                description: "No license information found".to_string(),
+                severity: ComplianceSeverity::High,
+            }],
             is_commercial_use_safe: true,
         };
-        
+
         assert_eq!(summary.licenses_found.len(), 2);
         assert!(summary.license_conflicts.is_empty());
         assert!(summary.copyleft_dependencies.is_empty());
@@ -352,7 +342,7 @@ mod dependency_analysis_tests {
             dependency_depth: 2,
             total_dependencies: 5,
         };
-        
+
         assert_eq!(graph.direct_dependencies.len(), 2);
         assert_eq!(graph.dependency_depth, 2);
         assert_eq!(graph.total_dependencies, 5);
@@ -367,7 +357,7 @@ mod dependency_analysis_tests {
             LibraryType::RuntimeLibrary,
             LibraryType::Framework,
         ];
-        
+
         for lt in types {
             match lt {
                 LibraryType::StaticLibrary => assert!(true),
@@ -388,7 +378,7 @@ mod dependency_analysis_tests {
             DependencySource::StringReference,
             DependencySource::RuntimeLoad,
         ];
-        
+
         for source in sources {
             match source {
                 DependencySource::Import => assert!(true),
@@ -409,7 +399,7 @@ mod dependency_analysis_tests {
             VulnerabilitySeverity::Low,
             VulnerabilitySeverity::None,
         ];
-        
+
         for severity in severities {
             match severity {
                 VulnerabilitySeverity::Critical => assert!(true),
@@ -430,7 +420,7 @@ mod dependency_analysis_tests {
             SecurityRiskLevel::Low,
             SecurityRiskLevel::Minimal,
         ];
-        
+
         for level in levels {
             match level {
                 SecurityRiskLevel::Critical => assert!(true),
@@ -451,7 +441,7 @@ mod dependency_analysis_tests {
             ComplianceIssueType::SourceCodeRequired,
             ComplianceIssueType::PatentConcern,
         ];
-        
+
         for issue_type in types {
             match issue_type {
                 ComplianceIssueType::MissingLicense => assert!(true),
@@ -475,7 +465,7 @@ mod dependency_analysis_tests {
             LicenseFamily::PublicDomain,
             LicenseFamily::Unknown,
         ];
-        
+
         for family in families {
             match family {
                 LicenseFamily::MIT => assert!(true),
@@ -495,7 +485,7 @@ mod dependency_analysis_tests {
         let mut file = NamedTempFile::new().unwrap();
         file.write_all(&create_test_binary()).unwrap();
         file.flush().unwrap();
-        
+
         let symbol_table = SymbolTable {
             functions: vec![],
             global_variables: vec![],
@@ -540,13 +530,9 @@ mod dependency_analysis_tests {
                 cross_references: 0,
             },
         };
-        
-        let result = analyze_dependencies(
-            file.path(),
-            &symbol_table,
-            None,
-        );
-        
+
+        let result = analyze_dependencies(file.path(), &symbol_table, None);
+
         match result {
             Ok(analysis) => {
                 assert!(analysis.dependencies.len() >= 3);

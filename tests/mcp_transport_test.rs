@@ -1,4 +1,4 @@
-use file_scanner::mcp_transport::{McpTransportServer, JsonRpcRequest};
+use file_scanner::mcp_transport::{JsonRpcRequest, McpTransportServer};
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
@@ -14,21 +14,21 @@ async fn test_transport_creation() {
 #[tokio::test]
 async fn test_jsonrpc_initialize() {
     let transport = McpTransportServer::new();
-    
+
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(1)),
         method: "initialize".to_string(),
         params: None,
     };
-    
+
     let response = transport.handle_jsonrpc_request(request).await;
-    
+
     assert_eq!(response.jsonrpc, "2.0");
     assert_eq!(response.id, Some(json!(1)));
     assert!(response.result.is_some());
     assert!(response.error.is_none());
-    
+
     if let Some(result) = response.result {
         assert!(result.get("protocolVersion").is_some());
         assert!(result.get("serverInfo").is_some());
@@ -39,27 +39,27 @@ async fn test_jsonrpc_initialize() {
 #[tokio::test]
 async fn test_jsonrpc_tools_list() {
     let transport = McpTransportServer::new();
-    
+
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(2)),
         method: "tools/list".to_string(),
         params: None,
     };
-    
+
     let response = transport.handle_jsonrpc_request(request).await;
-    
+
     assert_eq!(response.jsonrpc, "2.0");
     assert_eq!(response.id, Some(json!(2)));
     assert!(response.result.is_some());
     assert!(response.error.is_none());
-    
+
     if let Some(result) = response.result {
         if let Some(tools) = result.get("tools") {
             assert!(tools.is_array());
             let tools_array = tools.as_array().unwrap();
             assert!(!tools_array.is_empty());
-            
+
             // Check that analyze_file tool exists
             let has_analyze_tool = tools_array.iter().any(|tool| {
                 if let Some(name) = tool.get("name") {
@@ -79,7 +79,7 @@ async fn test_jsonrpc_analyze_file_tool() {
     let temp_dir = TempDir::new().unwrap();
     let test_file = temp_dir.path().join("test.txt");
     fs::write(&test_file, b"Hello, World!").unwrap();
-    
+
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(3)),
@@ -93,20 +93,20 @@ async fn test_jsonrpc_analyze_file_tool() {
             }
         })),
     };
-    
+
     let response = transport.handle_jsonrpc_request(request).await;
-    
+
     assert_eq!(response.jsonrpc, "2.0");
     assert_eq!(response.id, Some(json!(3)));
     assert!(response.result.is_some());
     assert!(response.error.is_none());
-    
+
     if let Some(result) = response.result {
         if let Some(content) = result.get("content") {
             assert!(content.is_array());
             let content_array = content.as_array().unwrap();
             assert!(!content_array.is_empty());
-            
+
             // Check that we got some analysis data
             if let Some(first_result) = content_array.first() {
                 if let Some(text_data) = first_result.get("text") {
@@ -128,7 +128,7 @@ async fn test_jsonrpc_llm_analyze_file_tool() {
     // Create a small binary-like file
     let content = vec![0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]; // ELF header start
     fs::write(&test_file, &content).unwrap();
-    
+
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(4)),
@@ -142,9 +142,9 @@ async fn test_jsonrpc_llm_analyze_file_tool() {
             }
         })),
     };
-    
+
     let response = transport.handle_jsonrpc_request(request).await;
-    
+
     assert_eq!(response.jsonrpc, "2.0");
     assert_eq!(response.id, Some(json!(4)));
     assert!(response.result.is_some());
@@ -154,7 +154,7 @@ async fn test_jsonrpc_llm_analyze_file_tool() {
 #[tokio::test]
 async fn test_jsonrpc_nonexistent_file() {
     let transport = McpTransportServer::new();
-    
+
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(5)),
@@ -167,9 +167,9 @@ async fn test_jsonrpc_nonexistent_file() {
             }
         })),
     };
-    
+
     let response = transport.handle_jsonrpc_request(request).await;
-    
+
     assert_eq!(response.jsonrpc, "2.0");
     assert_eq!(response.id, Some(json!(5)));
     // Should either have an error or a result indicating file not found
@@ -179,20 +179,20 @@ async fn test_jsonrpc_nonexistent_file() {
 #[tokio::test]
 async fn test_jsonrpc_invalid_method() {
     let transport = McpTransportServer::new();
-    
+
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(6)),
         method: "invalid/method".to_string(),
         params: None,
     };
-    
+
     let response = transport.handle_jsonrpc_request(request).await;
-    
+
     assert_eq!(response.jsonrpc, "2.0");
     assert_eq!(response.id, Some(json!(6)));
     assert!(response.error.is_some());
-    
+
     if let Some(error) = response.error {
         assert_eq!(error.code, -32601);
         assert!(error.message.contains("Method not found"));
@@ -202,7 +202,7 @@ async fn test_jsonrpc_invalid_method() {
 #[tokio::test]
 async fn test_jsonrpc_malformed_tool_call() {
     let transport = McpTransportServer::new();
-    
+
     let request = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(7)),
@@ -212,9 +212,9 @@ async fn test_jsonrpc_malformed_tool_call() {
             // Missing required arguments
         })),
     };
-    
+
     let response = transport.handle_jsonrpc_request(request).await;
-    
+
     assert_eq!(response.jsonrpc, "2.0");
     assert_eq!(response.id, Some(json!(7)));
     // Should have an error due to missing arguments

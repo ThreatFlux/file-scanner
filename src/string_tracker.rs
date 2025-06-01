@@ -526,7 +526,7 @@ mod tests {
     fn test_track_string_basic() {
         let tracker = StringTracker::new();
         let context = StringContext::FileString { offset: Some(100) };
-        
+
         let result = tracker.track_string(
             "test string",
             "/path/to/file",
@@ -534,9 +534,9 @@ mod tests {
             "test_tool",
             context,
         );
-        
+
         assert!(result.is_ok());
-        
+
         let stats = tracker.get_statistics(None);
         assert_eq!(stats.total_unique_strings, 1);
         assert_eq!(stats.total_occurrences, 1);
@@ -546,22 +546,24 @@ mod tests {
     fn test_track_string_multiple_occurrences() {
         let tracker = StringTracker::new();
         let context = StringContext::FileString { offset: Some(100) };
-        
+
         // Track same string multiple times
         for i in 0..5 {
-            tracker.track_string(
-                "repeated string",
-                &format!("/path/to/file{}", i),
-                &format!("hash{}", i),
-                "test_tool",
-                context.clone(),
-            ).unwrap();
+            tracker
+                .track_string(
+                    "repeated string",
+                    &format!("/path/to/file{}", i),
+                    &format!("hash{}", i),
+                    "test_tool",
+                    context.clone(),
+                )
+                .unwrap();
         }
-        
+
         let stats = tracker.get_statistics(None);
         assert_eq!(stats.total_unique_strings, 1);
         assert_eq!(stats.total_occurrences, 5);
-        
+
         let entry = tracker.get_string_details("repeated string").unwrap();
         assert_eq!(entry.total_occurrences, 5);
         assert_eq!(entry.unique_files.len(), 5);
@@ -570,30 +572,52 @@ mod tests {
     #[test]
     fn test_string_contexts() {
         let tracker = StringTracker::new();
-        
+
         let contexts = vec![
-            StringContext::Import { library: "kernel32.dll".to_string() },
-            StringContext::Export { symbol: "main".to_string() },
-            StringContext::Resource { resource_type: "icon".to_string() },
-            StringContext::Section { section_name: ".text".to_string() },
-            StringContext::Metadata { field: "version".to_string() },
-            StringContext::Path { path_type: "system".to_string() },
-            StringContext::Url { protocol: Some("https".to_string()) },
-            StringContext::Registry { hive: Some("HKEY_LOCAL_MACHINE".to_string()) },
-            StringContext::Command { command_type: "shell".to_string() },
-            StringContext::Other { category: "custom".to_string() },
+            StringContext::Import {
+                library: "kernel32.dll".to_string(),
+            },
+            StringContext::Export {
+                symbol: "main".to_string(),
+            },
+            StringContext::Resource {
+                resource_type: "icon".to_string(),
+            },
+            StringContext::Section {
+                section_name: ".text".to_string(),
+            },
+            StringContext::Metadata {
+                field: "version".to_string(),
+            },
+            StringContext::Path {
+                path_type: "system".to_string(),
+            },
+            StringContext::Url {
+                protocol: Some("https".to_string()),
+            },
+            StringContext::Registry {
+                hive: Some("HKEY_LOCAL_MACHINE".to_string()),
+            },
+            StringContext::Command {
+                command_type: "shell".to_string(),
+            },
+            StringContext::Other {
+                category: "custom".to_string(),
+            },
         ];
-        
+
         for (i, context) in contexts.into_iter().enumerate() {
-            tracker.track_string(
-                &format!("string{}", i),
-                "/test/file",
-                "hash123",
-                "test_tool",
-                context,
-            ).unwrap();
+            tracker
+                .track_string(
+                    &format!("string{}", i),
+                    "/test/file",
+                    "hash123",
+                    "test_tool",
+                    context,
+                )
+                .unwrap();
         }
-        
+
         let stats = tracker.get_statistics(None);
         assert_eq!(stats.total_unique_strings, 10);
         assert!(stats.category_distribution.len() >= 9); // Should have multiple categories
@@ -608,16 +632,12 @@ mod tests {
             "kernel32.dll".to_string(),
             "HKEY_LOCAL_MACHINE\\SOFTWARE".to_string(),
         ];
-        
-        let result = tracker.track_strings_from_results(
-            &strings,
-            "/test/file",
-            "hash123",
-            "test_tool",
-        );
-        
+
+        let result =
+            tracker.track_strings_from_results(&strings, "/test/file", "hash123", "test_tool");
+
         assert!(result.is_ok());
-        
+
         let stats = tracker.get_statistics(None);
         assert_eq!(stats.total_unique_strings, 4);
         assert_eq!(stats.total_occurrences, 4);
@@ -626,7 +646,7 @@ mod tests {
     #[test]
     fn test_categorize_string_url() {
         let tracker = StringTracker::new();
-        
+
         let url_context = tracker.categorize_string("https://example.com");
         match url_context {
             StringContext::Url { protocol } => {
@@ -639,7 +659,7 @@ mod tests {
     #[test]
     fn test_categorize_string_path() {
         let tracker = StringTracker::new();
-        
+
         let path_context = tracker.categorize_string("/usr/bin/test");
         match path_context {
             StringContext::Path { path_type } => {
@@ -647,7 +667,7 @@ mod tests {
             }
             _ => panic!("Expected Path context"),
         }
-        
+
         let temp_context = tracker.categorize_string("C:\\Temp\\file.txt");
         match temp_context {
             StringContext::Path { path_type } => {
@@ -660,7 +680,7 @@ mod tests {
     #[test]
     fn test_categorize_string_registry() {
         let tracker = StringTracker::new();
-        
+
         let registry_context = tracker.categorize_string("HKEY_LOCAL_MACHINE\\SOFTWARE\\Test");
         match registry_context {
             StringContext::Registry { hive } => {
@@ -673,7 +693,7 @@ mod tests {
     #[test]
     fn test_categorize_string_import() {
         let tracker = StringTracker::new();
-        
+
         let import_context = tracker.categorize_string("kernel32.dll");
         match import_context {
             StringContext::Import { library } => {
@@ -686,7 +706,7 @@ mod tests {
     #[test]
     fn test_categorize_string_command() {
         let tracker = StringTracker::new();
-        
+
         let cmd_context = tracker.categorize_string("cmd.exe /c dir");
         match cmd_context {
             StringContext::Command { command_type } => {
@@ -699,15 +719,15 @@ mod tests {
     #[test]
     fn test_calculate_entropy() {
         let tracker = StringTracker::new();
-        
+
         // Low entropy (repeated characters)
         let low_entropy = tracker.calculate_entropy("aaaaaaaaaa");
         assert!(low_entropy < 1.0);
-        
+
         // High entropy (random-looking)
         let high_entropy = tracker.calculate_entropy("aB3xY9zK2m");
         assert!(high_entropy > 3.0);
-        
+
         // Empty string
         let zero_entropy = tracker.calculate_entropy("");
         assert_eq!(zero_entropy, 0.0);
@@ -716,22 +736,22 @@ mod tests {
     #[test]
     fn test_is_suspicious() {
         let tracker = StringTracker::new();
-        
+
         // URL should be suspicious
         assert!(tracker.is_suspicious("https://malware.com/download"));
-        
+
         // IP address should be suspicious
         assert!(tracker.is_suspicious("192.168.1.1"));
-        
+
         // Command should be suspicious
         assert!(tracker.is_suspicious("cmd.exe"));
-        
+
         // High entropy should be suspicious (make it longer to trigger the entropy check)
         assert!(tracker.is_suspicious("aB3xY9zK2mP5qW8eF7gH1iJ"));
-        
+
         // Normal string should not be suspicious
         assert!(!tracker.is_suspicious("hello world"));
-        
+
         // String with control characters should be suspicious
         assert!(tracker.is_suspicious("test\x01string"));
     }
@@ -739,12 +759,36 @@ mod tests {
     #[test]
     fn test_statistics_with_filter() {
         let tracker = StringTracker::new();
-        
+
         // Add various strings
-        tracker.track_string("short", "/file1", "hash1", "tool", StringContext::FileString { offset: None }).unwrap();
-        tracker.track_string("medium length string", "/file2", "hash2", "tool", StringContext::FileString { offset: None }).unwrap();
-        tracker.track_string("https://suspicious.com", "/file3", "hash3", "tool", StringContext::Url { protocol: None }).unwrap();
-        
+        tracker
+            .track_string(
+                "short",
+                "/file1",
+                "hash1",
+                "tool",
+                StringContext::FileString { offset: None },
+            )
+            .unwrap();
+        tracker
+            .track_string(
+                "medium length string",
+                "/file2",
+                "hash2",
+                "tool",
+                StringContext::FileString { offset: None },
+            )
+            .unwrap();
+        tracker
+            .track_string(
+                "https://suspicious.com",
+                "/file3",
+                "hash3",
+                "tool",
+                StringContext::Url { protocol: None },
+            )
+            .unwrap();
+
         // Test length filter
         let filter = StringFilter {
             min_length: Some(10),
@@ -760,10 +804,10 @@ mod tests {
             max_entropy: None,
             date_range: None,
         };
-        
+
         let stats = tracker.get_statistics(Some(&filter));
         assert_eq!(stats.total_unique_strings, 2); // Only medium and URL strings
-        
+
         // Test suspicious filter
         let suspicious_filter = StringFilter {
             min_length: None,
@@ -779,7 +823,7 @@ mod tests {
             max_entropy: None,
             date_range: None,
         };
-        
+
         let suspicious_stats = tracker.get_statistics(Some(&suspicious_filter));
         assert!(suspicious_stats.total_unique_strings >= 1); // At least the URL
     }
@@ -787,20 +831,44 @@ mod tests {
     #[test]
     fn test_search_strings() {
         let tracker = StringTracker::new();
-        
-        tracker.track_string("test string one", "/file1", "hash1", "tool", StringContext::FileString { offset: None }).unwrap();
-        tracker.track_string("test string two", "/file2", "hash2", "tool", StringContext::FileString { offset: None }).unwrap();
-        tracker.track_string("different content", "/file3", "hash3", "tool", StringContext::FileString { offset: None }).unwrap();
-        
+
+        tracker
+            .track_string(
+                "test string one",
+                "/file1",
+                "hash1",
+                "tool",
+                StringContext::FileString { offset: None },
+            )
+            .unwrap();
+        tracker
+            .track_string(
+                "test string two",
+                "/file2",
+                "hash2",
+                "tool",
+                StringContext::FileString { offset: None },
+            )
+            .unwrap();
+        tracker
+            .track_string(
+                "different content",
+                "/file3",
+                "hash3",
+                "tool",
+                StringContext::FileString { offset: None },
+            )
+            .unwrap();
+
         let results = tracker.search_strings("test", 10);
         assert_eq!(results.len(), 2);
-        
+
         let results = tracker.search_strings("string", 10);
         assert_eq!(results.len(), 2);
-        
+
         let results = tracker.search_strings("different", 10);
         assert_eq!(results.len(), 1);
-        
+
         let results = tracker.search_strings("nonexistent", 10);
         assert_eq!(results.len(), 0);
     }
@@ -808,18 +876,26 @@ mod tests {
     #[test]
     fn test_get_string_details() {
         let tracker = StringTracker::new();
-        
-        tracker.track_string("detailed string", "/file1", "hash1", "tool", StringContext::FileString { offset: Some(100) }).unwrap();
-        
+
+        tracker
+            .track_string(
+                "detailed string",
+                "/file1",
+                "hash1",
+                "tool",
+                StringContext::FileString { offset: Some(100) },
+            )
+            .unwrap();
+
         let details = tracker.get_string_details("detailed string");
         assert!(details.is_some());
-        
+
         let entry = details.unwrap();
         assert_eq!(entry.value, "detailed string");
         assert_eq!(entry.total_occurrences, 1);
         assert_eq!(entry.unique_files.len(), 1);
         assert!(entry.unique_files.contains("hash1"));
-        
+
         let no_details = tracker.get_string_details("nonexistent string");
         assert!(no_details.is_none());
     }
@@ -827,16 +903,30 @@ mod tests {
     #[test]
     fn test_get_related_strings() {
         let tracker = StringTracker::new();
-        
+
         // Add strings that should be related (same file, same category)
-        let context = StringContext::Import { library: "test.dll".to_string() };
-        tracker.track_string("string1", "/file1", "hash1", "tool", context.clone()).unwrap();
-        tracker.track_string("string2", "/file1", "hash1", "tool", context.clone()).unwrap();
-        tracker.track_string("unrelated", "/file2", "hash2", "tool", StringContext::FileString { offset: None }).unwrap();
-        
+        let context = StringContext::Import {
+            library: "test.dll".to_string(),
+        };
+        tracker
+            .track_string("string1", "/file1", "hash1", "tool", context.clone())
+            .unwrap();
+        tracker
+            .track_string("string2", "/file1", "hash1", "tool", context.clone())
+            .unwrap();
+        tracker
+            .track_string(
+                "unrelated",
+                "/file2",
+                "hash2",
+                "tool",
+                StringContext::FileString { offset: None },
+            )
+            .unwrap();
+
         let related = tracker.get_related_strings("string1", 10);
         assert!(!related.is_empty());
-        
+
         // Should find string2 as related
         assert!(related.iter().any(|(s, _)| s == "string2"));
     }
@@ -844,7 +934,7 @@ mod tests {
     #[test]
     fn test_calculate_similarity() {
         let tracker = StringTracker::new();
-        
+
         let entry_a = StringEntry {
             value: "string_a".to_string(),
             first_seen: Utc::now(),
@@ -852,11 +942,14 @@ mod tests {
             total_occurrences: 1,
             unique_files: ["file1", "file2"].iter().map(|s| s.to_string()).collect(),
             occurrences: vec![],
-            categories: ["category1", "category2"].iter().map(|s| s.to_string()).collect(),
+            categories: ["category1", "category2"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             is_suspicious: false,
             entropy: 3.5,
         };
-        
+
         let entry_b = StringEntry {
             value: "string_b".to_string(),
             first_seen: Utc::now(),
@@ -864,11 +957,14 @@ mod tests {
             total_occurrences: 1,
             unique_files: ["file1", "file3"].iter().map(|s| s.to_string()).collect(),
             occurrences: vec![],
-            categories: ["category1", "category3"].iter().map(|s| s.to_string()).collect(),
+            categories: ["category1", "category3"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             is_suspicious: false,
             entropy: 3.7,
         };
-        
+
         let similarity = tracker.calculate_similarity(&entry_a, &entry_b);
         assert!(similarity > 0.0);
         assert!(similarity <= 1.0);
@@ -877,7 +973,7 @@ mod tests {
     #[test]
     fn test_filter_matching() {
         let tracker = StringTracker::new();
-        
+
         let entry = StringEntry {
             value: "test string".to_string(),
             first_seen: Utc::now(),
@@ -889,7 +985,7 @@ mod tests {
             is_suspicious: false,
             entropy: 2.5,
         };
-        
+
         // Test min occurrences
         let filter = StringFilter {
             min_occurrences: Some(3),
@@ -906,7 +1002,7 @@ mod tests {
             date_range: None,
         };
         assert!(tracker.matches_filter(&entry, Some(&filter)));
-        
+
         // Test max occurrences
         let filter = StringFilter {
             min_occurrences: None,
@@ -923,7 +1019,7 @@ mod tests {
             date_range: None,
         };
         assert!(!tracker.matches_filter(&entry, Some(&filter)));
-        
+
         // Test categories
         let filter = StringFilter {
             min_occurrences: None,
@@ -946,18 +1042,20 @@ mod tests {
     fn test_occurrence_limit() {
         let tracker = StringTracker::new();
         let context = StringContext::FileString { offset: None };
-        
+
         // Add more than 1000 occurrences
         for i in 0..1200 {
-            tracker.track_string(
-                "limited string",
-                &format!("/file{}", i),
-                &format!("hash{}", i),
-                "tool",
-                context.clone(),
-            ).unwrap();
+            tracker
+                .track_string(
+                    "limited string",
+                    &format!("/file{}", i),
+                    &format!("hash{}", i),
+                    "tool",
+                    context.clone(),
+                )
+                .unwrap();
         }
-        
+
         let entry = tracker.get_string_details("limited string").unwrap();
         assert_eq!(entry.total_occurrences, 1200);
         assert_eq!(entry.unique_files.len(), 1200);
@@ -967,14 +1065,22 @@ mod tests {
     #[test]
     fn test_clear() {
         let tracker = StringTracker::new();
-        
-        tracker.track_string("test", "/file", "hash", "tool", StringContext::FileString { offset: None }).unwrap();
-        
+
+        tracker
+            .track_string(
+                "test",
+                "/file",
+                "hash",
+                "tool",
+                StringContext::FileString { offset: None },
+            )
+            .unwrap();
+
         let stats = tracker.get_statistics(None);
         assert_eq!(stats.total_unique_strings, 1);
-        
+
         tracker.clear();
-        
+
         let stats = tracker.get_statistics(None);
         assert_eq!(stats.total_unique_strings, 0);
     }
@@ -987,24 +1093,22 @@ mod tests {
             last_seen: Utc::now(),
             total_occurrences: 5,
             unique_files: ["hash1", "hash2"].iter().map(|s| s.to_string()).collect(),
-            occurrences: vec![
-                StringOccurrence {
-                    file_path: "/test/file".to_string(),
-                    file_hash: "hash1".to_string(),
-                    tool_name: "test_tool".to_string(),
-                    timestamp: Utc::now(),
-                    context: StringContext::FileString { offset: Some(100) },
-                }
-            ],
+            occurrences: vec![StringOccurrence {
+                file_path: "/test/file".to_string(),
+                file_hash: "hash1".to_string(),
+                tool_name: "test_tool".to_string(),
+                timestamp: Utc::now(),
+                context: StringContext::FileString { offset: Some(100) },
+            }],
             categories: ["file_string"].iter().map(|s| s.to_string()).collect(),
             is_suspicious: false,
             entropy: 2.5,
         };
-        
+
         // Test JSON serialization
         let json = serde_json::to_string(&entry).unwrap();
         let deserialized: StringEntry = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.value, entry.value);
         assert_eq!(deserialized.total_occurrences, entry.total_occurrences);
         assert_eq!(deserialized.unique_files, entry.unique_files);
@@ -1023,12 +1127,15 @@ mod tests {
             category_distribution: [("file_string".to_string(), 15)].iter().cloned().collect(),
             length_distribution: [("0-10".to_string(), 8)].iter().cloned().collect(),
         };
-        
+
         // Test JSON serialization
         let json = serde_json::to_string(&stats).unwrap();
         let deserialized: StringStatistics = serde_json::from_str(&json).unwrap();
-        
-        assert_eq!(deserialized.total_unique_strings, stats.total_unique_strings);
+
+        assert_eq!(
+            deserialized.total_unique_strings,
+            stats.total_unique_strings
+        );
         assert_eq!(deserialized.total_occurrences, stats.total_occurrences);
         assert_eq!(deserialized.most_common, stats.most_common);
     }
@@ -1036,11 +1143,35 @@ mod tests {
     #[test]
     fn test_regex_filter() {
         let tracker = StringTracker::new();
-        
-        tracker.track_string("test123", "/file1", "hash1", "tool", StringContext::FileString { offset: None }).unwrap();
-        tracker.track_string("example456", "/file2", "hash2", "tool", StringContext::FileString { offset: None }).unwrap();
-        tracker.track_string("nodigits", "/file3", "hash3", "tool", StringContext::FileString { offset: None }).unwrap();
-        
+
+        tracker
+            .track_string(
+                "test123",
+                "/file1",
+                "hash1",
+                "tool",
+                StringContext::FileString { offset: None },
+            )
+            .unwrap();
+        tracker
+            .track_string(
+                "example456",
+                "/file2",
+                "hash2",
+                "tool",
+                StringContext::FileString { offset: None },
+            )
+            .unwrap();
+        tracker
+            .track_string(
+                "nodigits",
+                "/file3",
+                "hash3",
+                "tool",
+                StringContext::FileString { offset: None },
+            )
+            .unwrap();
+
         let filter = StringFilter {
             min_occurrences: None,
             max_occurrences: None,
@@ -1055,7 +1186,7 @@ mod tests {
             max_entropy: None,
             date_range: None,
         };
-        
+
         let stats = tracker.get_statistics(Some(&filter));
         assert_eq!(stats.total_unique_strings, 2); // test123 and example456
     }

@@ -221,9 +221,9 @@ fn parse_mach(mach: goblin::mach::Mach) -> Result<BinaryInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use std::fs;
     use std::io::Write;
+    use tempfile::TempDir;
 
     fn create_test_file(content: &[u8]) -> Result<(TempDir, std::path::PathBuf)> {
         let temp_dir = TempDir::new()?;
@@ -258,12 +258,12 @@ mod tests {
             0x00, 0x00, // Section header count
             0x00, 0x00, // Section name string table index
         ];
-        
+
         // Pad to at least 64 bytes
         while elf.len() < 64 {
             elf.push(0);
         }
-        
+
         elf
     }
 
@@ -273,18 +273,18 @@ mod tests {
             // DOS header
             0x4d, 0x5a, // "MZ"
         ];
-        
+
         // Pad DOS header to 64 bytes
         while pe.len() < 60 {
             pe.push(0);
         }
-        
+
         // PE offset at 0x3c
         pe.extend_from_slice(&[0x40, 0x00, 0x00, 0x00]); // PE header at offset 0x40
-        
+
         // PE signature at offset 0x40
         pe.extend_from_slice(b"PE\0\0");
-        
+
         // COFF header
         pe.extend_from_slice(&[
             0x64, 0x86, // Machine x86_64
@@ -295,18 +295,18 @@ mod tests {
             0xf0, 0x00, // Size of optional header
             0x22, 0x00, // Characteristics
         ]);
-        
+
         // Optional header
         pe.extend_from_slice(&[
             0x0b, 0x02, // Magic (PE64)
             14, 0, // Linker version
         ]);
-        
+
         // Pad to make valid PE
         while pe.len() < 512 {
             pe.push(0);
         }
-        
+
         pe
     }
 
@@ -314,7 +314,7 @@ mod tests {
     fn test_parse_elf_binary() {
         let elf_data = create_minimal_elf();
         let (_temp_dir, file_path) = create_test_file(&elf_data).unwrap();
-        
+
         let result = parse_binary(&file_path);
         // Our minimal ELF might not be valid enough for goblin to parse
         // So we test that it doesn't panic and handles the error gracefully
@@ -333,9 +333,9 @@ mod tests {
     fn test_parse_pe_binary() {
         let pe_data = create_minimal_pe();
         let (_temp_dir, file_path) = create_test_file(&pe_data).unwrap();
-        
+
         let result = parse_binary(&file_path);
-        
+
         // Note: The minimal PE might not be fully valid for goblin
         // In practice, you'd use a real PE file for testing
         if result.is_ok() {
@@ -348,7 +348,7 @@ mod tests {
     fn test_parse_invalid_binary() {
         let invalid_data = b"This is not a valid binary file";
         let (_temp_dir, file_path) = create_test_file(invalid_data).unwrap();
-        
+
         let result = parse_binary(&file_path);
         assert!(result.is_err());
     }
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn test_parse_empty_file() {
         let (_temp_dir, file_path) = create_test_file(b"").unwrap();
-        
+
         let result = parse_binary(&file_path);
         assert!(result.is_err());
     }
@@ -395,11 +395,11 @@ mod tests {
             is_stripped: false,
             has_debug_info: true,
         };
-        
+
         // Test JSON serialization
         let json = serde_json::to_string(&info).unwrap();
         let deserialized: BinaryInfo = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(deserialized.format, info.format);
         assert_eq!(deserialized.architecture, info.architecture);
         assert_eq!(deserialized.compiler, info.compiler);
@@ -416,7 +416,7 @@ mod tests {
             virtual_address: 0x3000,
             characteristics: "r".to_string(),
         };
-        
+
         assert_eq!(section.name, ".rodata");
         assert_eq!(section.size, 2048);
         assert_eq!(section.virtual_address, 0x3000);
@@ -429,7 +429,7 @@ mod tests {
         let mut elf_x86 = create_minimal_elf();
         elf_x86[18] = 0x03; // EM_386
         elf_x86[19] = 0x00;
-        
+
         let (_temp_dir, file_path) = create_test_file(&elf_x86).unwrap();
         if let Ok(info) = parse_binary(&file_path) {
             assert_eq!(info.architecture, "x86");
@@ -442,7 +442,7 @@ mod tests {
         // For now, test that the function handles empty sections gracefully
         let elf_data = create_minimal_elf();
         let (_temp_dir, file_path) = create_test_file(&elf_data).unwrap();
-        
+
         if let Ok(info) = parse_binary(&file_path) {
             // Minimal ELF has no sections
             assert!(info.sections.is_empty() || info.sections.len() > 0);
@@ -463,7 +463,7 @@ mod tests {
             is_stripped: true,
             has_debug_info: false,
         };
-        
+
         assert!(info.compiler.is_none());
         assert!(info.linker.is_none());
         assert!(info.sections.is_empty());
@@ -483,7 +483,7 @@ mod tests {
         if ls_path.exists() {
             let result = parse_binary(ls_path);
             assert!(result.is_ok());
-            
+
             let info = result.unwrap();
             assert_eq!(info.format, "ELF");
             assert!(!info.imports.is_empty()); // ls should have imports
@@ -498,10 +498,10 @@ mod tests {
             0xfe, 0xed, 0xfa, 0xce, // Mach-O 32-bit magic
             0x00, 0x00, 0x00, 0x01, // CPU type
         ];
-        
+
         let (_temp_dir, file_path) = create_test_file(&mach_data).unwrap();
         let result = parse_binary(&file_path);
-        
+
         // The mock data might not be valid enough for goblin
         // but we test that it attempts to parse
         assert!(result.is_err() || result.is_ok());
@@ -511,7 +511,7 @@ mod tests {
     fn test_compiler_detection_pe() {
         // Test the compiler detection logic for PE files
         let mut pe_data = create_minimal_pe();
-        
+
         // Test different linker versions
         let test_cases = vec![
             (14, "MSVC 2015-2022"),
@@ -524,7 +524,7 @@ mod tests {
             (6, "MSVC 6.0"),
             (3, "MinGW/GCC"),
         ];
-        
+
         for (version, _expected_compiler) in test_cases {
             pe_data[74] = version; // Assuming this is where linker version would be
             let (_temp_dir, file_path) = create_test_file(&pe_data).unwrap();

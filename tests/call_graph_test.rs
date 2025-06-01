@@ -1,8 +1,13 @@
 use file_scanner::call_graph::*;
-use file_scanner::disassembly::{DisassemblyResult, Instruction, FlowControl, InstructionType, InstructionAnalysis, DisassembledFunction, OutputFormats, ControlFlowSummary, GraphVisualizationData};
-use file_scanner::function_analysis::{FunctionInfo, FunctionType, SymbolTable, SymbolCounts, CallingConvention};
-use tempfile::TempDir;
+use file_scanner::disassembly::{
+    ControlFlowSummary, DisassembledFunction, DisassemblyResult, FlowControl,
+    GraphVisualizationData, Instruction, InstructionAnalysis, InstructionType, OutputFormats,
+};
+use file_scanner::function_analysis::{
+    CallingConvention, FunctionInfo, FunctionType, SymbolCounts, SymbolTable,
+};
 use std::fs;
+use tempfile::TempDir;
 
 #[test]
 fn test_node_type_variants() {
@@ -15,7 +20,7 @@ fn test_node_type_variants() {
         NodeType::Virtual,
         NodeType::Unknown,
     ];
-    
+
     for node_type in node_types {
         let json = serde_json::to_string(&node_type).unwrap();
         assert!(!json.is_empty());
@@ -31,7 +36,7 @@ fn test_call_type_variants() {
         CallType::Conditional,
         CallType::TailCall,
     ];
-    
+
     for call_type in call_types {
         let json = serde_json::to_string(&call_type).unwrap();
         assert!(!json.is_empty());
@@ -50,7 +55,7 @@ fn test_call_graph_node_creation() {
         is_recursive: false,
         call_depth: Some(0),
     };
-    
+
     assert_eq!(node.function_address, 0x1000);
     assert_eq!(node.function_name, "main");
     assert_eq!(node.complexity, 5);
@@ -69,7 +74,7 @@ fn test_call_graph_edge_creation() {
         call_sites: vec![0x1010, 0x1020],
         weight: 2,
     };
-    
+
     assert_eq!(edge.caller, 0x1000);
     assert_eq!(edge.callee, 0x2000);
     assert_eq!(edge.call_sites, vec![0x1010, 0x1020]);
@@ -90,7 +95,7 @@ fn test_call_graph_statistics() {
         avg_out_degree: 1.5,
         strongly_connected_components: 4,
     };
-    
+
     assert_eq!(stats.total_nodes, 10);
     assert_eq!(stats.total_edges, 15);
     assert_eq!(stats.max_depth, 5);
@@ -126,17 +131,15 @@ fn test_call_graph_creation() {
                 out_degree: 0,
                 is_recursive: false,
                 call_depth: Some(1),
-            }
+            },
         ],
-        edges: vec![
-            CallGraphEdge {
-                caller: 0x1000,
-                callee: 0x2000,
-                call_type: CallType::Direct,
-                call_sites: vec![0x1010],
-                weight: 1,
-            }
-        ],
+        edges: vec![CallGraphEdge {
+            caller: 0x1000,
+            callee: 0x2000,
+            call_type: CallType::Direct,
+            call_sites: vec![0x1010],
+            weight: 1,
+        }],
         entry_points: vec![0x1000],
         unreachable_functions: vec![],
         statistics: CallGraphStatistics {
@@ -152,7 +155,7 @@ fn test_call_graph_creation() {
             strongly_connected_components: 1,
         },
     };
-    
+
     assert_eq!(graph.nodes.len(), 2);
     assert_eq!(graph.edges.len(), 1);
     assert_eq!(graph.entry_points, vec![0x1000]);
@@ -198,7 +201,7 @@ fn test_generate_call_graph_with_simple_symbols() {
                 instruction_type: InstructionType::Control,
                 flow_control: Some(FlowControl::Return),
                 size: 1,
-            }
+            },
         ],
         analysis: InstructionAnalysis {
             total_instructions: 3,
@@ -234,7 +237,7 @@ fn test_generate_call_graph_with_simple_symbols() {
                 instructions: vec![],
                 basic_blocks: vec![],
                 complexity: 1,
-            }
+            },
         ],
         output_formats: OutputFormats {
             assembly: String::new(),
@@ -269,7 +272,7 @@ fn test_generate_call_graph_with_simple_symbols() {
                 is_entry_point: false,
                 is_exported: false,
                 is_imported: false,
-            }
+            },
         ],
         global_variables: vec![],
         cross_references: vec![],
@@ -286,16 +289,17 @@ fn test_generate_call_graph_with_simple_symbols() {
     };
 
     let result = generate_call_graph(&test_file, &disassembly, &symbols);
-    
+
     match result {
         Ok(graph) => {
             assert!(graph.nodes.len() >= 1);
             assert!(graph.statistics.total_nodes >= 1);
-            
+
             // Check that we have an entry point
-            let has_entry_point = graph.nodes.iter().any(|node| {
-                node.node_type == NodeType::EntryPoint
-            });
+            let has_entry_point = graph
+                .nodes
+                .iter()
+                .any(|node| node.node_type == NodeType::EntryPoint);
             assert!(has_entry_point);
         }
         Err(_) => {
@@ -360,7 +364,7 @@ fn test_generate_call_graph_empty_disassembly() {
     };
 
     let result = generate_call_graph(&test_file, &disassembly, &symbols);
-    
+
     match result {
         Ok(graph) => {
             assert_eq!(graph.nodes.len(), 0);
@@ -378,18 +382,16 @@ fn test_generate_call_graph_empty_disassembly() {
 #[test]
 fn test_call_graph_serialization() {
     let graph = CallGraph {
-        nodes: vec![
-            CallGraphNode {
-                function_address: 0x1000,
-                function_name: "test_func".to_string(),
-                node_type: NodeType::Internal,
-                complexity: 1,
-                in_degree: 0,
-                out_degree: 0,
-                is_recursive: false,
-                call_depth: Some(0),
-            }
-        ],
+        nodes: vec![CallGraphNode {
+            function_address: 0x1000,
+            function_name: "test_func".to_string(),
+            node_type: NodeType::Internal,
+            complexity: 1,
+            in_degree: 0,
+            out_degree: 0,
+            is_recursive: false,
+            call_depth: Some(0),
+        }],
         edges: vec![],
         entry_points: vec![0x1000],
         unreachable_functions: vec![],
@@ -415,7 +417,10 @@ fn test_call_graph_serialization() {
     assert_eq!(deserialized.nodes.len(), graph.nodes.len());
     assert_eq!(deserialized.edges.len(), graph.edges.len());
     assert_eq!(deserialized.entry_points, graph.entry_points);
-    assert_eq!(deserialized.statistics.total_nodes, graph.statistics.total_nodes);
+    assert_eq!(
+        deserialized.statistics.total_nodes,
+        graph.statistics.total_nodes
+    );
 }
 
 #[test]
@@ -441,17 +446,15 @@ fn test_call_graph_to_dot() {
                 out_degree: 0,
                 is_recursive: false,
                 call_depth: Some(1),
-            }
+            },
         ],
-        edges: vec![
-            CallGraphEdge {
-                caller: 0x1000,
-                callee: 0x2000,
-                call_type: CallType::Direct,
-                call_sites: vec![0x1010],
-                weight: 1,
-            }
-        ],
+        edges: vec![CallGraphEdge {
+            caller: 0x1000,
+            callee: 0x2000,
+            call_type: CallType::Direct,
+            call_sites: vec![0x1010],
+            weight: 1,
+        }],
         entry_points: vec![0x1000],
         unreachable_functions: vec![],
         statistics: CallGraphStatistics {
@@ -469,7 +472,7 @@ fn test_call_graph_to_dot() {
     };
 
     let dot_output = graph.to_dot();
-    
+
     assert!(dot_output.contains("digraph"));
     assert!(dot_output.contains("main"));
     assert!(dot_output.contains("helper"));
@@ -479,27 +482,23 @@ fn test_call_graph_to_dot() {
 #[test]
 fn test_recursive_call_detection() {
     let graph = CallGraph {
-        nodes: vec![
-            CallGraphNode {
-                function_address: 0x1000,
-                function_name: "recursive_func".to_string(),
-                node_type: NodeType::Internal,
-                complexity: 3,
-                in_degree: 1,
-                out_degree: 1,
-                is_recursive: true,
-                call_depth: Some(0),
-            }
-        ],
-        edges: vec![
-            CallGraphEdge {
-                caller: 0x1000,
-                callee: 0x1000,
-                call_type: CallType::Direct,
-                call_sites: vec![0x1050],
-                weight: 1,
-            }
-        ],
+        nodes: vec![CallGraphNode {
+            function_address: 0x1000,
+            function_name: "recursive_func".to_string(),
+            node_type: NodeType::Internal,
+            complexity: 3,
+            in_degree: 1,
+            out_degree: 1,
+            is_recursive: true,
+            call_depth: Some(0),
+        }],
+        edges: vec![CallGraphEdge {
+            caller: 0x1000,
+            callee: 0x1000,
+            call_type: CallType::Direct,
+            call_sites: vec![0x1050],
+            weight: 1,
+        }],
         entry_points: vec![0x1000],
         unreachable_functions: vec![],
         statistics: CallGraphStatistics {
@@ -552,17 +551,15 @@ fn test_call_graph_with_library_functions() {
                 out_degree: 0,
                 is_recursive: false,
                 call_depth: Some(1),
-            }
+            },
         ],
-        edges: vec![
-            CallGraphEdge {
-                caller: 0x1000,
-                callee: 0x0,
-                call_type: CallType::Direct,
-                call_sites: vec![0x1020],
-                weight: 1,
-            }
-        ],
+        edges: vec![CallGraphEdge {
+            caller: 0x1000,
+            callee: 0x0,
+            call_type: CallType::Direct,
+            call_sites: vec![0x1020],
+            weight: 1,
+        }],
         entry_points: vec![0x1000],
         unreachable_functions: vec![],
         statistics: CallGraphStatistics {
@@ -579,7 +576,10 @@ fn test_call_graph_with_library_functions() {
         },
     };
 
-    let library_node = graph.nodes.iter().find(|n| n.node_type == NodeType::Library);
+    let library_node = graph
+        .nodes
+        .iter()
+        .find(|n| n.node_type == NodeType::Library);
     assert!(library_node.is_some());
     assert_eq!(library_node.unwrap().function_name, "printf");
 }

@@ -1,10 +1,10 @@
-use file_scanner::metadata::FileMetadata;
 use chrono::{DateTime, Utc};
+use file_scanner::metadata::FileMetadata;
 
 /// Common test utilities
 pub mod utils {
     use super::*;
-    
+
     /// Compare two FileMetadata structs, ignoring timestamps
     pub fn assert_metadata_equal_ignore_time(actual: &FileMetadata, expected: &FileMetadata) {
         assert_eq!(actual.file_path, expected.file_path);
@@ -17,7 +17,7 @@ pub mod utils {
         // Note: FileMetadata doesn't have is_hidden, is_symlink, symlink_target fields
         // These would need to be added to the struct if needed for testing
     }
-    
+
     /// Check if a timestamp is recent (within last minute)
     pub fn is_recent_timestamp(time: &Option<DateTime<Utc>>) -> bool {
         if let Some(t) = time {
@@ -27,7 +27,7 @@ pub mod utils {
         }
         false
     }
-    
+
     /// Assert that a Result is an error with specific message content
     pub fn assert_error_contains<T, E: std::fmt::Display>(
         result: Result<T, E>,
@@ -52,31 +52,31 @@ pub mod utils {
 pub mod mocks {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    
+
     /// Mock file system for testing without actual file I/O
     pub struct MockFileSystem {
         files: HashMap<PathBuf, MockFile>,
     }
-    
+
     pub struct MockFile {
         pub content: Vec<u8>,
         pub metadata: MockMetadata,
     }
-    
+
     pub struct MockMetadata {
         pub size: u64,
         pub is_file: bool,
         pub is_dir: bool,
         pub permissions: u32,
     }
-    
+
     impl MockFileSystem {
         pub fn new() -> Self {
             Self {
                 files: HashMap::new(),
             }
         }
-        
+
         pub fn add_file(&mut self, path: impl Into<PathBuf>, content: Vec<u8>) {
             let path = path.into();
             let metadata = MockMetadata {
@@ -87,7 +87,7 @@ pub mod mocks {
             };
             self.files.insert(path, MockFile { content, metadata });
         }
-        
+
         pub fn get_file(&self, path: &Path) -> Option<&MockFile> {
             self.files.get(path)
         }
@@ -97,18 +97,21 @@ pub mod mocks {
 /// Test data generators
 pub mod generators {
     use rand::Rng;
-    
+
     /// Generate random bytes of specified length
     pub fn random_bytes(len: usize) -> Vec<u8> {
         let mut rng = rand::thread_rng();
         (0..len).map(|_| rng.gen()).collect()
     }
-    
+
     /// Generate a string with specific pattern
     pub fn generate_string_pattern(base: &str, count: usize) -> String {
-        (0..count).map(|i| format!("{}{}", base, i)).collect::<Vec<_>>().join("\n")
+        (0..count)
+            .map(|i| format!("{}{}", base, i))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
-    
+
     /// Generate test binary with embedded strings
     pub fn generate_binary_with_strings(strings: &[&str]) -> Vec<u8> {
         let mut result = Vec::new();
@@ -127,12 +130,12 @@ pub mod generators {
 /// Assertion helpers
 pub mod assertions {
     use pretty_assertions::assert_eq;
-    
+
     /// Assert two vectors are equal, showing differences clearly
     pub fn assert_vec_eq<T: std::fmt::Debug + PartialEq>(actual: &[T], expected: &[T]) {
         assert_eq!(actual, expected);
     }
-    
+
     /// Assert a vector contains specific items
     pub fn assert_vec_contains<T: std::fmt::Debug + PartialEq>(vec: &[T], items: &[T]) {
         for item in items {
@@ -144,7 +147,7 @@ pub mod assertions {
             );
         }
     }
-    
+
     /// Assert a string contains all substrings
     pub fn assert_contains_all(haystack: &str, needles: &[&str]) {
         for needle in needles {
@@ -161,7 +164,7 @@ pub mod assertions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_random_bytes_generator() {
         let bytes1 = generators::random_bytes(100);
@@ -170,7 +173,7 @@ mod tests {
         assert_eq!(bytes2.len(), 100);
         assert_ne!(bytes1, bytes2); // Should be different (very high probability)
     }
-    
+
     #[test]
     fn test_string_pattern_generator() {
         let pattern = generators::generate_string_pattern("test", 3);

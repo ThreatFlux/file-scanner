@@ -290,15 +290,18 @@ pub struct CacheStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
     use chrono::{Duration, Utc};
+    use tempfile::TempDir;
 
     fn create_test_entry(file_hash: &str, tool_name: &str, file_path: &str) -> CacheEntry {
         CacheEntry {
             file_path: file_path.to_string(),
             file_hash: file_hash.to_string(),
             tool_name: tool_name.to_string(),
-            tool_args: [("test_arg".to_string(), serde_json::json!("value"))].iter().cloned().collect(),
+            tool_args: [("test_arg".to_string(), serde_json::json!("value"))]
+                .iter()
+                .cloned()
+                .collect(),
             result: serde_json::json!({"result": "test"}),
             timestamp: Utc::now(),
             file_size: 1024,
@@ -588,7 +591,9 @@ mod tests {
 
         let results = cache.search_entries(&query);
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|e| e.tool_name == "hash_tool" && e.file_path.contains("bin")));
+        assert!(results
+            .iter()
+            .all(|e| e.tool_name == "hash_tool" && e.file_path.contains("bin")));
     }
 
     #[tokio::test]
@@ -644,7 +649,10 @@ mod tests {
             file_path: "/test/file.bin".to_string(),
             file_hash: "abc123".to_string(),
             tool_name: "test_tool".to_string(),
-            tool_args: [("arg1".to_string(), serde_json::json!("value1"))].iter().cloned().collect(),
+            tool_args: [("arg1".to_string(), serde_json::json!("value1"))]
+                .iter()
+                .cloned()
+                .collect(),
             result: serde_json::json!({"result": "success"}),
             timestamp: Utc::now(),
             file_size: 2048,
@@ -704,8 +712,14 @@ mod tests {
     #[tokio::test]
     async fn test_cache_statistics_serialization() {
         let stats = CacheStatistics {
-            tool_counts: [("tool1".to_string(), 5), ("tool2".to_string(), 3)].iter().cloned().collect(),
-            file_type_counts: [("exe".to_string(), 2), ("dll".to_string(), 1)].iter().cloned().collect(),
+            tool_counts: [("tool1".to_string(), 5), ("tool2".to_string(), 3)]
+                .iter()
+                .cloned()
+                .collect(),
+            file_type_counts: [("exe".to_string(), 2), ("dll".to_string(), 1)]
+                .iter()
+                .cloned()
+                .collect(),
             total_analyses: 8,
             unique_files: 6,
             avg_execution_time_ms: 150,
@@ -717,7 +731,10 @@ mod tests {
 
         assert_eq!(deserialized.total_analyses, stats.total_analyses);
         assert_eq!(deserialized.unique_files, stats.unique_files);
-        assert_eq!(deserialized.avg_execution_time_ms, stats.avg_execution_time_ms);
+        assert_eq!(
+            deserialized.avg_execution_time_ms,
+            stats.avg_execution_time_ms
+        );
         assert_eq!(deserialized.tool_counts, stats.tool_counts);
         assert_eq!(deserialized.file_type_counts, stats.file_type_counts);
     }
@@ -755,12 +772,12 @@ mod tests {
     #[tokio::test]
     async fn test_cache_persistence() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         {
             let cache = AnalysisCache::new(temp_dir.path()).unwrap();
             let entry = create_test_entry("persistent_hash", "test_tool", "/test/file.bin");
             cache.add_entry(entry).unwrap();
-            
+
             // Wait a bit for async save to complete
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
@@ -768,7 +785,7 @@ mod tests {
         // Create new cache instance to test loading
         let cache2 = AnalysisCache::new(temp_dir.path()).unwrap();
         let entries = cache2.get_entries("persistent_hash");
-        
+
         // May or may not find entries depending on timing of async save
         // This test mainly ensures no errors occur during persistence operations
         assert!(entries.is_some() || entries.is_none());

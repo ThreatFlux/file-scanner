@@ -527,7 +527,10 @@ mod tests {
         assert_eq!(func.address, 0x1000);
         assert_eq!(func.size, 64);
         assert!(matches!(func.function_type, FunctionType::Local));
-        assert!(matches!(func.calling_convention, Some(CallingConvention::Cdecl)));
+        assert!(matches!(
+            func.calling_convention,
+            Some(CallingConvention::Cdecl)
+        ));
         assert_eq!(func.parameters.len(), 1);
         assert_eq!(func.parameters[0].name, Some("param1".to_string()));
         assert!(!func.is_entry_point);
@@ -551,7 +554,7 @@ mod tests {
         for (i, func_type) in types.iter().enumerate() {
             let serialized = serde_json::to_string(func_type).unwrap();
             assert!(!serialized.is_empty());
-            
+
             // Each variant should serialize differently
             for (j, other_type) in types.iter().enumerate() {
                 if i != j {
@@ -578,17 +581,31 @@ mod tests {
         for convention in conventions {
             let serialized = serde_json::to_string(&convention).unwrap();
             let deserialized: CallingConvention = serde_json::from_str(&serialized).unwrap();
-            
+
             // Test round-trip serialization
             match convention {
-                CallingConvention::Cdecl => assert!(matches!(deserialized, CallingConvention::Cdecl)),
-                CallingConvention::Stdcall => assert!(matches!(deserialized, CallingConvention::Stdcall)),
-                CallingConvention::Fastcall => assert!(matches!(deserialized, CallingConvention::Fastcall)),
-                CallingConvention::Thiscall => assert!(matches!(deserialized, CallingConvention::Thiscall)),
-                CallingConvention::Vectorcall => assert!(matches!(deserialized, CallingConvention::Vectorcall)),
+                CallingConvention::Cdecl => {
+                    assert!(matches!(deserialized, CallingConvention::Cdecl))
+                }
+                CallingConvention::Stdcall => {
+                    assert!(matches!(deserialized, CallingConvention::Stdcall))
+                }
+                CallingConvention::Fastcall => {
+                    assert!(matches!(deserialized, CallingConvention::Fastcall))
+                }
+                CallingConvention::Thiscall => {
+                    assert!(matches!(deserialized, CallingConvention::Thiscall))
+                }
+                CallingConvention::Vectorcall => {
+                    assert!(matches!(deserialized, CallingConvention::Vectorcall))
+                }
                 CallingConvention::SysV => assert!(matches!(deserialized, CallingConvention::SysV)),
-                CallingConvention::Win64 => assert!(matches!(deserialized, CallingConvention::Win64)),
-                CallingConvention::Unknown => assert!(matches!(deserialized, CallingConvention::Unknown)),
+                CallingConvention::Win64 => {
+                    assert!(matches!(deserialized, CallingConvention::Win64))
+                }
+                CallingConvention::Unknown => {
+                    assert!(matches!(deserialized, CallingConvention::Unknown))
+                }
             }
         }
     }
@@ -646,11 +663,13 @@ mod tests {
         for var_type in types {
             let serialized = serde_json::to_string(&var_type).unwrap();
             let deserialized: VariableType = serde_json::from_str(&serialized).unwrap();
-            
+
             match var_type {
                 VariableType::Global => assert!(matches!(deserialized, VariableType::Global)),
                 VariableType::Static => assert!(matches!(deserialized, VariableType::Static)),
-                VariableType::ThreadLocal => assert!(matches!(deserialized, VariableType::ThreadLocal)),
+                VariableType::ThreadLocal => {
+                    assert!(matches!(deserialized, VariableType::ThreadLocal))
+                }
                 VariableType::Const => assert!(matches!(deserialized, VariableType::Const)),
             }
         }
@@ -685,12 +704,16 @@ mod tests {
         for ref_type in types {
             let serialized = serde_json::to_string(&ref_type).unwrap();
             let deserialized: ReferenceType = serde_json::from_str(&serialized).unwrap();
-            
+
             match ref_type {
                 ReferenceType::Call => assert!(matches!(deserialized, ReferenceType::Call)),
                 ReferenceType::Jump => assert!(matches!(deserialized, ReferenceType::Jump)),
-                ReferenceType::DataReference => assert!(matches!(deserialized, ReferenceType::DataReference)),
-                ReferenceType::StringReference => assert!(matches!(deserialized, ReferenceType::StringReference)),
+                ReferenceType::DataReference => {
+                    assert!(matches!(deserialized, ReferenceType::DataReference))
+                }
+                ReferenceType::StringReference => {
+                    assert!(matches!(deserialized, ReferenceType::StringReference))
+                }
                 ReferenceType::Import => assert!(matches!(deserialized, ReferenceType::Import)),
                 ReferenceType::Export => assert!(matches!(deserialized, ReferenceType::Export)),
             }
@@ -753,7 +776,10 @@ mod tests {
         };
 
         assert!(forwarder.is_forwarder);
-        assert_eq!(forwarder.forwarder_name, Some("other_dll.real_func".to_string()));
+        assert_eq!(
+            forwarder.forwarder_name,
+            Some("other_dll.real_func".to_string())
+        );
     }
 
     #[test]
@@ -811,14 +837,12 @@ mod tests {
             },
         ];
 
-        let cross_references = vec![
-            CrossReference {
-                from_address: 0x1000,
-                to_address: 0x2000,
-                reference_type: ReferenceType::Call,
-                instruction_type: None,
-            },
-        ];
+        let cross_references = vec![CrossReference {
+            from_address: 0x1000,
+            to_address: 0x2000,
+            reference_type: ReferenceType::Call,
+            instruction_type: None,
+        }];
 
         let symbol_count = SymbolCounts {
             total_functions: functions.len(),
@@ -877,14 +901,18 @@ mod tests {
         // Create a temporary file with invalid binary format
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(b"Invalid binary format").unwrap();
-        
+
         let result = analyze_symbols(temp_file.path());
         assert!(result.is_err());
-        
+
         if let Err(e) = result {
             let error_msg = e.to_string();
             // Should get a parsing error from goblin or unsupported format error
-            assert!(error_msg.contains("Unsupported") || error_msg.contains("parse") || error_msg.contains("magic"));
+            assert!(
+                error_msg.contains("Unsupported")
+                    || error_msg.contains("parse")
+                    || error_msg.contains("magic")
+            );
         }
     }
 
@@ -921,7 +949,10 @@ mod tests {
         assert_eq!(function.address, deserialized.address);
         assert_eq!(function.size, deserialized.size);
         assert!(matches!(deserialized.function_type, FunctionType::Exported));
-        assert!(matches!(deserialized.calling_convention, Some(CallingConvention::Stdcall)));
+        assert!(matches!(
+            deserialized.calling_convention,
+            Some(CallingConvention::Stdcall)
+        ));
         assert_eq!(function.parameters.len(), deserialized.parameters.len());
         assert_eq!(function.is_entry_point, deserialized.is_entry_point);
         assert_eq!(function.is_exported, deserialized.is_exported);
@@ -955,32 +986,26 @@ mod tests {
                     is_imported: true,
                 },
             ],
-            global_variables: vec![
-                VariableInfo {
-                    name: "global_counter".to_string(),
-                    address: 0x3000,
-                    size: 4,
-                    var_type: VariableType::Global,
-                    section: Some(".data".to_string()),
-                },
-            ],
-            cross_references: vec![
-                CrossReference {
-                    from_address: 0x1050,
-                    to_address: 0x0,
-                    reference_type: ReferenceType::Call,
-                    instruction_type: Some("call".to_string()),
-                },
-            ],
-            imports: vec![
-                ImportInfo {
-                    name: "printf".to_string(),
-                    library: Some("libc.so.6".to_string()),
-                    address: None,
-                    ordinal: None,
-                    is_delayed: false,
-                },
-            ],
+            global_variables: vec![VariableInfo {
+                name: "global_counter".to_string(),
+                address: 0x3000,
+                size: 4,
+                var_type: VariableType::Global,
+                section: Some(".data".to_string()),
+            }],
+            cross_references: vec![CrossReference {
+                from_address: 0x1050,
+                to_address: 0x0,
+                reference_type: ReferenceType::Call,
+                instruction_type: Some("call".to_string()),
+            }],
+            imports: vec![ImportInfo {
+                name: "printf".to_string(),
+                library: Some("libc.so.6".to_string()),
+                address: None,
+                ordinal: None,
+                is_delayed: false,
+            }],
             exports: vec![],
             symbol_count: SymbolCounts {
                 total_functions: 2,
@@ -997,15 +1022,30 @@ mod tests {
         let deserialized: SymbolTable = serde_json::from_str(&json).unwrap();
 
         assert_eq!(symbol_table.functions.len(), deserialized.functions.len());
-        assert_eq!(symbol_table.global_variables.len(), deserialized.global_variables.len());
-        assert_eq!(symbol_table.cross_references.len(), deserialized.cross_references.len());
+        assert_eq!(
+            symbol_table.global_variables.len(),
+            deserialized.global_variables.len()
+        );
+        assert_eq!(
+            symbol_table.cross_references.len(),
+            deserialized.cross_references.len()
+        );
         assert_eq!(symbol_table.imports.len(), deserialized.imports.len());
         assert_eq!(symbol_table.exports.len(), deserialized.exports.len());
-        
+
         // Verify symbol counts match
-        assert_eq!(symbol_table.symbol_count.total_functions, deserialized.symbol_count.total_functions);
-        assert_eq!(symbol_table.symbol_count.imported_functions, deserialized.symbol_count.imported_functions);
-        assert_eq!(symbol_table.symbol_count.global_variables, deserialized.symbol_count.global_variables);
+        assert_eq!(
+            symbol_table.symbol_count.total_functions,
+            deserialized.symbol_count.total_functions
+        );
+        assert_eq!(
+            symbol_table.symbol_count.imported_functions,
+            deserialized.symbol_count.imported_functions
+        );
+        assert_eq!(
+            symbol_table.symbol_count.global_variables,
+            deserialized.symbol_count.global_variables
+        );
     }
 
     #[test]
@@ -1102,10 +1142,22 @@ mod tests {
         ];
 
         // Verify function type classification
-        assert!(matches!(functions[0].function_type, FunctionType::EntryPoint));
-        assert!(matches!(functions[1].function_type, FunctionType::EntryPoint));
-        assert!(matches!(functions[2].function_type, FunctionType::Constructor));
-        assert!(matches!(functions[3].function_type, FunctionType::Destructor));
+        assert!(matches!(
+            functions[0].function_type,
+            FunctionType::EntryPoint
+        ));
+        assert!(matches!(
+            functions[1].function_type,
+            FunctionType::EntryPoint
+        ));
+        assert!(matches!(
+            functions[2].function_type,
+            FunctionType::Constructor
+        ));
+        assert!(matches!(
+            functions[3].function_type,
+            FunctionType::Destructor
+        ));
         assert!(matches!(functions[4].function_type, FunctionType::Thunk));
 
         // Verify entry point flags
@@ -1181,7 +1233,10 @@ mod tests {
         assert_eq!(import.name, imported_func.name);
         assert!(imported_func.is_imported);
         assert!(!imported_func.is_exported);
-        assert!(matches!(imported_func.function_type, FunctionType::Imported));
+        assert!(matches!(
+            imported_func.function_type,
+            FunctionType::Imported
+        ));
 
         // Test that exported functions are properly marked
         let export = ExportInfo {
@@ -1208,6 +1263,9 @@ mod tests {
         assert_eq!(export.address, exported_func.address);
         assert!(exported_func.is_exported);
         assert!(!exported_func.is_imported);
-        assert!(matches!(exported_func.function_type, FunctionType::Exported));
+        assert!(matches!(
+            exported_func.function_type,
+            FunctionType::Exported
+        ));
     }
 }

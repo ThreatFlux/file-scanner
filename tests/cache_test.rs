@@ -1,5 +1,7 @@
 use chrono::{Duration, Utc};
-use file_scanner::cache::{AnalysisCache, CacheEntry, CacheMetadata, CacheSearchQuery, CacheStatistics};
+use file_scanner::cache::{
+    AnalysisCache, CacheEntry, CacheMetadata, CacheSearchQuery, CacheStatistics,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -62,7 +64,7 @@ mod cache_creation_tests {
     async fn test_cache_directory_creation() {
         let temp_dir = TempDir::new().unwrap();
         let cache_path = temp_dir.path().join("non_existent_dir");
-        
+
         assert!(!cache_path.exists());
         let _cache = AnalysisCache::new(&cache_path).unwrap();
         assert!(cache_path.exists());
@@ -122,11 +124,7 @@ mod entry_operations_tests {
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
         let now = Utc::now();
-        let timestamps = vec![
-            now - Duration::hours(2),
-            now - Duration::hours(1),
-            now,
-        ];
+        let timestamps = vec![now - Duration::hours(2), now - Duration::hours(1), now];
 
         for (_i, timestamp) in timestamps.iter().enumerate() {
             let entry = create_custom_entry(
@@ -150,19 +148,33 @@ mod entry_operations_tests {
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
         let now = Utc::now();
-        
+
         // Add entries for different tools with different timestamps
-        let entry1 = create_custom_entry("hash123", "tool1", "/test/file.bin", 1024, 100, now - Duration::hours(1));
+        let entry1 = create_custom_entry(
+            "hash123",
+            "tool1",
+            "/test/file.bin",
+            1024,
+            100,
+            now - Duration::hours(1),
+        );
         let entry2 = create_custom_entry("hash123", "tool2", "/test/file.bin", 1024, 200, now);
-        let entry3 = create_custom_entry("hash123", "tool1", "/test/file.bin", 1024, 150, now - Duration::minutes(30));
-        
+        let entry3 = create_custom_entry(
+            "hash123",
+            "tool1",
+            "/test/file.bin",
+            1024,
+            150,
+            now - Duration::minutes(30),
+        );
+
         cache.add_entry(entry1).unwrap();
         cache.add_entry(entry2).unwrap();
         cache.add_entry(entry3).unwrap();
 
         let latest_tool1 = cache.get_latest_analysis("hash123", "tool1").unwrap();
         let latest_tool2 = cache.get_latest_analysis("hash123", "tool2").unwrap();
-        
+
         assert_eq!(latest_tool1.timestamp, now - Duration::minutes(30));
         assert_eq!(latest_tool2.timestamp, now);
     }
@@ -201,7 +213,7 @@ mod entry_operations_tests {
 
         let entries = cache.get_entries("hash123").unwrap();
         assert_eq!(entries.len(), 100); // Should be limited to 100
-        
+
         // Verify that the oldest entries were removed
         let tool_names: Vec<String> = entries.iter().map(|e| e.tool_name.clone()).collect();
         assert!(!tool_names.contains(&"tool_0".to_string())); // First entry should be removed
@@ -343,10 +355,22 @@ mod search_functionality_tests {
 
         let now = Utc::now();
         let test_data = vec![
-            ("hash1", "hash_tool", "/bin/ls", 1024, now - Duration::hours(1)),
+            (
+                "hash1",
+                "hash_tool",
+                "/bin/ls",
+                1024,
+                now - Duration::hours(1),
+            ),
             ("hash2", "string_tool", "/bin/cat", 2048, now),
             ("hash3", "hash_tool", "/usr/bin/grep", 512, now),
-            ("hash4", "hash_tool", "/home/file.txt", 1536, now - Duration::days(1)),
+            (
+                "hash4",
+                "hash_tool",
+                "/home/file.txt",
+                1536,
+                now - Duration::days(1),
+            ),
         ];
 
         for (hash, tool, path, size, timestamp) in test_data {
@@ -435,18 +459,18 @@ mod statistics_tests {
         }
 
         let stats = cache.get_statistics();
-        
+
         // Check tool counts
         assert_eq!(stats.tool_counts["hash_tool"], 2);
         assert_eq!(stats.tool_counts["string_tool"], 2);
         assert_eq!(stats.tool_counts["binary_tool"], 1);
-        
+
         // Check file type counts
         assert_eq!(stats.file_type_counts["exe"], 2);
         assert_eq!(stats.file_type_counts["dll"], 1);
         assert_eq!(stats.file_type_counts["txt"], 1);
         assert_eq!(stats.file_type_counts["py"], 1);
-        
+
         // Check other statistics
         assert_eq!(stats.total_analyses, 5);
         assert_eq!(stats.unique_files, 5);
@@ -474,11 +498,11 @@ mod persistence_tests {
     #[tokio::test]
     async fn test_save_and_load_cache() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create and populate cache
         {
             let cache = AnalysisCache::new(temp_dir.path()).unwrap();
-            
+
             let test_data = vec![
                 ("hash1", "tool1", "/file1.bin"),
                 ("hash2", "tool2", "/file2.bin"),
@@ -496,10 +520,10 @@ mod persistence_tests {
 
         // Create new cache instance and verify data was loaded
         let cache2 = AnalysisCache::new(temp_dir.path()).unwrap();
-        
+
         let all_entries = cache2.get_all_entries();
         assert_eq!(all_entries.len(), 3);
-        
+
         // Verify specific entries
         assert!(cache2.get_entries("hash1").is_some());
         assert!(cache2.get_entries("hash2").is_some());
@@ -746,7 +770,7 @@ mod memory_management_tests {
         // Should still be 100 (oldest removed)
         let entries = cache.get_entries("hash1").unwrap();
         assert_eq!(entries.len(), 100);
-        
+
         // Verify newest entry exists
         assert!(entries.iter().any(|e| e.tool_name == "tool_100"));
         // Verify oldest entry was removed
@@ -767,7 +791,7 @@ mod error_handling_tests {
         assert!(cache.get_entries("any_hash").is_none());
         assert!(cache.get_latest_analysis("any_hash", "any_tool").is_none());
         assert_eq!(cache.get_all_entries().len(), 0);
-        
+
         let empty_query = CacheSearchQuery {
             tool_name: None,
             file_path_pattern: None,
@@ -782,10 +806,10 @@ mod error_handling_tests {
     #[tokio::test]
     async fn test_invalid_json_in_cache_files() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create invalid JSON file in cache directory
         std::fs::write(temp_dir.path().join("invalid.json"), "not valid json").unwrap();
-        
+
         // Should still create cache successfully (ignoring invalid files)
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
         let metadata = cache.get_metadata();
@@ -927,7 +951,10 @@ mod serialization_tests {
 
         assert_eq!(deserialized.total_analyses, stats.total_analyses);
         assert_eq!(deserialized.unique_files, stats.unique_files);
-        assert_eq!(deserialized.avg_execution_time_ms, stats.avg_execution_time_ms);
+        assert_eq!(
+            deserialized.avg_execution_time_ms,
+            stats.avg_execution_time_ms
+        );
         assert_eq!(deserialized.tool_counts, stats.tool_counts);
         assert_eq!(deserialized.file_type_counts, stats.file_type_counts);
     }
@@ -957,8 +984,9 @@ mod edge_case_tests {
         let stats = cache.get_statistics();
         assert_eq!(stats.total_analyses, 4);
         // Files without extensions should not appear in file_type_counts
-        assert!(stats.file_type_counts.is_empty() || 
-                !stats.file_type_counts.values().any(|&v| v == 4));
+        assert!(
+            stats.file_type_counts.is_empty() || !stats.file_type_counts.values().any(|&v| v == 4)
+        );
     }
 
     #[tokio::test]
@@ -1037,7 +1065,7 @@ mod edge_case_tests {
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
         let test_data = vec![
-            ("hash1", "fast_tool", 0),      // Instant execution
+            ("hash1", "fast_tool", 0),       // Instant execution
             ("hash2", "slow_tool", 3600000), // 1 hour
             ("hash3", "normal_tool", 100),   // 100ms
         ];
@@ -1058,11 +1086,7 @@ mod edge_case_tests {
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
         let identical_hash = "identical_content_hash";
-        let paths = vec![
-            "/original/file.bin",
-            "/copy/file.bin",
-            "/backup/file.bin",
-        ];
+        let paths = vec!["/original/file.bin", "/copy/file.bin", "/backup/file.bin"];
 
         for path in paths {
             let entry = create_test_entry(identical_hash, "hash_tool", path);
@@ -1071,9 +1095,9 @@ mod edge_case_tests {
 
         let entries = cache.get_entries(identical_hash).unwrap();
         assert_eq!(entries.len(), 3);
-        
+
         // All entries should have the same hash but different paths
-        let unique_paths: std::collections::HashSet<_> = 
+        let unique_paths: std::collections::HashSet<_> =
             entries.iter().map(|e| &e.file_path).collect();
         assert_eq!(unique_paths.len(), 3);
     }

@@ -1,8 +1,8 @@
 use file_scanner::control_flow::*;
-use file_scanner::function_analysis::{FunctionInfo, FunctionType, SymbolTable, SymbolCounts};
+use file_scanner::function_analysis::{FunctionInfo, FunctionType, SymbolCounts, SymbolTable};
+use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
-use std::fs;
 
 #[test]
 fn test_block_type_variants() {
@@ -16,7 +16,7 @@ fn test_block_type_variants() {
         BlockType::Call,
         BlockType::Return,
     ];
-    
+
     for block_type in block_types {
         let json = serde_json::to_string(&block_type).unwrap();
         assert!(!json.is_empty());
@@ -38,7 +38,7 @@ fn test_instruction_types() {
         InstructionType::Nop,
         InstructionType::Other,
     ];
-    
+
     for inst_type in instruction_types {
         let json = serde_json::to_string(&inst_type).unwrap();
         assert!(!json.is_empty());
@@ -56,7 +56,7 @@ fn test_flow_control_types() {
         FlowControl::Indirect,
         FlowControl::Halt,
     ];
-    
+
     for fc in flow_controls {
         match fc {
             FlowControl::Jump(addr) => assert!(addr > 0),
@@ -78,7 +78,7 @@ fn test_instruction_creation() {
         flow_control: FlowControl::Fall,
         size: 2,
     };
-    
+
     assert_eq!(instruction.address, 0x1000);
     assert_eq!(instruction.mnemonic, "mov");
     assert_eq!(instruction.operands, "eax, ebx");
@@ -98,7 +98,7 @@ fn test_basic_block_creation() {
         block_type: BlockType::Entry,
         instruction_count: 0,
     };
-    
+
     assert_eq!(block.id, 0);
     assert_eq!(block.start_address, 0x1000);
     assert_eq!(block.end_address, 0x1010);
@@ -113,7 +113,7 @@ fn test_cfg_edge_creation() {
         to_block: 1,
         edge_type: EdgeType::Fall,
     };
-    
+
     assert_eq!(edge.from_block, 0);
     assert_eq!(edge.to_block, 1);
 }
@@ -127,7 +127,7 @@ fn test_loop_structure() {
         loop_type: LoopType::While,
         nesting_level: 1,
     };
-    
+
     assert_eq!(loop_info.header_block, 1);
     assert_eq!(loop_info.body_blocks, vec![2, 3, 4]);
     assert_eq!(loop_info.exit_blocks, vec![5]);
@@ -145,7 +145,7 @@ fn test_control_flow_metrics() {
         loop_count: 2,
         unreachable_blocks: vec![7, 8],
     };
-    
+
     assert_eq!(metrics.cyclomatic_complexity, 5);
     assert_eq!(metrics.cognitive_complexity, 8);
     assert_eq!(metrics.nesting_depth, 3);
@@ -175,7 +175,7 @@ fn test_control_flow_graph_creation() {
             unreachable_blocks: vec![],
         },
     };
-    
+
     assert_eq!(cfg.function_address, 0x1000);
     assert_eq!(cfg.function_name, "main");
     assert_eq!(cfg.entry_block, 0);
@@ -205,7 +205,7 @@ fn test_analyze_control_flow_nonexistent_file() {
             cross_references: 0,
         },
     };
-    
+
     let result = analyze_control_flow(Path::new("/nonexistent/file"), &symbol_table);
     assert!(result.is_err());
 }
@@ -215,7 +215,7 @@ fn test_analyze_control_flow_empty_file() {
     let temp_dir = TempDir::new().unwrap();
     let test_file = temp_dir.path().join("empty.bin");
     fs::write(&test_file, b"").unwrap();
-    
+
     let symbol_table = SymbolTable {
         functions: vec![],
         global_variables: vec![],
@@ -231,7 +231,7 @@ fn test_analyze_control_flow_empty_file() {
             cross_references: 0,
         },
     };
-    
+
     let result = analyze_control_flow(&test_file, &symbol_table);
     // Empty file should either error or return empty analysis
     match result {
@@ -245,11 +245,11 @@ fn test_analyze_control_flow_empty_file() {
     }
 }
 
-#[test] 
+#[test]
 fn test_analyze_control_flow_simple_binary() {
     let temp_dir = TempDir::new().unwrap();
     let test_file = temp_dir.path().join("simple.bin");
-    
+
     // Create a minimal ELF-like header
     let content = vec![
         0x7f, 0x45, 0x4c, 0x46, // ELF magic
@@ -259,21 +259,19 @@ fn test_analyze_control_flow_simple_binary() {
         0x3e, 0x00, // Machine (x86-64)
     ];
     fs::write(&test_file, &content).unwrap();
-    
+
     let symbol_table = SymbolTable {
-        functions: vec![
-            FunctionInfo {
-                name: "main".to_string(),
-                address: 0x1000,
-                size: 100,
-                function_type: FunctionType::EntryPoint,
-                calling_convention: None,
-                parameters: vec![],
-                is_entry_point: true,
-                is_exported: true,
-                is_imported: false,
-            }
-        ],
+        functions: vec![FunctionInfo {
+            name: "main".to_string(),
+            address: 0x1000,
+            size: 100,
+            function_type: FunctionType::EntryPoint,
+            calling_convention: None,
+            parameters: vec![],
+            is_entry_point: true,
+            is_exported: true,
+            is_imported: false,
+        }],
         global_variables: vec![],
         cross_references: vec![],
         imports: vec![],
@@ -287,14 +285,17 @@ fn test_analyze_control_flow_simple_binary() {
             cross_references: 0,
         },
     };
-    
+
     let result = analyze_control_flow(&test_file, &symbol_table);
     // This may succeed or fail depending on binary format support, both are valid
     match result {
         Ok(analysis) => {
             // If it succeeds, basic structure should be valid
             // total_functions is usize, so always >= 0
-            assert!(analysis.overall_metrics.total_functions == analysis.overall_metrics.total_functions);
+            assert!(
+                analysis.overall_metrics.total_functions
+                    == analysis.overall_metrics.total_functions
+            );
         }
         Err(_) => {
             // If it fails, that's also expected for non-valid binaries
@@ -308,25 +309,21 @@ fn test_serialization() {
     let cfg = ControlFlowGraph {
         function_address: 0x1000,
         function_name: "test_function".to_string(),
-        basic_blocks: vec![
-            BasicBlock {
-                id: 0,
-                start_address: 0x1000,
-                end_address: 0x1010,
-                instructions: vec![],
-                successors: vec![1],
-                predecessors: vec![],
-                block_type: BlockType::Entry,
-                instruction_count: 5,
-            }
-        ],
-        edges: vec![
-            CfgEdge {
-                from_block: 0,
-                to_block: 1,
-                edge_type: EdgeType::Fall,
-            }
-        ],
+        basic_blocks: vec![BasicBlock {
+            id: 0,
+            start_address: 0x1000,
+            end_address: 0x1010,
+            instructions: vec![],
+            successors: vec![1],
+            predecessors: vec![],
+            block_type: BlockType::Entry,
+            instruction_count: 5,
+        }],
+        edges: vec![CfgEdge {
+            from_block: 0,
+            to_block: 1,
+            edge_type: EdgeType::Fall,
+        }],
         entry_block: 0,
         exit_blocks: vec![1],
         loops: vec![],
@@ -340,11 +337,11 @@ fn test_serialization() {
             unreachable_blocks: vec![],
         },
     };
-    
+
     // Test JSON serialization
     let json = serde_json::to_string(&cfg).unwrap();
     assert!(!json.is_empty());
-    
+
     let deserialized: ControlFlowGraph = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.function_address, cfg.function_address);
     assert_eq!(deserialized.function_name, cfg.function_name);
@@ -360,7 +357,7 @@ fn test_edge_types() {
         EdgeType::Call,
         EdgeType::Return,
     ];
-    
+
     for edge_type in edge_types {
         let json = serde_json::to_string(&edge_type).unwrap();
         assert!(!json.is_empty());
@@ -376,7 +373,7 @@ fn test_loop_types() {
         LoopType::While,
         LoopType::For,
     ];
-    
+
     for loop_type in loop_types {
         let json = serde_json::to_string(&loop_type).unwrap();
         assert!(!json.is_empty());

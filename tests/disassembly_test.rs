@@ -1,8 +1,8 @@
 use file_scanner::disassembly::*;
-use file_scanner::function_analysis::{FunctionInfo, FunctionType, SymbolTable, SymbolCounts};
+use file_scanner::function_analysis::{FunctionInfo, FunctionType, SymbolCounts, SymbolTable};
 use std::collections::HashMap;
-use tempfile::NamedTempFile;
 use std::io::Write;
+use tempfile::NamedTempFile;
 
 #[cfg(test)]
 mod disassembly_tests {
@@ -53,31 +53,31 @@ mod disassembly_tests {
     fn create_test_elf_binary() -> Vec<u8> {
         // Create a minimal ELF binary
         let mut binary = vec![0u8; 0x2000];
-        
+
         // ELF header
         binary[0..4].copy_from_slice(&[0x7f, 0x45, 0x4c, 0x46]); // Magic
         binary[4] = 0x02; // 64-bit
         binary[5] = 0x01; // Little endian
         binary[6] = 0x01; // Current version
         binary[7] = 0x00; // System V ABI
-        
+
         // Machine type and version
         binary[0x10] = 0x02; // ET_EXEC
         binary[0x12] = 0x3e; // x86-64
         binary[0x14] = 0x01; // Version 1
-        
+
         // Entry point
         let entry = 0x1000u64;
         binary[0x18..0x20].copy_from_slice(&entry.to_le_bytes());
-        
+
         // Program header offset
         let phoff = 0x40u64;
         binary[0x20..0x28].copy_from_slice(&phoff.to_le_bytes());
-        
+
         // Section header offset
         let shoff = 0x200u64;
         binary[0x28..0x30].copy_from_slice(&shoff.to_le_bytes());
-        
+
         // Header sizes
         binary[0x34] = 0x40; // e_ehsize
         binary[0x36] = 0x38; // e_phentsize
@@ -85,40 +85,41 @@ mod disassembly_tests {
         binary[0x3a] = 0x40; // e_shentsize
         binary[0x3c] = 0x03; // e_shnum
         binary[0x3e] = 0x02; // e_shstrndx
-        
+
         // Section header for .text
         let text_sh_offset = 0x240;
         binary[text_sh_offset] = 0x01; // sh_name offset
         binary[text_sh_offset + 4] = 0x01; // SHT_PROGBITS
         binary[text_sh_offset + 8] = 0x06; // SHF_ALLOC | SHF_EXECINSTR
-        
+
         let text_addr = 0x1000u64;
         binary[text_sh_offset + 16..text_sh_offset + 24].copy_from_slice(&text_addr.to_le_bytes());
-        
+
         let text_file_offset = 0x1000u64;
-        binary[text_sh_offset + 24..text_sh_offset + 32].copy_from_slice(&text_file_offset.to_le_bytes());
-        
+        binary[text_sh_offset + 24..text_sh_offset + 32]
+            .copy_from_slice(&text_file_offset.to_le_bytes());
+
         let text_size = 0x100u64;
         binary[text_sh_offset + 32..text_sh_offset + 40].copy_from_slice(&text_size.to_le_bytes());
-        
+
         // Section string table
         let strtab_offset = 0x300;
         let strtab_content = b"\0.text\0.shstrtab\0";
         binary[strtab_offset..strtab_offset + strtab_content.len()].copy_from_slice(strtab_content);
-        
+
         // Add some x86-64 code at .text section
         let code = vec![
-            0x55,                         // push rbp
-            0x48, 0x89, 0xe5,            // mov rbp, rsp
-            0x48, 0x83, 0xec, 0x10,      // sub rsp, 0x10
+            0x55, // push rbp
+            0x48, 0x89, 0xe5, // mov rbp, rsp
+            0x48, 0x83, 0xec, 0x10, // sub rsp, 0x10
             0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x00, // mov rax, 0
-            0x48, 0x83, 0xc4, 0x10,      // add rsp, 0x10
-            0x5d,                        // pop rbp
-            0xc3,                        // ret
+            0x48, 0x83, 0xc4, 0x10, // add rsp, 0x10
+            0x5d, // pop rbp
+            0xc3, // ret
         ];
-        
+
         binary[0x1000..0x1000 + code.len()].copy_from_slice(&code);
-        
+
         binary
     }
 
@@ -128,11 +129,11 @@ mod disassembly_tests {
         let binary = create_test_elf_binary();
         file.write_all(&binary).unwrap();
         file.flush().unwrap();
-        
+
         let symbol_table = create_test_symbol_table();
-        
+
         let result = disassemble_binary(file.path(), &symbol_table);
-        
+
         match result {
             Ok(disasm) => {
                 assert!(!disasm.architecture.is_empty());
@@ -160,7 +161,7 @@ mod disassembly_tests {
             InstructionType::Comparison,
             InstructionType::Other,
         ];
-        
+
         for t in types {
             match t {
                 InstructionType::Arithmetic => assert!(true),
@@ -179,25 +180,33 @@ mod disassembly_tests {
 
     #[test]
     fn test_flow_control_types() {
-        let _jump = FlowControl::Jump { target: Some(0x1234), conditional: false };
-        let _cond_jump = FlowControl::Jump { target: Some(0x5678), conditional: true };
-        let _call = FlowControl::Call { target: Some(0xabcd), is_indirect: false };
-        let _indirect_call = FlowControl::Call { target: None, is_indirect: true };
+        let _jump = FlowControl::Jump {
+            target: Some(0x1234),
+            conditional: false,
+        };
+        let _cond_jump = FlowControl::Jump {
+            target: Some(0x5678),
+            conditional: true,
+        };
+        let _call = FlowControl::Call {
+            target: Some(0xabcd),
+            is_indirect: false,
+        };
+        let _indirect_call = FlowControl::Call {
+            target: None,
+            is_indirect: true,
+        };
         let _ret = FlowControl::Return;
         let _int = FlowControl::Interrupt { number: 0x80 };
         let _cmov = FlowControl::ConditionalMove;
-        
+
         assert!(true); // All constructions succeeded
     }
 
     #[test]
     fn test_access_types() {
-        let types = vec![
-            AccessType::Read,
-            AccessType::Write,
-            AccessType::Execute,
-        ];
-        
+        let types = vec![AccessType::Read, AccessType::Write, AccessType::Execute];
+
         for t in types {
             match t {
                 AccessType::Read => assert!(true),
@@ -217,7 +226,7 @@ mod disassembly_tests {
             CryptoOpType::RandomGeneration,
             CryptoOpType::KeyDerivation,
         ];
-        
+
         for t in types {
             match t {
                 CryptoOpType::AESOperation => assert!(true),
@@ -242,7 +251,7 @@ mod disassembly_tests {
             PatternType::NopSled,
             PatternType::ReturnOriented,
         ];
-        
+
         for t in types {
             match t {
                 PatternType::AntiDebug => assert!(true),
@@ -265,7 +274,7 @@ mod disassembly_tests {
             Severity::High,
             Severity::Critical,
         ];
-        
+
         for level in levels {
             match level {
                 Severity::Low => assert!(true),
@@ -286,7 +295,7 @@ mod disassembly_tests {
             SystemCallCategory::Security,
             SystemCallCategory::Other,
         ];
-        
+
         for cat in categories {
             match cat {
                 SystemCallCategory::FileSystem => assert!(true),
@@ -310,7 +319,7 @@ mod disassembly_tests {
             flow_control: None,
             size: 1,
         };
-        
+
         assert_eq!(insn.address, 0x1000);
         assert_eq!(insn.bytes, vec![0x55]);
         assert_eq!(insn.mnemonic, "push");
@@ -331,7 +340,7 @@ mod disassembly_tests {
             register_index: None,
             displacement: Some(0x10),
         };
-        
+
         assert_eq!(mem_access.instruction_address, 0x1000);
         assert!(matches!(mem_access.access_type, AccessType::Read));
         assert_eq!(mem_access.size, 8);
@@ -349,7 +358,7 @@ mod disassembly_tests {
             syscall_name: Some("write".to_string()),
             category: SystemCallCategory::FileSystem,
         };
-        
+
         assert_eq!(syscall.address, 0x1000);
         assert_eq!(syscall.syscall_number, Some(1));
         assert_eq!(syscall.syscall_name, Some("write".to_string()));
@@ -364,9 +373,12 @@ mod disassembly_tests {
             algorithm_hint: Some("AES-256".to_string()),
             confidence: 0.9,
         };
-        
+
         assert_eq!(crypto_op.address, 0x1000);
-        assert!(matches!(crypto_op.operation_type, CryptoOpType::AESOperation));
+        assert!(matches!(
+            crypto_op.operation_type,
+            CryptoOpType::AESOperation
+        ));
         assert_eq!(crypto_op.algorithm_hint, Some("AES-256".to_string()));
         assert_eq!(crypto_op.confidence, 0.9);
     }
@@ -379,7 +391,7 @@ mod disassembly_tests {
             description: "Anti-debugging detected".to_string(),
             severity: Severity::High,
         };
-        
+
         assert!(matches!(pattern.pattern_type, PatternType::AntiDebug));
         assert_eq!(pattern.addresses.len(), 3);
         assert_eq!(pattern.description, "Anti-debugging detected");
@@ -403,7 +415,7 @@ mod disassembly_tests {
                 },
             ],
         };
-        
+
         assert_eq!(block.start_address, 0x1000);
         assert_eq!(block.end_address, 0x1020);
         assert_eq!(block.instruction_count, 8);
@@ -419,7 +431,7 @@ mod disassembly_tests {
             ExitType::Call,
             ExitType::Return,
         ];
-        
+
         for t in types {
             match t {
                 ExitType::FallThrough => assert!(true),
@@ -442,7 +454,7 @@ mod disassembly_tests {
             returns: 3,
             interrupts: 1,
         };
-        
+
         assert_eq!(summary.total_jumps, 10);
         assert_eq!(summary.conditional_jumps, 6);
         assert_eq!(summary.unconditional_jumps, 4);
@@ -462,7 +474,7 @@ mod disassembly_tests {
             basic_blocks: vec![],
             complexity: 5,
         };
-        
+
         assert_eq!(func.address, 0x1000);
         assert_eq!(func.name, "test_function");
         assert_eq!(func.size, 100);
@@ -488,16 +500,14 @@ mod disassembly_tests {
                     metadata: HashMap::new(),
                 },
             ],
-            edges: vec![
-                GraphEdge {
-                    source: "node1".to_string(),
-                    target: "node2".to_string(),
-                    edge_type: "jump".to_string(),
-                    label: Some("unconditional".to_string()),
-                },
-            ],
+            edges: vec![GraphEdge {
+                source: "node1".to_string(),
+                target: "node2".to_string(),
+                edge_type: "jump".to_string(),
+                label: Some("unconditional".to_string()),
+            }],
         };
-        
+
         assert_eq!(graph.nodes.len(), 2);
         assert_eq!(graph.edges.len(), 1);
         assert_eq!(graph.edges[0].source, "node1");
@@ -524,7 +534,7 @@ mod disassembly_tests {
                 interrupts: 0,
             },
         };
-        
+
         assert_eq!(analysis.total_instructions, 100);
         assert!(analysis.instruction_types.is_empty());
         assert!(analysis.register_usage.is_empty());
@@ -547,7 +557,7 @@ mod disassembly_tests {
                 edges: vec![],
             },
         };
-        
+
         assert!(output.assembly.contains("mov"));
         assert!(output.assembly.contains("ret"));
         assert!(output.json_structured.is_object());
@@ -588,7 +598,7 @@ mod disassembly_tests {
                 },
             },
         };
-        
+
         assert_eq!(result.architecture, "x86_64");
         assert!(result.instructions.is_empty());
         assert_eq!(result.analysis.total_instructions, 0);
