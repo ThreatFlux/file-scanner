@@ -329,10 +329,7 @@ impl CallGraph {
         let mut adjacency: HashMap<u64, Vec<u64>> = HashMap::new();
 
         for edge in &self.edges {
-            adjacency
-                .entry(edge.caller)
-                .or_default()
-                .push(edge.callee);
+            adjacency.entry(edge.caller).or_default().push(edge.callee);
         }
 
         // DFS to detect cycles
