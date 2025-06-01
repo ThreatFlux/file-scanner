@@ -1,0 +1,48 @@
+name: Auto-assign Copilot Review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  assign-copilot:
+    name: Request Copilot Review
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - name: Request Copilot review
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              // Request Copilot review using GitHub API
+              const response = await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+                reviewers: ['github-advanced-security[bot]']
+              });
+              
+              console.log('Successfully requested Copilot review');
+            } catch (error) {
+              // If the above fails, try the Copilot-specific endpoint
+              try {
+                const { data } = await github.request('POST /repos/{owner}/{repo}/pulls/{pull_number}/copilot/reviews', {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.issue.number,
+                  headers: {
+                    'X-GitHub-Api-Version': '2022-11-28'
+                  }
+                });
+                console.log('Successfully requested Copilot review via API');
+              } catch (apiError) {
+                console.log('Could not request Copilot review:', apiError.message);
+                // Don't fail the workflow if Copilot review can't be requested
+              }
+            }
