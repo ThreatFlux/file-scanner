@@ -51,7 +51,7 @@ futures-util = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
 
 # OpenAPI documentation
-utoipa = { version = "4.2", features = ["axum_extras", "chrono", "uuid"] }
+utoipa = { version = "5.3", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-redoc = { version = "4.0", features = ["axum"] }
 utoipa-swagger-ui = { version = "7.1", features = ["axum"] }
 
