@@ -66,7 +66,7 @@ yara-x = { git = "https://github.com/wroersma/yara-x", branch = "main" }
 walkdir = "2.4"
 
 # OLE and VBA parsing
-cfb = "0.9"  # Compound File Binary format (OLE storage)
+cfb = "0.10"  # Compound File Binary format (OLE storage)
 zip = "2.1"  # For OOXML format support and Java archives
 
 # NPM package analysis
