@@ -80,7 +80,7 @@ base64 = "0.22"     # For certificate decoding
 tempfile = "3.8"
 # Testing utilities
 mockall = "0.13"
-proptest = "1.4"
+proptest = "1.7"
 rstest = "0.25"
 criterion = { version = "0.6", features = ["html_reports"] }
 pretty_assertions = "1.4"
