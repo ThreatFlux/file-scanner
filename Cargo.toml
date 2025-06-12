@@ -74,7 +74,7 @@ edit-distance = "2.1"  # Additional string distance algorithms
 
 # OLE and VBA parsing
 cfb = "0.10"  # Compound File Binary format (OLE storage)
-zip = "3.0"  # For OOXML format support and Java archives
+zip = "4.0"  # For OOXML format support and Java archives
 
 # NPM package analysis
 flate2 = "1.0"  # For gzip decompression
