@@ -16,7 +16,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Binary parsing
 goblin = "0.10"  # For PE/ELF parsing
-object = "0.36" # For object file parsing
+object = "0.37" # For object file parsing
 
 # String extraction
 regex = "1.10"
