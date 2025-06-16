@@ -81,7 +81,7 @@ flate2 = "1.0"  # For gzip decompression
 tar = "0.4"     # For tar archive extraction
 
 # Java/Android analysis
-quick-xml = "0.36"  # For Android manifest parsing
+quick-xml = "0.37"  # For Android manifest parsing
 base64 = "0.22"     # For certificate decoding
 
 # PDF analysis - using basic implementation for now
