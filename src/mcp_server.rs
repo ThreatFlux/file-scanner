@@ -284,6 +284,23 @@ impl FileScannerMcp {
         // Check if 'all' flag is set
         let all = request.all.unwrap_or(false);
 
+        // Cache extracted strings to avoid multiple expensive extractions
+        let mut cached_strings: Option<crate::strings::ExtractedStrings> = None;
+
+        // Preemptively extract strings if any analysis that needs them is requested
+        let needs_strings = request.strings.unwrap_or(false)
+            || request.dependencies.unwrap_or(false)
+            || request.behavioral.unwrap_or(false)
+            || request.yara_indicators.unwrap_or(false)
+            || all;
+
+        if needs_strings && cached_strings.is_none() {
+            let min_len = request.min_string_length.unwrap_or(4);
+            if let Ok(strings) = extract_strings(&path, min_len) {
+                cached_strings = Some(strings);
+            }
+        }
+
         // Metadata
         if request.metadata.unwrap_or(false) || all {
             let mut metadata = FileMetadata::new(&path).map_err(|e| e.to_string())?;
@@ -303,12 +320,16 @@ impl FileScannerMcp {
             result.hashes = Some(hashes);
         }
 
-        // Strings
+        // Strings (use cached version)
         if request.strings.unwrap_or(false) || all {
-            let min_len = request.min_string_length.unwrap_or(4);
-            let strings = extract_strings(&path, min_len).map_err(|e| e.to_string())?;
-            let all_strings = [strings.ascii_strings, strings.unicode_strings].concat();
-            result.strings = Some(all_strings);
+            if let Some(ref strings) = cached_strings {
+                let all_strings = [
+                    strings.ascii_strings.clone(),
+                    strings.unicode_strings.clone(),
+                ]
+                .concat();
+                result.strings = Some(all_strings);
+            }
         }
 
         // Hex dump
@@ -405,8 +426,8 @@ impl FileScannerMcp {
         // Dependencies
         if request.dependencies.unwrap_or(false) || all {
             if let Ok(symbols) = analyze_symbols(&path) {
-                let strings = extract_strings(&path, 4).ok();
-                if let Ok(deps) = analyze_dependencies(&path, &symbols, strings.as_ref()) {
+                // Use cached strings if available, otherwise extract with min length 4
+                if let Ok(deps) = analyze_dependencies(&path, &symbols, cached_strings.as_ref()) {
                     result.dependencies = Some(deps);
                 }
             }
@@ -437,7 +458,6 @@ impl FileScannerMcp {
 
         // Behavioral
         if request.behavioral.unwrap_or(false) || all {
-            let strings = extract_strings(&path, 4).ok();
             let symbols = analyze_symbols(&path).ok();
             let disassembly = if let Some(ref syms) = symbols {
                 disassemble_binary(&path, syms).ok()
@@ -447,7 +467,7 @@ impl FileScannerMcp {
 
             if let Ok(behavioral) = analyze_behavior(
                 &path,
-                strings.as_ref(),
+                cached_strings.as_ref(),
                 symbols.as_ref(),
                 disassembly.as_ref(),
             ) {
@@ -501,8 +521,14 @@ impl FileScannerMcp {
                 analyze_entropy(&path).map_err(|e| e.to_string())?
             };
 
-            // Extract unique strings
-            let strings = extract_strings(&path, 8).map_err(|e| e.to_string())?;
+            // Extract unique strings (use cached if available, otherwise extract with min length 8)
+            let strings = if let Some(ref cached) = cached_strings {
+                cached
+            } else {
+                // Fallback: extract strings with min length 8 if not cached
+                cached_strings = Some(extract_strings(&path, 8).map_err(|e| e.to_string())?);
+                cached_strings.as_ref().unwrap()
+            };
             let mut unique_strings: Vec<String> = strings
                 .interesting_strings
                 .iter()

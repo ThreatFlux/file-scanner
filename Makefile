@@ -1,4 +1,4 @@
-.PHONY: help init build test test-parallel test-unit test-hash test-mcp test-analysis test-integration test-legacy install clean run-debug run-release docker-build docker-run lint fmt check deps update security-audit dev dev-full ci ci-full prepare-release
+.PHONY: help init build test test-parallel test-unit test-hash test-mcp test-analysis test-integration test-legacy install clean run-debug run-release docker-build docker-run docker-run-http lint fmt check deps update security-audit dev dev-full ci ci-full prepare-release coverage coverage-html setup-optimization
 
 # Default target
 help:
@@ -34,11 +34,17 @@ help:
 	@echo "DOCKER COMMANDS:"
 	@echo "  docker-build  - Build Docker image"
 	@echo "  docker-run    - Run Docker container"
+	@echo "  docker-run-http - Run Docker container in MCP HTTP mode (port 3111)"
 	@echo ""
 	@echo "MISC COMMANDS:"
 	@echo "  deps          - Update dependencies"
 	@echo "  test-programs - Compile all test programs"
 	@echo "  mcp-test      - Test MCP server functionality"
+	@echo ""
+	@echo "OPTIMIZATION COMMANDS:"
+	@echo "  setup-optimization - Install sccache and cargo-llvm-cov"
+	@echo "  coverage      - Generate code coverage (fast with llvm-cov)"
+	@echo "  coverage-html - Generate HTML coverage report"
 
 # Initialize project
 init:
@@ -51,11 +57,17 @@ init:
 # Build debug version
 build:
 	@echo "Building debug version..."
+	@if command -v sccache >/dev/null 2>&1; then \
+		export RUSTC_WRAPPER=sccache; \
+	fi; \
 	cargo build
 
 # Build release version
 release:
 	@echo "Building release version..."
+	@if command -v sccache >/dev/null 2>&1; then \
+		export RUSTC_WRAPPER=sccache; \
+	fi; \
 	cargo build --release
 
 # Run tests (fast unit tests)
@@ -100,6 +112,25 @@ install: release
 	cargo install --path .
 	@echo "Installed to ~/.cargo/bin/file-scanner"
 
+# Setup optimization tools
+setup-optimization:
+	@echo "Setting up CI/CD optimization tools..."
+	@command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --locked
+	@command -v sccache >/dev/null 2>&1 || cargo install sccache --locked
+	@echo "Optimization tools installed!"
+
+# Generate code coverage with llvm-cov (faster than tarpaulin)
+coverage:
+	@echo "Generating code coverage..."
+	cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+	@echo "Coverage report: lcov.info"
+
+# Generate HTML coverage report
+coverage-html:
+	@echo "Generating HTML coverage report..."
+	cargo llvm-cov --all-features --workspace --html
+	@echo "Coverage report: open target/llvm-cov/html/index.html"
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
@@ -124,6 +155,10 @@ docker-build:
 docker-run:
 	@echo "Running Docker container..."
 	docker run --rm -v /bin:/data:ro threatflux/file-scanner:latest /data/ls
+
+docker-run-http:
+	@echo "Running Docker container in MCP HTTP mode..."
+	docker run --rm -p 3111:3000 threatflux/file-scanner:latest mcp-http --port 3000
 
 # Code quality
 lint:

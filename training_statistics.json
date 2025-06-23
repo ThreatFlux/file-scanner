@@ -1,0 +1,14 @@
+{
+  "generation_time": "2025-06-16T20:48:09.676274",
+  "total_examples": 92735,
+  "files_analyzed": 1538,
+  "expertise_levels": 20,
+  "question_categories": 21,
+  "file_importance_distribution": {
+    "critical": 192,
+    "high": 47,
+    "medium": 921,
+    "low": 378
+  },
+  "examples_by_importance": {}
+}
