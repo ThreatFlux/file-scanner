@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.87.0-slim AS builder
+FROM rust:1.88.0-slim AS builder
 
 # Build arguments
 ARG VERSION=unknown
