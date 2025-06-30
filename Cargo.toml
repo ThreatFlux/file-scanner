@@ -40,7 +40,7 @@ ring = "0.17"
 
 # MCP SDK
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "db03f63", features = ["transport-io"] }
-schemars = "0.9"
+schemars = "1.0"
 
 # HTTP server for MCP
 axum = { version = "0.8", features = ["ws"] }
