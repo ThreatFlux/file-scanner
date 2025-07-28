@@ -33,7 +33,7 @@ anyhow = "1.0"
 thiserror = "2.0"
 
 # Async runtime (optional, for parallel processing)
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.47", features = ["full"] }
 
 # Digital signature verification
 ring = "0.17"
