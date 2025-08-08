@@ -15,7 +15,7 @@ fn create_test_file(content: &[u8]) -> anyhow::Result<(TempDir, std::path::PathB
 
 #[test]
 fn test_file_scanner_mcp_creation() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
 
     // Test that we can create the MCP server
     let info = mcp.get_info();
@@ -27,7 +27,7 @@ fn test_file_scanner_mcp_creation() {
 
 #[test]
 fn test_mcp_server_info_structure() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let info = mcp.get_info();
 
     // Verify server info fields
@@ -50,7 +50,7 @@ fn test_mcp_server_info_structure() {
 
 #[tokio::test]
 async fn test_file_analysis_request_validation() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let (_temp_dir, file_path) = create_test_file(b"test content").unwrap();
 
     // Test valid request
@@ -84,7 +84,7 @@ async fn test_file_analysis_request_validation() {
 
 #[tokio::test]
 async fn test_file_analysis_request_invalid_path() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
 
     let request = FileAnalysisRequest {
         all: None,
@@ -116,7 +116,7 @@ async fn test_file_analysis_request_invalid_path() {
 
 #[tokio::test]
 async fn test_llm_file_analysis_request_validation() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let (_temp_dir, file_path) = create_test_file(b"test content for LLM analysis").unwrap();
 
     let request = LlmFileAnalysisRequest {
@@ -140,7 +140,7 @@ async fn test_llm_file_analysis_request_validation() {
 
 #[tokio::test]
 async fn test_llm_file_analysis_with_defaults() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let (_temp_dir, file_path) = create_test_file(b"default analysis test").unwrap();
 
     let request = LlmFileAnalysisRequest {
@@ -166,7 +166,7 @@ async fn test_llm_file_analysis_with_defaults() {
 
 #[tokio::test]
 async fn test_file_analysis_metadata_only() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let (_temp_dir, file_path) = create_test_file(b"metadata test content").unwrap();
 
     let request = FileAnalysisRequest {
@@ -206,7 +206,7 @@ async fn test_file_analysis_metadata_only() {
 
 #[tokio::test]
 async fn test_file_analysis_hashes_only() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let (_temp_dir, file_path) = create_test_file(b"hash test content").unwrap();
 
     let request = FileAnalysisRequest {
@@ -249,7 +249,7 @@ async fn test_file_analysis_hashes_only() {
 
 #[tokio::test]
 async fn test_file_analysis_strings_with_parameters() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let content = b"Short\x00LongerString\x00VeryLongStringForTesting\x00";
     let (_temp_dir, file_path) = create_test_file(content).unwrap();
 
@@ -292,7 +292,7 @@ async fn test_file_analysis_strings_with_parameters() {
 
 #[tokio::test]
 async fn test_file_analysis_hex_dump_with_parameters() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let content = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let (_temp_dir, file_path) = create_test_file(content).unwrap();
 
@@ -335,7 +335,7 @@ async fn test_file_analysis_hex_dump_with_parameters() {
 
 #[tokio::test]
 async fn test_file_analysis_request_all_options_false() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let (_temp_dir, file_path) = create_test_file(b"test").unwrap();
 
     let request = FileAnalysisRequest {
@@ -375,7 +375,7 @@ async fn test_file_analysis_request_all_options_false() {
 
 #[tokio::test]
 async fn test_file_analysis_binary_file() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
 
     // Create a minimal ELF-like file
     let mut content = vec![0x7f, 0x45, 0x4c, 0x46]; // ELF magic
@@ -430,7 +430,7 @@ async fn test_file_analysis_binary_file() {
 
 #[tokio::test]
 async fn test_llm_analysis_token_limit_enforcement() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
 
     // Create a file with many strings
     let mut content = Vec::new();
@@ -529,7 +529,7 @@ fn test_llm_file_analysis_request_structure() {
 
 #[tokio::test]
 async fn test_file_analysis_empty_file() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let (_temp_dir, file_path) = create_test_file(b"").unwrap();
 
     let request = FileAnalysisRequest {
@@ -583,7 +583,7 @@ async fn test_file_analysis_empty_file() {
 
 #[tokio::test]
 async fn test_llm_analysis_empty_file() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let (_temp_dir, file_path) = create_test_file(b"").unwrap();
 
     let request = LlmFileAnalysisRequest {
@@ -611,7 +611,7 @@ async fn test_llm_analysis_empty_file() {
 
 #[tokio::test]
 async fn test_file_analysis_permission_error() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
 
     // Try to analyze a system file that might not be readable
     let request = FileAnalysisRequest {
@@ -645,7 +645,7 @@ async fn test_file_analysis_permission_error() {
 
 #[tokio::test]
 async fn test_file_analysis_response_structure() {
-    let mcp = FileScannerMcp;
+    let mcp = FileScannerMcp::new();
     let (_temp_dir, file_path) = create_test_file(b"response structure test").unwrap();
 
     let request = FileAnalysisRequest {

@@ -2,7 +2,7 @@ use anyhow::Result;
 use rmcp::{
     handler::server::wrapper::Json,
     model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
-    schemars, tool, ServerHandler,
+    schemars, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -246,14 +246,14 @@ pub struct PythonAnalysisRequest {
 #[derive(Debug, Clone)]
 pub struct FileScannerMcp;
 
-#[tool(tool_box)]
 impl FileScannerMcp {
-    #[tool(
-        description = "Comprehensive file analysis tool - use 'all' flag to enable all analyses, or individual flags to control specific analyses (metadata, hashes, strings, hex_dump, binary_info, signatures, symbols, control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, threats, behavioral, yara_indicators)"
-    )]
+    pub fn new() -> Self {
+        FileScannerMcp
+    }
+
     pub async fn analyze_file(
         &self,
-        #[tool(aggr)] request: FileAnalysisRequest,
+        request: FileAnalysisRequest,
     ) -> Result<Json<FileAnalysisResult>, String> {
         let path = PathBuf::from(&request.file_path);
 
@@ -572,12 +572,9 @@ impl FileScannerMcp {
         Ok(Json(result))
     }
 
-    #[tool(
-        description = "LLM-optimized file analysis for YARA rule generation - returns focused, token-limited output with key indicators"
-    )]
-    pub async fn llm_analyze_file(
+        pub async fn llm_analyze_file(
         &self,
-        #[tool(aggr)] request: LlmFileAnalysisRequest,
+         request: LlmFileAnalysisRequest,
     ) -> Result<Json<LlmFileAnalysisResult>, String> {
         use crate::{
             binary_parser::parse_binary, entropy_analysis::analyze_entropy,
@@ -874,12 +871,9 @@ impl FileScannerMcp {
         result
     }
 
-    #[tool(
-        description = "Scan files with custom YARA rules - supports single files or directories with recursive scanning"
-    )]
-    pub async fn yara_scan_file(
+        pub async fn yara_scan_file(
         &self,
-        #[tool(aggr)] request: YaraScanRequest,
+         request: YaraScanRequest,
     ) -> Result<Json<YaraScanResult>, String> {
         use crate::threat_detection::scan_with_custom_rule;
         use std::time::Instant;
@@ -917,12 +911,9 @@ impl FileScannerMcp {
         }))
     }
 
-    #[tool(
-        description = "Analyze Java archives (JAR/WAR/EAR/APK/AAR) and class files - provides detailed Java/Android specific analysis including manifests, certificates, classes, and security assessment"
-    )]
-    pub async fn analyze_java_file(
+        pub async fn analyze_java_file(
         &self,
-        #[tool(aggr)] request: JavaAnalysisRequest,
+         request: JavaAnalysisRequest,
     ) -> Result<Json<JavaAnalysisResult>, String> {
         let path = PathBuf::from(&request.file_path);
 
@@ -946,12 +937,9 @@ impl FileScannerMcp {
         Ok(Json(analysis_result))
     }
 
-    #[tool(
-        description = "Analyze npm packages for vulnerabilities and malicious code - detects typosquatting, supply chain attacks, malware patterns, and known vulnerabilities. Works with .tgz files or directories containing package.json"
-    )]
-    pub async fn analyze_npm_package(
+        pub async fn analyze_npm_package(
         &self,
-        #[tool(aggr)] request: NpmAnalysisRequest,
+         request: NpmAnalysisRequest,
     ) -> Result<Json<NpmPackageAnalysis>, String> {
         let path = PathBuf::from(&request.package_path);
 
@@ -964,12 +952,9 @@ impl FileScannerMcp {
         Ok(Json(analysis_result))
     }
 
-    #[tool(
-        description = "Analyze Python packages for vulnerabilities and malicious code - detects typosquatting, supply chain attacks, malware patterns, and known vulnerabilities. Works with .whl, .tar.gz, .zip files or directories containing setup.py/pyproject.toml"
-    )]
-    pub async fn analyze_python_package(
+        pub async fn analyze_python_package(
         &self,
-        #[tool(aggr)] request: PythonAnalysisRequest,
+         request: PythonAnalysisRequest,
     ) -> Result<Json<PythonPackageAnalysis>, String> {
         let path = PathBuf::from(&request.package_path);
 
@@ -983,7 +968,6 @@ impl FileScannerMcp {
     }
 }
 
-#[tool(tool_box)]
 impl ServerHandler for FileScannerMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -1000,7 +984,7 @@ impl ServerHandler for FileScannerMcp {
 
 // Public functions for CLI usage
 pub async fn analyze_file_llm(request: LlmFileAnalysisRequest) -> Result<LlmFileAnalysisResult> {
-    let handler = FileScannerMcp;
+    let handler = FileScannerMcp::new();
     let result = handler
         .llm_analyze_file(request)
         .await
@@ -1009,7 +993,7 @@ pub async fn analyze_file_llm(request: LlmFileAnalysisRequest) -> Result<LlmFile
 }
 
 pub async fn yara_scan_files(request: YaraScanRequest) -> Result<YaraScanResult> {
-    let handler = FileScannerMcp;
+    let handler = FileScannerMcp::new();
     let result = handler
         .yara_scan_file(request)
         .await
@@ -1132,7 +1116,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_analyze_file_nonexistent() {
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = FileAnalysisRequest {
             all: None,
             file_path: "/nonexistent/file.bin".to_string(),
@@ -1170,7 +1154,7 @@ mod tests {
         let test_content = b"Hello, World! This is test content for analysis.";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = FileAnalysisRequest {
             all: None,
             file_path: file_path.to_string_lossy().to_string(),
@@ -1209,7 +1193,7 @@ mod tests {
         let test_content = b"Test content for hash calculation";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = FileAnalysisRequest {
             all: None,
             file_path: file_path.to_string_lossy().to_string(),
@@ -1250,7 +1234,7 @@ mod tests {
             b"Hello World! This is a test string for extraction. Another string here.";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = FileAnalysisRequest {
             all: None,
             file_path: file_path.to_string_lossy().to_string(),
@@ -1289,7 +1273,7 @@ mod tests {
         let test_content = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = FileAnalysisRequest {
             all: None,
             file_path: file_path.to_string_lossy().to_string(),
@@ -1328,7 +1312,7 @@ mod tests {
         let test_content = b"Combined analysis test with various features enabled.";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = FileAnalysisRequest {
             all: None,
             file_path: file_path.to_string_lossy().to_string(),
@@ -1367,7 +1351,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_llm_analyze_file_nonexistent() {
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = LlmFileAnalysisRequest {
             file_path: "/nonexistent/file.bin".to_string(),
             token_limit: None,
@@ -1392,7 +1376,7 @@ mod tests {
         let test_content = b"LLM analysis test content with interesting patterns and strings.";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = LlmFileAnalysisRequest {
             file_path: file_path.to_string_lossy().to_string(),
             token_limit: Some(10000),
@@ -1418,7 +1402,7 @@ mod tests {
 
     #[test]
     fn test_extract_key_strings() {
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
 
         // Create mock extracted strings
         let extracted_strings = crate::strings::ExtractedStrings {
@@ -1460,7 +1444,7 @@ mod tests {
         let test_content = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let result = mcp.extract_hex_patterns(&file_path, 16);
 
         assert!(result.is_ok());
@@ -1482,7 +1466,7 @@ mod tests {
         ];
         let (_temp_dir, file_path) = create_test_file(&test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let result = mcp.extract_key_opcodes(&file_path, 5);
 
         // This test might not find opcodes since it looks at offset 0x1000
@@ -1492,7 +1476,7 @@ mod tests {
 
     #[test]
     fn test_generate_yara_rule_suggestion() {
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
 
         let analysis = LlmFileAnalysisResult {
             md5: "abc123def456".to_string(),
@@ -1522,7 +1506,7 @@ mod tests {
 
     #[test]
     fn test_trim_results_to_token_limit() {
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
 
         let result = LlmFileAnalysisResult {
             md5: "abc123".to_string(),
@@ -1545,7 +1529,7 @@ mod tests {
 
     #[test]
     fn test_server_handler_get_info() {
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let info = mcp.get_info();
 
         assert_eq!(info.server_info.name, "file-scanner");
@@ -1609,7 +1593,7 @@ mod tests {
         let test_content = b"Test content for all flag verification";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = FileAnalysisRequest {
             file_path: file_path.to_string_lossy().to_string(),
             all: Some(true),
@@ -1672,7 +1656,7 @@ mod tests {
         let test_content = b"Test content for individual flag verification";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = FileAnalysisRequest {
             file_path: file_path.to_string_lossy().to_string(),
             all: Some(false),
@@ -1734,7 +1718,7 @@ mod tests {
         let test_content = b"Test content for default behavior verification";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
         let request = FileAnalysisRequest {
             file_path: file_path.to_string_lossy().to_string(),
             all: None, // Default behavior
@@ -1891,7 +1875,7 @@ mod tests {
         let test_content = b"Comprehensive test content with various features for all flag testing";
         let (_temp_dir, file_path) = create_test_file(test_content).unwrap();
 
-        let mcp = FileScannerMcp;
+        let mcp = FileScannerMcp::new();
 
         // Test 1: Verify 'all: true' enables more analyses than individual flags
         let request_all = FileAnalysisRequest {

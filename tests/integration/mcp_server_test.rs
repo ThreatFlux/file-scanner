@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 async fn create_test_server() -> FileScannerMcp {
-    FileScannerMcp
+    FileScannerMcp::new()
 }
 
 fn create_test_file(dir: &TempDir, name: &str, content: &[u8]) -> PathBuf {

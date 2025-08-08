@@ -19,7 +19,7 @@ fn create_test_state() -> McpServerState {
     let string_tracker = Arc::new(StringTracker::new());
     let sse_clients = Arc::new(Mutex::new(HashMap::new()));
 
-    McpServerState::new_for_testing(FileScannerMcp, sse_clients, cache, string_tracker)
+    McpServerState::new_for_testing(FileScannerMcp::new(), sse_clients, cache, string_tracker)
 }
 
 // Helper function to create a test transport server

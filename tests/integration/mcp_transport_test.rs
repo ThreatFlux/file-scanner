@@ -351,7 +351,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mcp_server_state_creation() {
-        let handler = FileScannerMcp;
+        let handler = FileScannerMcp::new();
         let sse_clients = Arc::new(Mutex::new(HashMap::new()));
         let cache_dir = std::env::temp_dir().join("test-file-scanner-cache");
         let cache = Arc::new(

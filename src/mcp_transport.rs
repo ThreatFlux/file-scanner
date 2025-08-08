@@ -128,7 +128,7 @@ impl McpTransportServer {
         let string_tracker = Arc::new(StringTracker::new());
 
         Self {
-            handler: FileScannerMcp,
+            handler: FileScannerMcp::new(),
             cache,
             string_tracker,
         }
@@ -1017,7 +1017,7 @@ mod tests {
         let sse_clients = Arc::new(Mutex::new(HashMap::new()));
 
         McpServerState {
-            handler: FileScannerMcp,
+            handler: FileScannerMcp::new(),
             sse_clients,
             cache,
             string_tracker,
@@ -1031,7 +1031,7 @@ mod tests {
         let string_tracker = Arc::new(StringTracker::new());
 
         McpTransportServer {
-            handler: FileScannerMcp,
+            handler: FileScannerMcp::new(),
             cache,
             string_tracker,
         }
@@ -1547,7 +1547,7 @@ mod tests {
         let sse_clients = Arc::new(Mutex::new(HashMap::new()));
 
         let _state = McpServerState::new_for_testing(
-            FileScannerMcp,
+            FileScannerMcp::new(),
             sse_clients.clone(),
             cache.clone(),
             string_tracker.clone(),
@@ -1791,7 +1791,7 @@ mod tests {
         let sse_clients = Arc::new(Mutex::new(HashMap::new()));
 
         let _state = McpServerState::new_for_testing(
-            FileScannerMcp,
+            FileScannerMcp::new(),
             sse_clients.clone(),
             cache.clone(),
             string_tracker.clone(),

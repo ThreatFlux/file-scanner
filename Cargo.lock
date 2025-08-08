@@ -1000,8 +1000,18 @@ version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee"
 dependencies = [
- "darling_core",
- "darling_macro",
+ "darling_core 0.20.11",
+ "darling_macro 0.20.11",
+]
+
+[[package]]
+name = "darling"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6b136475da5ef7b6ac596c0e956e37bad51b85b987ff3d5e230e964936736b2"
+dependencies = [
+ "darling_core 0.21.1",
+ "darling_macro 0.21.1",
 ]
 
 [[package]]
@@ -1019,12 +1029,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "darling_core"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b44ad32f92b75fb438b04b68547e521a548be8acc339a6dacc4a7121488f53e6"
+dependencies = [
+ "fnv",
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 2.0.104",
+]
+
+[[package]]
 name = "darling_macro"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
 dependencies = [
- "darling_core",
+ "darling_core 0.20.11",
+ "quote",
+ "syn 2.0.104",
+]
+
+[[package]]
+name = "darling_macro"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b5be8a7a562d315a5b92a630c30cec6bcf663e6673f00fbb69cca66a6f521b9"
+dependencies = [
+ "darling_core 0.21.1",
  "quote",
  "syn 2.0.104",
 ]
@@ -1325,7 +1360,7 @@ dependencies = [
  "ring",
  "rmcp",
  "rstest",
- "schemars 1.0.4",
+ "schemars",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3395,8 +3430,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "0.1.5"
-source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=db03f63#db03f63e76b5b32f65d34a1bd08ae56dab595f60"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a04b2d9da174d72bc0511410242eb3e8f47a02d9e23868e4b076c7c70208eb4"
 dependencies = [
  "base64",
  "chrono",
@@ -3404,7 +3440,7 @@ dependencies = [
  "paste",
  "pin-project-lite",
  "rmcp-macros",
- "schemars 0.8.22",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.12",
@@ -3415,9 +3451,11 @@ dependencies = [
 
 [[package]]
 name = "rmcp-macros"
-version = "0.1.5"
-source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=db03f63#db03f63e76b5b32f65d34a1bd08ae56dab595f60"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "470958f96a5700478601c385ad3d987460372c2223959eddcb682c7273cdfb86"
 dependencies = [
+ "darling 0.21.1",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -3692,40 +3730,16 @@ dependencies = [
 
 [[package]]
 name = "schemars"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
-dependencies = [
- "chrono",
- "dyn-clone",
- "schemars_derive 0.8.22",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "schemars"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "82d20c4491bc164fa2f6c5d44565947a52ad80b9505d8e36f8d54c27c739fcd0"
 dependencies = [
+ "chrono",
  "dyn-clone",
  "ref-cast",
- "schemars_derive 1.0.4",
+ "schemars_derive",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "schemars_derive"
-version = "0.8.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde_derive_internals",
- "syn 2.0.104",
 ]
 
 [[package]]
@@ -5442,7 +5456,7 @@ version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88535b229ed05a4fce90def2b855fbec9c82463b02ec64db2312ea0702ed9288"
 dependencies = [
- "darling",
+ "darling 0.20.11",
  "proc-macro2",
  "quote",
  "syn 2.0.104",
