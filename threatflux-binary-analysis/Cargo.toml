@@ -46,7 +46,7 @@ capstone = { version = "0.13", optional = true }
 iced-x86 = { version = "1.21", optional = true }
 
 # WASM support (optional)
-wasmparser = { version = "0.217", optional = true }
+wasmparser = { version = "0.233", optional = true }
 
 # Control flow analysis (optional)
 petgraph = { version = "0.6", optional = true }

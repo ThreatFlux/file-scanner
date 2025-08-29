@@ -5533,7 +5533,7 @@ dependencies = [
  "test-case",
  "thiserror 1.0.69",
  "tokio-test",
- "wasmparser 0.217.1",
+ "wasmparser 0.233.0",
 ]
 
 [[package]]
