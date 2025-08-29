@@ -52,7 +52,7 @@ wasmparser = { version = "0.217", optional = true }
 petgraph = { version = "0.6", optional = true }
 
 # Statistical analysis (optional)  
-statrs = { version = "0.17", optional = true }
+statrs = { version = "0.18", optional = true }
 
 # Symbol resolution (optional)
 gimli = { version = "0.31", optional = true }
