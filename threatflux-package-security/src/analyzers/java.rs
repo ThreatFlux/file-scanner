@@ -117,27 +117,27 @@ pub struct JavaSecurityAnalysis {
 
 /// Java package analyzer
 pub struct JavaAnalyzer {
-    vuln_db: Box<dyn VulnerabilityDatabase>,
+    _vuln_db: Box<dyn VulnerabilityDatabase>,
     pattern_matcher: PatternMatcher,
-    typo_detector: TyposquattingDetector,
+    _typo_detector: TyposquattingDetector,
 }
 
 impl JavaAnalyzer {
     /// Create a new Java analyzer
     pub fn new() -> Result<Self> {
         Ok(Self {
-            vuln_db: crate::vulnerability_db::create_java_database()?,
+            _vuln_db: crate::vulnerability_db::create_java_database()?,
             pattern_matcher: PatternMatcher::new()?,
-            typo_detector: TyposquattingDetector::new(),
+            _typo_detector: TyposquattingDetector::new(),
         })
     }
 
     /// Create analyzer with custom database path
     pub fn with_db_path(db_path: &Path) -> Result<Self> {
         Ok(Self {
-            vuln_db: crate::vulnerability_db::create_java_database_with_path(db_path)?,
+            _vuln_db: crate::vulnerability_db::create_java_database_with_path(db_path)?,
             pattern_matcher: PatternMatcher::new()?,
-            typo_detector: TyposquattingDetector::new(),
+            _typo_detector: TyposquattingDetector::new(),
         })
     }
 

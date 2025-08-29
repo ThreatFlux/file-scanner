@@ -193,7 +193,7 @@ impl RiskCalculator {
         malicious_patterns: &[MaliciousPattern],
         is_typosquatting: bool,
         supply_chain_score: f32,
-        maintenance_score: f32,
+        _maintenance_score: f32,
     ) -> RiskScore {
         let mut components = HashMap::new();
         let mut factors = Vec::new();

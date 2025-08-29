@@ -142,12 +142,7 @@ impl TyposquattingDetector {
 
     /// Check for visually similar characters
     fn is_visual_confusion(&self, c1: char, c2: char) -> bool {
-        match (c1, c2) {
-            ('0', 'o') | ('o', '0') | ('0', 'O') | ('O', '0') => true,
-            ('1', 'l') | ('l', '1') | ('1', 'I') | ('I', '1') => true,
-            ('5', 's') | ('s', '5') | ('5', 'S') | ('S', '5') => true,
-            _ => false,
-        }
+        matches!((c1, c2), ('0', 'o') | ('o', '0') | ('0', 'O') | ('O', '0') | ('1', 'l') | ('l', '1') | ('1', 'I') | ('I', '1') | ('5', 's') | ('s', '5') | ('5', 'S') | ('S', '5'))
     }
 }
 

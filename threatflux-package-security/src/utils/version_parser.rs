@@ -50,20 +50,20 @@ impl Version {
     /// Check if this version satisfies a version specification
     pub fn satisfies(&self, spec: &str) -> bool {
         // Simple implementation - just checks basic operators
-        if spec.starts_with(">=") {
-            if let Ok(other) = Version::parse(&spec[2..]) {
+        if let Some(stripped) = spec.strip_prefix(">=") {
+            if let Ok(other) = Version::parse(stripped) {
                 return self >= &other;
             }
-        } else if spec.starts_with('>') {
-            if let Ok(other) = Version::parse(&spec[1..]) {
+        } else if let Some(stripped) = spec.strip_prefix('>') {
+            if let Ok(other) = Version::parse(stripped) {
                 return self > &other;
             }
-        } else if spec.starts_with("<=") {
-            if let Ok(other) = Version::parse(&spec[2..]) {
+        } else if let Some(stripped) = spec.strip_prefix("<=") {
+            if let Ok(other) = Version::parse(stripped) {
                 return self <= &other;
             }
-        } else if spec.starts_with('<') {
-            if let Ok(other) = Version::parse(&spec[1..]) {
+        } else if let Some(stripped) = spec.strip_prefix('<') {
+            if let Ok(other) = Version::parse(stripped) {
                 return self < &other;
             }
         } else if spec.starts_with('=') || spec.starts_with("==") {
