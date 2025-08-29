@@ -24,15 +24,30 @@ if [ -n "$CI" ]; then
         echo "🧹 Freeing up disk space..."
         df -h
         
-        # Clean up unnecessary files
-        sudo rm -rf /usr/local/lib/android || true
-        sudo rm -rf /usr/share/dotnet || true
-        sudo rm -rf /opt/ghc || true
-        sudo rm -rf /usr/local/.ghcup || true
-        sudo apt-get clean || true
+        # Run aggressive cleanup script if it exists
+        SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+        if [ -f "$SCRIPT_DIR/cleanup-ci-disk.sh" ]; then
+            echo "🚀 Running aggressive disk cleanup..."
+            bash "$SCRIPT_DIR/cleanup-ci-disk.sh"
+        else
+            # Fallback to basic cleanup
+            sudo rm -rf /usr/local/lib/android || true
+            sudo rm -rf /usr/share/dotnet || true
+            sudo rm -rf /opt/ghc || true
+            sudo rm -rf /usr/local/.ghcup || true
+            sudo apt-get clean || true
+        fi
         
-        # Clean cargo cache selectively
+        # Clean cargo cache more aggressively
+        echo "🧹 Cleaning Cargo cache..."
+        rm -rf ~/.cargo/registry/cache/* || true
+        rm -rf ~/.cargo/git/checkouts/* || true
         cargo clean -p file-scanner --release || true
+        
+        # Clean target directory selectively
+        find target -type f -name "*.rlib" -size +20M -delete 2>/dev/null || true
+        find target -type f -name "*.rmeta" -delete 2>/dev/null || true
+        find target -type f -name "*.d" -delete 2>/dev/null || true
         
         echo "📊 Disk space after cleanup:"
         df -h

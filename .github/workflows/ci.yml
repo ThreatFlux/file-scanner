@@ -25,6 +25,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free disk space at start
+        run: |
+          echo "📊 Initial disk space:"
+          df -h
+          echo "📦 Removing unnecessary packages and tools..."
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/julia*
+          sudo rm -rf /usr/share/kotlinc
+          sudo rm -rf /usr/local/go
+          sudo rm -rf /usr/share/miniconda
+          sudo rm -rf /usr/share/gradle-*
+          sudo rm -rf /usr/share/apache-maven-*
+          sudo rm -rf /usr/share/sbt
+          sudo apt-get clean
+          sudo docker system prune -af
+          echo "📊 Disk space after cleanup:"
+          df -h
+
       - name: Generate cache key
         id: cache-key
         run: |
@@ -57,11 +81,37 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-
 
+      - name: Monitor disk space during build
+        run: |
+          echo "📊 Disk space before build:"
+          df -h
+
       - name: Pre-build dependencies
         run: |
+          # Build incrementally to manage disk space
           cargo build --all-features
+          echo "📊 Disk space after debug build:"
+          df -h
+          
+          # Clean up debug artifacts before release build
+          rm -rf target/debug/deps/*.rlib
+          rm -rf target/debug/incremental
+          rm -rf target/debug/build
+          
           cargo build --release
-          cargo test --no-run --all-features
+          echo "📊 Disk space after release build:"
+          df -h
+          
+          # Build test dependencies separately
+          cargo test --no-run --all-features 2>&1 | head -100
+          
+          # Clean up test build artifacts not needed for caching
+          find target -name "*.d" -delete
+          find target -name "*.rmeta" -delete
+          find target -name "*.rlib" -size +50M -delete
+          
+          echo "📊 Final disk space:"
+          df -h
 
   lint:
     name: Lint
@@ -114,6 +164,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free disk space (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "📊 Initial disk space:"
+          df -h
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo apt-get clean
+          echo "📊 Disk space after cleanup:"
+          df -h
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -147,13 +210,26 @@ jobs:
         run: chmod +x scripts/*.sh
 
       - name: Run fast unit tests
-        run: ./scripts/test-fast.sh
+        run: |
+          echo "📊 Disk space before tests:"
+          df -h
+          ./scripts/test-fast.sh
+          # Clean up test artifacts between test runs
+          rm -rf target/debug/deps/*-*
+          rm -rf target/debug/incremental
 
       - name: Run tests with all features
-        run: cargo test --all-features --verbose
+        run: |
+          cargo test --all-features --verbose --jobs 2
+          # Clean up after tests
+          rm -rf target/debug/deps/*-*
+          rm -rf target/debug/incremental
 
       - name: Run doc tests
-        run: cargo test --doc --verbose
+        run: |
+          cargo test --doc --verbose
+          echo "📊 Final disk space:"
+          df -h
 
   integration-test:
     name: Integration Tests
@@ -162,14 +238,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Maximize available disk space
+        run: |
+          echo "📊 Initial disk space:"
+          df -h
+          echo "🧹 Removing unnecessary software..."
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/julia*
+          sudo rm -rf /usr/share/kotlinc
+          sudo rm -rf /usr/local/go
+          sudo rm -rf /usr/share/miniconda
+          sudo rm -rf /usr/share/gradle-*
+          sudo rm -rf /usr/share/apache-maven-*
+          sudo rm -rf /usr/share/sbt
+          sudo rm -rf /opt/az
+          sudo rm -rf /usr/share/az_*
+          sudo rm -rf /opt/microsoft
+          sudo rm -rf /opt/google
+          sudo rm -rf /opt/pipx
+          sudo apt-get remove -y '^aspnetcore-.*' '^dotnet-.*' '^llvm-.*' 'php.*' '^mongodb-.*' '^mysql-.*' 'azure-cli' 'google-chrome-stable' 'firefox' 'powershell' 'mono-devel' 'libgl1-mesa-dri' '^google-cloud-.*' || true
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          sudo docker system prune -af
+          echo "📊 Disk space after cleanup:"
+          df -h
+
       - name: Setup swap space
         run: |
           echo "📊 Current memory and swap:"
           free -h
-          sudo fallocate -l 4G /swapfile
+          sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          sudo swapon --show
           echo "📊 Memory and swap after setup:"
           free -h
 
@@ -201,20 +309,31 @@ jobs:
       - name: Make scripts executable
         run: chmod +x scripts/*.sh
 
-      - name: Free disk space before tests
+      - name: Clean build artifacts before tests
         run: |
-          echo "📊 Initial disk space:"
-          df -h
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /usr/local/.ghcup || true
-          sudo apt-get clean || true
-          echo "📊 Disk space after cleanup:"
+          echo "🧹 Cleaning build artifacts to save space..."
+          # Remove debug symbols and incremental compilation artifacts
+          rm -rf target/debug/deps/*.pdb
+          rm -rf target/debug/deps/*.dSYM
+          rm -rf target/debug/incremental
+          rm -rf target/release/deps/*.pdb
+          rm -rf target/release/deps/*.dSYM
+          rm -rf target/release/incremental
+          # Remove large rlib files we don't need for tests
+          find target -name "*.rlib" -size +30M -delete
+          echo "📊 Disk space after artifact cleanup:"
           df -h
 
       - name: Run comprehensive parallel tests
-        run: ./scripts/test-parallel-ci.sh
+        run: |
+          echo "📊 Disk space before tests:"
+          df -h
+          # Set lower parallelism to reduce memory/disk pressure
+          export CARGO_BUILD_JOBS=2
+          export RUST_TEST_THREADS=2
+          ./scripts/test-parallel-ci.sh
+          echo "📊 Disk space after tests:"
+          df -h
 
   coverage:
     name: Code Coverage
@@ -222,6 +341,27 @@ jobs:
     needs: build-cache
     steps:
       - uses: actions/checkout@v4
+
+      - name: Maximize available disk space
+        run: |
+          echo "📊 Initial disk space:"
+          df -h
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/julia*
+          sudo rm -rf /usr/share/kotlinc
+          sudo rm -rf /usr/local/go
+          sudo apt-get remove -y '^aspnetcore-.*' '^dotnet-.*' '^llvm-.*' 'php.*' '^mongodb-.*' '^mysql-.*' || true
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          sudo docker system prune -af
+          echo "📊 Disk space after cleanup:"
+          df -h
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -261,15 +401,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-coverage-tools-
 
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/.ghcup
-          sudo apt-get clean
-          df -h
-
       - name: Install cargo-llvm-cov (faster than tarpaulin)
         run: |
           if ! command -v cargo-llvm-cov &> /dev/null; then
@@ -278,8 +409,16 @@ jobs:
 
       - name: Generate code coverage
         run: |
+          echo "📊 Disk space before coverage:"
+          df -h
           # Use llvm-cov which is much faster than tarpaulin
+          # Reduce parallelism to save memory/disk
+          export CARGO_BUILD_JOBS=2
           cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+          # Clean up immediately after
+          rm -rf target/llvm-cov-target
+          echo "📊 Disk space after coverage:"
+          df -h
         timeout-minutes: 20
 
       - name: Upload coverage to Codecov
