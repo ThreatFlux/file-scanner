@@ -17,25 +17,45 @@ RUN apt-get update && apt-get install -y \
 # Create app directory
 WORKDIR /usr/src/file-scanner
 
-# Copy manifests first for better caching
+# Copy workspace manifests and member directories structure
 COPY Cargo.toml Cargo.lock ./
 
-# Create dummy directories and files for dependencies
+# Copy all workspace member Cargo.toml files to maintain workspace structure
+COPY threatflux-binary-analysis/Cargo.toml ./threatflux-binary-analysis/
+COPY threatflux-cache/Cargo.toml ./threatflux-cache/
+COPY threatflux-hashing/Cargo.toml ./threatflux-hashing/
+COPY threatflux-package-security/Cargo.toml ./threatflux-package-security/
+COPY threatflux-string-analysis/Cargo.toml ./threatflux-string-analysis/
+COPY threatflux-threat-detection/Cargo.toml ./threatflux-threat-detection/
+
+# Create dummy source files for all workspace members to cache dependencies
 RUN mkdir -p src benches && \
     echo "fn main() {}" > src/main.rs && \
     echo "fn main() {}" > benches/hash_benchmark.rs && \
-    echo "fn main() {}" > benches/parser_benchmark.rs
+    echo "fn main() {}" > benches/parser_benchmark.rs && \
+    for member in threatflux-binary-analysis threatflux-cache threatflux-hashing threatflux-package-security threatflux-string-analysis threatflux-threat-detection; do \
+        mkdir -p $member/src && \
+        echo "#![allow(dead_code)]" > $member/src/lib.rs; \
+    done
 
 # Build dependencies (this layer will be cached)
-RUN cargo build --release && rm -rf src benches target/release/deps/*file*scanner* target/release/.fingerprint/*file*scanner*
+RUN cargo build --release --workspace && \
+    rm -rf src benches target/release/deps/*file*scanner* target/release/.fingerprint/*file*scanner* && \
+    for member in threatflux-*; do rm -rf $member/src; done
 
-# Copy source code
+# Copy all source code
 COPY src ./src
 COPY benches ./benches
+COPY threatflux-binary-analysis/src ./threatflux-binary-analysis/src
+COPY threatflux-cache/src ./threatflux-cache/src
+COPY threatflux-hashing/src ./threatflux-hashing/src
+COPY threatflux-package-security/src ./threatflux-package-security/src
+COPY threatflux-string-analysis/src ./threatflux-string-analysis/src
+COPY threatflux-threat-detection/src ./threatflux-threat-detection/src
 
 # Build for release with version info
 ENV CARGO_PKG_VERSION=${VERSION}
-RUN cargo build --release
+RUN cargo build --release --workspace
 
 # Runtime stage
 FROM debian:bookworm-slim
