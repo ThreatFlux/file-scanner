@@ -32,6 +32,3 @@ pretty_assertions = "1.4"
 default = ["serde"]
 serde = ["dep:serde"]
 
-[[bench]]
-name = "hash_benchmarks"
-harness = false

@@ -80,19 +80,6 @@ tokio-test = "0.4"
 # Performance and stress testing
 rand = "0.8"
 
-[[example]]
-name = "basic_analysis"
-path = "examples/basic_analysis.rs"
-
-[[example]]
-name = "control_flow"
-path = "examples/control_flow.rs"
-required-features = ["control-flow"]
-
-[[example]]
-name = "disassembly"
-path = "examples/disassembly.rs"
-required-features = ["disasm-capstone"]
 
 # Benchmarks currently disabled - files not implemented yet
 # [[bench]]
