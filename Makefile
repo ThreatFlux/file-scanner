@@ -1,7 +1,26 @@
 # Define all ThreatFlux libraries
 LIBRARIES := threatflux-hashing threatflux-string-analysis threatflux-cache threatflux-binary-analysis threatflux-threat-detection threatflux-package-security
 
-.PHONY: help init build test test-parallel test-unit test-hash test-mcp test-analysis test-integration test-legacy install clean run-debug run-release docker-build docker-run docker-run-http lint fmt check deps update security-audit dev dev-full ci ci-full prepare-release coverage coverage-html setup-optimization libs-% parallel-%
+.PHONY: all help init build test test-parallel test-unit test-hash test-mcp test-analysis test-integration test-legacy install clean run-debug run-release docker-build docker-run docker-run-http lint fmt check deps update security-audit dev dev-full ci ci-full prepare-release coverage coverage-html setup-optimization libs-% parallel-% \
+         fmt-check test-no-features test-mcp-features build-examples test-doc doc-check doc-links \
+         deny outdated security-geiger security-supply-chain semver-check feature-test feature-test-full \
+         msrv msrv-install security-enhanced ci-local validate analyze examples release-prep docs
+
+# Default target
+all: setup-optimization fmt lint build test security-audit
+	@echo "✅ All checks passed!"
+
+# CI simulation - matches GitHub Actions CI workflow
+ci-local: fmt-check lint build test test-mcp security-audit
+	@echo "✅ CI checks passed!"
+
+# Full validation (everything)
+validate: all coverage test-parallel libs-test
+	@echo "🎉 Full validation complete!"
+
+# Complete analysis (all tools, all checks)
+analyze: validate security-enhanced doc-check
+	@echo "🎯 Complete analysis finished!"
 
 # Default target
 help:
@@ -124,6 +143,28 @@ test-legacy:
 	@echo "Running legacy test command..."
 	cargo test --all-features
 
+# Test without features
+test-no-features:
+	@echo "🧪 Running tests without features..."
+	@cargo test --no-default-features
+	@echo "✅ Tests without features passed"
+
+# Test with MCP features
+test-mcp-features:
+	@echo "🧪 Testing MCP features..."
+	@cargo test --features "mcp"
+	@echo "✅ MCP feature tests passed"
+
+# Build examples
+build-examples:
+	@echo "🔨 Building examples..."
+	@if [ -d "examples" ]; then \
+		cargo build --examples --all-features; \
+	else \
+		echo "No examples directory found"; \
+	fi
+	@echo "✅ Examples built successfully"
+
 # Install binary
 install: release
 	@echo "Installing file-scanner..."
@@ -188,8 +229,10 @@ fmt:
 	cargo fmt
 
 fmt-check:
-	@echo "Checking code formatting..."
-	cargo fmt -- --check
+	@echo "🔍 Checking code format..."
+	@cargo fmt -- --check
+	@echo "✅ Format check passed"
+
 
 check:
 	@echo "Running cargo check..."
@@ -208,6 +251,30 @@ deps-tree:
 security-audit:
 	@echo "Running security audit..."
 	cargo audit
+
+# Additional security checks
+deny:
+	@echo "🚫 Running cargo-deny checks..."
+	@cargo deny check
+	@echo "✅ Cargo deny checks passed"
+
+outdated:
+	@echo "📊 Checking for outdated dependencies..."
+	@cargo outdated || true
+	@echo "✅ Outdated check complete"
+
+security-geiger:
+	@echo "🔍 Analyzing unsafe code usage..."
+	@cargo geiger --output-format GitHubMarkdown > unsafe-report.md || echo "⚠️ Geiger analysis completed with warnings"
+	@echo "✅ Unsafe code analysis complete (see unsafe-report.md)"
+
+security-supply-chain:
+	@echo "🔗 Analyzing supply chain security..."
+	@cargo supply-chain crates > supply-chain-report.txt 2>&1 || echo "⚠️ Supply chain analysis completed with warnings"
+	@echo "✅ Supply chain analysis complete (see supply-chain-report.txt)"
+
+security-enhanced: security-audit deny outdated
+	@echo "✅ Enhanced security analysis complete!"
 
 # Dependency analysis with cargo-deny
 deny-check:
@@ -272,6 +339,21 @@ bench:
 docs:
 	@echo "Building documentation..."
 	cargo doc --no-deps --open
+
+doc-check:
+	@echo "📖 Checking documentation..."
+	@RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps --document-private-items
+	@echo "✅ Documentation check passed"
+
+doc-links:
+	@echo "🔗 Checking documentation links..."
+	@cargo doc --all-features --no-deps --document-private-items
+	@echo "✅ Documentation link check complete"
+
+test-doc:
+	@echo "📚 Testing documentation examples..."
+	@cargo test --doc --all-features
+	@echo "✅ Doc tests passed"
 
 # Version info
 version:
