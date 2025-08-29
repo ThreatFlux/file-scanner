@@ -44,11 +44,3 @@ metrics = ["prometheus"]
 tracing = ["dep:tracing"]
 full = ["filesystem-backend", "json-serialization", "bincode-serialization", "compression", "openapi", "metrics", "tracing"]
 
-[[example]]
-name = "basic_usage"
-
-[[example]]
-name = "custom_entry"
-
-[[example]]
-name = "file_scanner_migration"

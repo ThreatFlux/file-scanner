@@ -41,7 +41,7 @@ RUN mkdir -p src benches && \
 # Build dependencies (this layer will be cached)
 RUN cargo build --release --workspace && \
     rm -rf src benches target/release/deps/*file*scanner* target/release/.fingerprint/*file*scanner* && \
-    for member in threatflux-*; do rm -rf $member/src; done
+    for member in threatflux-*; do rm -rf $member/src $member/examples; done
 
 # Copy all source code
 COPY src ./src
