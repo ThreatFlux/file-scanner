@@ -11,16 +11,18 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     build-essential \
+    clang \
+    lld \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app directory
 WORKDIR /usr/src/file-scanner
 
-# Copy workspace manifests and member directories structure
+# Copy workspace manifests 
 COPY Cargo.toml Cargo.lock ./
 
-# Copy all workspace member Cargo.toml files to maintain workspace structure
+# Copy all workspace member Cargo.toml files
 COPY threatflux-binary-analysis/Cargo.toml ./threatflux-binary-analysis/
 COPY threatflux-cache/Cargo.toml ./threatflux-cache/
 COPY threatflux-hashing/Cargo.toml ./threatflux-hashing/
@@ -28,30 +30,28 @@ COPY threatflux-package-security/Cargo.toml ./threatflux-package-security/
 COPY threatflux-string-analysis/Cargo.toml ./threatflux-string-analysis/
 COPY threatflux-threat-detection/Cargo.toml ./threatflux-threat-detection/
 
-# Create dummy source files for all workspace members to cache dependencies
-RUN mkdir -p src benches && \
-    echo "fn main() {}" > src/main.rs && \
-    echo "fn main() {}" > benches/hash_benchmark.rs && \
-    echo "fn main() {}" > benches/parser_benchmark.rs && \
-    for member in threatflux-binary-analysis threatflux-cache threatflux-hashing threatflux-package-security threatflux-string-analysis threatflux-threat-detection; do \
-        mkdir -p $member/src && \
-        echo "#![allow(dead_code)]" > $member/src/lib.rs; \
-    done
-
-# Build dependencies (this layer will be cached)
-RUN cargo build --release --workspace && \
-    rm -rf src benches target/release/deps/*file*scanner* target/release/.fingerprint/*file*scanner* && \
-    for member in threatflux-*; do rm -rf $member/src $member/examples; done
-
-# Copy all source code
-COPY src ./src
-COPY benches ./benches
+# Copy all workspace member source code first (needed for proper compilation)
 COPY threatflux-binary-analysis/src ./threatflux-binary-analysis/src
 COPY threatflux-cache/src ./threatflux-cache/src
 COPY threatflux-hashing/src ./threatflux-hashing/src
 COPY threatflux-package-security/src ./threatflux-package-security/src
 COPY threatflux-string-analysis/src ./threatflux-string-analysis/src
 COPY threatflux-threat-detection/src ./threatflux-threat-detection/src
+
+# Create dummy main source to build dependencies
+RUN mkdir -p src benches && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "fn main() {}" > benches/hash_benchmark.rs && \
+    echo "fn main() {}" > benches/parser_benchmark.rs
+
+# Build dependencies (this layer will be cached when dependencies change)
+RUN cargo build --release --workspace && \
+    rm -rf src benches target/release/deps/file_scanner* target/release/.fingerprint/file-scanner* \
+    target/release/file-scanner
+
+# Copy main source code
+COPY src ./src
+COPY benches ./benches
 
 # Build for release with version info
 ENV CARGO_PKG_VERSION=${VERSION}
