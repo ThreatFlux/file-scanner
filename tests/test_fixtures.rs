@@ -1,13 +1,11 @@
 //! Common test fixtures for the file-scanner project
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 
 /// Test binary data generators
 pub mod binaries {
-    use super::*;
 
     /// Create a minimal ELF binary for testing
     pub fn create_elf_binary() -> Vec<u8> {

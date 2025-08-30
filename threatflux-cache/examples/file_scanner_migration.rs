@@ -46,9 +46,19 @@ impl EntryMetadata for FileAnalysisMetadata {
 // Adapter functions to maintain API compatibility
 pub struct FileAnalysisCacheAdapter {
     #[cfg(feature = "filesystem-backend")]
-    cache: Cache<String, serde_json::Value, FileAnalysisMetadata, FilesystemBackend<String, serde_json::Value, FileAnalysisMetadata>>,
+    cache: Cache<
+        String,
+        serde_json::Value,
+        FileAnalysisMetadata,
+        FilesystemBackend<String, serde_json::Value, FileAnalysisMetadata>,
+    >,
     #[cfg(not(feature = "filesystem-backend"))]
-    cache: Cache<String, serde_json::Value, FileAnalysisMetadata, MemoryBackend<String, serde_json::Value, FileAnalysisMetadata>>,
+    cache: Cache<
+        String,
+        serde_json::Value,
+        FileAnalysisMetadata,
+        MemoryBackend<String, serde_json::Value, FileAnalysisMetadata>,
+    >,
 }
 
 impl FileAnalysisCacheAdapter {

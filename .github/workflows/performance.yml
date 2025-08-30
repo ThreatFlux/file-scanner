@@ -1,0 +1,153 @@
+name: Performance Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run benchmarks weekly on Sunday at 3 AM UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Build release binary for benchmarking
+        run: |
+          cargo build --release --all-features
+
+      - name: Run benchmarks
+        run: |
+          cargo bench --all-features -- --output-format json | tee benchmark_results.json
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Rust Benchmark
+          tool: 'cargo'
+          output-file-path: benchmark_results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: true
+          alert-threshold: '200%'
+          fail-on-alert: false
+
+      - name: Performance test with real files
+        run: |
+          echo "Testing performance with various file types..."
+          
+          # Create test files of different sizes
+          dd if=/dev/zero of=test_1kb.bin bs=1024 count=1
+          dd if=/dev/zero of=test_1mb.bin bs=1048576 count=1
+          dd if=/dev/zero of=test_10mb.bin bs=1048576 count=10
+          
+          # Test performance with different file sizes
+          echo "=== 1KB file ===" 
+          time ./target/release/file-scanner test_1kb.bin --all
+          
+          echo "=== 1MB file ===" 
+          time ./target/release/file-scanner test_1mb.bin --all
+          
+          echo "=== 10MB file ===" 
+          time ./target/release/file-scanner test_10mb.bin --all
+          
+          echo "=== System binary analysis ===" 
+          time ./target/release/file-scanner /bin/ls --all
+
+      - name: Memory usage test
+        run: |
+          echo "Testing memory usage..."
+          
+          # Install memory profiling tool
+          sudo apt-get install -y time
+          
+          # Test memory usage with different file sizes
+          echo "=== Memory usage for 1MB file ==="
+          /usr/bin/time -v ./target/release/file-scanner test_1mb.bin --all 2>&1 | grep -E "Maximum resident set size|User time|System time"
+          
+          echo "=== Memory usage for 10MB file ==="
+          /usr/bin/time -v ./target/release/file-scanner test_10mb.bin --all 2>&1 | grep -E "Maximum resident set size|User time|System time"
+
+  memory-profiling:
+    name: Memory Profiling
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Valgrind
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+
+      - name: Build debug binary for profiling
+        run: |
+          cargo build --all-features
+
+      - name: Run memory leak check
+        run: |
+          echo "Test content" > test_file.txt
+          valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all \
+            --track-origins=yes --verbose --log-file=valgrind-output.txt \
+            ./target/debug/file-scanner test_file.txt --metadata --hashes || true
+
+      - name: Upload Valgrind results
+        uses: actions/upload-artifact@v4
+        with:
+          name: valgrind-results
+          path: valgrind-output.txt
+
+  compile-time-benchmark:
+    name: Compile Time Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Clean build timing
+        run: |
+          echo "=== Clean build timing ==="
+          time cargo build --release --all-features
+
+      - name: Incremental build timing  
+        run: |
+          echo "=== Incremental build timing ==="
+          touch src/main.rs
+          time cargo build --release --all-features
+
+      - name: Test compilation timing
+        run: |
+          echo "=== Test compilation timing ==="
+          time cargo test --all-features --no-run

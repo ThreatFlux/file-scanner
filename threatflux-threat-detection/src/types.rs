@@ -332,8 +332,6 @@ pub struct RuleMetadata {
     pub tags: Vec<String>,
 }
 
-
-
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {

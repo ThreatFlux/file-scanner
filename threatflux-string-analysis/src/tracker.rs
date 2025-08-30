@@ -189,7 +189,7 @@ impl StringTracker {
 
         entry.last_seen = Utc::now();
         entry.total_occurrences += 1;
-        entry.unique_files.insert(file_path.to_string());
+        entry.unique_files.insert(file_hash.to_string());
         entry.occurrences.push(occurrence);
 
         // Limit occurrences per string to prevent memory explosion

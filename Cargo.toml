@@ -142,6 +142,7 @@ readme = "README.md"
 keywords = ["security", "malware", "forensics", "analysis", "file-scanner"]
 categories = ["command-line-utilities", "development-tools", "security", "analysis"]
 
+
 [dependencies]
 # ThreatFlux libraries - our modular components
 threatflux-hashing = { path = "./threatflux-hashing", features = ["serde"] }
@@ -254,10 +255,11 @@ harness = false
 
 # Optimized profiles for different build scenarios
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+opt-level = 3
 
 [profile.test]
 opt-level = 2

@@ -1,21 +1,22 @@
 # Configuration for cargo-deny
 # See https://embarkstudios.github.io/cargo-deny/checks/cfg.html
 
+[graph]
+targets = []
+
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
-unmaintained = "none"
-yanked = "warn"
-notice = "warn"
 ignore = [
     # Add any advisory IDs to ignore here
     # paste crate unmaintained warning - not a security issue
     "RUSTSEC-2024-0436",
+    # RSA timing attack - waiting for yara-x upstream fix
+    "RUSTSEC-2023-0071",
 ]
 
 [licenses]
-unlicensed = "deny"
+version = 2
 allow = [
     "MIT",
     "Apache-2.0",
@@ -23,23 +24,17 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
+    "Unicode-3.0",
     "CC0-1.0",
+    "Zlib",
+    "bzip2-1.0.6",
+    "MPL-2.0",
 ]
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "AGPL-1.0",
-    "AGPL-3.0",
-]
-copyleft = "warn"
-allow-osi-fsf-free = "neither"
-default = "deny"
-confidence-threshold = 0.8
 exceptions = [
     # Allow specific packages with incompatible licenses if necessary
     # { allow = ["ISC"], name = "package-name" },
 ]
+confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
@@ -59,10 +54,19 @@ skip = [
     { name = "windows_x86_64_msvc", version = "*" },
     { name = "windows_x86_64_gnu", version = "*" },
     { name = "windows_i686_msvc", version = "*" },
-    { name = "syn", version = "*" },
     { name = "hashbrown", version = "*" },
     { name = "gimli", version = "*" },
     { name = "object", version = "*" },
+    { name = "zip", version = "*" },
+    { name = "addr2line", version = "*" },
+    { name = "zerovec-derive", version = "*" },
+    { name = "zerovec", version = "*" },
+    { name = "darling", version = "*" },
+    { name = "darling_core", version = "*" },
+    { name = "darling_macro", version = "*" },
+    { name = "fallible-iterator", version = "*" },
+    { name = "getrandom", version = "*" },
+    { name = "yoke-derive", version = "*" },
 ]
 skip-tree = [
     # Skip entire dependency trees
