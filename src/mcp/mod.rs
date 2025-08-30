@@ -5,6 +5,4 @@ pub mod registry;
 pub mod tools;
 pub mod transport;
 
-pub use error::{McpError, McpResult};
-pub use handler::McpHandler;
-pub use registry::{McpTool, ToolMetadata, ToolRegistry};
+// Re-exports will be added as needed

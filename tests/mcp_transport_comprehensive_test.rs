@@ -4,7 +4,7 @@ use file_scanner::mcp_transport::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpServerState, McpTransportServer, SseEvent,
     SseQuery,
 };
-use file_scanner::string_tracker::StringTracker;
+use file_scanner::string_tracker_compat::StringTracker;
 use futures_util::future;
 use serde_json::json;
 use std::collections::HashMap;

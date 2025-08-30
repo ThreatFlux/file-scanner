@@ -29,7 +29,7 @@ use crate::{
 };
 
 // Re-export YARA types from threat_detection module
-pub use crate::threat_detection::{YaraFileMatch, YaraRuleMatch, YaraScanError, YaraStringMatch};
+pub use crate::threat_detection::{YaraFileMatch, YaraScanError};
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FileAnalysisRequest {

@@ -1,10 +1,11 @@
 use chrono::Utc;
-use file_scanner::string_tracker::{
-    StringContext, StringEntry, StringFilter, StringOccurrence, StringStatistics, StringTracker,
+use file_scanner::string_tracker_compat::{
+    StringContext, StringEntry, StringFilter, StringStatistics, StringTracker,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
+use threatflux_string_analysis::StringOccurrence;
 
 #[test]
 fn test_string_tracker_initialization() {

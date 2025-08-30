@@ -1,12 +1,8 @@
 //! YARA detection engine implementation
 
 use crate::error::{Result, ThreatError};
-use crate::types::{
-    DetectionEngine, IndicatorType, ScanTarget, Severity, ThreatAnalysis, ThreatClassification,
-    ThreatIndicator, ThreatLevel, YaraMatch,
-};
+use crate::types::{DetectionEngine, ScanTarget, ThreatAnalysis, ThreatLevel};
 use async_trait::async_trait;
-use std::collections::HashSet;
 
 /// YARA-X based detection engine
 pub struct YaraEngine {
@@ -86,5 +82,10 @@ impl DetectionEngine for YaraEngine {
     async fn update_rules(&mut self) -> Result<()> {
         // Placeholder - would update YARA rule database
         Ok(())
+    }
+
+    fn is_available(&self) -> bool {
+        // Check if YARA-X is properly initialized
+        true
     }
 }

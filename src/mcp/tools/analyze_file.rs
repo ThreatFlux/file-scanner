@@ -3,7 +3,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use crate::mcp::error::McpResult;
 use crate::mcp::registry::{create_input_schema, McpTool, ToolMetadata};

@@ -2,14 +2,13 @@
 
 use crate::{
     types::{
-        Architecture, BinaryFormat as Format, BinaryMetadata, Endianness, Export, FunctionType,
+        Architecture, BinaryFormat as Format, BinaryMetadata, Endianness, Export,
         Import, Section, SectionPermissions, SectionType, SecurityFeatures, Symbol, SymbolBinding,
         SymbolType, SymbolVisibility,
     },
     BinaryError, BinaryFormatParser, BinaryFormatTrait, Result,
 };
 use goblin::mach::{load_command::LoadCommand, Mach, MachO};
-use std::collections::HashMap;
 
 /// Mach-O format parser
 pub struct MachOParser;

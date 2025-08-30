@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
+// ThreatFlux binary analysis imports (temporarily disabled due to compilation issues)
+// use threatflux_binary_analysis::{
+//     BinaryAnalyzer, BinaryFile, AnalysisConfig, Architecture as TfArch, BinaryFormat as TfFormat,
+//     Section as TfSection, Import as TfImport, Export as TfExport, Symbol as TfSymbol,
+// };
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BinaryInfo {
     pub format: String,
@@ -29,6 +35,63 @@ pub struct SectionInfo {
     pub virtual_address: u64,
     pub characteristics: String,
 }
+
+// Temporarily disabled ThreatFlux conversion function
+// TODO: Re-enable when ThreatFlux binary analysis compilation issues are fixed
+// /// Convert ThreatFlux types to BinaryInfo
+// fn convert_threatflux_to_binary_info(
+//     analysis: &threatflux_binary_analysis::AnalysisResult,
+//     compiler_info: Option<String>,
+//     linker_info: Option<String>,
+//     java_analysis: Option<JavaAnalysisResult>,
+// ) -> BinaryInfo {
+//     BinaryInfo {
+//         format: match analysis.format {
+//             TfFormat::Elf => "ELF".to_string(),
+//             TfFormat::Pe => "PE".to_string(),
+//             TfFormat::MachO => "Mach-O".to_string(),
+//             TfFormat::Java => "Java".to_string(),
+//             TfFormat::Wasm => "WebAssembly".to_string(),
+//             TfFormat::Raw => "Raw".to_string(),
+//             TfFormat::Unknown => "Unknown".to_string(),
+//         },
+//         architecture: match analysis.architecture {
+//             TfArch::X86 => "x86".to_string(),
+//             TfArch::X86_64 => "x86_64".to_string(),
+//             TfArch::Arm => "ARM".to_string(),
+//             TfArch::Arm64 => "ARM64".to_string(),
+//             TfArch::Mips => "MIPS".to_string(),
+//             TfArch::Mips64 => "MIPS64".to_string(),
+//             TfArch::PowerPC => "PowerPC".to_string(),
+//             TfArch::PowerPC64 => "PowerPC64".to_string(),
+//             TfArch::RiscV => "RISC-V".to_string(),
+//             TfArch::RiscV64 => "RISC-V64".to_string(),
+//             TfArch::Wasm => "WebAssembly".to_string(),
+//             TfArch::Jvm => "Java Bytecode".to_string(),
+//             TfArch::Unknown => "Unknown".to_string(),
+//         },
+//         compiler: compiler_info,
+//         linker: linker_info,
+//         sections: analysis.sections.iter().map(|s| SectionInfo {
+//             name: s.name.clone(),
+//             size: s.size,
+//             virtual_address: s.address,
+//             characteristics: format!("{:?}", s.permissions),
+//         }).collect(),
+//         imports: analysis.imports.iter().map(|i| {
+//             if let Some(ref library) = i.library {
+//                 format!("{} ({})", i.name, library)
+//             } else {
+//                 i.name.clone()
+//             }
+//         }).collect(),
+//         exports: analysis.exports.iter().map(|e| e.name.clone()).collect(),
+//         entry_point: analysis.entry_point,
+//         is_stripped: analysis.symbols.is_empty(),
+//         has_debug_info: analysis.sections.iter().any(|s| s.name.contains("debug")),
+//         java_analysis,
+//     }
+// }
 
 pub fn parse_binary(path: &Path) -> Result<BinaryInfo> {
     // First check if it's a Java-related file
@@ -58,13 +121,90 @@ pub fn parse_binary(path: &Path) -> Result<BinaryInfo> {
         return parse_java_class(path);
     }
 
-    // Parse native binaries
+    // TODO: Re-enable ThreatFlux integration when compilation issues are fixed
+    // Try ThreatFlux first (if available and working), fallback to goblin
+    // if let Ok(analyzer) = try_create_threatflux_analyzer() {
+    //     if let Ok(analysis) = analyzer.analyze(&buffer) {
+    //         // Extract compiler/linker info using legacy methods for enhanced detection
+    //         if let Ok((compiler_info, linker_info)) = extract_legacy_compiler_info(&buffer) {
+    //             return Ok(convert_threatflux_to_binary_info(
+    //                 &analysis,
+    //                 compiler_info,
+    //                 linker_info,
+    //                 None, // No Java analysis for native binaries
+    //             ));
+    //         }
+    //     }
+    // }
+
+    // Parse native binaries using goblin (original implementation)
     match Object::parse(&buffer)? {
         Object::Elf(elf) => parse_elf(elf, &buffer),
         Object::PE(pe) => parse_pe(pe, &buffer),
         Object::Mach(mach) => parse_mach(mach),
         _ => anyhow::bail!("Unsupported binary format"),
     }
+}
+
+// Temporarily disabled ThreatFlux analyzer creation
+// TODO: Re-enable when ThreatFlux binary analysis compilation issues are fixed
+// /// Try to create ThreatFlux analyzer, return error if library has compilation issues
+// fn try_create_threatflux_analyzer() -> Result<BinaryAnalyzer> {
+//     Ok(BinaryAnalyzer::new())
+// }
+
+/// Extract enhanced compiler and linker information using legacy methods
+/// This provides more detailed detection than basic ThreatFlux analysis
+fn extract_legacy_compiler_info(buffer: &[u8]) -> Result<(Option<String>, Option<String>)> {
+    let mut compiler_info = None;
+    let mut linker_info = None;
+
+    match Object::parse(buffer)? {
+        Object::Elf(elf) => {
+            // Check for compiler signatures in ELF notes/sections
+            for section in &elf.section_headers {
+                if let Some(name) = elf.shdr_strtab.get_at(section.sh_name) {
+                    if name.contains(".note.gnu") || name.contains(".note.ABI-tag") {
+                        compiler_info = Some("GCC/GNU".to_string());
+                        break;
+                    } else if name.contains(".note.clang") {
+                        compiler_info = Some("Clang".to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        Object::PE(pe) => {
+            // Enhanced PE compiler/linker detection
+            if let Some(optional_header) = pe.header.optional_header {
+                let major_version = optional_header.standard_fields.major_linker_version;
+                let minor_version = optional_header.standard_fields.minor_linker_version;
+
+                linker_info = Some(format!("Linker v{}.{}", major_version, minor_version));
+
+                compiler_info = match major_version {
+                    14..=16 => Some("MSVC 2015-2022".to_string()),
+                    12..=13 => Some("MSVC 2013".to_string()),
+                    11 => Some("MSVC 2012".to_string()),
+                    10 => Some("MSVC 2010".to_string()),
+                    9 => Some("MSVC 2008".to_string()),
+                    8 => Some("MSVC 2005".to_string()),
+                    7 => Some("MSVC 2003".to_string()),
+                    6 => Some("MSVC 6.0".to_string()),
+                    2..=4 => Some("MinGW/GCC".to_string()),
+                    _ => None,
+                };
+            }
+        }
+        Object::Mach(_) => {
+            // Basic macOS compiler detection
+            compiler_info = Some("Apple Clang".to_string());
+            linker_info = Some("Apple LD".to_string());
+        }
+        _ => {}
+    }
+
+    Ok((compiler_info, linker_info))
 }
 
 fn parse_elf(elf: elf::Elf, _buffer: &[u8]) -> Result<BinaryInfo> {

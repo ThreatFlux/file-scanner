@@ -14,7 +14,8 @@ readme = "README.md"
 [features]
 default = ["yara-engine", "builtin-rules"]
 yara-engine = ["yara-x"]
-clamav-engine = ["clamav-rs"]
+# Temporarily disabled due to shlex security vulnerability RUSTSEC-2024-0006
+# clamav-engine = ["clamav-rs"]
 pattern-matching = ["aho-corasick", "regex"]
 rule-management = ["git2", "reqwest"]
 builtin-rules = []
@@ -32,7 +33,8 @@ async-trait = "0.1"
 
 # Detection engines
 yara-x = { version = "1.5", optional = true }
-clamav-rs = { version = "0.5.5", optional = true }
+# Temporarily disabled due to shlex security vulnerability RUSTSEC-2024-0006
+# clamav-rs = { version = "0.5.5", optional = true }
 
 # Pattern matching (optional)
 aho-corasick = { version = "1.1", optional = true }

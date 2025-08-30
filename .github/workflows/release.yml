@@ -23,7 +23,6 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
       tag_name: ${{ steps.get_tag.outputs.tag_name }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
@@ -39,12 +38,12 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: actions/create-release@0cb9c9b65d5d1901c1f53e5e66eaf4afd303e70e  # v1.1.4
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.get_tag.outputs.tag_name }}
-          release_name: File Scanner ${{ steps.get_tag.outputs.tag_name }}
+          name: File Scanner ${{ steps.get_tag.outputs.tag_name }}
           draft: false
           prerelease: false
           body: |
@@ -190,14 +189,12 @@ jobs:
           .\${{ matrix.asset_name }} --version
 
       - name: Upload Release Asset
-        uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5  # v1.0.2
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.asset_name }}
-          asset_name: ${{ matrix.asset_name }}
-          asset_content_type: application/octet-stream
+          tag_name: ${{ needs.create-release.outputs.tag_name }}
+          files: ./${{ matrix.asset_name }}
 
   docker-release:
     name: Docker Release

@@ -56,7 +56,7 @@ impl RuleManager {
         let mut all_rules = String::new();
         let mut metadata = HashMap::new();
         let mut errors = Vec::new();
-        let mut warnings = Vec::new();
+        let warnings = Vec::new();
 
         // Load built-in rules
         #[cfg(feature = "builtin-rules")]

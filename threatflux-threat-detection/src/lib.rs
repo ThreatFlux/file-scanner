@@ -48,7 +48,9 @@ use std::sync::Arc;
 
 /// Main threat detection interface
 pub struct ThreatDetector {
-    engines: Vec<Box<dyn DetectionEngine>>,
+    yara_engine: Option<engines::yara::YaraEngine>,
+    #[cfg(feature = "pattern-matching")]
+    pattern_engine: Option<engines::patterns::PatternEngine>,
     config: Arc<ScanConfig>,
 }
 
@@ -93,28 +95,24 @@ impl ThreatDetector {
 
     /// Create a new threat detector with custom configuration
     pub async fn with_config(config: ThreatDetectorConfig) -> Result<Self> {
-        let mut engines: Vec<Box<dyn DetectionEngine>> = Vec::new();
-
         // Initialize YARA engine
         #[cfg(feature = "yara-engine")]
-        if config.enable_yara {
-            let yara_engine = engines::yara::YaraEngine::new().await?;
-            engines.push(Box::new(yara_engine));
-        }
+        let yara_engine = if config.enable_yara {
+            Some(engines::yara::YaraEngine::new().await?)
+        } else {
+            None
+        };
 
-        // Initialize ClamAV engine
-        #[cfg(feature = "clamav-engine")]
-        if config.enable_clamav {
-            let clamav_engine = engines::clamav::ClamAVEngine::new().await?;
-            engines.push(Box::new(clamav_engine));
-        }
+        #[cfg(not(feature = "yara-engine"))]
+        let yara_engine = None;
 
         // Initialize pattern matching engine
         #[cfg(feature = "pattern-matching")]
-        if config.enable_patterns {
-            let pattern_engine = engines::patterns::PatternEngine::new().await?;
-            engines.push(Box::new(pattern_engine));
-        }
+        let pattern_engine = if config.enable_patterns {
+            Some(engines::patterns::PatternEngine::new().await?)
+        } else {
+            None
+        };
 
         let scan_config = Arc::new(ScanConfig {
             max_file_size: config.max_file_size,
@@ -123,7 +121,9 @@ impl ThreatDetector {
         });
 
         Ok(Self {
-            engines,
+            yara_engine,
+            #[cfg(feature = "pattern-matching")]
+            pattern_engine,
             config: scan_config,
         })
     }
@@ -155,11 +155,9 @@ impl ThreatDetector {
 
     /// Scan with custom YARA rule
     pub async fn scan_with_rule(&self, target: ScanTarget, rule: &str) -> Result<ThreatAnalysis> {
-        // Find YARA engine and use custom rule
-        for engine in &self.engines {
-            if engine.engine_type() == "YARA" {
-                return engine.scan_with_custom_rule(target, rule).await;
-            }
+        // Use YARA engine if available
+        if let Some(ref yara_engine) = self.yara_engine {
+            return yara_engine.scan_with_custom_rule(target, rule).await;
         }
 
         Err(ThreatError::engine_not_available("YARA"))
@@ -172,16 +170,31 @@ impl ThreatDetector {
         let mut all_indicators = Vec::new();
         let mut classifications = std::collections::HashSet::new();
 
-        // Run all engines
-        for engine in &self.engines {
-            match engine.scan(target.clone()).await {
+        // Run YARA engine if available
+        if let Some(ref yara_engine) = self.yara_engine {
+            match yara_engine.scan(target.clone()).await {
                 Ok(result) => {
                     all_matches.extend(result.matches);
                     all_indicators.extend(result.indicators);
                     classifications.extend(result.classifications);
                 }
                 Err(e) => {
-                    log::warn!("Engine {} failed: {}", engine.engine_type(), e);
+                    log::warn!("YARA engine failed: {}", e);
+                }
+            }
+        }
+
+        // Run pattern engine if available
+        #[cfg(feature = "pattern-matching")]
+        if let Some(ref pattern_engine) = self.pattern_engine {
+            match pattern_engine.scan(target.clone()).await {
+                Ok(result) => {
+                    all_matches.extend(result.matches);
+                    all_indicators.extend(result.indicators);
+                    classifications.extend(result.classifications);
+                }
+                Err(e) => {
+                    log::warn!("Pattern engine failed: {}", e);
                 }
             }
         }
@@ -190,11 +203,9 @@ impl ThreatDetector {
 
         // Analyze results
         let threat_level = analysis::calculate_threat_level(&all_matches, &all_indicators);
-        let recommendations = analysis::generate_recommendations(
-            &threat_level,
-            &all_matches,
-            &classifications.iter().cloned().collect(),
-        );
+        let classifications_vec: Vec<_> = classifications.iter().cloned().collect();
+        let recommendations =
+            analysis::generate_recommendations(&threat_level, &all_matches, &classifications_vec);
 
         let file_size = match &target {
             ScanTarget::File(path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
@@ -219,20 +230,44 @@ impl ThreatDetector {
 
     /// Update threat detection rules
     pub async fn update_rules(&mut self) -> Result<()> {
-        for engine in &mut self.engines {
-            if let Err(e) = engine.update_rules().await {
-                log::warn!("Failed to update rules for {}: {}", engine.engine_type(), e);
+        // Update YARA engine if available
+        if let Some(ref mut yara_engine) = self.yara_engine {
+            if let Err(e) = yara_engine.update_rules().await {
+                log::warn!("Failed to update YARA rules: {}", e);
             }
         }
+
+        // Update pattern engine if available
+        #[cfg(feature = "pattern-matching")]
+        if let Some(ref mut pattern_engine) = self.pattern_engine {
+            if let Err(e) = pattern_engine.update_rules().await {
+                log::warn!("Failed to update pattern rules: {}", e);
+            }
+        }
+
         Ok(())
     }
 
     /// Get engine information
     pub fn get_engine_info(&self) -> Vec<(String, String)> {
-        self.engines
-            .iter()
-            .map(|e| (e.engine_type().to_string(), e.version().to_string()))
-            .collect()
+        let mut engines = Vec::new();
+
+        if let Some(ref yara_engine) = self.yara_engine {
+            engines.push((
+                yara_engine.engine_type().to_string(),
+                yara_engine.version().to_string(),
+            ));
+        }
+
+        #[cfg(feature = "pattern-matching")]
+        if let Some(ref pattern_engine) = self.pattern_engine {
+            engines.push((
+                pattern_engine.engine_type().to_string(),
+                pattern_engine.version().to_string(),
+            ));
+        }
+
+        engines
     }
 }
 
@@ -240,7 +275,9 @@ impl Default for ThreatDetector {
     fn default() -> Self {
         // This is a placeholder - the actual implementation would be async
         Self {
-            engines: Vec::new(),
+            yara_engine: None,
+            #[cfg(feature = "pattern-matching")]
+            pattern_engine: None,
             config: Arc::new(ScanConfig {
                 max_file_size: 100 * 1024 * 1024,
                 scan_timeout: std::time::Duration::from_secs(300),

@@ -110,7 +110,6 @@ async fn sse_request_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::registry::ToolRegistry;
     use serde_json::json;
 
     #[tokio::test]
@@ -124,8 +123,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sse_request_handler() {
-        let registry = ToolRegistry::new();
-        let handler = McpHandler::new(registry);
+        let handler = McpHandler::new(None, None);
         let handler = Arc::new(handler);
 
         let request = JsonRpcRequest {

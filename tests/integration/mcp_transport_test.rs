@@ -361,7 +361,7 @@ mod tests {
         let cache = Arc::new(
             file_scanner::cache::AnalysisCache::new(cache_dir).expect("Failed to create cache"),
         );
-        let string_tracker = Arc::new(file_scanner::string_tracker::StringTracker::new());
+        let string_tracker = Arc::new(file_scanner::string_tracker_compat::StringTracker::new());
 
         let state =
             McpServerState::new_for_testing(handler, sse_clients.clone(), cache, string_tracker);

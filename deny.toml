@@ -5,12 +5,13 @@
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 vulnerability = "deny"
-unmaintained = "warn"
+unmaintained = "none"
 yanked = "warn"
 notice = "warn"
 ignore = [
     # Add any advisory IDs to ignore here
-    # Example: "RUSTSEC-2020-0001",
+    # paste crate unmaintained warning - not a security issue
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]

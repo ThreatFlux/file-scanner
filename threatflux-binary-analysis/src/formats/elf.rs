@@ -2,14 +2,13 @@
 
 use crate::{
     types::{
-        Architecture, BinaryFormat as Format, BinaryMetadata, Endianness, Export, FunctionType,
+        Architecture, BinaryFormat as Format, BinaryMetadata, Endianness, Export,
         Import, Section, SectionPermissions, SectionType, SecurityFeatures, Symbol, SymbolBinding,
         SymbolType, SymbolVisibility,
     },
-    BinaryError, BinaryFormatParser, BinaryFormatTrait, Result,
+    BinaryFormatParser, BinaryFormatTrait, Result,
 };
-use goblin::elf::{Elf, SectionHeader, Sym};
-use std::collections::HashMap;
+use goblin::elf::Elf;
 
 /// ELF format parser
 pub struct ElfParser;

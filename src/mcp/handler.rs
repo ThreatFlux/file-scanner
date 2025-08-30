@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::cache::AnalysisCache;
 use crate::mcp::error::{McpError, McpResult};
 use crate::mcp::registry::ToolRegistry;
-// use crate::mcp::tools::*; // Temporarily disabled during refactoring
+use crate::mcp::tools::*;
 use crate::string_tracker_compat::StringTracker;
 
 /// Main MCP handler that manages tools and requests
@@ -25,14 +25,14 @@ impl McpHandler {
         cache: Option<Arc<AnalysisCache>>,
         string_tracker: Option<Arc<StringTracker>>,
     ) -> Self {
-        // Build tool registry (tools temporarily disabled during refactoring)
+        // Build tool registry
         let registry = ToolRegistry::builder()
-            // .register(AnalyzeFileTool::new(cache.clone(), string_tracker.clone()))
-            // .register(LlmAnalyzeTool::new())
-            // .register(YaraScanTool::new(cache.clone()))
-            // .register(JavaAnalyzeTool::new())
-            // .register(NpmAnalyzeTool::new())
-            // .register(PythonAnalyzeTool::new())
+            .register(AnalyzeFileTool)
+            .register(LlmAnalyzeTool)
+            .register(YaraScanTool)
+            .register(JavaAnalyzeTool)
+            .register(NpmAnalyzeTool)
+            .register(PythonAnalyzeTool)
             .build();
 
         Self {
@@ -147,8 +147,8 @@ mod tests {
         assert!(info.capabilities.tools.is_some());
     }
 
-    #[test]
-    fn test_handler_with_cache() {
+    #[tokio::test]
+    async fn test_handler_with_cache() {
         let temp_dir = TempDir::new().unwrap();
         let cache = Arc::new(AnalysisCache::new(temp_dir.path()).unwrap());
         let string_tracker = Arc::new(StringTracker::new());

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::mcp::error::{McpError, McpResult};
+use crate::mcp::error::McpError;
 use crate::mcp::handler::McpHandler;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

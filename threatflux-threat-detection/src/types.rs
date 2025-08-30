@@ -221,7 +221,7 @@ pub enum ScanTarget {
 }
 
 /// Detection engine trait
-#[cfg_attr(feature = "async-scanning", async_trait::async_trait)]
+#[async_trait::async_trait]
 pub trait DetectionEngine: Send + Sync {
     /// Get engine type name
     fn engine_type(&self) -> &str;

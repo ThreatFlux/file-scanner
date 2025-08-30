@@ -16,27 +16,27 @@ jobs:
   release:
     name: Semantic Release
     runs-on: ubuntu-latest
-    if: github.repository_owner == 'vtriple'
+    if: github.repository_owner == 'ThreatFlux'
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.87.0
+          toolchain: stable
 
       - name: Install cargo-release
-        uses: taiki-e/install-action@65d14c1beefa0eed0e0285f1c6ee9d7c037bc1cf # v2.52.7
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-release
 
       - name: Setup Node.js
-        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
 

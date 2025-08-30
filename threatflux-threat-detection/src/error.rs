@@ -74,8 +74,15 @@ pub enum ThreatError {
 }
 
 #[cfg(feature = "yara-engine")]
-impl From<yara_x::Error> for ThreatError {
-    fn from(err: yara_x::Error) -> Self {
+impl From<yara_x::ScanError> for ThreatError {
+    fn from(err: yara_x::ScanError) -> Self {
+        ThreatError::YaraError(err.to_string())
+    }
+}
+
+#[cfg(feature = "yara-engine")]
+impl From<yara_x::errors::CompileError> for ThreatError {
+    fn from(err: yara_x::errors::CompileError) -> Self {
         ThreatError::YaraError(err.to_string())
     }
 }

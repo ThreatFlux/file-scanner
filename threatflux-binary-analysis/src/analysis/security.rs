@@ -5,13 +5,12 @@
 
 use crate::{
     types::{
-        Architecture, BinaryMetadata, Export, Import, Section, SectionPermissions, SectionType,
+        Architecture, Import, Section,
         SecurityFeatures, SecurityIndicators, Symbol,
     },
-    BinaryError, BinaryFile, Result,
+    BinaryFile, Result,
 };
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::collections::HashSet;
 
 /// Security analyzer for binary files
 pub struct SecurityAnalyzer {
@@ -195,7 +194,7 @@ impl SecurityAnalyzer {
         for import in imports {
             let api_name = &import.name;
 
-            if suspicious_apis.contains(api_name) {
+            if suspicious_apis.contains(&api_name.to_string()) {
                 indicators.suspicious_apis.push(api_name.clone());
                 findings.push(SecurityFinding {
                     category: FindingCategory::SuspiciousApi,
@@ -206,7 +205,7 @@ impl SecurityAnalyzer {
                 });
             }
 
-            if anti_debug_apis.contains(api_name) {
+            if anti_debug_apis.contains(&api_name.to_string()) {
                 indicators.anti_debug.push(api_name.clone());
                 findings.push(SecurityFinding {
                     category: FindingCategory::AntiDebug,
@@ -217,7 +216,7 @@ impl SecurityAnalyzer {
                 });
             }
 
-            if anti_vm_apis.contains(api_name) {
+            if anti_vm_apis.contains(&api_name.to_string()) {
                 indicators.anti_vm.push(api_name.clone());
                 findings.push(SecurityFinding {
                     category: FindingCategory::AntiVm,
@@ -228,7 +227,7 @@ impl SecurityAnalyzer {
                 });
             }
 
-            if crypto_apis.contains(api_name) {
+            if crypto_apis.contains(&api_name.to_string()) {
                 indicators.crypto_indicators.push(api_name.clone());
                 findings.push(SecurityFinding {
                     category: FindingCategory::Cryptographic,
@@ -239,7 +238,7 @@ impl SecurityAnalyzer {
                 });
             }
 
-            if network_apis.contains(api_name) {
+            if network_apis.contains(&api_name.to_string()) {
                 indicators.network_indicators.push(api_name.clone());
                 findings.push(SecurityFinding {
                     category: FindingCategory::Network,
@@ -250,7 +249,7 @@ impl SecurityAnalyzer {
                 });
             }
 
-            if filesystem_apis.contains(api_name) {
+            if filesystem_apis.contains(&api_name.to_string()) {
                 indicators.filesystem_indicators.push(api_name.clone());
                 findings.push(SecurityFinding {
                     category: FindingCategory::Filesystem,

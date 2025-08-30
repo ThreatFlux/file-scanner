@@ -103,7 +103,7 @@ impl BinaryAnalyzer {
 
     /// Analyze a parsed binary file
     pub fn analyze_binary(&self, binary: &BinaryFile) -> Result<AnalysisResult> {
-        let mut result = AnalysisResult {
+        let result = AnalysisResult {
             format: binary.format(),
             architecture: binary.architecture(),
             entry_point: binary.entry_point(),

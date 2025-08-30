@@ -1,7 +1,6 @@
 //! Analysis and scoring logic for threat detection
 
 use crate::types::{Severity, ThreatClassification, ThreatIndicator, ThreatLevel, YaraMatch};
-use std::collections::HashMap;
 
 /// Calculate overall threat level based on matches and indicators
 pub fn calculate_threat_level(
@@ -92,6 +91,10 @@ pub fn generate_recommendations(
         ThreatLevel::Clean => {
             recommendations.push("No immediate threats detected".to_string());
             recommendations.push("Continue regular security monitoring".to_string());
+        }
+        ThreatLevel::None => {
+            recommendations.push("No analysis performed or insufficient data".to_string());
+            recommendations.push("Consider running additional scans or analysis".to_string());
         }
     }
 

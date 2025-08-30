@@ -2,14 +2,13 @@
 
 use crate::{
     types::{
-        Architecture, BinaryFormat as Format, BinaryMetadata, Endianness, Export, FunctionType,
+        Architecture, BinaryFormat as Format, BinaryMetadata, Endianness, Export,
         Import, Section, SectionPermissions, SectionType, SecurityFeatures, Symbol, SymbolBinding,
         SymbolType, SymbolVisibility,
     },
-    BinaryError, BinaryFormatParser, BinaryFormatTrait, Result,
+    BinaryFormatParser, BinaryFormatTrait, Result,
 };
 use goblin::pe::{dll_characteristic::*, header::Header, PE};
-use std::collections::HashMap;
 
 /// PE format parser
 pub struct PeParser;

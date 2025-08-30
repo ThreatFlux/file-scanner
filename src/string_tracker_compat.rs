@@ -4,9 +4,7 @@
 use anyhow::Result;
 
 // Re-export types from the library that match the original API
-pub use threatflux_string_analysis::{
-    StringContext, StringEntry, StringFilter, StringOccurrence, StringStatistics,
-};
+pub use threatflux_string_analysis::{StringContext, StringEntry, StringFilter, StringStatistics};
 
 /// Wrapper around the threatflux-string-analysis StringTracker
 /// that maintains backward compatibility

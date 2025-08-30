@@ -64,7 +64,7 @@ async fn health_check() -> Json<Value> {
 
 async fn mcp_handler(
     State(handler): State<Arc<McpHandler>>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Result<Json<JsonRpcResponse>, (StatusCode, Json<JsonRpcResponse>)> {
     // Log the request for debugging
@@ -79,7 +79,6 @@ async fn mcp_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::registry::ToolRegistry;
     use serde_json::json;
 
     #[tokio::test]

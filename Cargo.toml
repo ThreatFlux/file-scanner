@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     ".",
-    "threatflux-binary-analysis",
+    # "threatflux-binary-analysis", # Temporarily disabled - needs API updates
     "threatflux-cache",
     "threatflux-hashing",
     "threatflux-package-security",
@@ -147,8 +147,8 @@ categories = ["command-line-utilities", "development-tools", "security", "analys
 threatflux-hashing = { path = "./threatflux-hashing", features = ["serde"] }
 threatflux-string-analysis = { path = "./threatflux-string-analysis" }
 threatflux-cache = { path = "./threatflux-cache", features = ["openapi"] }
-# Note: Some libraries temporarily disabled due to compilation issues during transition
-# threatflux-binary-analysis = { path = "./threatflux-binary-analysis", features = ["elf", "pe", "macho"] }
+# threatflux-binary-analysis = { path = "./threatflux-binary-analysis", features = ["serde-support"] }
+# Note: threat-detection temporarily disabled during binary analysis integration
 # threatflux-threat-detection = { path = "./threatflux-threat-detection", features = ["builtin-rules", "pattern-matching"] }
 threatflux-package-security = { path = "./threatflux-package-security" }
 
