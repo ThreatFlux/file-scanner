@@ -29,7 +29,7 @@ prometheus = { version = "0.14", optional = true }
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full"] }
 tempfile = "3.16"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.7", features = ["async_tokio"] }
 proptest = "1.7"
 anyhow = "1.0"
 
