@@ -218,7 +218,7 @@ pub fn calculate_confidence_score(
     }
 
     // Factor 3: File size (very small or very large files might be less reliable)
-    let size_factor = if file_size < 1024 || file_size > 50 * 1024 * 1024 {
+    let size_factor = if !(1024..=50 * 1024 * 1024).contains(&file_size) {
         0.8
     } else {
         1.0
@@ -237,7 +237,7 @@ pub fn calculate_confidence_score(
     }
 
     if factors > 0 {
-        (confidence / factors as f32).min(1.0).max(0.0)
+        (confidence / factors as f32).clamp(0.0, 1.0)
     } else {
         0.0
     }

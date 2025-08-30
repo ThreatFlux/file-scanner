@@ -12,7 +12,7 @@ struct Document {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Create a cache with filesystem persistence
     let config = CacheConfig::default()
         .with_persistence(PersistenceConfig::with_path("/tmp/document-cache"))

@@ -26,10 +26,11 @@ pub struct ThreatAnalysis {
 }
 
 /// Threat severity levels
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
 pub enum ThreatLevel {
     None,
+    #[default]
     Clean,
     Suspicious,
     Malicious,
@@ -174,9 +175,10 @@ pub enum IndicatorType {
 }
 
 /// Severity levels for indicators
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
 pub enum Severity {
+    #[default]
     Low,
     Medium,
     High,
@@ -330,17 +332,7 @@ pub struct RuleMetadata {
     pub tags: Vec<String>,
 }
 
-impl Default for ThreatLevel {
-    fn default() -> Self {
-        ThreatLevel::Clean
-    }
-}
 
-impl Default for Severity {
-    fn default() -> Self {
-        Severity::Low
-    }
-}
 
 impl Default for ScanConfig {
     fn default() -> Self {

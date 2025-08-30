@@ -90,12 +90,12 @@ async fn test_cache_multiple_entries() {
         .await
         .unwrap();
 
-    let num_entries = 100;
+    let num_entries: usize = 100;
 
     // Insert multiple entries
     for i in 0..num_entries {
         let key = format!("key_{}", i);
-        let data = TestData::new(i, &format!("item_{}", i), i as i32 * 10);
+        let data = TestData::new(i as u32, &format!("item_{}", i), i as i32 * 10);
         cache.put(key, data).await.unwrap();
     }
 
@@ -108,7 +108,7 @@ async fn test_cache_multiple_entries() {
         assert!(cache.contains(&key).await.unwrap());
 
         let data = cache.get(&key).await.unwrap().unwrap();
-        assert_eq!(data.id, i);
+        assert_eq!(data.id, i as u32);
         assert_eq!(data.name, format!("item_{}", i));
         assert_eq!(data.value, i as i32 * 10);
     }
@@ -179,8 +179,8 @@ async fn test_cache_concurrent_operations() {
             .unwrap(),
     );
 
-    let num_tasks = 10;
-    let entries_per_task = 100;
+    let num_tasks: usize = 10;
+    let entries_per_task: usize = 100;
 
     // Concurrent writes
     let mut write_handles = vec![];
@@ -189,7 +189,7 @@ async fn test_cache_concurrent_operations() {
         let handle = task::spawn(async move {
             for i in 0..entries_per_task {
                 let key = format!("concurrent_{}_{}", task_id, i);
-                let data = TestData::new(task_id * 1000 + i, &key, i as i32);
+                let data = TestData::new((task_id * 1000 + i) as u32, &key, i as i32);
                 cache_clone.put(key, data).await.unwrap();
             }
         });
@@ -215,7 +215,7 @@ async fn test_cache_concurrent_operations() {
                 assert!(data.is_some());
 
                 let entry = data.unwrap();
-                assert_eq!(entry.id, task_id * 1000 + i);
+                assert_eq!(entry.id, (task_id * 1000 + i) as u32);
                 assert_eq!(entry.name, key);
                 assert_eq!(entry.value, i as i32);
             }
@@ -234,7 +234,7 @@ async fn test_cache_with_custom_config() {
     let config = CacheConfig::default()
         .with_max_entries_per_key(3)
         .with_max_total_entries(50)
-        .with_default_ttl(Some(Duration::from_secs(60)));
+        .with_default_ttl(Duration::from_secs(60));
 
     let cache = Cache::<String, TestData>::with_config(config)
         .await
@@ -387,13 +387,13 @@ async fn test_cache_performance_characteristics() {
         .await
         .unwrap();
 
-    let num_entries = 10000;
+    let num_entries: usize = 10000;
 
     // Measure insertion performance
     let start_time = std::time::Instant::now();
     for i in 0..num_entries {
         let key = format!("perf_key_{}", i);
-        let data = TestData::new(i, &format!("perf_item_{}", i), i as i32);
+        let data = TestData::new(i as u32, &format!("perf_item_{}", i), i as i32);
         cache.put(key, data).await.unwrap();
     }
     let insertion_time = start_time.elapsed();
@@ -436,14 +436,14 @@ async fn test_cache_memory_efficiency() {
         .unwrap();
 
     // Add many entries and then remove them to test memory cleanup
-    let batch_size = 1000;
+    let batch_size: usize = 1000;
     let num_batches = 10;
 
     for batch in 0..num_batches {
         // Add a batch of entries
         for i in 0..batch_size {
             let key = format!("memory_key_{}_{}", batch, i);
-            let data = TestData::new(batch * 1000 + i, &key, i as i32);
+            let data = TestData::new((batch * 1000 + i) as u32, &key, i as i32);
             cache.put(key, data).await.unwrap();
         }
 

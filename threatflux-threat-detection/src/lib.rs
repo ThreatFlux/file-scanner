@@ -51,6 +51,7 @@ pub struct ThreatDetector {
     yara_engine: Option<engines::yara::YaraEngine>,
     #[cfg(feature = "pattern-matching")]
     pattern_engine: Option<engines::patterns::PatternEngine>,
+    #[allow(dead_code)]
     config: Arc<ScanConfig>,
 }
 
