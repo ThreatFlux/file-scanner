@@ -13,7 +13,7 @@
     [
       "@semantic-release/git",
       {
-        "assets": ["CHANGELOG.md", "Cargo.toml", "*/Cargo.toml"],
+        "assets": ["CHANGELOG.md", "Cargo.toml", "threatflux-package-security/Cargo.toml", "threatflux-threat-detection/Cargo.toml"],
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
     ]

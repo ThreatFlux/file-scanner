@@ -22,20 +22,12 @@ WORKDIR /usr/src/file-scanner
 # Copy workspace manifests 
 COPY Cargo.toml Cargo.lock ./
 
-# Copy all workspace member Cargo.toml files
-COPY threatflux-binary-analysis/Cargo.toml ./threatflux-binary-analysis/
-COPY threatflux-cache/Cargo.toml ./threatflux-cache/
-COPY threatflux-hashing/Cargo.toml ./threatflux-hashing/
+# Copy remaining workspace member Cargo.toml files
 COPY threatflux-package-security/Cargo.toml ./threatflux-package-security/
-COPY threatflux-string-analysis/Cargo.toml ./threatflux-string-analysis/
 COPY threatflux-threat-detection/Cargo.toml ./threatflux-threat-detection/
 
-# Copy all workspace member source code first (needed for proper compilation)
-COPY threatflux-binary-analysis/src ./threatflux-binary-analysis/src
-COPY threatflux-cache/src ./threatflux-cache/src
-COPY threatflux-hashing/src ./threatflux-hashing/src
+# Copy remaining workspace member source code first (needed for proper compilation)
 COPY threatflux-package-security/src ./threatflux-package-security/src
-COPY threatflux-string-analysis/src ./threatflux-string-analysis/src
 COPY threatflux-threat-detection/src ./threatflux-threat-detection/src
 
 # Create dummy main source to build dependencies
