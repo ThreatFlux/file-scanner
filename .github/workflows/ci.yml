@@ -54,6 +54,11 @@ jobs:
         run: |
           echo "key=${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}" >> $GITHUB_OUTPUT
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libssl-dev
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -120,6 +125,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libssl-dev
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -176,6 +186,11 @@ jobs:
           sudo apt-get clean
           echo "📊 Disk space after cleanup:"
           df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libssl-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
@@ -281,6 +296,11 @@ jobs:
           echo "📊 Memory and swap after setup:"
           free -h
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libssl-dev
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -362,6 +382,11 @@ jobs:
           sudo docker system prune -af
           echo "📊 Disk space after cleanup:"
           df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libssl-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -458,6 +483,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libssl-dev
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -494,6 +524,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libssl-dev
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -501,14 +536,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: '**/package-lock.json'
 
       - name: Cache npm packages
         uses: actions/cache@v4
         with:
           path: ~/.npm
-          key: ${{ runner.os }}-npm-mcp-${{ hashFiles('**/package-lock.json') }}
+          key: ${{ runner.os }}-npm-mcp-v1
           restore-keys: |
             ${{ runner.os }}-npm-mcp-
             ${{ runner.os }}-npm-
