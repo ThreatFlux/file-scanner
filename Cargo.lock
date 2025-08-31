@@ -4345,14 +4345,16 @@ dependencies = [
 
 [[package]]
 name = "threatflux-string-analysis"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d69bb66800e594fe4dffbcaccf97fe14bf23196971ffb2305e5c562d7969af44"
 dependencies = [
  "anyhow",
  "chrono",
+ "once_cell",
  "regex",
  "serde",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]

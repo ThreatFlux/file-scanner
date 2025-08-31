@@ -2,11 +2,12 @@
 resolver = "2"
 members = [
     ".",
-    # "threatflux-binary-analysis", # Temporarily disabled - needs API updates
-    # "threatflux-cache", # Not used in actual source code - commented out
+    # All ThreatFlux libraries have been migrated to crates.io
+    # "threatflux-binary-analysis", # Migrated to crates.io v0.2.0
+    # "threatflux-cache", # Migrated to crates.io v0.1.8
     # "threatflux-hashing", # Migrated to crates.io v0.1.8
-    # "threatflux-package-security", # Not used in actual source code - commented out
-    "threatflux-string-analysis",
+    # "threatflux-package-security", # Not used in actual source code
+    # "threatflux-string-analysis", # Migrated to crates.io v0.1.1
     # "threatflux-threat-detection", # Already disabled
 ]
 exclude = []
@@ -144,14 +145,14 @@ categories = ["command-line-utilities", "development-tools", "security", "analys
 
 
 [dependencies]
-# ThreatFlux libraries - our modular components
+# ThreatFlux libraries - migrated to crates.io
 threatflux-hashing = { version = "0.1.8", features = ["serde"] }
-threatflux-string-analysis = { path = "./threatflux-string-analysis" }
-# threatflux-cache = { path = "./threatflux-cache", features = ["openapi"] } # Not used in actual source code
-# threatflux-binary-analysis = { path = "./threatflux-binary-analysis", features = ["serde-support"] }
+threatflux-string-analysis = { version = "0.1.1" }
+# threatflux-cache = { version = "0.1.8", features = ["openapi"] } # Not used in actual source code
+# threatflux-binary-analysis = { version = "0.2.0", features = ["serde-support"] } # Available if needed
 # Note: threat-detection temporarily disabled during binary analysis integration
-# threatflux-threat-detection = { path = "./threatflux-threat-detection", features = ["builtin-rules", "pattern-matching"] }
-# threatflux-package-security = { path = "./threatflux-package-security" } # Not used in actual source code
+# threatflux-threat-detection = { version = "0.1.0", features = ["builtin-rules", "pattern-matching"] }
+# threatflux-package-security = { version = "0.1.0" } # Not used in actual source code
 
 # Core dependencies (using workspace versions)
 tokio = { workspace = true }
