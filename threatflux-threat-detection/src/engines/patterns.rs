@@ -64,4 +64,9 @@ impl DetectionEngine for PatternEngine {
         // Placeholder - would update pattern database
         Ok(())
     }
+
+    fn is_available(&self) -> bool {
+        // For now, always return false since this is a placeholder implementation
+        false
+    }
 }

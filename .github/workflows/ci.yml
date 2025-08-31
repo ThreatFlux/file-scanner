@@ -187,10 +187,18 @@ jobs:
           echo "📊 Disk space after cleanup:"
           df -h
 
-      - name: Install build dependencies
+      - name: Install build dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang lld pkg-config libssl-dev
+
+      - name: Install build dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew update
+          brew install llvm pkg-config openssl
+          echo 'export PATH="/opt/homebrew/opt/llvm/bin:$PATH"' >> $GITHUB_ENV
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master

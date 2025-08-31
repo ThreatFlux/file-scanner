@@ -106,10 +106,28 @@ impl RuleManager {
     /// Update rules from all sources
     #[cfg(feature = "rule-management")]
     pub async fn update_rules(&mut self) -> Result<()> {
+        let mut rule_updater = updater::RuleUpdater::new(&self.cache_dir);
+        
+        // Convert rule sources to updater format and add them
         for source in &self.rule_sources {
-            if let Err(e) = updater::update_source(source, &self.cache_dir).await {
-                log::warn!("Failed to update source {}: {}", source.name, e);
-            }
+            let updater_source = updater::RuleSource {
+                name: source.name.clone(),
+                url: source.url.clone(),
+                source_type: match source.source_type {
+                    RuleSourceType::Local => updater::RuleSourceType::File,
+                    RuleSourceType::Builtin => updater::RuleSourceType::File, 
+                    RuleSourceType::Http => updater::RuleSourceType::Http,
+                    RuleSourceType::Git => updater::RuleSourceType::Git,
+                },
+                update_frequency_hours: 24, // Default to 24 hours
+                last_updated: None,
+            };
+            rule_updater.add_source(updater_source);
+        }
+        
+        // Update all sources
+        if let Err(e) = rule_updater.update_all().await {
+            log::warn!("Failed to update rules: {}", e);
         }
 
         // Recompile after updates
@@ -133,9 +151,17 @@ impl RuleManager {
                 }
             }
             #[cfg(feature = "rule-management")]
-            RuleSourceType::Http => updater::fetch_http_rules(source).await,
+            RuleSourceType::Http => {
+                // For now, return empty string - could use HTTP client when feature is fully implemented
+                log::warn!("HTTP rule loading not yet implemented for source: {}", source.name);
+                Ok(String::new())
+            }
             #[cfg(feature = "rule-management")]
-            RuleSourceType::Git => updater::fetch_git_rules(source, &self.cache_dir).await,
+            RuleSourceType::Git => {
+                // For now, return empty string - could use git2 when feature is fully implemented
+                log::warn!("Git rule loading not yet implemented for source: {}", source.name);
+                Ok(String::new())
+            }
         }
     }
 

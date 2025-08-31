@@ -64,4 +64,9 @@ impl DetectionEngine for ClamAVEngine {
         // Placeholder - would update ClamAV signatures
         Ok(())
     }
+
+    fn is_available(&self) -> bool {
+        // For now, always return false since this is a placeholder implementation
+        false
+    }
 }
