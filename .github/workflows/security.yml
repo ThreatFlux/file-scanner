@@ -146,4 +146,3 @@ jobs:
             p/secrets
             p/owasp-top-ten
             p/rust
-

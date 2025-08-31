@@ -151,4 +151,3 @@ jobs:
         run: |
           echo "=== Test compilation timing ==="
           time cargo test --all-features --no-run
-
