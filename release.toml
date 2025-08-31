@@ -1,20 +1,18 @@
 # cargo-release configuration
 # https://github.com/crate-ci/cargo-release
 
-[workspace]
 # Ensure we're releasing from main branch
 allow-branch = ["main", "master"]
 
-# Sign commits and tags
-sign-commit = true
-sign-tag = true
+# Don't sign commits and tags (requires GPG setup)
+sign-commit = false
+sign-tag = false
 
 # Update version in multiple files
 pre-release-replacements = [
   {file="README.md", search="file-scanner = \"[^\"]*\"", replace="file-scanner = \"{{version}}\""},
   {file="src/main.rs", search="version = \"[^\"]*\"", replace="version = \"{{version}}\""},
   {file="CHANGELOG.md", search="## \\[Unreleased\\]", replace="## [Unreleased]\n\n## [{{version}}] - {{date}}"},
-  {file="CHANGELOG.md", search="\\[Unreleased\\]: https://github.com/vtriple/file-scanner/compare/v[^\\s]+\\.\\.\\.HEAD", replace="[Unreleased]: https://github.com/vtriple/file-scanner/compare/v{{version}}...HEAD\n[{{version}}]: https://github.com/vtriple/file-scanner/compare/v{{prev_version}}...v{{version}}"},
 ]
 
 # Commit message for version bump
@@ -33,12 +31,3 @@ publish = false  # Set to true when ready for crates.io
 
 # Post-release version bump
 post-release-commit-message = "chore: bump version to {{next_version}}"
-
-# Changelog generation
-[[pre-release-replacements]]
-file = "CHANGELOG.md"
-search = "## \\[Unreleased\\]"
-replace = """## [Unreleased]
-
-## [{{version}}] - {{date}}"""
-min = 0
