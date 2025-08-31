@@ -107,7 +107,6 @@ impl RuleManager {
     #[cfg(feature = "rule-management")]
     pub async fn update_rules(&mut self) -> Result<()> {
         let mut rule_updater = updater::RuleUpdater::new(&self.cache_dir);
-        
         // Convert rule sources to updater format and add them
         for source in &self.rule_sources {
             let updater_source = updater::RuleSource {
@@ -115,7 +114,7 @@ impl RuleManager {
                 url: source.url.clone(),
                 source_type: match source.source_type {
                     RuleSourceType::Local => updater::RuleSourceType::File,
-                    RuleSourceType::Builtin => updater::RuleSourceType::File, 
+                    RuleSourceType::Builtin => updater::RuleSourceType::File,
                     RuleSourceType::Http => updater::RuleSourceType::Http,
                     RuleSourceType::Git => updater::RuleSourceType::Git,
                 },
@@ -124,7 +123,7 @@ impl RuleManager {
             };
             rule_updater.add_source(updater_source);
         }
-        
+
         // Update all sources
         if let Err(e) = rule_updater.update_all().await {
             log::warn!("Failed to update rules: {}", e);
@@ -153,13 +152,19 @@ impl RuleManager {
             #[cfg(feature = "rule-management")]
             RuleSourceType::Http => {
                 // For now, return empty string - could use HTTP client when feature is fully implemented
-                log::warn!("HTTP rule loading not yet implemented for source: {}", source.name);
+                log::warn!(
+                    "HTTP rule loading not yet implemented for source: {}",
+                    source.name
+                );
                 Ok(String::new())
             }
             #[cfg(feature = "rule-management")]
             RuleSourceType::Git => {
                 // For now, return empty string - could use git2 when feature is fully implemented
-                log::warn!("Git rule loading not yet implemented for source: {}", source.name);
+                log::warn!(
+                    "Git rule loading not yet implemented for source: {}",
+                    source.name
+                );
                 Ok(String::new())
             }
         }
