@@ -159,7 +159,7 @@ enum Commands {
         path: PathBuf,
         #[arg(short, long, help = "YARA rule file or inline rule")]
         rule: String,
-        #[arg(short, long, help = "Recursively scan directories")]
+        #[arg(short = 'R', long, help = "Recursively scan directories")]
         recursive: bool,
         #[arg(long, help = "Maximum file size to scan in MB", default_value = "100")]
         max_file_size_mb: u64,
