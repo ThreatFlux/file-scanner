@@ -447,12 +447,14 @@ jobs:
           # Use llvm-cov which is much faster than tarpaulin
           # Reduce parallelism to save memory/disk
           export CARGO_BUILD_JOBS=2
-          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+          # Generate coverage for main package only, not entire workspace
+          # This reduces memory usage and build time significantly
+          cargo llvm-cov --all-features --lib --bins --lcov --output-path lcov.info
           # Clean up immediately after
           rm -rf target/llvm-cov-target
           echo "📊 Disk space after coverage:"
           df -h
-        timeout-minutes: 20
+        timeout-minutes: 30
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
