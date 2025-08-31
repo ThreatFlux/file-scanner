@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.89.0-slim AS builder
+FROM rust:1.89.0-bookworm AS builder
 
 # Build arguments
 ARG VERSION=unknown
