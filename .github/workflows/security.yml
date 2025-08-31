@@ -104,7 +104,7 @@ jobs:
         run: |
           cargo install cargo-cyclonedx
           cargo cyclonedx --format json --output-file sbom.json
-          
+
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
@@ -146,3 +146,4 @@ jobs:
             p/secrets
             p/owasp-top-ten
             p/rust
+

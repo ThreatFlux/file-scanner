@@ -62,36 +62,36 @@ jobs:
       - name: Performance test with real files
         run: |
           echo "Testing performance with various file types..."
-          
+
           # Create test files of different sizes
           dd if=/dev/zero of=test_1kb.bin bs=1024 count=1
           dd if=/dev/zero of=test_1mb.bin bs=1048576 count=1
           dd if=/dev/zero of=test_10mb.bin bs=1048576 count=10
-          
+
           # Test performance with different file sizes
-          echo "=== 1KB file ===" 
+          echo "=== 1KB file ==="
           time ./target/release/file-scanner test_1kb.bin --all
-          
-          echo "=== 1MB file ===" 
+
+          echo "=== 1MB file ==="
           time ./target/release/file-scanner test_1mb.bin --all
-          
-          echo "=== 10MB file ===" 
+
+          echo "=== 10MB file ==="
           time ./target/release/file-scanner test_10mb.bin --all
-          
-          echo "=== System binary analysis ===" 
+
+          echo "=== System binary analysis ==="
           time ./target/release/file-scanner /bin/ls --all
 
       - name: Memory usage test
         run: |
           echo "Testing memory usage..."
-          
+
           # Install memory profiling tool
           sudo apt-get install -y time
-          
+
           # Test memory usage with different file sizes
           echo "=== Memory usage for 1MB file ==="
           /usr/bin/time -v ./target/release/file-scanner test_1mb.bin --all 2>&1 | grep -E "Maximum resident set size|User time|System time"
-          
+
           echo "=== Memory usage for 10MB file ==="
           /usr/bin/time -v ./target/release/file-scanner test_10mb.bin --all 2>&1 | grep -E "Maximum resident set size|User time|System time"
 
@@ -141,7 +141,7 @@ jobs:
           echo "=== Clean build timing ==="
           time cargo build --release --all-features
 
-      - name: Incremental build timing  
+      - name: Incremental build timing
         run: |
           echo "=== Incremental build timing ==="
           touch src/main.rs
@@ -151,3 +151,4 @@ jobs:
         run: |
           echo "=== Test compilation timing ==="
           time cargo test --all-features --no-run
+

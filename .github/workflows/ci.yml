@@ -97,24 +97,24 @@ jobs:
           cargo build --all-features
           echo "📊 Disk space after debug build:"
           df -h
-          
+
           # Clean up debug artifacts before release build
           rm -rf target/debug/deps/*.rlib
           rm -rf target/debug/incremental
           rm -rf target/debug/build
-          
+
           cargo build --release
           echo "📊 Disk space after release build:"
           df -h
-          
+
           # Build test dependencies separately
           cargo test --no-run --all-features 2>&1 | head -100
-          
+
           # Clean up test build artifacts not needed for caching
           find target -name "*.d" -delete
           find target -name "*.rmeta" -delete
           find target -name "*.rlib" -size +50M -delete
-          
+
           echo "📊 Final disk space:"
           df -h
 
