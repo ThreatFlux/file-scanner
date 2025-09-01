@@ -47,7 +47,7 @@ jobs:
         run: |
           # Run benchmarks and capture JSON output from Criterion
           cargo bench --all-features 2>&1 | tee benchmark_output.txt
-          
+
           # Extract benchmark results from criterion and create proper JSON
           # Criterion outputs to target/criterion directory
           if [ -d "target/criterion" ]; then
