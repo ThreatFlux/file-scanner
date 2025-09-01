@@ -66,70 +66,70 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-    - name: Setup Git
-      run: |
-        git config --global user.name 'github-actions[bot]'
-        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+      - name: Setup Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
 
-    - name: Install cargo-bump
-      run: cargo install cargo-bump
+      - name: Install cargo-bump
+        run: cargo install cargo-bump
 
-    - name: Determine version bump
-      id: version
-      run: |
-        # Get current version from Cargo.toml
-        CURRENT_VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-        echo "Current version: $CURRENT_VERSION"
+      - name: Determine version bump
+        id: version
+        run: |
+          # Get current version from Cargo.toml
+          CURRENT_VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Current version: $CURRENT_VERSION"
 
-        # Determine bump type
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          BUMP_TYPE="${{ github.event.inputs.version_type }}"
-        else
-          # Auto-determine based on commit messages since last release
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -z "$LAST_TAG" ]; then
-            COMMIT_RANGE="HEAD"
+          # Determine bump type
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BUMP_TYPE="${{ github.event.inputs.version_type }}"
           else
-            COMMIT_RANGE="$LAST_TAG..HEAD"
+            # Auto-determine based on commit messages since last release
+            LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -z "$LAST_TAG" ]; then
+              COMMIT_RANGE="HEAD"
+            else
+              COMMIT_RANGE="$LAST_TAG..HEAD"
+            fi
+
+            COMMIT_MESSAGES=$(git log --pretty=format:"%s" $COMMIT_RANGE)
+
+            if echo "$COMMIT_MESSAGES" | grep -q "BREAKING CHANGE\|!:" ; then
+              BUMP_TYPE="major"
+            elif echo "$COMMIT_MESSAGES" | grep -q "feat\|feature:" ; then
+              BUMP_TYPE="minor"
+            else
+              BUMP_TYPE="patch"
+            fi
           fi
 
-          COMMIT_MESSAGES=$(git log --pretty=format:"%s" $COMMIT_RANGE)
+          echo "Bump type: $BUMP_TYPE"
 
-          if echo "$COMMIT_MESSAGES" | grep -q "BREAKING CHANGE\|!:" ; then
-            BUMP_TYPE="major"
-          elif echo "$COMMIT_MESSAGES" | grep -q "feat\|feature:" ; then
-            BUMP_TYPE="minor"
+          # Bump version
+          cargo bump $BUMP_TYPE
+          NEW_VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+          echo "New version: $NEW_VERSION"
+          echo "new_version=v$NEW_VERSION" >> $GITHUB_OUTPUT
+
+          # Check if version actually changed
+          if [ "$CURRENT_VERSION" != "$NEW_VERSION" ]; then
+            echo "version_changed=true" >> $GITHUB_OUTPUT
+
+            # Commit version change
+            git add Cargo.toml Cargo.lock
+            git commit -m "chore(release): bump version to $NEW_VERSION
+
+            Auto-generated release commit"
+
+            # Create and push tag
+            git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
+            git push origin main
+            git push origin "v$NEW_VERSION"
           else
-            BUMP_TYPE="patch"
+            echo "version_changed=false" >> $GITHUB_OUTPUT
           fi
-        fi
-
-        echo "Bump type: $BUMP_TYPE"
-
-        # Bump version
-        cargo bump $BUMP_TYPE
-        NEW_VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-
-        echo "New version: $NEW_VERSION"
-        echo "new_version=v$NEW_VERSION" >> $GITHUB_OUTPUT
-
-        # Check if version actually changed
-        if [ "$CURRENT_VERSION" != "$NEW_VERSION" ]; then
-          echo "version_changed=true" >> $GITHUB_OUTPUT
-
-          # Commit version change
-          git add Cargo.toml Cargo.lock
-          git commit -m "chore(release): bump version to $NEW_VERSION
-
-          Auto-generated release commit"
-
-          # Create and push tag
-          git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
-          git push origin main
-          git push origin "v$NEW_VERSION"
-        else
-          echo "version_changed=false" >> $GITHUB_OUTPUT
-        fi
 
   # Build and test release
   build-and-test:
