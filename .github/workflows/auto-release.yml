@@ -11,9 +11,9 @@ on:
         default: 'patch'
         type: choice
         options:
-        - patch
-        - minor
-        - major
+          - patch
+          - minor
+          - major
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,26 +28,26 @@ jobs:
     name: Wait for CI
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
-    
-    steps:
-    - name: Wait for CI workflows
-      uses: lewagon/wait-on-check-action@v1.3.4
-      with:
-        ref: ${{ github.sha }}
-        check-regexp: '^(Build Cache|Lint|Test|Integration Tests|Code Coverage)$'
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
-        wait-interval: 30
-        allowed-conclusions: success
 
-    - name: Wait for Security Audit
-      uses: lewagon/wait-on-check-action@v1.3.4
-      with:
-        ref: ${{ github.sha }}
-        check-name: 'Security Audit'
-        repo-token: ${{ secrets.GITHUB_TOKEN }}
-        wait-interval: 30
-        allowed-conclusions: success,neutral,skipped
-      continue-on-error: true
+    steps:
+      - name: Wait for CI workflows
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-regexp: '^(Build Cache|Lint|Test|Integration Tests|Code Coverage)$'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 30
+          allowed-conclusions: success
+
+      - name: Wait for Security Audit
+        uses: lewagon/wait-on-check-action@v1.3.4
+        with:
+          ref: ${{ github.sha }}
+          check-name: 'Security Audit'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 30
+          allowed-conclusions: success,neutral,skipped
+        continue-on-error: true
 
   # Determine version bump and update Cargo.toml
   version-bump:
@@ -58,13 +58,13 @@ jobs:
     outputs:
       new_version: ${{ steps.version.outputs.new_version }}
       version_changed: ${{ steps.version.outputs.version_changed }}
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        fetch-depth: 0
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
     - name: Setup Git
       run: |
@@ -80,7 +80,7 @@ jobs:
         # Get current version from Cargo.toml
         CURRENT_VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
         echo "Current version: $CURRENT_VERSION"
-        
+
         # Determine bump type
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           BUMP_TYPE="${{ github.event.inputs.version_type }}"
@@ -92,9 +92,9 @@ jobs:
           else
             COMMIT_RANGE="$LAST_TAG..HEAD"
           fi
-          
+
           COMMIT_MESSAGES=$(git log --pretty=format:"%s" $COMMIT_RANGE)
-          
+
           if echo "$COMMIT_MESSAGES" | grep -q "BREAKING CHANGE\|!:" ; then
             BUMP_TYPE="major"
           elif echo "$COMMIT_MESSAGES" | grep -q "feat\|feature:" ; then
@@ -103,26 +103,26 @@ jobs:
             BUMP_TYPE="patch"
           fi
         fi
-        
+
         echo "Bump type: $BUMP_TYPE"
-        
+
         # Bump version
         cargo bump $BUMP_TYPE
         NEW_VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-        
+
         echo "New version: $NEW_VERSION"
         echo "new_version=v$NEW_VERSION" >> $GITHUB_OUTPUT
-        
+
         # Check if version actually changed
         if [ "$CURRENT_VERSION" != "$NEW_VERSION" ]; then
           echo "version_changed=true" >> $GITHUB_OUTPUT
-          
+
           # Commit version change
           git add Cargo.toml Cargo.lock
           git commit -m "chore(release): bump version to $NEW_VERSION
 
           Auto-generated release commit"
-          
+
           # Create and push tag
           git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
           git push origin main
@@ -141,14 +141,14 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: windows-latest  
+          - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: macos-latest
             target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -194,7 +194,7 @@ jobs:
     if: needs.version-bump.outputs.version_changed == 'true'
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -211,13 +211,13 @@ jobs:
         else
           COMMIT_RANGE="$LAST_TAG..HEAD"
         fi
-        
+
         echo "## What's Changed" > release_notes.md
         echo "" >> release_notes.md
-        
+
         # Generate changelog from commits
         git log --pretty=format:"- %s (%h)" $COMMIT_RANGE | grep -v "^- chore(release):" >> release_notes.md || echo "- Initial release" >> release_notes.md
-        
+
         echo "" >> release_notes.md
         echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${LAST_TAG}...${{ needs.version-bump.outputs.new_version }}" >> release_notes.md
 
@@ -238,7 +238,7 @@ jobs:
     needs: [version-bump, build-and-test, create-release]
     runs-on: ubuntu-latest
     if: needs.version-bump.outputs.version_changed == 'true'
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -284,7 +284,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-      
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -374,10 +374,10 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             name: macos-arm64
-    
+
     runs-on: ${{ matrix.os }}
     if: needs.version-bump.outputs.version_changed == 'true'
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -436,7 +436,7 @@ jobs:
     needs: [version-bump, build-and-test, create-release, build-docker, build-binaries]
     runs-on: ubuntu-latest
     if: always() && needs.version-bump.outputs.version_changed == 'true'
-    
+
     steps:
     - name: Release Status
       run: |
