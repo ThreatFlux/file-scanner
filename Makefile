@@ -250,6 +250,7 @@ deps-tree:
 # Security audit
 security-audit:
 	@echo "Running security audit..."
+	@command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit
 	cargo audit
 
 # Additional security checks
