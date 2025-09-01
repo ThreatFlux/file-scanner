@@ -116,7 +116,7 @@ jobs:
 
     steps:
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@18f2510ee396bbf800e4dded78c5f5d7ea27a3ad  # v0.30.0
+        uses: aquasecurity/trivy-action@0.32.0
         with:
           image-ref: '${{ env.REGISTRY }}/${{ needs.docker-build-test.outputs.image_name }}:${{ github.ref_name }}-${{ github.sha }}'
           format: 'sarif'
