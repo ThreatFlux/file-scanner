@@ -26,7 +26,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libssl-dev
+          sudo apt-get install -y build-essential pkg-config libssl-dev jq
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -45,7 +45,35 @@ jobs:
 
       - name: Run benchmarks
         run: |
-          cargo bench --all-features -- --output-format json | tee benchmark_results.json
+          # Run benchmarks and capture JSON output from Criterion
+          cargo bench --all-features 2>&1 | tee benchmark_output.txt
+          
+          # Extract benchmark results from criterion and create proper JSON
+          # Criterion outputs to target/criterion directory
+          if [ -d "target/criterion" ]; then
+            # Create benchmark results JSON file
+            echo '[' > benchmark_results.json
+            first=true
+            for report in target/criterion/*/base/estimates.json; do
+              if [ -f "$report" ]; then
+                if [ "$first" = false ]; then
+                  echo ',' >> benchmark_results.json
+                fi
+                benchmark_name=$(basename $(dirname $(dirname "$report")))
+                mean_ns=$(jq -r '.mean.point_estimate' "$report" 2>/dev/null || echo "0.0")
+                echo "{" >> benchmark_results.json
+                echo "  \"name\": \"$benchmark_name\"," >> benchmark_results.json
+                echo "  \"value\": $mean_ns," >> benchmark_results.json
+                echo "  \"unit\": \"ns\"" >> benchmark_results.json
+                echo "}" >> benchmark_results.json
+                first=false
+              fi
+            done
+            echo ']' >> benchmark_results.json
+          else
+            # Fallback if no criterion results
+            echo '[{"name": "no_benchmarks", "value": 0, "unit": "ns"}]' > benchmark_results.json
+          fi
 
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1

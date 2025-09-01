@@ -34,7 +34,7 @@ jobs:
       uses: lewagon/wait-on-check-action@v1.3.4
       with:
         ref: ${{ github.sha }}
-        check-regexp: '^CI$'
+        check-regexp: '^(Build Cache|Lint|Test|Integration Tests|Code Coverage)$'
         repo-token: ${{ secrets.GITHUB_TOKEN }}
         wait-interval: 30
         allowed-conclusions: success
