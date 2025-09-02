@@ -93,13 +93,11 @@ jobs:
               if [ "$first" = false ]; then
                 echo ',' >> benchmark_results.json
               fi
-              cat >> benchmark_results.json << JSONEOF
-  {
-    "name": "$name",
-    "value": ${benchmark_results[$name]},
-    "unit": "ns"
-  }
-JSONEOF
+              echo "  {" >> benchmark_results.json
+              echo "    \"name\": \"$name\"," >> benchmark_results.json
+              echo "    \"value\": ${benchmark_results[$name]}," >> benchmark_results.json
+              echo "    \"unit\": \"ns\"" >> benchmark_results.json
+              echo "  }" >> benchmark_results.json
               first=false
             done
             echo ']' >> benchmark_results.json
