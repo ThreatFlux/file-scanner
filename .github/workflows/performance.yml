@@ -62,20 +62,20 @@ jobs:
             echo "Found criterion results, parsing..."
             echo '[' > benchmark_results.json
             first=true
-            
+
             # Use find to locate all estimate files and process them
             find target/criterion -name "estimates.json" -type f | while read -r report; do
               if [ -f "$report" ] && [ -s "$report" ]; then
                 if [ "$first" = false ]; then
                   echo ',' >> benchmark_results.json
                 fi
-                
+
                 # Extract benchmark name from path
                 benchmark_name=$(echo "$report" | sed 's|target/criterion/||' | sed 's|/base/estimates.json||' | sed 's|/new/estimates.json||')
-                
+
                 # Safely extract mean from JSON, with fallback
                 mean_ns=$(jq -r '.mean.point_estimate // 0.0' "$report" 2>/dev/null || echo "0.0")
-                
+
                 # Validate that mean_ns is a number
                 if ! printf '%f' "$mean_ns" >/dev/null 2>&1; then
                   mean_ns="0.0"
