@@ -60,11 +60,11 @@ jobs:
           # Criterion outputs to target/criterion directory
           if [ -d "target/criterion" ] && [ -n "$(find target/criterion -name 'estimates.json' 2>/dev/null)" ]; then
             echo "Found criterion results, parsing..."
-            
+
             # Create a temporary file to build JSON array
             temp_json=$(mktemp)
             echo '[' > "$temp_json"
-            
+
             # Process all estimate files
             count=0
             for report in $(find target/criterion -name "estimates.json" -type f); do
@@ -72,31 +72,30 @@ jobs:
                 if [ $count -gt 0 ]; then
                   echo ',' >> "$temp_json"
                 fi
-                
+
                 # Extract benchmark name from path
                 benchmark_name=$(echo "$report" | sed 's|target/criterion/||' | sed 's|/base/estimates.json||' | sed 's|/new/estimates.json||')
-                
+
                 # Safely extract mean from JSON, with fallback
                 mean_ns=$(jq -r '.mean.point_estimate // 0.0' "$report" 2>/dev/null || echo "0.0")
-                
+
                 # Validate that mean_ns is a number
                 if ! printf '%f' "$mean_ns" >/dev/null 2>&1; then
                   mean_ns="0.0"
                 fi
-                
-                cat >> "$temp_json" << EOF
-  {
-    "name": "$benchmark_name",
-    "value": $mean_ns,
-    "unit": "ns"
-  }
-EOF
+
+                # Write JSON object
+                echo "  {" >> "$temp_json"
+                echo "    \"name\": \"$benchmark_name\"," >> "$temp_json"
+                echo "    \"value\": $mean_ns," >> "$temp_json"
+                echo "    \"unit\": \"ns\"" >> "$temp_json"
+                echo "  }" >> "$temp_json"
                 count=$((count + 1))
               fi
             done
-            
+
             echo ']' >> "$temp_json"
-            
+
             # Move temp file to final location
             mv "$temp_json" benchmark_results.json
           elif [ -s "benchmark_output.txt" ]; then
