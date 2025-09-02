@@ -23,6 +23,22 @@ target/
 # VS Code
 .vscode/
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
 # macOS
 .DS_Store
 
