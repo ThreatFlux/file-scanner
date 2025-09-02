@@ -179,9 +179,50 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install openssl pkg-config
+          
+          # Set up OpenSSL environment for cross-compilation
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            echo "Setting up OpenSSL for aarch64-apple-darwin cross-compilation"
+            export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+            export OPENSSL_LIB_DIR="$OPENSSL_ROOT_DIR/lib"
+            export OPENSSL_INCLUDE_DIR="$OPENSSL_ROOT_DIR/include"
+            echo "OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR" >> $GITHUB_ENV
+            echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR" >> $GITHUB_ENV
+            echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR" >> $GITHUB_ENV
+            echo "PKG_CONFIG_PATH=$OPENSSL_ROOT_DIR/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          else
+            echo "Setting up OpenSSL for x86_64-apple-darwin"
+            export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+            export OPENSSL_LIB_DIR="$OPENSSL_ROOT_DIR/lib"
+            export OPENSSL_INCLUDE_DIR="$OPENSSL_ROOT_DIR/include"
+            echo "OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR" >> $GITHUB_ENV
+            echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR" >> $GITHUB_ENV
+            echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR" >> $GITHUB_ENV
+            echo "PKG_CONFIG_PATH=$OPENSSL_ROOT_DIR/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          fi
 
       - name: Build release
-        run: cargo build --release --all-features --target ${{ matrix.target }}
+        env:
+          # Try to use static OpenSSL linking for better cross-compilation support
+          OPENSSL_STATIC: ${{ runner.os == 'macOS' && '1' || '0' }}
+        run: |
+          # Set additional OpenSSL environment variables for macOS
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export OPENSSL_DIR=$(brew --prefix openssl)
+            export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+            export OPENSSL_LIB_DIR="$OPENSSL_DIR/lib"
+            export OPENSSL_INCLUDE_DIR="$OPENSSL_DIR/include"
+            export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:$PKG_CONFIG_PATH"
+            
+            # Additional environment variables for openssl-sys crate
+            export OPENSSL_NO_VENDOR=1
+            echo "OpenSSL configuration:"
+            echo "OPENSSL_DIR=$OPENSSL_DIR"
+            echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+            ls -la "$OPENSSL_DIR/lib" || echo "OpenSSL lib directory not found"
+          fi
+          
+          cargo build --release --all-features --target ${{ matrix.target }}
 
       - name: Run tests
         run: cargo test --release --all-features --target ${{ matrix.target }}
@@ -399,9 +440,37 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install openssl pkg-config
+          
+          # Set up OpenSSL environment for cross-compilation
+          export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+          export OPENSSL_LIB_DIR="$OPENSSL_ROOT_DIR/lib"
+          export OPENSSL_INCLUDE_DIR="$OPENSSL_ROOT_DIR/include"
+          echo "OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR" >> $GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$OPENSSL_ROOT_DIR/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
       - name: Build binary
+        env:
+          # Try to use static OpenSSL linking for better cross-compilation support
+          OPENSSL_STATIC: ${{ runner.os == 'macOS' && '1' || '0' }}
         run: |
+          # Set additional OpenSSL environment variables for macOS
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export OPENSSL_DIR=$(brew --prefix openssl)
+            export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+            export OPENSSL_LIB_DIR="$OPENSSL_DIR/lib"
+            export OPENSSL_INCLUDE_DIR="$OPENSSL_DIR/include"
+            export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:$PKG_CONFIG_PATH"
+            
+            # Additional environment variables for openssl-sys crate
+            export OPENSSL_NO_VENDOR=1
+            echo "OpenSSL configuration:"
+            echo "OPENSSL_DIR=$OPENSSL_DIR"
+            echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+            ls -la "$OPENSSL_DIR/lib" || echo "OpenSSL lib directory not found"
+          fi
+          
           cargo build --release --all-features --target ${{ matrix.target }}
 
       - name: Create archive (Unix)
