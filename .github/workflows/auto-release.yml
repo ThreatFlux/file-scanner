@@ -202,6 +202,7 @@ jobs:
           fi
 
       - name: Build release
+        shell: bash
         env:
           # Try to use static OpenSSL linking for better cross-compilation support
           OPENSSL_STATIC: ${{ runner.os == 'macOS' && '1' || '0' }}
@@ -451,6 +452,7 @@ jobs:
           echo "PKG_CONFIG_PATH=$OPENSSL_ROOT_DIR/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
 
       - name: Build binary
+        shell: bash
         env:
           # Try to use static OpenSSL linking for better cross-compilation support
           OPENSSL_STATIC: ${{ runner.os == 'macOS' && '1' || '0' }}
