@@ -804,3 +804,4 @@ The scanner maintains a database of known malicious packages including typosquat
 - Ruby gem security analysis
 - Java/Maven package analysis
 - Container image scanning
+# GitHub Pages configured for benchmark results
