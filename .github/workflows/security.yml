@@ -119,7 +119,7 @@ jobs:
           echo "SBOM size: $(wc -c < sbom.json) bytes"
           echo "SBOM preview:"
           head -20 sbom.json
-          
+
           # Basic JSON validation
           if jq empty sbom.json 2>/dev/null; then
             echo "✓ SBOM is valid JSON"
