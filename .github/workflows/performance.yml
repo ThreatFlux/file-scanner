@@ -80,7 +80,7 @@ jobs:
                 if ! printf '%f' "$mean_ns" >/dev/null 2>&1; then
                   mean_ns="0.0"
                 fi
-                
+
                 echo "  {" >> benchmark_results.json
                 echo "    \"name\": \"$benchmark_name\"," >> benchmark_results.json
                 echo "    \"value\": $mean_ns," >> benchmark_results.json
@@ -89,30 +89,30 @@ jobs:
                 first=false
               fi
             done
-            
+
             echo ']' >> benchmark_results.json
           elif [ -s "benchmark_output.txt" ]; then
             # Try to parse criterion output from stdout/stderr
             echo "No criterion directory found, trying to parse output directly..."
-            
+
             # Look for Criterion benchmark results in output
             if grep -q "time:" benchmark_output.txt; then
               echo '[' > benchmark_results.json
               first=true
-              
+
               # Extract benchmark names and times from output
               grep "time:" benchmark_output.txt | while read -r line; do
                 benchmark_name=$(echo "$line" | sed 's/.*\[\([^]]*\)\].*/\1/' | tr ' ' '_')
                 time_value=$(echo "$line" | grep -o '[0-9.]*[[:space:]]*[μnms]*s' | head -1 | sed 's/[^0-9.]//g')
-                
+
                 if [ -n "$benchmark_name" ] && [ -n "$time_value" ]; then
                   if [ "$first" = false ]; then
                     echo ',' >> benchmark_results.json
                   fi
-                  
+
                   # Convert to nanoseconds if needed (simple heuristic)
                   value_ns=$(echo "$time_value * 1000000000" | bc -l 2>/dev/null || echo "$time_value")
-                  
+
                   echo "  {" >> benchmark_results.json
                   echo "    \"name\": \"$benchmark_name\"," >> benchmark_results.json
                   echo "    \"value\": $value_ns," >> benchmark_results.json
@@ -121,7 +121,7 @@ jobs:
                   first=false
                 fi
               done
-              
+
               echo ']' >> benchmark_results.json
             fi
           fi
@@ -131,12 +131,12 @@ jobs:
             echo "Generated invalid JSON, creating fallback..."
             echo '[{"name": "no_benchmarks", "value": 0, "unit": "ns"}]' > benchmark_results.json
           fi
-          
+
           # Validate final output
           if [ ! -s benchmark_results.json ]; then
             echo '[{"name": "no_benchmarks", "value": 0, "unit": "ns"}]' > benchmark_results.json
           fi
-          
+
           echo "Benchmark results JSON:"
           cat benchmark_results.json
 

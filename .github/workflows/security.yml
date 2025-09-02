@@ -115,7 +115,7 @@ jobs:
         run: |
           # Install cyclonedx-cli for validation
           npm install -g @cyclonedx/cyclonedx-cli
-          
+
           # Validate SBOM with more lenient settings
           if cyclonedx validate --input-file sbom.json --fail-on-errors; then
             echo "SBOM validation passed"
@@ -180,7 +180,7 @@ jobs:
             p/owasp-top-ten
             p/rust
         continue-on-error: true
-        
+
       - name: Upload Semgrep results
         if: always()
         uses: actions/upload-artifact@v4

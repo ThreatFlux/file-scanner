@@ -179,7 +179,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install openssl pkg-config
-          
+
           # Set up OpenSSL environment for cross-compilation
           if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
             echo "Setting up OpenSSL for aarch64-apple-darwin cross-compilation"
@@ -213,7 +213,7 @@ jobs:
             export OPENSSL_LIB_DIR="$OPENSSL_DIR/lib"
             export OPENSSL_INCLUDE_DIR="$OPENSSL_DIR/include"
             export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:$PKG_CONFIG_PATH"
-            
+
             # Additional environment variables for openssl-sys crate
             export OPENSSL_NO_VENDOR=1
             echo "OpenSSL configuration:"
@@ -221,7 +221,7 @@ jobs:
             echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
             ls -la "$OPENSSL_DIR/lib" || echo "OpenSSL lib directory not found"
           fi
-          
+
           cargo build --release --all-features --target ${{ matrix.target }}
 
       - name: Run tests
@@ -440,7 +440,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install openssl pkg-config
-          
+
           # Set up OpenSSL environment for cross-compilation
           export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
           export OPENSSL_LIB_DIR="$OPENSSL_ROOT_DIR/lib"
@@ -462,7 +462,7 @@ jobs:
             export OPENSSL_LIB_DIR="$OPENSSL_DIR/lib"
             export OPENSSL_INCLUDE_DIR="$OPENSSL_DIR/include"
             export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:$PKG_CONFIG_PATH"
-            
+
             # Additional environment variables for openssl-sys crate
             export OPENSSL_NO_VENDOR=1
             echo "OpenSSL configuration:"
@@ -470,7 +470,7 @@ jobs:
             echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
             ls -la "$OPENSSL_DIR/lib" || echo "OpenSSL lib directory not found"
           fi
-          
+
           cargo build --release --all-features --target ${{ matrix.target }}
 
       - name: Create archive (Unix)
