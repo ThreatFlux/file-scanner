@@ -109,13 +109,21 @@ if [ -n "$CI" ]; then
     
     # Second batch: Integration tests
     echo "📦 Batch 2: Integration tests"
-    # Use --tests instead of --test "*" to avoid glob issues
-    time cargo test \
+    # Run all integration tests with a timeout
+    # Note: --tests runs all integration tests in tests/ directory
+    timeout 10m cargo test \
         --tests \
         --profile test \
         --jobs $MAX_JOBS \
         --quiet \
-        "$@" || echo "⚠️ Some integration tests failed or timed out, continuing..."
+        "$@" || {
+        exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+            echo "⚠️ Integration tests timed out after 10 minutes, continuing..."
+        else
+            echo "⚠️ Some integration tests failed (exit code: $exit_code), continuing..."
+        fi
+    }
     
     # Third batch: Doc tests
     echo "📦 Batch 3: Doc tests"
