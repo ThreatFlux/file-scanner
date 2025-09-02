@@ -150,6 +150,12 @@ jobs:
           echo "Benchmark results JSON:"
           cat benchmark_results.json
 
+      - name: Clean working directory
+        run: |
+          # Clean any uncommitted changes that might interfere with gh-pages switch
+          git stash push -m "Stash changes before benchmark storage" || true
+          git clean -fd || true
+
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
