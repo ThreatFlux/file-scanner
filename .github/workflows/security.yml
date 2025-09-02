@@ -114,7 +114,7 @@ jobs:
       - name: Validate SBOM
         run: |
           # Install cyclonedx-cli for validation
-          npm install -g @cyclonedx/cyclonedx-cli
+          npm install -g @cyclonedx/cli
 
           # Validate SBOM with more lenient settings
           if cyclonedx validate --input-file sbom.json --fail-on-errors; then

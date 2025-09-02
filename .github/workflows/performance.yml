@@ -60,37 +60,45 @@ jobs:
           # Criterion outputs to target/criterion directory
           if [ -d "target/criterion" ] && [ -n "$(find target/criterion -name 'estimates.json' 2>/dev/null)" ]; then
             echo "Found criterion results, parsing..."
-            echo '[' > benchmark_results.json
-            first=true
-
-            # Use find to locate all estimate files and process them
-            find target/criterion -name "estimates.json" -type f | while read -r report; do
+            
+            # Create a temporary file to build JSON array
+            temp_json=$(mktemp)
+            echo '[' > "$temp_json"
+            
+            # Process all estimate files
+            count=0
+            for report in $(find target/criterion -name "estimates.json" -type f); do
               if [ -f "$report" ] && [ -s "$report" ]; then
-                if [ "$first" = false ]; then
-                  echo ',' >> benchmark_results.json
+                if [ $count -gt 0 ]; then
+                  echo ',' >> "$temp_json"
                 fi
-
+                
                 # Extract benchmark name from path
                 benchmark_name=$(echo "$report" | sed 's|target/criterion/||' | sed 's|/base/estimates.json||' | sed 's|/new/estimates.json||')
-
+                
                 # Safely extract mean from JSON, with fallback
                 mean_ns=$(jq -r '.mean.point_estimate // 0.0' "$report" 2>/dev/null || echo "0.0")
-
+                
                 # Validate that mean_ns is a number
                 if ! printf '%f' "$mean_ns" >/dev/null 2>&1; then
                   mean_ns="0.0"
                 fi
-
-                echo "  {" >> benchmark_results.json
-                echo "    \"name\": \"$benchmark_name\"," >> benchmark_results.json
-                echo "    \"value\": $mean_ns," >> benchmark_results.json
-                echo "    \"unit\": \"ns\"" >> benchmark_results.json
-                echo "  }" >> benchmark_results.json
-                first=false
+                
+                cat >> "$temp_json" << EOF
+  {
+    "name": "$benchmark_name",
+    "value": $mean_ns,
+    "unit": "ns"
+  }
+EOF
+                count=$((count + 1))
               fi
             done
-
-            echo ']' >> benchmark_results.json
+            
+            echo ']' >> "$temp_json"
+            
+            # Move temp file to final location
+            mv "$temp_json" benchmark_results.json
           elif [ -s "benchmark_output.txt" ]; then
             # Try to parse criterion output from stdout/stderr
             echo "No criterion directory found, trying to parse output directly..."
