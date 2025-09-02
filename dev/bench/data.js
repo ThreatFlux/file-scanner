@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1756824098685,
+  "lastUpdate": 1756824228025,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -83,6 +83,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "hash_calculations/calculate_md5_only/10KB",
             "value": 50919.93325519576,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "Wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "Wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "distinct": true,
+          "id": "df34c3109a561692ffd62f0449a6c14588916f2c",
+          "message": "fix: remove trailing spaces from performance.yml",
+          "timestamp": "2025-09-02T10:17:42-04:00",
+          "tree_id": "3c29f09f611e0d6267083c1e04f58eb8d87f7c6f",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/df34c3109a561692ffd62f0449a6c14588916f2c"
+        },
+        "date": 1756824227658,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2657927.8021052624,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 315393.07106431935,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2153345.69625,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 31848.247222445807,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2700190.2221052633,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 4970.760617194473,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 38507.09220182459,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 74573.88070661665,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 235762.84311820436,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3297606.44625,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2157131.703913043,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 50882.48235207164,
             "unit": "ns"
           }
         ]
