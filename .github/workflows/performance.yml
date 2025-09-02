@@ -154,7 +154,7 @@ jobs:
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Rust Benchmark
-          tool: 'cargo'
+          tool: 'customSmallerIsBetter'
           output-file-path: benchmark_results.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: true
