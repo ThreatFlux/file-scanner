@@ -9,8 +9,17 @@
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
+# macOS doesn't support lld linker, use default linker
 [target.x86_64-apple-darwin]
-rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+# rustflags = []
+
+[target.aarch64-apple-darwin]
+# rustflags = []
+
+# Windows MSVC target
+[target.x86_64-pc-windows-msvc]
+# Windows uses link.exe, no special flags needed
+# rustflags = []
 
 # Test configuration
 [env]
