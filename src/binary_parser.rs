@@ -591,8 +591,7 @@ mod tests {
         let result = parse_binary(&file_path);
         // Our minimal ELF might not be valid enough for goblin to parse
         // So we test that it doesn't panic and handles the error gracefully
-        if result.is_ok() {
-            let info = result.unwrap();
+        if let Ok(info) = result {
             assert_eq!(info.format, "ELF");
             assert_eq!(info.architecture, "x86_64");
             assert_eq!(info.entry_point, Some(0x1000));
@@ -611,8 +610,7 @@ mod tests {
 
         // Note: The minimal PE might not be fully valid for goblin
         // In practice, you'd use a real PE file for testing
-        if result.is_ok() {
-            let info = result.unwrap();
+        if let Ok(info) = result {
             assert_eq!(info.format, "PE");
         }
     }

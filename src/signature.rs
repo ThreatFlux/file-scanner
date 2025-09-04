@@ -507,8 +507,7 @@ mod tests {
 
         // The function returns Ok with "No signature found" for nonexistent files
         // because the signature verification functions handle file errors internally
-        if result.is_ok() {
-            let info = result.unwrap();
+        if let Ok(info) = result {
             assert!(!info.is_signed);
             assert_eq!(info.verification_status, "No signature found");
         } else {
