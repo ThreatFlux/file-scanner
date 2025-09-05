@@ -131,7 +131,7 @@ pre-release-replacements = [
 # Main file-scanner package configuration
 [package]
 name = "file-scanner"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 rust-version = "1.75.0"
 authors = ["File Scanner Project <dev@threatflux.com>"]
