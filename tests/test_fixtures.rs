@@ -248,6 +248,12 @@ pub struct TestFileBuilder {
     temp_dir: TempDir,
 }
 
+impl Default for TestFileBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestFileBuilder {
     /// Create a new test file builder
     pub fn new() -> Self {
@@ -307,9 +313,9 @@ impl TestFileBuilder {
 
         // Create various test files
         fs::write(test_dir.join("test.txt"), "Hello World").unwrap();
-        fs::write(test_dir.join("binary.exe"), &binaries::create_pe_binary()).unwrap();
-        fs::write(test_dir.join("program"), &binaries::create_elf_binary()).unwrap();
-        fs::write(test_dir.join("data.bin"), &[0x00, 0xFF, 0x55, 0xAA]).unwrap();
+        fs::write(test_dir.join("binary.exe"), binaries::create_pe_binary()).unwrap();
+        fs::write(test_dir.join("program"), binaries::create_elf_binary()).unwrap();
+        fs::write(test_dir.join("data.bin"), [0x00, 0xFF, 0x55, 0xAA]).unwrap();
 
         test_dir
     }
