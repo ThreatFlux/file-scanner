@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1758175633664,
+  "lastUpdate": 1758206295305,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -1163,6 +1163,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "hash_calculations/calculate_md5_only/10KB",
             "value": 50880.209837453185,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "Wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "Wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "distinct": true,
+          "id": "9c163362ff6652e2dbb33741e121a65bf5679742",
+          "message": "fix(test): fix Windows cache test failure with platform-specific invalid paths\n\nThe test_cache_with_invalid_path test was failing on Windows because\nthe Unix path \"/dev/null/invalid\" behaves differently on Windows.\n\nChanges:\n- Use conditional compilation to provide platform-specific invalid paths\n- Unix: \"/dev/null/invalid\" (existing behavior)\n- Windows: \"C:\\\\invalid<>:\\\"|?*path\" (path with invalid Windows characters)\n\nThis ensures the test validates error handling for invalid paths on\nboth Unix and Windows platforms correctly.\n\nFixes the CI/CD failure:\nassertion failed: result.is_err() in cache_creation_tests::test_cache_with_invalid_path\n\n🤖 Generated with [Claude Code](https://claude.ai/code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-09-18T10:11:44-04:00",
+          "tree_id": "70cddaa416b52fe92567c6900f10fd627fe0897f",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/9c163362ff6652e2dbb33741e121a65bf5679742"
+        },
+        "date": 1758206294356,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2764835.22631579,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 328481.72523861885,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2203705.7613043482,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 31737.212650048994,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2768168.551666666,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 5003.054027040973,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 38911.569087579126,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 76495.29154132608,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 239193.793679786,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3297358.285333334,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2154646.029565217,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 51021.63873268415,
             "unit": "ns"
           }
         ]
