@@ -24,7 +24,7 @@ use crate::{
     python_analysis::{analyze_python_package, PythonPackageAnalysis},
     signature::verify_signature,
     strings::extract_strings,
-    threat_detection::{analyze_threats, ThreatAnalysis},
+    threat_detection::{analyze_threats, analyze_threats_enhanced, ThreatAnalysis},
     vulnerability_detection::{analyze_vulnerabilities, VulnerabilityDetectionResult},
 };
 
@@ -77,6 +77,10 @@ pub struct FileAnalysisRequest {
     pub disassembly: Option<bool>,
     #[schemars(description = "Detect threats and malware")]
     pub threats: Option<bool>,
+    #[schemars(
+        description = "Enhanced threat detection using threatflux-threat-detection library"
+    )]
+    pub enhanced_threats: Option<bool>,
     #[schemars(description = "Analyze behavioral patterns")]
     pub behavioral: Option<bool>,
     #[schemars(description = "Extract YARA rule indicators")]
@@ -429,6 +433,22 @@ impl FileScannerMcp {
         if request.threats.unwrap_or(false) || all {
             if let Ok(threats) = analyze_threats(&path) {
                 result.threats = Some(threats);
+            }
+        }
+
+        // Enhanced Threats
+        if request.enhanced_threats.unwrap_or(false) || all {
+            match analyze_threats_enhanced(&path).await {
+                Ok(enhanced_threats) => {
+                    result.threats = Some(enhanced_threats);
+                }
+                Err(e) => {
+                    eprintln!("Enhanced threat analysis failed: {}", e);
+                    // Fallback to regular threat analysis
+                    if let Ok(threats) = analyze_threats(&path) {
+                        result.threats = Some(threats);
+                    }
+                }
             }
         }
 
@@ -1032,6 +1052,7 @@ mod tests {
             threats: Some(false),
             behavioral: Some(false),
             yara_indicators: Some(true),
+            enhanced_threats: None,
         };
 
         // Test JSON serialization
@@ -1115,6 +1136,7 @@ mod tests {
             threats: None,
             behavioral: None,
             yara_indicators: None,
+            enhanced_threats: None,
         };
 
         let result = mcp.analyze_file(request).await;
@@ -1153,6 +1175,7 @@ mod tests {
             threats: None,
             behavioral: None,
             yara_indicators: None,
+            enhanced_threats: None,
         };
 
         let result = mcp.analyze_file(request).await;
@@ -1192,6 +1215,7 @@ mod tests {
             threats: None,
             behavioral: None,
             yara_indicators: None,
+            enhanced_threats: None,
         };
 
         let result = mcp.analyze_file(request).await;
@@ -1233,6 +1257,7 @@ mod tests {
             threats: None,
             behavioral: None,
             yara_indicators: None,
+            enhanced_threats: None,
         };
 
         let result = mcp.analyze_file(request).await;
@@ -1272,6 +1297,7 @@ mod tests {
             threats: None,
             behavioral: None,
             yara_indicators: None,
+            enhanced_threats: None,
         };
 
         let result = mcp.analyze_file(request).await;
@@ -1311,6 +1337,7 @@ mod tests {
             threats: None,
             behavioral: None,
             yara_indicators: None,
+            enhanced_threats: None,
         };
 
         let result = mcp.analyze_file(request).await;
@@ -1643,6 +1670,7 @@ rule TestRule {
             threats: Some(false),
             behavioral: Some(false),
             yara_indicators: Some(false),
+            enhanced_threats: None,
         };
 
         let result = mcp.analyze_file(request).await;
@@ -1705,6 +1733,7 @@ rule TestRule {
             threats: Some(false),
             behavioral: Some(false),
             yara_indicators: Some(false),
+            enhanced_threats: None,
         };
 
         let result = mcp.analyze_file(request).await;
@@ -1767,6 +1796,7 @@ rule TestRule {
             threats: Some(false),
             behavioral: Some(false),
             yara_indicators: Some(false),
+            enhanced_threats: None,
         };
 
         let result = mcp.analyze_file(request).await;
@@ -1822,6 +1852,7 @@ rule TestRule {
             threats: Some(false),
             behavioral: Some(false),
             yara_indicators: Some(false),
+            enhanced_threats: None,
         };
 
         let json = serde_json::to_string(&request_all_true).unwrap();
@@ -1853,6 +1884,7 @@ rule TestRule {
             threats: Some(false),
             behavioral: Some(false),
             yara_indicators: Some(true),
+            enhanced_threats: None,
         };
 
         let json = serde_json::to_string(&request_all_false).unwrap();
@@ -1885,6 +1917,7 @@ rule TestRule {
             threats: Some(false),
             behavioral: Some(false),
             yara_indicators: Some(false),
+            enhanced_threats: None,
         };
 
         let json = serde_json::to_string(&request_all_none).unwrap();
@@ -1926,6 +1959,7 @@ rule TestRule {
             threats: None,
             behavioral: None,
             yara_indicators: None,
+            enhanced_threats: None,
         };
 
         let result_all = mcp.analyze_file(request_all).await;
@@ -1955,6 +1989,7 @@ rule TestRule {
             threats: None,
             behavioral: None,
             yara_indicators: None,
+            enhanced_threats: None,
         };
 
         let result_selective = mcp.analyze_file(request_selective).await;

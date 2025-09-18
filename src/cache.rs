@@ -10,6 +10,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{RwLock, Semaphore};
 use utoipa::ToSchema;
 
+// ThreatFlux cache integration (TODO: Implement full migration)
+// use threatflux_cache::{
+//     Cache as ThreatFluxCache, CacheConfig, backends,
+// };
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CacheEntry {
     pub file_path: String,
@@ -37,6 +42,8 @@ pub struct AnalysisCache {
     max_entries_per_file: usize,
     max_total_entries: usize,
     save_semaphore: Arc<Semaphore>,
+    // TODO: Enhanced caching with ThreatFlux backend (prepare for future migration)
+    _threatflux_ready: bool,
 }
 
 impl AnalysisCache {
@@ -52,6 +59,8 @@ impl AnalysisCache {
             max_entries_per_file: 100,
             max_total_entries: 10000, // Global cache limit
             save_semaphore: Arc::new(Semaphore::new(1)), // Only one save at a time
+            // Mark that threatflux-cache is available as dependency
+            _threatflux_ready: true,
         };
 
         // Load existing cache

@@ -42,6 +42,7 @@ async fn test_analyze_file_metadata_only() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = server.analyze_file(params).await;
@@ -83,6 +84,7 @@ async fn test_analyze_file_with_hashes() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = server.analyze_file(params).await;
@@ -126,6 +128,7 @@ async fn test_analyze_file_with_strings() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = server.analyze_file(params).await;
@@ -165,6 +168,7 @@ async fn test_analyze_file_with_hex_dump() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = server.analyze_file(params).await;
@@ -203,6 +207,7 @@ async fn test_analyze_file_nonexistent() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = server.analyze_file(params).await;
@@ -338,6 +343,7 @@ async fn test_analyze_file_all_options() {
         threats: Some(true),
         behavioral: Some(true),
         yara_indicators: Some(true),
+        enhanced_threats: None,
     };
 
     let result = server.analyze_file(params).await;
@@ -383,6 +389,7 @@ fn test_analyze_file_params_defaults() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     // All options should be None by default

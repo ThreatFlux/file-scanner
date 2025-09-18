@@ -39,6 +39,7 @@ fn test_threat_level_variants() {
                 file_size_scanned: 1024,
             },
             recommendations: vec![],
+            enhanced_analysis: None,
         };
 
         assert!(std::mem::discriminant(&analysis.threat_level) == std::mem::discriminant(&level));
@@ -752,6 +753,7 @@ fn test_serialization_deserialization() {
             file_size_scanned: 2048,
         },
         recommendations: vec!["Test recommendation".to_string()],
+        enhanced_analysis: None,
     };
 
     // Test JSON serialization

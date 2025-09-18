@@ -9,7 +9,7 @@ use std::path::Path;
 
 // ThreatFlux binary analysis imports
 use threatflux_binary_analysis::{
-    BinaryAnalyzer, Architecture as TfArch, BinaryFormat as TfFormat,
+    Architecture as TfArch, BinaryAnalyzer, BinaryFormat as TfFormat,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,19 +70,27 @@ fn convert_threatflux_to_binary_info(
         },
         compiler: compiler_info,
         linker: linker_info,
-        sections: analysis.sections.iter().map(|s| SectionInfo {
-            name: s.name.clone(),
-            size: s.size,
-            virtual_address: s.address,
-            characteristics: format!("{:?}", s.permissions),
-        }).collect(),
-        imports: analysis.imports.iter().map(|i| {
-            if let Some(ref library) = i.library {
-                format!("{} ({})", i.name, library)
-            } else {
-                i.name.clone()
-            }
-        }).collect(),
+        sections: analysis
+            .sections
+            .iter()
+            .map(|s| SectionInfo {
+                name: s.name.clone(),
+                size: s.size,
+                virtual_address: s.address,
+                characteristics: format!("{:?}", s.permissions),
+            })
+            .collect(),
+        imports: analysis
+            .imports
+            .iter()
+            .map(|i| {
+                if let Some(ref library) = i.library {
+                    format!("{} ({})", i.name, library)
+                } else {
+                    i.name.clone()
+                }
+            })
+            .collect(),
         exports: analysis.exports.iter().map(|e| e.name.clone()).collect(),
         entry_point: analysis.entry_point,
         is_stripped: analysis.symbols.is_empty(),

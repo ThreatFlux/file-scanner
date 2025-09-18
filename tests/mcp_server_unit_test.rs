@@ -76,6 +76,7 @@ async fn test_file_analysis_request_validation() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;
@@ -108,6 +109,7 @@ async fn test_file_analysis_request_invalid_path() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;
@@ -191,6 +193,7 @@ async fn test_file_analysis_metadata_only() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;
@@ -231,6 +234,7 @@ async fn test_file_analysis_hashes_only() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;
@@ -275,6 +279,7 @@ async fn test_file_analysis_strings_with_parameters() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;
@@ -318,6 +323,7 @@ async fn test_file_analysis_hex_dump_with_parameters() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;
@@ -360,6 +366,7 @@ async fn test_file_analysis_request_all_options_false() {
         threats: Some(false),
         behavioral: Some(false),
         yara_indicators: Some(false),
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;
@@ -407,6 +414,7 @@ async fn test_file_analysis_binary_file() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;
@@ -489,6 +497,7 @@ fn test_file_analysis_request_structure() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     // Test serialization/deserialization
@@ -554,6 +563,7 @@ async fn test_file_analysis_empty_file() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;
@@ -636,6 +646,7 @@ async fn test_file_analysis_permission_error() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;
@@ -670,6 +681,7 @@ async fn test_file_analysis_response_structure() {
         threats: None,
         behavioral: None,
         yara_indicators: None,
+        enhanced_threats: None,
     };
 
     let result = mcp.analyze_file(request).await;

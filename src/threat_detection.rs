@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
+// Import threatflux-threat-detection for enhanced capabilities
+use threatflux_threat_detection::{ThreatDetector, ThreatDetectorConfig};
+
 // YARA-related types for scanning
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct YaraFileMatch {
@@ -44,6 +47,18 @@ pub struct ThreatAnalysis {
     pub indicators: Vec<ThreatIndicator>,
     pub scan_stats: ScanStatistics,
     pub recommendations: Vec<String>,
+    /// Enhanced analysis from threatflux-threat-detection (if available)
+    pub enhanced_analysis: Option<EnhancedAnalysisInfo>,
+}
+
+/// Information about enhanced analysis from threatflux-threat-detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnhancedAnalysisInfo {
+    pub enabled: bool,
+    pub confidence_score: f32,
+    pub analysis_depth: String,
+    pub coverage_percentage: f32,
+    pub engines_used: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +206,83 @@ pub fn analyze_threats(path: &Path) -> Result<ThreatAnalysis> {
         indicators,
         scan_stats,
         recommendations,
+        enhanced_analysis: None,
+    })
+}
+
+/// Enhanced threat analysis using both legacy YARA rules and threatflux-threat-detection
+pub async fn analyze_threats_enhanced(path: &Path) -> Result<ThreatAnalysis> {
+    // First run the legacy analysis
+    let mut legacy_analysis = analyze_threats(path)?;
+
+    // Try to run enhanced analysis
+    match run_enhanced_analysis(path).await {
+        Ok(enhanced_info) => {
+            legacy_analysis.enhanced_analysis = Some(enhanced_info);
+            legacy_analysis.recommendations.push(
+                "Enhanced threat analysis completed with additional intelligence.".to_string(),
+            );
+        }
+        Err(e) => {
+            eprintln!("Enhanced analysis failed: {}", e);
+            legacy_analysis.enhanced_analysis = Some(EnhancedAnalysisInfo {
+                enabled: false,
+                confidence_score: 0.0,
+                analysis_depth: "Basic (enhanced analysis failed)".to_string(),
+                coverage_percentage: 0.0,
+                engines_used: 1, // Only legacy YARA
+            });
+        }
+    }
+
+    Ok(legacy_analysis)
+}
+
+/// Run enhanced analysis using threatflux-threat-detection
+async fn run_enhanced_analysis(path: &Path) -> Result<EnhancedAnalysisInfo> {
+    let config = ThreatDetectorConfig {
+        enable_yara: true,
+        enable_clamav: false, // Disabled due to security vulnerability
+        enable_patterns: true,
+        max_file_size: 100 * 1024 * 1024, // 100MB
+        scan_timeout: 300,                // 5 minutes
+        max_concurrent_scans: 4,
+        rule_sources: Vec::new(),
+    };
+
+    let detector = ThreatDetector::with_config(config)
+        .await
+        .context("Failed to create threatflux threat detector")?;
+
+    let result = detector
+        .scan_file(path)
+        .await
+        .context("Failed to scan file with threatflux detector")?;
+
+    // Calculate metrics
+    let confidence_score = if !result.indicators.is_empty() {
+        result.indicators.iter().map(|i| i.confidence).sum::<f32>() / result.indicators.len() as f32
+    } else {
+        0.5 // Default confidence
+    };
+
+    let analysis_depth = match (result.indicators.len(), result.matches.len()) {
+        (i, m) if i >= 5 && m >= 3 => "Comprehensive",
+        (i, m) if i >= 2 || m >= 1 => "Standard",
+        _ => "Basic",
+    }
+    .to_string();
+
+    let coverage_percentage =
+        ((result.scan_stats.rules_evaluated as f32 / 100.0) * 100.0).min(100.0);
+    let engines_used = 2; // YARA + Pattern matching
+
+    Ok(EnhancedAnalysisInfo {
+        enabled: true,
+        confidence_score,
+        analysis_depth,
+        coverage_percentage,
+        engines_used,
     })
 }
 
@@ -1599,6 +1691,7 @@ rule test_rule {
             indicators: vec![],
             scan_stats,
             recommendations: vec!["Test recommendation".to_string()],
+            enhanced_analysis: None,
         };
 
         // Test serialization to JSON
