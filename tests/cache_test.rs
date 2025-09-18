@@ -73,7 +73,13 @@ mod cache_creation_tests {
     #[tokio::test]
     async fn test_cache_with_invalid_path() {
         // Test cache creation with a path that cannot be created
-        let result = AnalysisCache::new("/dev/null/invalid");
+        #[cfg(unix)]
+        let invalid_path = "/dev/null/invalid";
+
+        #[cfg(windows)]
+        let invalid_path = "C:\\invalid<>:\"|?*path"; // Path with invalid Windows characters
+
+        let result = AnalysisCache::new(invalid_path);
         assert!(result.is_err());
     }
 }
