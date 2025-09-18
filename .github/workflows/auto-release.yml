@@ -58,6 +58,7 @@ jobs:
     outputs:
       new_version: ${{ steps.version.outputs.new_version }}
       version_changed: ${{ steps.version.outputs.version_changed }}
+      release_sha: ${{ steps.version.outputs.release_sha }}
 
     steps:
       - name: Checkout code
@@ -123,12 +124,19 @@ jobs:
 
             Auto-generated release commit"
 
+            # Get the commit SHA
+            RELEASE_SHA=$(git rev-parse HEAD)
+            echo "release_sha=$RELEASE_SHA" >> $GITHUB_OUTPUT
+
             # Create and push tag
             git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
             git push origin main
             git push origin "v$NEW_VERSION"
+
+            echo "Tagged release v$NEW_VERSION at commit $RELEASE_SHA"
           else
             echo "version_changed=false" >> $GITHUB_OUTPUT
+            echo "release_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
           fi
 
   # Build and test release
@@ -153,7 +161,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: ${{ needs.version-bump.outputs.new_version }}
+          ref: ${{ needs.version-bump.outputs.release_sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -241,8 +249,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: ${{ needs.version-bump.outputs.new_version }}
+          ref: ${{ needs.version-bump.outputs.release_sha }}
           fetch-depth: 0
+
+      - name: Verify tag exists
+        run: |
+          echo "Checking if tag ${{ needs.version-bump.outputs.new_version }} exists..."
+          if git tag -l | grep -q "^${{ needs.version-bump.outputs.new_version }}$"; then
+            echo "✅ Tag ${{ needs.version-bump.outputs.new_version }} found"
+          else
+            echo "❌ Tag ${{ needs.version-bump.outputs.new_version }} not found"
+            echo "Available tags:"
+            git tag -l | head -10
+            exit 1
+          fi
 
       - name: Generate changelog
         id: changelog
@@ -285,7 +305,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: ${{ needs.version-bump.outputs.new_version }}
+          ref: ${{ needs.version-bump.outputs.release_sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -331,7 +351,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: ${{ needs.version-bump.outputs.new_version }}
+          ref: ${{ needs.version-bump.outputs.release_sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -424,7 +444,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
         with:
-          ref: ${{ needs.version-bump.outputs.new_version }}
+          ref: ${{ needs.version-bump.outputs.release_sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
