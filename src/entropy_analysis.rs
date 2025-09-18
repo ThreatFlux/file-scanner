@@ -186,10 +186,10 @@ fn analyze_pe_sections(pe: &PE, buffer: &[u8]) -> Result<Vec<SectionEntropy>> {
             let entropy = calculate_entropy(section_data);
 
             let mut characteristics = Vec::new();
-            if section.characteristics & 0x20000000 != 0 {
+            if section.characteristics & 0x2000_0000 != 0 {
                 characteristics.push("executable".to_string());
             }
-            if section.characteristics & 0x80000000 != 0 {
+            if section.characteristics & 0x8000_0000 != 0 {
                 characteristics.push("writable".to_string());
             }
 

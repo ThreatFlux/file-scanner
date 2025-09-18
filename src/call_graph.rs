@@ -224,8 +224,14 @@ impl CallGraphBuilder {
         });
     }
 
-    fn add_edge(&mut self, caller: u64, callee: u64, call_type: CallType, call_site: u64) {
-        let key = (caller, callee);
+    fn add_edge(
+        &mut self,
+        caller_addr: u64,
+        callee_addr: u64,
+        call_type: CallType,
+        call_site: u64,
+    ) {
+        let key = (caller_addr, callee_addr);
 
         if let Some(&edge_idx) = self.edge_map.get(&key) {
             // Edge exists, add call site
@@ -235,8 +241,8 @@ impl CallGraphBuilder {
             // New edge
             let edge_idx = self.edges.len();
             self.edges.push(CallGraphEdge {
-                caller,
-                callee,
+                caller: caller_addr,
+                callee: callee_addr,
                 call_type,
                 call_sites: vec![call_site],
                 weight: 1,
@@ -245,10 +251,10 @@ impl CallGraphBuilder {
         }
 
         // Update degrees
-        if let Some(caller_node) = self.nodes.get_mut(&caller) {
+        if let Some(caller_node) = self.nodes.get_mut(&caller_addr) {
             caller_node.out_degree += 1;
         }
-        if let Some(callee_node) = self.nodes.get_mut(&callee) {
+        if let Some(callee_node) = self.nodes.get_mut(&callee_addr) {
             callee_node.in_degree += 1;
         }
     }

@@ -662,11 +662,13 @@ fn detect_suspicious_patterns(instructions: &[Instruction]) -> Vec<SuspiciousPat
         .filter(|insn| {
             matches!(
                 &insn.flow_control,
-                Some(FlowControl::Jump { target: None, .. })
-                    | Some(FlowControl::Call {
-                        is_indirect: true,
-                        ..
-                    })
+                Some(
+                    FlowControl::Jump { target: None, .. }
+                        | FlowControl::Call {
+                            is_indirect: true,
+                            ..
+                        }
+                )
             )
         })
         .map(|insn| insn.address)
