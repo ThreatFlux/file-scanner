@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "file-scanner"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "addr2line 0.25.1",
  "anyhow",
@@ -1395,6 +1395,7 @@ dependencies = [
  "test-case",
  "thiserror 2.0.16",
  "threatflux-binary-analysis",
+ "threatflux-cache",
  "threatflux-hashing",
  "threatflux-string-analysis",
  "tokio",
@@ -4410,6 +4411,20 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "zip 0.6.6",
+]
+
+[[package]]
+name = "threatflux-cache"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "624af5ec3490081366148f56db6e80ba7e38a19fbd6a9e212a2bbea9b6d507e6"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.16",
+ "tokio",
 ]
 
 [[package]]

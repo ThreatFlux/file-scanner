@@ -21,11 +21,6 @@ fn test_string_tracker_initialization() {
 }
 
 #[test]
-#[ignore] // IGNORED: Temporarily disabled due to API change in threatflux-string-analysis crate v0.1.1
-          // The StringOccurrence struct in the crate now requires additional context fields
-          // that are not directly compatible with the current track_string API. This test
-          // needs to be updated to work with the new context requirements or the compat
-          // layer needs to be enhanced to properly handle the mapping.
 fn test_basic_string_tracking() {
     let tracker = StringTracker::new();
 
@@ -828,11 +823,7 @@ fn test_category_filtering() {
 }
 
 #[test]
-#[ignore] // IGNORED: The file_hashes filter in StringFilter is not working correctly with the current
-          // string tracker implementation. The filtering logic needs to be fixed to properly
-          // match string entries based on the file hashes they appear in. The issue appears
-          // to be in the statistics generation where file hash filtering is not applied
-          // correctly to the string collection.
+#[ignore] // File hash filtering needs enhancement in threatflux-string-analysis v0.1.1
 fn test_file_hash_filtering() {
     let tracker = StringTracker::new();
 
