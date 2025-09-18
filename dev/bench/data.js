@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1758206295305,
+  "lastUpdate": 1758228588317,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -1247,6 +1247,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "hash_calculations/calculate_md5_only/10KB",
             "value": 51021.63873268415,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "Wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "Wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "distinct": true,
+          "id": "f2bde9f8ef3775559f65762893e023b28a4fdd0a",
+          "message": "fix(ci): fix auto-release workflow tag and checkout issues\n\n- Add release_sha output to version-bump job to track commit SHA\n- Use commit SHA instead of tag reference for checkout operations\n- Add tag verification step to ensure tag exists before release\n- Fix timing issues where jobs tried to checkout non-existent tags\n\nThis resolves the \"Unexpected error fetching GitHub release for tag\nrefs/heads/main\" error by ensuring proper tag creation and checkout\nsynchronization in the release process.\n\nChanges:\n- Output release SHA after tag creation\n- Replace tag-based checkout with SHA-based checkout\n- Add verification step for tag existence\n- Improve error handling and debugging\n\n🤖 Generated with [Claude Code](https://claude.ai/code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-09-18T16:24:21-04:00",
+          "tree_id": "da9eee3954e46460a5bebac2f28cb5386e6775f2",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/f2bde9f8ef3775559f65762893e023b28a4fdd0a"
+        },
+        "date": 1758228587932,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2759844.2036842112,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 321329.2964242989,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2199196.18,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 31912.15621372469,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2734832.5968421055,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 5065.316839764335,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 38631.494382893245,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 76338.46726868358,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 237161.15559108078,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3372014.2919999985,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2215508.4565217393,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 50634.6936076358,
             "unit": "ns"
           }
         ]
