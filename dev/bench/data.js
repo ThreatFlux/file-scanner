@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1758228588317,
+  "lastUpdate": 1758234836851,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -1331,6 +1331,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "hash_calculations/calculate_md5_only/10KB",
             "value": 50634.6936076358,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "Wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "Wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "distinct": true,
+          "id": "1106cec4ff9bf6f34b5be1fc9aa8269f478168e0",
+          "message": "feat: enable threatflux-binary-analysis integration\n\nEnable the threatflux-binary-analysis library integration to provide\nenhanced binary analysis capabilities beyond the current goblin-based\nimplementation.\n\nChanges:\n- Enable threatflux-binary-analysis v0.2.0 dependency with serde-support\n- Uncomment and activate ThreatFlux analyzer integration code\n- Implement hybrid approach: ThreatFlux primary, goblin fallback\n- Fix tests to accommodate ThreatFlux's enhanced format support\n- ThreatFlux can analyze Raw/Unknown formats where goblin fails\n\nEnhanced Capabilities Now Available:\n- Better format detection and parsing\n- More resilient analysis of non-standard binaries\n- Enhanced import/export extraction\n- Improved section analysis with detailed permissions\n- Advanced architecture detection\n\nIntegration maintains backward compatibility with existing API\nwhile providing significantly enhanced analysis capabilities.\n\n🤖 Generated with [Claude Code](https://claude.ai/code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-09-18T18:08:12-04:00",
+          "tree_id": "553c8cbf33cc7091d36f17ffd63169b4d6bdd7fe",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/1106cec4ff9bf6f34b5be1fc9aa8269f478168e0"
+        },
+        "date": 1758234835810,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2776343.8468421055,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 323550.03467049,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2217721.5147826085,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 32332.34987497719,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2740380.0873684203,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 5344.979807636244,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 40349.77014920237,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 78352.6019894448,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 238834.00038892965,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3410338.137333333,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2209367.027826087,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 51971.06074255152,
             "unit": "ns"
           }
         ]
