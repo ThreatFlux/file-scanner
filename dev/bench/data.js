@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1757821521396,
+  "lastUpdate": 1758173865390,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -911,6 +911,90 @@ window.BENCHMARK_DATA = {
           {
             "name": "hash_calculations/calculate_md5_only/10KB",
             "value": 51000.58429543096,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "Wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "Wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "distinct": true,
+          "id": "84232b9d1809f4e727d86a9155c140869ead92f3",
+          "message": "deps: update dependencies and fix code quality issues\n\n- Update Rust dependencies in Cargo.toml:\n  • serde: 1.0.219 → 1.0.223\n  • chrono: 0.4.41 → 0.4.42\n  • addr2line: 0.25.0 → 0.25.1\n  • tempfile: 3.21.0 → 3.22.0\n  • zip: 4.5.0 → 4.6.1\n  • uuid: 1.18.0 → 1.18.1\n  • clap: 4.5.46 → 4.5.47\n  • yara-x: 1.5.0 → 1.6.0\n\n- Update GitHub Actions dependencies:\n  • actions/checkout: v4 → v5\n  • actions/setup-node: v4 → v5\n  • docker/build-push-action: v5 → v6\n  • lewagon/wait-on-check-action: v1.3.4 → v1.4.0\n  • aquasecurity/trivy-action: 0.32.0 → 0.33.1\n\n- Fix code quality issues:\n  • Rename similar variables in call_graph.rs for clarity\n  • Improve pattern matching in disassembly.rs\n  • Add separators to hex literals in entropy_analysis.rs\n\nAll tests pass and code compiles cleanly with no warnings.\n\n🤖 Generated with [Claude Code](https://claude.ai/code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-09-18T01:11:36-04:00",
+          "tree_id": "e2ed00caa1bc4c77c885d9c44df65a8ce68a11ec",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/84232b9d1809f4e727d86a9155c140869ead92f3"
+        },
+        "date": 1758173864877,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2646846.22,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 312708.3905587897,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2147303.895833333,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 32745.081248578947,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2630105.101578948,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 4987.013143112651,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 39994.87312930542,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 76122.57590827873,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 237717.27432021347,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3193392.190625,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2192848.626956521,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 50682.153407529695,
             "unit": "ns"
           }
         ]
