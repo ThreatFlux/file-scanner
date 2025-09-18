@@ -149,7 +149,7 @@ categories = ["command-line-utilities", "development-tools", "security", "analys
 threatflux-hashing = { version = "0.1.8", features = ["serde"] }
 threatflux-string-analysis = { version = "0.1.1" }
 # threatflux-cache = { version = "0.1.8", features = ["openapi"] } # Not used in actual source code
-# threatflux-binary-analysis = { version = "0.2.0", features = ["serde-support"] } # Available if needed
+threatflux-binary-analysis = { version = "0.2.0", features = ["serde-support"] }
 # Note: threat-detection temporarily disabled during binary analysis integration
 # threatflux-threat-detection = { version = "0.1.0", features = ["builtin-rules", "pattern-matching"] }
 # threatflux-package-security = { version = "0.1.0" } # Not used in actual source code

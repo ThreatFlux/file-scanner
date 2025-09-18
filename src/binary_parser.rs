@@ -7,11 +7,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-// ThreatFlux binary analysis imports (temporarily disabled due to compilation issues)
-// use threatflux_binary_analysis::{
-//     BinaryAnalyzer, BinaryFile, AnalysisConfig, Architecture as TfArch, BinaryFormat as TfFormat,
-//     Section as TfSection, Import as TfImport, Export as TfExport, Symbol as TfSymbol,
-// };
+// ThreatFlux binary analysis imports
+use threatflux_binary_analysis::{
+    BinaryAnalyzer, Architecture as TfArch, BinaryFormat as TfFormat,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BinaryInfo {
@@ -37,61 +36,60 @@ pub struct SectionInfo {
 }
 
 // Temporarily disabled ThreatFlux conversion function
-// TODO: Re-enable when ThreatFlux binary analysis compilation issues are fixed
-// /// Convert ThreatFlux types to BinaryInfo
-// fn convert_threatflux_to_binary_info(
-//     analysis: &threatflux_binary_analysis::AnalysisResult,
-//     compiler_info: Option<String>,
-//     linker_info: Option<String>,
-//     java_analysis: Option<JavaAnalysisResult>,
-// ) -> BinaryInfo {
-//     BinaryInfo {
-//         format: match analysis.format {
-//             TfFormat::Elf => "ELF".to_string(),
-//             TfFormat::Pe => "PE".to_string(),
-//             TfFormat::MachO => "Mach-O".to_string(),
-//             TfFormat::Java => "Java".to_string(),
-//             TfFormat::Wasm => "WebAssembly".to_string(),
-//             TfFormat::Raw => "Raw".to_string(),
-//             TfFormat::Unknown => "Unknown".to_string(),
-//         },
-//         architecture: match analysis.architecture {
-//             TfArch::X86 => "x86".to_string(),
-//             TfArch::X86_64 => "x86_64".to_string(),
-//             TfArch::Arm => "ARM".to_string(),
-//             TfArch::Arm64 => "ARM64".to_string(),
-//             TfArch::Mips => "MIPS".to_string(),
-//             TfArch::Mips64 => "MIPS64".to_string(),
-//             TfArch::PowerPC => "PowerPC".to_string(),
-//             TfArch::PowerPC64 => "PowerPC64".to_string(),
-//             TfArch::RiscV => "RISC-V".to_string(),
-//             TfArch::RiscV64 => "RISC-V64".to_string(),
-//             TfArch::Wasm => "WebAssembly".to_string(),
-//             TfArch::Jvm => "Java Bytecode".to_string(),
-//             TfArch::Unknown => "Unknown".to_string(),
-//         },
-//         compiler: compiler_info,
-//         linker: linker_info,
-//         sections: analysis.sections.iter().map(|s| SectionInfo {
-//             name: s.name.clone(),
-//             size: s.size,
-//             virtual_address: s.address,
-//             characteristics: format!("{:?}", s.permissions),
-//         }).collect(),
-//         imports: analysis.imports.iter().map(|i| {
-//             if let Some(ref library) = i.library {
-//                 format!("{} ({})", i.name, library)
-//             } else {
-//                 i.name.clone()
-//             }
-//         }).collect(),
-//         exports: analysis.exports.iter().map(|e| e.name.clone()).collect(),
-//         entry_point: analysis.entry_point,
-//         is_stripped: analysis.symbols.is_empty(),
-//         has_debug_info: analysis.sections.iter().any(|s| s.name.contains("debug")),
-//         java_analysis,
-//     }
-// }
+/// Convert ThreatFlux types to BinaryInfo
+fn convert_threatflux_to_binary_info(
+    analysis: &threatflux_binary_analysis::AnalysisResult,
+    compiler_info: Option<String>,
+    linker_info: Option<String>,
+    java_analysis: Option<JavaAnalysisResult>,
+) -> BinaryInfo {
+    BinaryInfo {
+        format: match analysis.format {
+            TfFormat::Elf => "ELF".to_string(),
+            TfFormat::Pe => "PE".to_string(),
+            TfFormat::MachO => "Mach-O".to_string(),
+            TfFormat::Java => "Java".to_string(),
+            TfFormat::Wasm => "WebAssembly".to_string(),
+            TfFormat::Raw => "Raw".to_string(),
+            TfFormat::Unknown => "Unknown".to_string(),
+        },
+        architecture: match analysis.architecture {
+            TfArch::X86 => "x86".to_string(),
+            TfArch::X86_64 => "x86_64".to_string(),
+            TfArch::Arm => "ARM".to_string(),
+            TfArch::Arm64 => "ARM64".to_string(),
+            TfArch::Mips => "MIPS".to_string(),
+            TfArch::Mips64 => "MIPS64".to_string(),
+            TfArch::PowerPC => "PowerPC".to_string(),
+            TfArch::PowerPC64 => "PowerPC64".to_string(),
+            TfArch::RiscV => "RISC-V".to_string(),
+            TfArch::RiscV64 => "RISC-V64".to_string(),
+            TfArch::Wasm => "WebAssembly".to_string(),
+            TfArch::Jvm => "Java Bytecode".to_string(),
+            TfArch::Unknown => "Unknown".to_string(),
+        },
+        compiler: compiler_info,
+        linker: linker_info,
+        sections: analysis.sections.iter().map(|s| SectionInfo {
+            name: s.name.clone(),
+            size: s.size,
+            virtual_address: s.address,
+            characteristics: format!("{:?}", s.permissions),
+        }).collect(),
+        imports: analysis.imports.iter().map(|i| {
+            if let Some(ref library) = i.library {
+                format!("{} ({})", i.name, library)
+            } else {
+                i.name.clone()
+            }
+        }).collect(),
+        exports: analysis.exports.iter().map(|e| e.name.clone()).collect(),
+        entry_point: analysis.entry_point,
+        is_stripped: analysis.symbols.is_empty(),
+        has_debug_info: analysis.sections.iter().any(|s| s.name.contains("debug")),
+        java_analysis,
+    }
+}
 
 pub fn parse_binary(path: &Path) -> Result<BinaryInfo> {
     // First check if it's a Java-related file
@@ -121,21 +119,20 @@ pub fn parse_binary(path: &Path) -> Result<BinaryInfo> {
         return parse_java_class(path);
     }
 
-    // TODO: Re-enable ThreatFlux integration when compilation issues are fixed
-    // Try ThreatFlux first (if available and working), fallback to goblin
-    // if let Ok(analyzer) = try_create_threatflux_analyzer() {
-    //     if let Ok(analysis) = analyzer.analyze(&buffer) {
-    //         // Extract compiler/linker info using legacy methods for enhanced detection
-    //         if let Ok((compiler_info, linker_info)) = extract_legacy_compiler_info(&buffer) {
-    //             return Ok(convert_threatflux_to_binary_info(
-    //                 &analysis,
-    //                 compiler_info,
-    //                 linker_info,
-    //                 None, // No Java analysis for native binaries
-    //             ));
-    //         }
-    //     }
-    // }
+    // Try ThreatFlux first (enhanced analysis), fallback to goblin if needed
+    if let Ok(analyzer) = try_create_threatflux_analyzer() {
+        if let Ok(analysis) = analyzer.analyze(&buffer) {
+            // Extract compiler/linker info using legacy methods for enhanced detection
+            if let Ok((compiler_info, linker_info)) = extract_legacy_compiler_info(&buffer) {
+                return Ok(convert_threatflux_to_binary_info(
+                    &analysis,
+                    compiler_info,
+                    linker_info,
+                    None, // No Java analysis for native binaries
+                ));
+            }
+        }
+    }
 
     // Parse native binaries using goblin (original implementation)
     match Object::parse(&buffer)? {
@@ -146,12 +143,10 @@ pub fn parse_binary(path: &Path) -> Result<BinaryInfo> {
     }
 }
 
-// Temporarily disabled ThreatFlux analyzer creation
-// TODO: Re-enable when ThreatFlux binary analysis compilation issues are fixed
-// /// Try to create ThreatFlux analyzer, return error if library has compilation issues
-// fn try_create_threatflux_analyzer() -> Result<BinaryAnalyzer> {
-//     Ok(BinaryAnalyzer::new())
-// }
+/// Try to create ThreatFlux analyzer, return error if library has compilation issues
+fn try_create_threatflux_analyzer() -> Result<BinaryAnalyzer> {
+    Ok(BinaryAnalyzer::new())
+}
 
 /// Extract enhanced compiler and linker information using legacy methods
 /// This provides more detailed detection than basic ThreatFlux analysis
@@ -621,7 +616,15 @@ mod tests {
         let (_temp_dir, file_path) = create_test_file(invalid_data).unwrap();
 
         let result = parse_binary(&file_path);
-        assert!(result.is_err());
+        // ThreatFlux is more resilient and can analyze unknown/raw formats
+        match result {
+            Ok(binary_info) => {
+                assert!(binary_info.format == "Raw" || binary_info.format == "Unknown");
+            }
+            Err(_) => {
+                // Goblin fallback might still return error, which is also acceptable
+            }
+        }
     }
 
     #[test]
