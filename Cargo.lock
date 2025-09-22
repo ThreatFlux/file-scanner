@@ -1471,7 +1471,7 @@ dependencies = [
  "walkdir",
  "wiremock",
  "yara-x",
- "zip 4.6.1",
+ "zip 5.1.1",
 ]
 
 [[package]]
@@ -2484,26 +2484,6 @@ dependencies = [
  "libssh2-sys",
  "libz-sys",
  "openssl-sys",
- "pkg-config",
-]
-
-[[package]]
-name = "liblzma"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10bf66f4598dc77ff96677c8e763655494f00ff9c1cf79e2eb5bb07bc31f807d"
-dependencies = [
- "liblzma-sys",
-]
-
-[[package]]
-name = "liblzma-sys"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01b9596486f6d60c3bbe644c0e1be1aa6ccc472ad630fe8927b456973d7cb736"
-dependencies = [
- "cc",
- "libc",
  "pkg-config",
 ]
 
@@ -6117,33 +6097,6 @@ dependencies = [
  "indexmap 2.11.3",
  "memchr",
  "zopfli",
-]
-
-[[package]]
-name = "zip"
-version = "4.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caa8cd6af31c3b31c6631b8f483848b91589021b28fffe50adada48d4f4d2ed1"
-dependencies = [
- "aes",
- "arbitrary",
- "bzip2 0.6.0",
- "constant_time_eq 0.3.1",
- "crc32fast",
- "deflate64",
- "flate2",
- "getrandom 0.3.3",
- "hmac",
- "indexmap 2.11.3",
- "liblzma",
- "memchr",
- "pbkdf2 0.12.2",
- "ppmd-rust",
- "sha1",
- "time",
- "zeroize",
- "zopfli",
- "zstd 0.13.3",
 ]
 
 [[package]]
