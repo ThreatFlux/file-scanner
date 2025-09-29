@@ -96,7 +96,7 @@ quick-xml = "0.38"
 base64 = "0.22"
 
 # Test dependencies
-tempfile = "3.22.0"
+tempfile = "3.23.0"
 mockall = "0.13"
 proptest = "1.4"
 rstest = "0.26"
