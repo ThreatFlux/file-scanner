@@ -237,7 +237,7 @@ jobs:
             ./target/debug/file-scanner test_file.txt --metadata --hashes || true
 
       - name: Upload Valgrind results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: valgrind-results
           path: valgrind-output.txt
