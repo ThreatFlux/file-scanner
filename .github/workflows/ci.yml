@@ -23,7 +23,7 @@ jobs:
     outputs:
       cache-key: ${{ steps.cache-key.outputs.key }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Free disk space at start
         run: |
@@ -123,7 +123,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-cache
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
@@ -172,7 +172,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         rust: [stable, beta]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Free disk space (Ubuntu only)
         if: matrix.os == 'ubuntu-latest'
@@ -259,7 +259,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-cache
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Maximize available disk space
         run: |
@@ -368,7 +368,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-cache
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Maximize available disk space
         run: |
@@ -467,7 +467,7 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Cache cargo-audit
         uses: actions/cache@v4
@@ -491,7 +491,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-cache
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
@@ -532,7 +532,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-cache
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
@@ -586,7 +586,7 @@ jobs:
     name: Docker Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
