@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1766894549341,
+  "lastUpdate": 1767499380272,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -2813,6 +2813,88 @@ window.BENCHMARK_DATA = {
           {
             "name": "hash_calculations/calculate_md5_only/10KB",
             "value": 49709.40647850966,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Wyatt Roersma",
+            "username": "wroersma",
+            "email": "Wyattroersma@gmail.com"
+          },
+          "committer": {
+            "name": "Wyatt Roersma",
+            "username": "wroersma",
+            "email": "Wyattroersma@gmail.com"
+          },
+          "id": "40f94142805ca1c2586c3c5c1079075612e0e3f2",
+          "message": "feat: prepare threatflux-cache integration foundation\n\nAdd threatflux-cache v0.1.8 as dependency and prepare the caching\ninfrastructure for future migration to leverage enhanced performance.\n\nChanges:\n- Enable threatflux-cache v0.1.8 dependency\n- Prepare cache.rs structure for future ThreatFlux backend integration\n- Add migration planning infrastructure\n- Maintain full backward compatibility with current cache API\n\nCurrent Status:\n- threatflux-cache dependency available and compiling\n- All 40 cache tests passing (100% compatibility maintained)\n- All 952 total tests passing with enhanced ThreatFlux ecosystem\n- Ready for future implementation of 10x performance improvements\n\nNext Steps for Full Migration:\n1. Update threatflux-cache library to use utoipa 5.4.0\n2. Implement async cache backend integration\n3. Add multiple backend support (memory, filesystem, distributed)\n4. Performance benchmarking and optimization\n\nFoundation is now ready for advanced caching capabilities while\nmaintaining current functionality and reliability.\n\n🤖 Generated with [Claude Code](https://claude.ai/code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+          "timestamp": "2025-09-18T22:56:54Z",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/40f94142805ca1c2586c3c5c1079075612e0e3f2"
+        },
+        "date": 1767499379990,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2669404.875263157,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 308624.2820366004,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2168169.7300000004,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 31145.61363981735,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2620464.2825000007,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 5462.227093887811,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 38721.233363683845,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 72626.31913562812,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 237118.78074673947,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3150506.309375,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2237865.9865217386,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 50201.75198512269,
             "unit": "ns"
           }
         ]
