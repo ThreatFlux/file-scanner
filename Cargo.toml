@@ -76,7 +76,7 @@ capstone = "0.13"
 petgraph = "0.8.2"
 
 # Threat detection
-yara-x = "1.6.0"
+yara-x = "1.8.1"
 
 # Network and repository checks
 strsim = "0.11"
