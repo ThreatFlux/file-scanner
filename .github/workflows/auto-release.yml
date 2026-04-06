@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Wait for CI workflows
-        uses: lewagon/wait-on-check-action@v1.4.1
+        uses: lewagon/wait-on-check-action@3603e826ee561ea102b58accb5ea55a1a7482343 # v1.4.1
         with:
           ref: ${{ github.sha }}
           check-regexp: '^(Build Cache|Lint|Test|Integration Tests|Code Coverage)$'
@@ -40,7 +40,7 @@ jobs:
           allowed-conclusions: success
 
       - name: Wait for Security Audit
-        uses: lewagon/wait-on-check-action@v1.4.1
+        uses: lewagon/wait-on-check-action@3603e826ee561ea102b58accb5ea55a1a7482343 # v1.4.1
         with:
           ref: ${{ github.sha }}
           check-name: 'Security Audit'
