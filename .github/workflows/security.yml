@@ -58,7 +58,7 @@ jobs:
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: moderate
-          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, CC0-1.0, Zlib, bzip2-1.0.6, MPL-2.0
+          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-3.0, CC0-1.0, MIT-0, Zlib, bzip2-1.0.6, MPL-2.0
 
   codeql-analysis:
     name: CodeQL Analysis

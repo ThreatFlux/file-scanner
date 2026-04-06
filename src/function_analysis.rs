@@ -333,9 +333,8 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
         });
 
         // Add exported functions to function list
-        if export.name.is_some() {
+        if let Some(name) = export.name {
             // For PE files, we'll consider main/WinMain/DllMain as potential entry points
-            let name = export.name.unwrap();
             let is_entry_point = name == "main" || name == "WinMain" || name == "DllMain";
 
             functions.push(FunctionInfo {
