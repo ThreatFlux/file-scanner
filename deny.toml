@@ -11,6 +11,9 @@ ignore = [
     # Add any advisory IDs to ignore here
     # paste crate unmaintained warning - not a security issue
     "RUSTSEC-2024-0436",
+    # bincode is transitively pulled in by yara-x and currently only surfaces as an
+    # unmaintained warning in this workspace.
+    "RUSTSEC-2025-0141",
     # RSA timing attack - waiting for yara-x upstream fix
     "RUSTSEC-2023-0071",
 ]
@@ -26,6 +29,10 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "CC0-1.0",
+    "MIT-0",
+    "Unlicense",
+    "BSL-1.0",
+    "LGPL-2.1-or-later",
     "Zlib",
     "bzip2-1.0.6",
     "MPL-2.0",
