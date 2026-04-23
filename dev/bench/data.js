@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776573173046,
+  "lastUpdate": 1776932607882,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -4689,6 +4689,86 @@ window.BENCHMARK_DATA = {
           {
             "name": "hash_calculations/calculate_md5_only/10KB",
             "value": 58319.43039493505,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "ThreatFlux",
+            "username": "ThreatFlux"
+          },
+          "committer": {
+            "name": "ThreatFlux",
+            "username": "ThreatFlux"
+          },
+          "id": "75e57699a3d70e3f6d59f477897e8082d9a0aeae",
+          "message": "[codex] Roll up Dependabot and security updates (2026-04-23)",
+          "timestamp": "2026-04-07T04:57:56Z",
+          "url": "https://github.com/ThreatFlux/file-scanner/pull/126/commits/75e57699a3d70e3f6d59f477897e8082d9a0aeae"
+        },
+        "date": 1776932607324,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 3157191.429375,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 378330.2469495304,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2869487.0111111104,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 28004.863973879103,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 3049747.7052941173,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 2809.925708892771,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 30925.561412108236,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 68360.36678878123,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 217603.9567974074,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3763227.9228571444,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2082726.5596000003,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 47072.56587718664,
             "unit": "ns"
           }
         ]
