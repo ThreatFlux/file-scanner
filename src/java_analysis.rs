@@ -462,7 +462,7 @@ fn parse_archive_contents(
     };
 
     // Sort and keep largest entries
-    entry_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+    entry_sizes.sort_by_key(|item| std::cmp::Reverse(item.1));
     result.metadata.largest_entries = entry_sizes.into_iter().take(10).collect();
 
     Ok(())
