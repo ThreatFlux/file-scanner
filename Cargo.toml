@@ -10,7 +10,7 @@ members = [
     # "threatflux-string-analysis", # Migrated to crates.io v0.1.1
     # "threatflux-threat-detection", # Already disabled
 ]
-exclude = []
+exclude = ["threatflux-package-security"]
 
 # Workspace-wide dependency specifications for consistency
 [workspace.dependencies]
@@ -76,7 +76,7 @@ capstone = "0.13"
 petgraph = "0.8.2"
 
 # Threat detection
-yara-x = "1.8.1"
+yara-x = "1.15.0"
 
 # Network and repository checks
 strsim = "0.11"

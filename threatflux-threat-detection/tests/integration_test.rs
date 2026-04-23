@@ -1,6 +1,5 @@
 //! Integration tests for the complete threat detection pipeline
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -149,12 +148,13 @@ async fn test_memory_scanning() {
     };
 
     let detector = ThreatDetector::with_config(config).await.unwrap();
+    let pe_header = test_data::create_pe_header();
 
     // Test memory scanning with different data types
     let test_cases = vec![
         (test_data::create_benign_text(), "benign.txt"),
         (test_data::create_eicar_test_string(), "eicar.com"),
-        (&test_data::create_pe_header(), "sample.exe"),
+        (&pe_header, "sample.exe"),
         (test_data::create_suspicious_script(), "script.ps1"),
     ];
 
@@ -393,12 +393,13 @@ async fn test_threat_level_calculation() {
     };
 
     let detector = ThreatDetector::with_config(config).await.unwrap();
+    let pe_header = test_data::create_pe_header();
 
     // Test with different types of content
     let test_cases = vec![
         (test_data::create_benign_text(), ThreatLevel::Clean),
         (test_data::create_eicar_test_string(), ThreatLevel::Clean), // No engines = clean
-        (&test_data::create_pe_header(), ThreatLevel::Clean),
+        (&pe_header, ThreatLevel::Clean),
         (test_data::create_suspicious_script(), ThreatLevel::Clean),
     ];
 

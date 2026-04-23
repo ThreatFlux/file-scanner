@@ -246,7 +246,8 @@ pub fn calculate_confidence_score(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{IndicatorType, StringMatch};
+    use crate::types::IndicatorType;
+    use std::collections::HashMap;
 
     #[test]
     fn test_threat_level_calculation() {

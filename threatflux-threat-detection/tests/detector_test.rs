@@ -1,7 +1,6 @@
 //! Tests for the main ThreatDetector functionality
 
 use std::io::Write;
-use std::path::Path;
 use tempfile::NamedTempFile;
 use threatflux_threat_detection::types::*;
 use threatflux_threat_detection::{ThreatDetector, ThreatDetectorConfig};
@@ -474,10 +473,11 @@ async fn test_performance_metrics() {
 #[test]
 fn test_detector_default() {
     let detector = ThreatDetector::default();
+    let config = detector.scan_config();
 
     // Default should create an empty detector
-    assert_eq!(detector.engines.len(), 0);
-    assert_eq!(detector.config.max_file_size, 100 * 1024 * 1024);
-    assert_eq!(detector.config.scan_timeout.as_secs(), 300);
-    assert_eq!(detector.config.max_concurrent_scans, 4);
+    assert_eq!(detector.get_engine_info().len(), 0);
+    assert_eq!(config.max_file_size, 100 * 1024 * 1024);
+    assert_eq!(config.scan_timeout.as_secs(), 300);
+    assert_eq!(config.max_concurrent_scans, 4);
 }

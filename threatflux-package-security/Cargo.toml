@@ -9,6 +9,8 @@ repository = "https://github.com/ThreatFlux/threatflux-package-security"
 keywords = ["security", "vulnerability", "npm", "python", "java", "package-analysis"]
 categories = ["development-tools", "security"]
 
+[workspace]
+
 [dependencies]
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }

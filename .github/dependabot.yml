@@ -17,6 +17,23 @@ updates:
       - "rust"
     open-pull-requests-limit: 10
 
+  # Enable version updates for the standalone package security crate
+  - package-ecosystem: "cargo"
+    directory: "/threatflux-package-security"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    reviewers:
+      - "vtriple"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "rust"
+    open-pull-requests-limit: 5
+
   # Enable version updates for GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
