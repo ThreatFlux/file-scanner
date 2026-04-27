@@ -39,7 +39,7 @@ walkdir = "2.4"
 # Hashing algorithms
 sha2 = "0.10"
 md-5 = "0.10"
-blake3 = "1.5"
+blake3 = "1.8"
 
 # String processing
 regex = "1.10"
