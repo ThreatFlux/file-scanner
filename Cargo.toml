@@ -97,7 +97,7 @@ base64 = "0.22"
 
 # Test dependencies
 tempfile = "3.23.0"
-mockall = "0.13"
+mockall = "0.14"
 proptest = "1.8"
 rstest = "0.26"
 criterion = { version = "0.7", features = ["html_reports"] }
