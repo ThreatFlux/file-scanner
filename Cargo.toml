@@ -87,7 +87,7 @@ edit-distance = "2.2"
 
 # Archive handling
 cfb = "0.11"
-zip = "5.1.1"
+zip = "8.5.0"
 flate2 = "1.0"
 tar = "0.4"
 
