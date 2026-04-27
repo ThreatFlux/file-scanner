@@ -63,7 +63,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 hyper = "1.5"
 tokio-stream = "0.1"
 futures-util = "0.3"
-uuid = { version = "1.18.1", features = ["v4"] }
+uuid = { version = "1.23.1", features = ["v4"] }
 
 # OpenAPI documentation
 utoipa = { version = "5.4", features = ["axum_extras", "chrono", "uuid"] }
