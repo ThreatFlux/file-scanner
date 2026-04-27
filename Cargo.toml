@@ -72,7 +72,7 @@ utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 # Static analysis
 addr2line = "0.25.1"
-capstone = "0.13"
+capstone = "0.14"
 petgraph = "0.8.2"
 
 # Threat detection
