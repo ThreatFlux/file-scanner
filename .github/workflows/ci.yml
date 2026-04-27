@@ -65,7 +65,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -136,7 +136,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -206,7 +206,7 @@ jobs:
           toolchain: ${{ matrix.rust }}
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -313,7 +313,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -402,7 +402,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -502,7 +502,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
         uses: actions/cache@v4
