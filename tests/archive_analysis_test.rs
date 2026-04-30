@@ -312,7 +312,8 @@ fn test_zip_with_comment() {
         let mut zip = ZipWriter::new(file);
 
         // Set archive comment
-        zip.set_comment("This is a test archive with comment");
+        zip.set_comment("This is a test archive with comment")
+            .unwrap();
 
         let options = SimpleFileOptions::default();
         zip.start_file("file.txt", options).unwrap();

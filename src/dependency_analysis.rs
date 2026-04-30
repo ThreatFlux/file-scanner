@@ -1719,7 +1719,7 @@ mod tests {
         let _none = VulnerabilitySeverity::None;
 
         // Create vulnerabilities with different severities
-        let vulnerabilities = vec![
+        let vulnerabilities = [
             KnownVulnerability {
                 cve_id: "CVE-1".to_string(),
                 severity: low.clone(),

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use blake3::Hasher as Blake3Hasher;
-use md5::{Digest, Md5};
+use md5::{Digest as _, Md5};
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Sha512};
+use sha2::{Digest as _, Sha256, Sha512};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -23,6 +23,16 @@ pub struct Hashes {
     pub sha256: String,
     pub sha512: String,
     pub blake3: String,
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 pub async fn calculate_all_hashes(path: &Path) -> Result<Hashes> {
@@ -85,7 +95,7 @@ fn calculate_md5_sync(path: &Path) -> Result<String> {
         hasher.update(&buffer[..count]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(encode_hex(&hasher.finalize()))
 }
 
 fn calculate_sha256(path: &Path) -> Result<String> {
@@ -102,7 +112,7 @@ fn calculate_sha256(path: &Path) -> Result<String> {
         hasher.update(&buffer[..count]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(encode_hex(&hasher.finalize()))
 }
 
 fn calculate_sha512(path: &Path) -> Result<String> {
@@ -119,7 +129,7 @@ fn calculate_sha512(path: &Path) -> Result<String> {
         hasher.update(&buffer[..count]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(encode_hex(&hasher.finalize()))
 }
 
 fn calculate_blake3(path: &Path) -> Result<String> {

@@ -1306,7 +1306,7 @@ fn test_import_export_analysis() {
 #[test]
 fn test_symbol_count_calculations() {
     // Test symbol count calculation logic
-    let functions = vec![
+    let functions = [
         FunctionInfo {
             name: "local1".to_string(),
             address: 0x1000,
@@ -1480,7 +1480,7 @@ fn test_address_validation() {
 #[test]
 fn test_function_size_analysis() {
     // Test function size analysis and validation
-    let functions = vec![
+    let functions = [
         ("small_func", 10u64),
         ("medium_func", 1000u64),
         ("large_func", 10000u64),
@@ -1781,7 +1781,7 @@ fn test_mach_o_symbol_analysis_detailed() {
 #[test]
 fn test_function_overlaps_and_gaps() {
     // Test detection of function overlaps and gaps
-    let functions = vec![
+    let functions = [
         FunctionInfo {
             name: "func1".to_string(),
             address: 0x1000,

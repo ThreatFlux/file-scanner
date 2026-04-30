@@ -206,21 +206,21 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
                     });
                 }
             }
-            goblin::elf::sym::STT_OBJECT => {
-                if binding == goblin::elf::sym::STB_GLOBAL || binding == goblin::elf::sym::STB_LOCAL
-                {
-                    global_variables.push(VariableInfo {
-                        name: name.clone(),
-                        address,
-                        size,
-                        var_type: if binding == goblin::elf::sym::STB_GLOBAL {
-                            VariableType::Global
-                        } else {
-                            VariableType::Static
-                        },
-                        section: None, // Could be enhanced to include section name
-                    });
-                }
+            goblin::elf::sym::STT_OBJECT
+                if binding == goblin::elf::sym::STB_GLOBAL
+                    || binding == goblin::elf::sym::STB_LOCAL =>
+            {
+                global_variables.push(VariableInfo {
+                    name: name.clone(),
+                    address,
+                    size,
+                    var_type: if binding == goblin::elf::sym::STB_GLOBAL {
+                        VariableType::Global
+                    } else {
+                        VariableType::Static
+                    },
+                    section: None, // Could be enhanced to include section name
+                });
             }
             _ => {}
         }
@@ -783,7 +783,7 @@ mod tests {
 
     #[test]
     fn test_symbol_counts_calculation() {
-        let functions = vec![
+        let functions = [
             FunctionInfo {
                 name: "local_func".to_string(),
                 address: 0x1000,
@@ -1077,7 +1077,7 @@ mod tests {
     #[test]
     fn test_function_classification() {
         // Test entry point detection for different scenarios
-        let functions = vec![
+        let functions = [
             // Linux entry point
             FunctionInfo {
                 name: "_start".to_string(),
