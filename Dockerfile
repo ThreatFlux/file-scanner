@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.95.0-bookworm AS builder
+FROM ghcr.io/threatflux/rust-cicd-template:base-rust-latest AS builder
 
 # Build arguments
 ARG VERSION=unknown
