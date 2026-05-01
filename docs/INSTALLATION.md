@@ -19,7 +19,7 @@ This guide covers installing File Scanner on various platforms.
 
 ### Required
 
-- **Rust**: Version 1.87.0 or later
+- **Rust**: Version 1.95.0 or later
 
   ```bash
   # Install Rust via rustup
