@@ -127,12 +127,8 @@ setup(
     match result {
         Ok(analysis) => {
             // Should extract repository URL from setup.py
-            if analysis.package_info.repository_url.is_some() {
-                assert!(analysis
-                    .package_info
-                    .repository_url
-                    .unwrap()
-                    .contains("github.com"));
+            if let Some(repository_url) = &analysis.package_info.repository_url {
+                assert!(repository_url.contains("github.com"));
             }
 
             // Should have integrity checks

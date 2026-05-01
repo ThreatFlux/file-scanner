@@ -2,7 +2,7 @@ use anyhow::Result;
 use blake3::Hasher as Blake3Hasher;
 use md5::{Digest as _, Md5};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256, Sha512};
+use sha2::{Sha256, Sha512};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;

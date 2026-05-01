@@ -1708,8 +1708,8 @@ fn test_pe_symbol_analysis_detailed() {
 
                     // PE imports should have library names
                     for import in &symbol_table.imports {
-                        if import.library.is_some() {
-                            assert!(!import.library.as_ref().unwrap().is_empty());
+                        if let Some(library) = &import.library {
+                            assert!(!library.is_empty());
                         }
                     }
 
