@@ -37,7 +37,7 @@ memmap2 = "0.9"
 walkdir = "2.4"
 
 # Hashing algorithms
-sha2 = "0.10"
+sha2 = "0.11.0"
 md-5 = "0.11"
 blake3 = "1.8"
 
@@ -47,7 +47,7 @@ encoding_rs = "0.8"
 
 # Binary parsing
 goblin = "0.10"
-object = "0.37"
+object = "0.39.1"
 
 # Cryptography and signatures
 ring = "0.17"
@@ -80,13 +80,13 @@ yara-x = "1.15.0"
 
 # Network and repository checks
 strsim = "0.11"
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+reqwest = { version = "0.13.3", features = ["json", "blocking"] }
 git2 = "0.20"
 url = "2.5"
 edit-distance = "2.2"
 
 # Archive handling
-cfb = "0.11"
+cfb = "0.14.0"
 zip = "8.5.0"
 flate2 = "1.0"
 tar = "0.4"
@@ -100,7 +100,7 @@ tempfile = "3.23.0"
 mockall = "0.14"
 proptest = "1.8"
 rstest = "0.26"
-criterion = { version = "0.7", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 pretty_assertions = "1.4"
 test-case = "3.3"
 serial_test = "3.0"
@@ -133,7 +133,7 @@ pre-release-replacements = [
 name = "file-scanner"
 version = "0.2.9"
 edition = "2021"
-rust-version = "1.75.0"
+rust-version = "1.95.0"
 authors = ["File Scanner Project <dev@threatflux.com>"]
 description = "A comprehensive file analysis framework for security research, malware detection, and forensic investigation"
 homepage = "https://github.com/ThreatFlux/file-scanner"

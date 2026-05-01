@@ -2,7 +2,7 @@
 name = "threatflux-threat-detection"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75.0"
+rust-version = "1.95.0"
 authors = ["ThreatFlux Team"]
 description = "Comprehensive threat detection library with YARA integration and malware analysis"
 license = "MIT"
@@ -26,7 +26,7 @@ serde-support = ["serde", "serde_json"]
 [dependencies]
 # Core dependencies
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0.18"
 log = "0.4"
 walkdir = "2.3"
 async-trait = "0.1"
@@ -42,7 +42,7 @@ regex = { version = "1.10", optional = true }
 
 # Rule management (optional)
 git2 = { version = "0.20", optional = true }
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { version = "0.13.3", features = ["json"], optional = true }
 
 # Async support (optional)
 tokio = { version = "1.0", features = ["full"], optional = true }
@@ -60,7 +60,7 @@ uuid = { version = "1.8", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.0"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 proptest = "1.0"
 tokio-test = "0.4"
 # Testing utilities
@@ -73,7 +73,7 @@ env_logger = "0.11"
 # Async testing
 futures = "0.3"
 # Mock and test data
-rand = "0.8"
+rand = "0.10.1"
 
 # Examples and benchmarks currently disabled - files not implemented yet
 # [[example]]
