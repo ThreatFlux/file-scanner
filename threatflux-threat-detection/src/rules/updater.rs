@@ -53,7 +53,7 @@ impl RuleUpdater {
     /// Update rules from all sources
     pub async fn update_all(&mut self) -> Result<()> {
         for source in &mut self.sources {
-            if let Err(e) = self.update_source(source).await {
+            if let Err(e) = Self::update_source(source).await {
                 log::warn!("Failed to update source {}: {}", source.name, e);
             }
         }
@@ -61,16 +61,16 @@ impl RuleUpdater {
     }
 
     /// Update rules from a specific source
-    async fn update_source(&self, source: &mut RuleSource) -> Result<()> {
+    async fn update_source(source: &mut RuleSource) -> Result<()> {
         match source.source_type {
-            RuleSourceType::Git => self.update_from_git(source).await,
-            RuleSourceType::Http => self.update_from_http(source).await,
-            RuleSourceType::File => self.update_from_file(source).await,
+            RuleSourceType::Git => Self::update_from_git(source).await,
+            RuleSourceType::Http => Self::update_from_http(source).await,
+            RuleSourceType::File => Self::update_from_file(source).await,
         }
     }
 
     /// Update rules from Git repository
-    async fn update_from_git(&self, source: &mut RuleSource) -> Result<()> {
+    async fn update_from_git(source: &mut RuleSource) -> Result<()> {
         // Placeholder implementation - would use git2 crate when feature is enabled
         log::info!("Updating rules from Git source: {}", source.name);
         source.last_updated = Some(Utc::now());
@@ -78,7 +78,7 @@ impl RuleUpdater {
     }
 
     /// Update rules from HTTP endpoint
-    async fn update_from_http(&self, source: &mut RuleSource) -> Result<()> {
+    async fn update_from_http(source: &mut RuleSource) -> Result<()> {
         // Placeholder implementation - would use reqwest when feature is enabled
         log::info!("Updating rules from HTTP source: {}", source.name);
         source.last_updated = Some(Utc::now());
@@ -86,7 +86,7 @@ impl RuleUpdater {
     }
 
     /// Update rules from local file
-    async fn update_from_file(&self, source: &mut RuleSource) -> Result<()> {
+    async fn update_from_file(source: &mut RuleSource) -> Result<()> {
         // Placeholder implementation
         log::info!("Updating rules from file source: {}", source.name);
 

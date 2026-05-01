@@ -365,13 +365,13 @@ async fn test_scan_target_variants() {
     let detector = ThreatDetector::with_config(config).await.unwrap();
 
     // Test different target types
-    let memory_target = ScanTarget::Memory {
+    let _memory_target = ScanTarget::Memory {
         data: b"memory test data".to_vec(),
         name: Some("memory_sample".to_string()),
     };
 
     let test_file = create_test_file(b"file test data");
-    let file_target = ScanTarget::File(test_file.path().to_path_buf());
+    let _file_target = ScanTarget::File(test_file.path().to_path_buf());
 
     // Test memory target
     let memory_result = detector
@@ -402,10 +402,10 @@ async fn test_analysis_result_structure() {
         .unwrap();
 
     // Verify analysis structure is complete
-    assert!(result.matches.len() >= 0);
-    assert!(result.indicators.len() >= 0);
-    assert!(result.classifications.len() >= 0);
-    assert!(result.recommendations.len() >= 0);
+    assert_eq!(result.matches.len(), 0);
+    assert_eq!(result.indicators.len(), 0);
+    assert_eq!(result.classifications.len(), 0);
+    assert_eq!(result.recommendations.len(), 0);
 
     // Verify scan statistics
     assert!(result.scan_stats.scan_duration.as_nanos() > 0);

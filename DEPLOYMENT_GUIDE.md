@@ -238,7 +238,7 @@ sudo systemctl status threatflux
 
 ```dockerfile
 # Multi-stage build for optimization
-FROM rust:1.87-slim as builder
+FROM docker.io/threatflux/rust-cicd-template:base-rust-latest as builder
 
 WORKDIR /app
 

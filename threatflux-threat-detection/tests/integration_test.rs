@@ -304,7 +304,7 @@ async fn test_directory_scanning() {
 
             for analysis in analyses {
                 assert_eq!(analysis.threat_level, ThreatLevel::Clean);
-                assert!(analysis.scan_stats.file_size_scanned >= 0);
+                assert!(analysis.scan_stats.file_size_scanned > 0);
             }
         }
         Err(_) => {

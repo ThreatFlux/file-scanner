@@ -113,8 +113,7 @@ impl RuleManager {
                 name: source.name.clone(),
                 url: source.url.clone(),
                 source_type: match source.source_type {
-                    RuleSourceType::Local => updater::RuleSourceType::File,
-                    RuleSourceType::Builtin => updater::RuleSourceType::File,
+                    RuleSourceType::File => updater::RuleSourceType::File,
                     RuleSourceType::Http => updater::RuleSourceType::Http,
                     RuleSourceType::Git => updater::RuleSourceType::Git,
                 },
@@ -137,18 +136,9 @@ impl RuleManager {
     /// Load rules from a specific source
     async fn load_rules_from_source(&self, source: &RuleSource) -> Result<String> {
         match source.source_type {
-            RuleSourceType::Local => std::fs::read_to_string(&source.url)
+            #[cfg(feature = "rule-management")]
+            RuleSourceType::File => std::fs::read_to_string(&source.url)
                 .map_err(|e| ThreatError::rule_load(format!("Local file {}: {}", source.url, e))),
-            RuleSourceType::Builtin => {
-                #[cfg(feature = "builtin-rules")]
-                {
-                    Ok(builtin::get_builtin_rules().join("\n"))
-                }
-                #[cfg(not(feature = "builtin-rules"))]
-                {
-                    Err(ThreatError::rule_load("Built-in rules not enabled"))
-                }
-            }
             #[cfg(feature = "rule-management")]
             RuleSourceType::Http => {
                 // For now, return empty string - could use HTTP client when feature is fully implemented
@@ -166,6 +156,21 @@ impl RuleManager {
                     source.name
                 );
                 Ok(String::new())
+            }
+            #[cfg(not(feature = "rule-management"))]
+            RuleSourceType::Local => std::fs::read_to_string(&source.url).map_err(|e| {
+                ThreatError::rule_load(format!("Local file {}: {}", source.url, e))
+            }),
+            #[cfg(not(feature = "rule-management"))]
+            RuleSourceType::Builtin => {
+                #[cfg(feature = "builtin-rules")]
+                {
+                    Ok(builtin::get_builtin_rules().join("\n"))
+                }
+                #[cfg(not(feature = "builtin-rules"))]
+                {
+                    Err(ThreatError::rule_load("Built-in rules not enabled"))
+                }
             }
         }
     }
