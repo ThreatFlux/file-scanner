@@ -15,7 +15,13 @@ RUN apt-get update && apt-get install -y \
     clang \
     lld \
     curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain 1.95.0
+
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Create app directory
 WORKDIR /usr/src/file-scanner
