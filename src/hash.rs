@@ -1,8 +1,9 @@
 use anyhow::Result;
 use blake3::Hasher as Blake3Hasher;
-use md5::{Digest, Md5};
+use md5::digest::Digest as Md5Digest;
+use md5::Md5;
 use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Sha512};
+use sha2::{digest::Digest as ShaDigest, Sha256, Sha512};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -82,10 +83,10 @@ fn calculate_md5_sync(path: &Path) -> Result<String> {
         if count == 0 {
             break;
         }
-        hasher.update(&buffer[..count]);
+        Md5Digest::update(&mut hasher, &buffer[..count]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(to_hex(Md5Digest::finalize(hasher).as_ref()))
 }
 
 fn calculate_sha256(path: &Path) -> Result<String> {
@@ -99,10 +100,10 @@ fn calculate_sha256(path: &Path) -> Result<String> {
         if count == 0 {
             break;
         }
-        hasher.update(&buffer[..count]);
+        ShaDigest::update(&mut hasher, &buffer[..count]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(to_hex(ShaDigest::finalize(hasher).as_ref()))
 }
 
 fn calculate_sha512(path: &Path) -> Result<String> {
@@ -116,10 +117,21 @@ fn calculate_sha512(path: &Path) -> Result<String> {
         if count == 0 {
             break;
         }
-        hasher.update(&buffer[..count]);
+        ShaDigest::update(&mut hasher, &buffer[..count]);
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(to_hex(ShaDigest::finalize(hasher).as_ref()))
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, byte| {
+            use std::fmt::Write;
+
+            let _ = write!(out, "{:02x}", byte);
+            out
+        })
 }
 
 fn calculate_blake3(path: &Path) -> Result<String> {
