@@ -158,9 +158,8 @@ impl RuleManager {
                 Ok(String::new())
             }
             #[cfg(not(feature = "rule-management"))]
-            RuleSourceType::Local => std::fs::read_to_string(&source.url).map_err(|e| {
-                ThreatError::rule_load(format!("Local file {}: {}", source.url, e))
-            }),
+            RuleSourceType::Local => std::fs::read_to_string(&source.url)
+                .map_err(|e| ThreatError::rule_load(format!("Local file {}: {}", source.url, e))),
             #[cfg(not(feature = "rule-management"))]
             RuleSourceType::Builtin => {
                 #[cfg(feature = "builtin-rules")]
