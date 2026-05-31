@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated Dockerfile to use Rust 1.87.0
 - Improved error handling in MCP tests
 - Enhanced caching strategy for better performance
+- Explicitly excluded `threatflux-package-security` from the root workspace so it can be updated and validated independently
+- Added Dependabot coverage for the standalone `threatflux-package-security` crate
 
 ### Fixed
 
@@ -44,6 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added cargo-audit to CI pipeline
 - Implemented security vulnerability reporting templates
 - Enhanced input validation for file paths
+- Refreshed root and standalone Cargo lockfiles to pick up patched transitive dependencies
+- Updated the Docker security scan action to a patched Trivy release
 
 ## [0.1.0] - 2025-05-29
 

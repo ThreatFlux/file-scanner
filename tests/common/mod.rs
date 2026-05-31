@@ -105,7 +105,7 @@ pub mod mocks {
 
 /// Test data generators
 pub mod generators {
-    use rand::Rng;
+    use rand::RngExt;
 
     /// Generate random bytes of specified length
     pub fn random_bytes(len: usize) -> Vec<u8> {

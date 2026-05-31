@@ -324,7 +324,7 @@ mount -o noatime,nodiratime /dev/sda1 /mnt/analysis
 
 #### Docker Configuration
 ```dockerfile
-FROM rust:1.87-slim
+FROM docker.io/threatflux/rust-cicd-template:base-rust-latest
 
 # Optimize for analysis workloads
 ENV RUST_LOG=warn

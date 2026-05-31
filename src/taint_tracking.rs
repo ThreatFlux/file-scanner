@@ -510,7 +510,7 @@ impl TaintTracker {
         }
 
         let mut most_common_vulnerabilities: Vec<_> = vuln_counts.into_iter().collect();
-        most_common_vulnerabilities.sort_by(|a, b| b.1.cmp(&a.1));
+        most_common_vulnerabilities.sort_by_key(|item| std::cmp::Reverse(item.1));
         most_common_vulnerabilities.truncate(5);
 
         TaintFlowSummary {

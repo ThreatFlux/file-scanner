@@ -171,6 +171,16 @@ impl ThreatDetector {
         let mut all_indicators = Vec::new();
         let mut classifications = std::collections::HashSet::new();
 
+        match &target {
+            ScanTarget::File(path) => {
+                std::fs::metadata(path).map_err(ThreatError::from)?;
+            }
+            ScanTarget::Directory(path) => {
+                std::fs::metadata(path).map_err(ThreatError::from)?;
+            }
+            ScanTarget::Memory { .. } => {}
+        }
+
         // Run YARA engine if available
         if let Some(ref yara_engine) = self.yara_engine {
             match yara_engine.scan(target.clone()).await {
@@ -269,6 +279,11 @@ impl ThreatDetector {
         }
 
         engines
+    }
+
+    /// Get the active scan configuration.
+    pub fn scan_config(&self) -> &ScanConfig {
+        self.config.as_ref()
     }
 }
 

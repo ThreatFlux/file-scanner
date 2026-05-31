@@ -66,6 +66,19 @@ We regularly update dependencies to patch known vulnerabilities. You can check f
 cargo audit
 ```
 
+### Temporary Accepted Risk: `yara-x` / `wasmtime`
+
+As of April 30, 2026, the default malware-analysis path still depends on `yara-x`, and the
+latest available `yara-x` release continues to resolve to `wasmtime 40.0.4`. The upstream
+Wasmtime advisories published on April 9, 2026 are therefore temporarily accepted for this
+repository while YARA support remains a core feature.
+
+This exception is limited to the `yara-x` dependency chain and must be re-evaluated when either:
+
+- `yara-x` releases a version that moves to a patched Wasmtime line
+- file-scanner makes YARA support optional or isolates it from the default runtime path
+- upstream guidance materially changes the exploitability assessment for our supported targets
+
 ## Acknowledgments
 
 We appreciate responsible disclosure of security vulnerabilities. Contributors who report valid security

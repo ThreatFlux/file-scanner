@@ -1,7 +1,6 @@
 //! Tests for the main ThreatDetector functionality
 
 use std::io::Write;
-use std::path::Path;
 use tempfile::NamedTempFile;
 use threatflux_threat_detection::types::*;
 use threatflux_threat_detection::{ThreatDetector, ThreatDetectorConfig};
@@ -366,13 +365,13 @@ async fn test_scan_target_variants() {
     let detector = ThreatDetector::with_config(config).await.unwrap();
 
     // Test different target types
-    let memory_target = ScanTarget::Memory {
+    let _memory_target = ScanTarget::Memory {
         data: b"memory test data".to_vec(),
         name: Some("memory_sample".to_string()),
     };
 
     let test_file = create_test_file(b"file test data");
-    let file_target = ScanTarget::File(test_file.path().to_path_buf());
+    let _file_target = ScanTarget::File(test_file.path().to_path_buf());
 
     // Test memory target
     let memory_result = detector
@@ -403,10 +402,10 @@ async fn test_analysis_result_structure() {
         .unwrap();
 
     // Verify analysis structure is complete
-    assert!(result.matches.len() >= 0);
-    assert!(result.indicators.len() >= 0);
-    assert!(result.classifications.len() >= 0);
-    assert!(result.recommendations.len() >= 0);
+    assert_eq!(result.matches.len(), 0);
+    assert_eq!(result.indicators.len(), 0);
+    assert_eq!(result.classifications.len(), 0);
+    assert_eq!(result.recommendations.len(), 0);
 
     // Verify scan statistics
     assert!(result.scan_stats.scan_duration.as_nanos() > 0);
@@ -474,10 +473,11 @@ async fn test_performance_metrics() {
 #[test]
 fn test_detector_default() {
     let detector = ThreatDetector::default();
+    let config = detector.scan_config();
 
     // Default should create an empty detector
-    assert_eq!(detector.engines.len(), 0);
-    assert_eq!(detector.config.max_file_size, 100 * 1024 * 1024);
-    assert_eq!(detector.config.scan_timeout.as_secs(), 300);
-    assert_eq!(detector.config.max_concurrent_scans, 4);
+    assert_eq!(detector.get_engine_info().len(), 0);
+    assert_eq!(config.max_file_size, 100 * 1024 * 1024);
+    assert_eq!(config.scan_timeout.as_secs(), 300);
+    assert_eq!(config.max_concurrent_scans, 4);
 }

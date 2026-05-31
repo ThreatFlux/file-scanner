@@ -194,7 +194,7 @@ fn create_minimal_zip() -> Vec<u8> {
 }
 
 fn generate_random_data(size: usize) -> Vec<u8> {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
     (0..size).map(|_| rng.random()).collect()
 }

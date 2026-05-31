@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.91.1-bookworm AS builder
+FROM docker.io/threatflux/rust-cicd-template:base-rust-latest AS builder
 
 # Build arguments
 ARG VERSION=unknown
@@ -7,6 +7,7 @@ ARG BUILD_DATE
 ARG VCS_REF
 
 # Install build dependencies
+USER root
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
@@ -14,7 +15,13 @@ RUN apt-get update && apt-get install -y \
     clang \
     lld \
     curl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain 1.95.0
+
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Create app directory
 WORKDIR /usr/src/file-scanner
@@ -53,6 +60,7 @@ RUN cargo build --release --workspace
 FROM debian:bookworm-slim
 
 # Install runtime dependencies
+USER root
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \

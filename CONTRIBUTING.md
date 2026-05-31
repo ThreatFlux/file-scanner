@@ -81,8 +81,8 @@ Look for issues labeled:
 
 ```bash
 # Required
-rustc 1.87.0+
-cargo 1.87.0+
+rustc 1.95.0+
+cargo 1.95.0+
 
 # Recommended
 git 2.0+

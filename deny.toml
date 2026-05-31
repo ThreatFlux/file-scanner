@@ -16,6 +16,20 @@ ignore = [
     "RUSTSEC-2025-0141",
     # RSA timing attack - waiting for yara-x upstream fix
     "RUSTSEC-2023-0071",
+    # Temporary accepted risk: file-scanner's default malware-analysis path depends on
+    # yara-x, which currently pins wasmtime 40.0.4. These advisories are tracked until
+    # yara-x moves to a patched Wasmtime release line.
+    "RUSTSEC-2026-0085",
+    "RUSTSEC-2026-0086",
+    "RUSTSEC-2026-0087",
+    "RUSTSEC-2026-0088",
+    "RUSTSEC-2026-0089",
+    "RUSTSEC-2026-0091",
+    "RUSTSEC-2026-0092",
+    "RUSTSEC-2026-0093",
+    "RUSTSEC-2026-0094",
+    "RUSTSEC-2026-0095",
+    "RUSTSEC-2026-0096",
 ]
 
 [licenses]
@@ -36,6 +50,7 @@ allow = [
     "Zlib",
     "bzip2-1.0.6",
     "MPL-2.0",
+    "CDLA-Permissive-2.0",
 ]
 exceptions = [
     # Allow specific packages with incompatible licenses if necessary
