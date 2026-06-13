@@ -32,7 +32,7 @@ walkdir = "2.3"
 async-trait = "0.1"
 
 # Detection engines
-yara-x = { version = "1.15.0", optional = true }
+yara-x = { version = "1.17.0", optional = true }
 # Temporarily disabled due to shlex security vulnerability RUSTSEC-2024-0006
 # clamav-rs = { version = "0.5.5", optional = true }
 
