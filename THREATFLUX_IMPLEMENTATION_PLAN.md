@@ -1281,7 +1281,7 @@ criterion_main!(benches);
 ### Docker Image
 
 ```dockerfile
-FROM docker.io/threatflux/rust-cicd-template:base-rust-latest as builder
+FROM rust:1.96.0-bookworm AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
