@@ -2,7 +2,7 @@
 name = "threatflux-threat-detection"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.95.0"
+rust-version = "1.96.0"
 authors = ["ThreatFlux Team"]
 description = "Comprehensive threat detection library with YARA integration and malware analysis"
 license = "MIT"

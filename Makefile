@@ -1,3 +1,12 @@
+CARGO ?= cargo
+RUST_MSRV ?= 1.96.0
+RUST_TOOLCHAIN ?= 1.96.0
+BINARY_NAME ?= file-scanner
+BINARY_PACKAGE ?= file-scanner
+SBOM_MANIFEST_PATH ?= Cargo.toml
+DOCKER_IMAGE ?= threatflux/file-scanner
+DOCKER_TAG ?= latest
+
 # Define all ThreatFlux libraries
 LIBRARIES := threatflux-hashing threatflux-string-analysis threatflux-cache threatflux-binary-analysis threatflux-threat-detection threatflux-package-security
 
@@ -47,6 +56,7 @@ help:
 	@echo "  fmt           - Format code with rustfmt"
 	@echo "  check         - Run cargo check"
 	@echo "  security-audit - Run security audit"
+	@echo "  msrv          - Check Rust $(RUST_MSRV) compatibility"
 	@echo ""
 	@echo "RUN COMMANDS:"
 	@echo "  install       - Install the binary to ~/.cargo/bin"
@@ -86,9 +96,9 @@ help:
 # Initialize project
 init:
 	@echo "Initializing project..."
-	rustup update stable
-	rustup component add clippy rustfmt
-	cargo fetch
+	rustup toolchain install $(RUST_TOOLCHAIN)
+	rustup component add --toolchain $(RUST_TOOLCHAIN) clippy rustfmt llvm-tools-preview
+	$(CARGO) +$(RUST_TOOLCHAIN) fetch
 	@echo "Project initialized successfully!"
 
 # Build debug version
@@ -209,7 +219,15 @@ run-release: release
 # Docker operations
 docker-build:
 	@echo "Building Docker image..."
-	docker build -t threatflux/file-scanner:latest .
+	docker build \
+		--build-arg BINARY_NAME=$(BINARY_NAME) \
+		--build-arg BINARY_PACKAGE=$(BINARY_PACKAGE) \
+		--build-arg SBOM_MANIFEST_PATH=$(SBOM_MANIFEST_PATH) \
+		--build-arg OCI_IMAGE_TITLE="File Scanner" \
+		--build-arg OCI_IMAGE_DESCRIPTION="Comprehensive native file scanner with MCP server support" \
+		--build-arg OCI_IMAGE_VENDOR=ThreatFlux \
+		--build-arg OCI_IMAGE_SOURCE=https://github.com/ThreatFlux/file-scanner \
+		-t $(DOCKER_IMAGE):$(DOCKER_TAG) .
 
 docker-run:
 	@echo "Running Docker container..."
@@ -232,6 +250,16 @@ fmt-check:
 	@echo "🔍 Checking code format..."
 	@cargo fmt -- --check
 	@echo "✅ Format check passed"
+
+msrv-install:
+	@echo "Installing Rust $(RUST_MSRV)..."
+	@rustup toolchain install $(RUST_MSRV) --profile minimal
+	@rustup component add --toolchain $(RUST_MSRV) clippy rustfmt
+
+msrv: msrv-install
+	@echo "Checking MSRV ($(RUST_MSRV))..."
+	@rustup run $(RUST_MSRV) cargo check --workspace --all-features
+	@echo "✅ MSRV check passed"
 
 
 check:

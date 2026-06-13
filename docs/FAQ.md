@@ -61,7 +61,7 @@ File Scanner can analyze any file type, with specialized support for:
 
 ### Rust version error
 
-#### Q: I get "error: package requires rustc 1.95.0"
+#### Q: I get "error: package requires rustc 1.96.0"
 
 A: Update Rust to the latest version:
 
