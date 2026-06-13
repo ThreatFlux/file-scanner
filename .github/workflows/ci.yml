@@ -356,8 +356,12 @@ jobs:
           rm -rf target/release/deps/*.pdb
           rm -rf target/release/deps/*.dSYM
           rm -rf target/release/incremental
-          # Remove large rlib files we don't need for tests
-          find target -name "*.rlib" -size +30M -delete
+          # Remove large rlib files we don't need for tests when the cache restored a target dir.
+          if [ -d target ]; then
+            find target -name "*.rlib" -size +30M -delete
+          else
+            echo "No target directory to clean"
+          fi
           echo "📊 Disk space after artifact cleanup:"
           df -h
 
