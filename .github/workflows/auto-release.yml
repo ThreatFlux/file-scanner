@@ -325,7 +325,7 @@ jobs:
     name: Publish to crates.io
     needs: [version-bump, build-and-test, create-release]
     runs-on: ubuntu-latest
-    if: needs.version-bump.outputs.version_changed == 'true'
+    if: needs.version-bump.outputs.version_changed == 'true' && vars.PUBLISH_CRATE == 'true'
 
     steps:
       - name: Checkout code
