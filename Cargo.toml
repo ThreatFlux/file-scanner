@@ -151,7 +151,7 @@ threatflux-string-analysis = { version = "0.1.1" }
 threatflux-cache = { version = "0.1.8" } # TODO: Update library to use utoipa 5.4.0 for openapi feature
 threatflux-binary-analysis = { version = "0.2.0", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis (local workspace)
-threatflux-threat-detection = { path = "threatflux-threat-detection", features = ["builtin-rules", "pattern-matching", "serde-support", "async-scanning"] }
+threatflux-threat-detection = { version = "0.1.0", path = "threatflux-threat-detection", features = ["builtin-rules", "pattern-matching", "serde-support", "async-scanning"] }
 # threatflux-package-security = { version = "0.1.0" } # Not used in actual source code
 
 # Core dependencies (using workspace versions)

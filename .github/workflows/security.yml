@@ -42,18 +42,26 @@ jobs:
 
       - name: Run cargo audit
         run: |
-          cargo audit \
-            --ignore RUSTSEC-2026-0085 \
-            --ignore RUSTSEC-2026-0086 \
-            --ignore RUSTSEC-2026-0087 \
-            --ignore RUSTSEC-2026-0088 \
-            --ignore RUSTSEC-2026-0089 \
-            --ignore RUSTSEC-2026-0091 \
-            --ignore RUSTSEC-2026-0092 \
-            --ignore RUSTSEC-2026-0093 \
-            --ignore RUSTSEC-2026-0094 \
-            --ignore RUSTSEC-2026-0095 \
-            --ignore RUSTSEC-2026-0096
+          for attempt in 1 2 3; do
+            if cargo audit \
+              --ignore RUSTSEC-2026-0085 \
+              --ignore RUSTSEC-2026-0086 \
+              --ignore RUSTSEC-2026-0087 \
+              --ignore RUSTSEC-2026-0088 \
+              --ignore RUSTSEC-2026-0089 \
+              --ignore RUSTSEC-2026-0091 \
+              --ignore RUSTSEC-2026-0092 \
+              --ignore RUSTSEC-2026-0093 \
+              --ignore RUSTSEC-2026-0094 \
+              --ignore RUSTSEC-2026-0095 \
+              --ignore RUSTSEC-2026-0096; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 10))
+          done
 
       - name: Run cargo deny
         run: cargo deny check
