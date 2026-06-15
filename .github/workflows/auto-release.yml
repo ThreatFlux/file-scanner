@@ -311,7 +311,7 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version-bump.outputs.new_version }}
           name: File Scanner ${{ needs.version-bump.outputs.new_version }}
@@ -542,7 +542,7 @@ jobs:
           sha256sum file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.zip > file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.zip.sha256
 
       - name: Upload binary to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version-bump.outputs.new_version }}
           files: |
