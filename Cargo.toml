@@ -81,7 +81,7 @@ yara-x = "1.17.0"
 # Network and repository checks
 strsim = "0.11"
 reqwest = { version = "0.13.3", features = ["json", "blocking"] }
-git2 = "0.20"
+git2 = "0.21"
 url = "2.5"
 edit-distance = "2.2"
 
