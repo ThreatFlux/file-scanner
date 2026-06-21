@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781446924935,
+  "lastUpdate": 1782018221320,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -7285,6 +7285,88 @@ window.BENCHMARK_DATA = {
           {
             "name": "hash_calculations/calculate_md5_only/10KB",
             "value": 56928.519379143094,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "github-actions[bot]",
+            "username": "github-actions[bot]",
+            "email": "github-actions[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "github-actions[bot]",
+            "username": "github-actions[bot]",
+            "email": "github-actions[bot]@users.noreply.github.com"
+          },
+          "id": "fe9512df959ce8e8d64f4de1b5b1bb7b9e00b6fb",
+          "message": "chore(release): bump version to 0.3.2\n\n  Auto-generated release commit",
+          "timestamp": "2026-06-14T03:06:32Z",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/fe9512df959ce8e8d64f4de1b5b1bb7b9e00b6fb"
+        },
+        "date": 1782018220987,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2967112.11,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 346000.1364305503,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2497206.572500001,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 33217.42267213832,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2879505.418333333,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 6532.651153363426,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 45699.534871213466,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 84828.52674143668,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 252464.5522579182,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3508607.2573333336,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2274426.1486363644,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 52987.112572825725,
             "unit": "ns"
           }
         ]
