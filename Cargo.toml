@@ -53,7 +53,7 @@ object = "0.39.1"
 ring = "0.17"
 
 # MCP SDK
-rmcp = { version = "=0.5.0", features = ["transport-io"] }
+rmcp = { version = "=1.4.0", features = ["transport-io"] }
 schemars = "1.0"
 
 # HTTP server
@@ -81,7 +81,7 @@ yara-x = "1.17.0"
 # Network and repository checks
 strsim = "0.11"
 reqwest = { version = "0.13.3", features = ["json", "blocking"] }
-git2 = "0.20"
+git2 = "0.21"
 url = "2.5"
 edit-distance = "2.2"
 
@@ -92,7 +92,7 @@ flate2 = "1.0"
 tar = "0.4"
 
 # XML and data processing
-quick-xml = "0.40"
+quick-xml = "0.41"
 base64 = "0.22"
 
 # Test dependencies
