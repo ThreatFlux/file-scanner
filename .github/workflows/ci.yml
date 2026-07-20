@@ -68,7 +68,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -79,7 +79,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target
           key: ${{ steps.cache-key.outputs.key }}-build
@@ -139,7 +139,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -150,7 +150,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target
           key: ${{ needs.build-cache.outputs.cache-key }}-build
@@ -209,7 +209,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -221,7 +221,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target
           key: ${{ runner.os }}-${{ matrix.rust }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
@@ -325,7 +325,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -336,7 +336,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target
           key: ${{ needs.build-cache.outputs.cache-key }}-build
@@ -418,7 +418,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -429,7 +429,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target
           key: ${{ needs.build-cache.outputs.cache-key }}-coverage
@@ -438,7 +438,7 @@ jobs:
             ${{ runner.os }}-cargo-build-
 
       - name: Cache coverage tools
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/cargo-llvm-cov
@@ -483,7 +483,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Cache cargo-audit
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-audit
           key: ${{ runner.os }}-cargo-audit-v2
@@ -527,7 +527,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -538,7 +538,7 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target
           key: ${{ needs.build-cache.outputs.cache-key }}-bench
@@ -570,7 +570,7 @@ jobs:
           node-version: '20'
 
       - name: Cache npm packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: ${{ runner.os }}-npm-mcp-v1
@@ -582,7 +582,7 @@ jobs:
         run: npm install -g @modelcontextprotocol/inspector
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: target
           key: ${{ needs.build-cache.outputs.cache-key }}-build
