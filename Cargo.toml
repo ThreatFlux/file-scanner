@@ -71,7 +71,7 @@ utoipa-redoc = { version = "6.0", features = ["axum"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 # Static analysis
-addr2line = "0.26.1"
+addr2line = "0.27.0"
 capstone = "0.14"
 petgraph = "0.8.2"
 
