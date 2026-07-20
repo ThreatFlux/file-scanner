@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Wait for CI workflows
-        uses: lewagon/wait-on-check-action@3603e826ee561ea102b58accb5ea55a1a7482343 # v1.4.1
+        uses: lewagon/wait-on-check-action@96d9100b431964d10e0136aff8b9ccb92470505e # v1.8.0
         with:
           ref: ${{ github.sha }}
           check-regexp: '^(Build Cache|Lint|Test|Integration Tests|Code Coverage)$'
@@ -40,7 +40,7 @@ jobs:
           allowed-conclusions: success
 
       - name: Wait for Security Audit
-        uses: lewagon/wait-on-check-action@3603e826ee561ea102b58accb5ea55a1a7482343 # v1.4.1
+        uses: lewagon/wait-on-check-action@96d9100b431964d10e0136aff8b9ccb92470505e # v1.8.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Security Audit'
@@ -311,7 +311,7 @@ jobs:
 
       - name: Create Release
         id: create_release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ needs.version-bump.outputs.new_version }}
           name: File Scanner ${{ needs.version-bump.outputs.new_version }}
@@ -380,7 +380,7 @@ jobs:
           ref: ${{ needs.version-bump.outputs.release_sha }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
           driver-opts: |
             network=host
@@ -542,7 +542,7 @@ jobs:
           sha256sum file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.zip > file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.zip.sha256
 
       - name: Upload binary to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: ${{ needs.version-bump.outputs.new_version }}
           files: |

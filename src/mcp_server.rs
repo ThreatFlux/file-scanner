@@ -966,15 +966,10 @@ impl FileScannerMcp {
 
 impl ServerHandler for FileScannerMcp {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            server_info: Implementation {
-                name: "file-scanner".into(),
-                version: "0.1.0".into(),
-            },
-            instructions: Some("A comprehensive file scanner with analyze_file, llm_analyze_file, yara_scan_file, analyze_java_file, analyze_npm_package, and analyze_python_package tools. The analyze_file tool supports multiple analysis types via flags: metadata, hashes, strings, hex_dump, binary_info, signatures, symbols, control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, threats, behavioral, and yara_indicators. The yara_scan_file tool allows scanning files or directories with custom YARA rules. The analyze_java_file tool provides specialized analysis for Java archives (JAR/WAR/EAR/APK/AAR) and class files. The analyze_npm_package tool analyzes npm packages for vulnerabilities, malicious code, typosquatting, and supply chain attacks. The analyze_python_package tool provides similar analysis for Python packages including .whl, .tar.gz, and source distributions.".into()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_server_info(Implementation::new("file-scanner", "0.1.0"))
+            .with_instructions("A comprehensive file scanner with analyze_file, llm_analyze_file, yara_scan_file, analyze_java_file, analyze_npm_package, and analyze_python_package tools. The analyze_file tool supports multiple analysis types via flags: metadata, hashes, strings, hex_dump, binary_info, signatures, symbols, control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, threats, behavioral, and yara_indicators. The yara_scan_file tool allows scanning files or directories with custom YARA rules. The analyze_java_file tool provides specialized analysis for Java archives (JAR/WAR/EAR/APK/AAR) and class files. The analyze_npm_package tool analyzes npm packages for vulnerabilities, malicious code, typosquatting, and supply chain attacks. The analyze_python_package tool provides similar analysis for Python packages including .whl, .tar.gz, and source distributions.")
     }
 }
 
