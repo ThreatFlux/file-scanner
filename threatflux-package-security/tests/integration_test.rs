@@ -22,7 +22,7 @@ async fn test_npm_package_analysis() {
     let result = analyzer.analyze(temp_dir.path()).await.unwrap();
 
     assert_eq!(result.package_info().package_type(), "npm");
-    assert!(result.vulnerabilities().len() > 0);
+    assert!(!result.vulnerabilities().is_empty());
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-//! # ThreatFlux Threat Detection Library
+//! # `ThreatFlux` Threat Detection Library
 //!
 //! A comprehensive threat detection framework for malware analysis, YARA scanning,
 //! and security assessment. Supports multiple detection engines and rule sources.
@@ -6,7 +6,7 @@
 //! ## Features
 //!
 //! - **YARA Integration**: Full YARA-X support with custom rule compilation
-//! - **Multi-Engine Support**: YARA, ClamAV, pattern matching engines
+//! - **Multi-Engine Support**: YARA, `ClamAV`, pattern matching engines
 //! - **Rule Management**: Automatic rule updates from multiple sources
 //! - **Threat Classification**: Comprehensive threat categorization and scoring
 //! - **Async Scanning**: High-performance concurrent scanning
@@ -14,7 +14,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```rust,no_run
 //! use threatflux_threat_detection::{ThreatDetector, ScanTarget};
 //!
 //! # #[tokio::main]
@@ -60,7 +60,7 @@ pub struct ThreatDetector {
 pub struct ThreatDetectorConfig {
     /// Enable YARA engine
     pub enable_yara: bool,
-    /// Enable ClamAV engine
+    /// Enable `ClamAV` engine
     pub enable_clamav: bool,
     /// Enable pattern matching
     pub enable_patterns: bool,
@@ -95,11 +95,12 @@ impl ThreatDetector {
     }
 
     /// Create a new threat detector with custom configuration
+    #[allow(clippy::unused_async)]
     pub async fn with_config(config: ThreatDetectorConfig) -> Result<Self> {
         // Initialize YARA engine
         #[cfg(feature = "yara-engine")]
         let yara_engine = if config.enable_yara {
-            Some(engines::yara::YaraEngine::new().await?)
+            Some(engines::yara::YaraEngine::new()?)
         } else {
             None
         };
@@ -110,7 +111,7 @@ impl ThreatDetector {
         // Initialize pattern matching engine
         #[cfg(feature = "pattern-matching")]
         let pattern_engine = if config.enable_patterns {
-            Some(engines::patterns::PatternEngine::new().await?)
+            Some(engines::patterns::PatternEngine::new()?)
         } else {
             None
         };
@@ -139,7 +140,7 @@ impl ThreatDetector {
     pub async fn scan_data(&self, data: &[u8], name: Option<&str>) -> Result<ThreatAnalysis> {
         let target = ScanTarget::Memory {
             data: data.to_vec(),
-            name: name.map(|n| n.to_string()),
+            name: name.map(std::string::ToString::to_string),
         };
         self.scan(target).await
     }
@@ -172,10 +173,7 @@ impl ThreatDetector {
         let mut classifications = std::collections::HashSet::new();
 
         match &target {
-            ScanTarget::File(path) => {
-                std::fs::metadata(path).map_err(ThreatError::from)?;
-            }
-            ScanTarget::Directory(path) => {
+            ScanTarget::File(path) | ScanTarget::Directory(path) => {
                 std::fs::metadata(path).map_err(ThreatError::from)?;
             }
             ScanTarget::Memory { .. } => {}
@@ -190,7 +188,7 @@ impl ThreatDetector {
                     classifications.extend(result.classifications);
                 }
                 Err(e) => {
-                    log::warn!("YARA engine failed: {}", e);
+                    log::warn!("YARA engine failed: {e}");
                 }
             }
         }
@@ -205,7 +203,7 @@ impl ThreatDetector {
                     classifications.extend(result.classifications);
                 }
                 Err(e) => {
-                    log::warn!("Pattern engine failed: {}", e);
+                    log::warn!("Pattern engine failed: {e}");
                 }
             }
         }
@@ -219,7 +217,7 @@ impl ThreatDetector {
             analysis::generate_recommendations(&threat_level, &all_matches, &classifications_vec);
 
         let file_size = match &target {
-            ScanTarget::File(path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+            ScanTarget::File(path) => std::fs::metadata(path).map_or(0, |m| m.len()),
             ScanTarget::Memory { data, .. } => data.len() as u64,
             ScanTarget::Directory(_) => 0,
         };
@@ -244,7 +242,7 @@ impl ThreatDetector {
         // Update YARA engine if available
         if let Some(ref mut yara_engine) = self.yara_engine {
             if let Err(e) = yara_engine.update_rules().await {
-                log::warn!("Failed to update YARA rules: {}", e);
+                log::warn!("Failed to update YARA rules: {e}");
             }
         }
 
@@ -252,7 +250,7 @@ impl ThreatDetector {
         #[cfg(feature = "pattern-matching")]
         if let Some(ref mut pattern_engine) = self.pattern_engine {
             if let Err(e) = pattern_engine.update_rules().await {
-                log::warn!("Failed to update pattern rules: {}", e);
+                log::warn!("Failed to update pattern rules: {e}");
             }
         }
 
@@ -296,7 +294,7 @@ impl Default for ThreatDetector {
             pattern_engine: None,
             config: Arc::new(ScanConfig {
                 max_file_size: 100 * 1024 * 1024,
-                scan_timeout: std::time::Duration::from_secs(300),
+                scan_timeout: std::time::Duration::from_mins(5),
                 max_concurrent_scans: 4,
             }),
         }

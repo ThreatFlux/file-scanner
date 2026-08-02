@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use file_scanner::ole_vba_analysis::*;
 use std::io::Write;
 use std::path::Path;
@@ -20,7 +65,7 @@ fn test_ole_file_type_variants() {
     for file_type in file_types {
         let json = serde_json::to_string(&file_type).unwrap();
         let deserialized: OleFileType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", file_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{file_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -31,7 +76,7 @@ fn test_entry_type_variants() {
     for entry_type in entry_types {
         let json = serde_json::to_string(&entry_type).unwrap();
         let deserialized: EntryType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", entry_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{entry_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -42,7 +87,7 @@ fn test_node_color_variants() {
     for color in colors {
         let json = serde_json::to_string(&color).unwrap();
         let deserialized: NodeColor = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", color), format!("{:?}", deserialized));
+        assert_eq!(format!("{color:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -59,7 +104,7 @@ fn test_vba_module_type_variants() {
     for module_type in module_types {
         let json = serde_json::to_string(&module_type).unwrap();
         let deserialized: VbaModuleType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", module_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{module_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -75,7 +120,7 @@ fn test_vba_procedure_type_variants() {
     for proc_type in procedure_types {
         let json = serde_json::to_string(&proc_type).unwrap();
         let deserialized: VbaProcedureType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", proc_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{proc_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -91,7 +136,7 @@ fn test_vba_reference_type_variants() {
     for ref_type in reference_types {
         let json = serde_json::to_string(&ref_type).unwrap();
         let deserialized: VbaReferenceType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", ref_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{ref_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -113,7 +158,7 @@ fn test_stream_type_variants() {
     for stream_type in stream_types {
         let json = serde_json::to_string(&stream_type).unwrap();
         let deserialized: StreamType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", stream_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{stream_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -133,7 +178,7 @@ fn test_obfuscation_type_variants() {
     for obf_type in obfuscation_types {
         let json = serde_json::to_string(&obf_type).unwrap();
         let deserialized: ObfuscationType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", obf_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{obf_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -151,7 +196,7 @@ fn test_connection_type_variants() {
     for conn_type in connection_types {
         let json = serde_json::to_string(&conn_type).unwrap();
         let deserialized: ConnectionType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", conn_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{conn_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -167,7 +212,7 @@ fn test_risk_level_variants() {
     for risk_level in risk_levels {
         let json = serde_json::to_string(&risk_level).unwrap();
         let deserialized: RiskLevel = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", risk_level), format!("{:?}", deserialized));
+        assert_eq!(format!("{risk_level:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -501,7 +546,10 @@ fn test_suspicious_indicators_comprehensive() {
         process_operations: vec![ProcessOperation {
             operation_type: ProcessOperationType::Create,
             target_process: "cmd.exe".to_string(),
-            parameters: ["/c", "dir"].iter().map(|s| s.to_string()).collect(),
+            parameters: ["/c", "dir"]
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             location: "Module2".to_string(),
             risk_level: RiskLevel::Critical,
         }],
@@ -629,19 +677,16 @@ fn test_analyze_ole_vba_non_ole_file() {
     let result = analyze_ole_vba(temp_file.path());
 
     // This may fail due to insufficient header size, which is expected
-    match result {
-        Ok(analysis) => {
-            assert!(matches!(analysis.file_type, OleFileType::NotOleFile));
-            assert!(analysis.ole_structure.is_none());
-            assert!(analysis.vba_project.is_none());
-            assert!(analysis.macros.is_empty());
-            assert!(analysis.streams.is_empty());
-            assert!(!analysis.suspicious_indicators.has_macros);
-            assert_eq!(analysis.suspicious_indicators.risk_score, 0);
-        }
-        Err(_) => {
-            // Expected for non-OLE files with insufficient header size
-        }
+    if let Ok(analysis) = result {
+        assert!(matches!(analysis.file_type, OleFileType::NotOleFile));
+        assert!(analysis.ole_structure.is_none());
+        assert!(analysis.vba_project.is_none());
+        assert!(analysis.macros.is_empty());
+        assert!(analysis.streams.is_empty());
+        assert!(!analysis.suspicious_indicators.has_macros);
+        assert_eq!(analysis.suspicious_indicators.risk_score, 0);
+    } else {
+        // Expected for non-OLE files with insufficient header size
     }
 }
 
@@ -657,17 +702,14 @@ fn test_analyze_ole_vba_text_file() {
     let result = analyze_ole_vba(temp_file.path());
 
     // This may fail due to insufficient header size, which is expected
-    match result {
-        Ok(analysis) => {
-            assert!(matches!(analysis.file_type, OleFileType::NotOleFile));
-            assert!(analysis.ole_structure.is_none());
-            assert!(analysis.vba_project.is_none());
-            assert!(analysis.macros.is_empty());
-            assert!(!analysis.suspicious_indicators.has_macros);
-        }
-        Err(_) => {
-            // Expected for non-OLE files with insufficient header size
-        }
+    if let Ok(analysis) = result {
+        assert!(matches!(analysis.file_type, OleFileType::NotOleFile));
+        assert!(analysis.ole_structure.is_none());
+        assert!(analysis.vba_project.is_none());
+        assert!(analysis.macros.is_empty());
+        assert!(!analysis.suspicious_indicators.has_macros);
+    } else {
+        // Expected for non-OLE files with insufficient header size
     }
 }
 
@@ -680,17 +722,14 @@ fn test_analyze_ole_vba_empty_file() {
     let result = analyze_ole_vba(temp_file.path());
 
     // This will fail due to insufficient header size, which is expected
-    match result {
-        Ok(analysis) => {
-            assert!(matches!(analysis.file_type, OleFileType::NotOleFile));
-            assert!(analysis.ole_structure.is_none());
-            assert!(analysis.vba_project.is_none());
-            assert!(analysis.macros.is_empty());
-            assert!(!analysis.suspicious_indicators.has_macros);
-        }
-        Err(_) => {
-            // Expected for empty files with no header
-        }
+    if let Ok(analysis) = result {
+        assert!(matches!(analysis.file_type, OleFileType::NotOleFile));
+        assert!(analysis.ole_structure.is_none());
+        assert!(analysis.vba_project.is_none());
+        assert!(analysis.macros.is_empty());
+        assert!(!analysis.suspicious_indicators.has_macros);
+    } else {
+        // Expected for empty files with no header
     }
 }
 
@@ -779,7 +818,7 @@ fn test_edge_cases_and_boundaries() {
 
     // Test with minimum values
     let minimal_procedure = VbaProcedure {
-        name: "".to_string(), // Empty name
+        name: String::new(), // Empty name
         procedure_type: VbaProcedureType::Sub,
         start_line: 0,
         end_line: 0,
@@ -817,7 +856,7 @@ fn test_operation_type_variants() {
     for op in file_ops {
         let json = serde_json::to_string(&op).unwrap();
         let deserialized: FileOperationType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", op), format!("{:?}", deserialized));
+        assert_eq!(format!("{op:?}"), format!("{:?}", deserialized));
     }
 
     // Test RegistryOperationType variants
@@ -832,7 +871,7 @@ fn test_operation_type_variants() {
     for op in reg_ops {
         let json = serde_json::to_string(&op).unwrap();
         let deserialized: RegistryOperationType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", op), format!("{:?}", deserialized));
+        assert_eq!(format!("{op:?}"), format!("{:?}", deserialized));
     }
 
     // Test ProcessOperationType variants
@@ -847,7 +886,7 @@ fn test_operation_type_variants() {
     for op in proc_ops {
         let json = serde_json::to_string(&op).unwrap();
         let deserialized: ProcessOperationType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", op), format!("{:?}", deserialized));
+        assert_eq!(format!("{op:?}"), format!("{:?}", deserialized));
     }
 
     // Test CryptoOperationType variants
@@ -862,7 +901,7 @@ fn test_operation_type_variants() {
     for op in crypto_ops {
         let json = serde_json::to_string(&op).unwrap();
         let deserialized: CryptoOperationType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", op), format!("{:?}", deserialized));
+        assert_eq!(format!("{op:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -885,7 +924,7 @@ fn test_risk_factor_type_variants() {
     for factor_type in risk_factor_types {
         let json = serde_json::to_string(&factor_type).unwrap();
         let deserialized: RiskFactorType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", factor_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{factor_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -907,7 +946,7 @@ fn test_ioc_type_variants() {
     for ioc_type in ioc_types {
         let json = serde_json::to_string(&ioc_type).unwrap();
         let deserialized: IocType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", ioc_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{ioc_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -1635,20 +1674,17 @@ fn test_create_ole_signature_file() {
     let result = analyze_ole_vba(temp_file.path());
 
     // Should successfully detect as OLE file but without VBA content
-    match result {
-        Ok(analysis) => {
-            // Should be detected as some form of OLE document
-            assert!(!matches!(analysis.file_type, OleFileType::NotOleFile));
-            assert!(analysis.ole_structure.is_some());
-            assert!(analysis.vba_project.is_none());
-            assert!(analysis.macros.is_empty());
-            assert!(!analysis.suspicious_indicators.has_macros);
-            assert_eq!(analysis.suspicious_indicators.risk_score, 0);
-        }
-        Err(_) => {
-            // OLE parsing might fail with minimal header, which is acceptable
-            // The important thing is that it attempts to parse as OLE
-        }
+    if let Ok(analysis) = result {
+        // Should be detected as some form of OLE document
+        assert!(!matches!(analysis.file_type, OleFileType::NotOleFile));
+        assert!(analysis.ole_structure.is_some());
+        assert!(analysis.vba_project.is_none());
+        assert!(analysis.macros.is_empty());
+        assert!(!analysis.suspicious_indicators.has_macros);
+        assert_eq!(analysis.suspicious_indicators.risk_score, 0);
+    } else {
+        // OLE parsing might fail with minimal header, which is acceptable
+        // The important thing is that it attempts to parse as OLE
     }
 }
 
@@ -1667,17 +1703,14 @@ fn test_integration_with_zip_file() {
     let result = analyze_ole_vba(temp_file.path());
 
     // Should be detected as OOXML but no VBA content
-    match result {
-        Ok(analysis) => {
-            assert!(matches!(analysis.file_type, OleFileType::OfficeOpenXml));
-            assert!(analysis.ole_structure.is_none());
-            assert!(analysis.vba_project.is_none());
-            assert!(analysis.macros.is_empty());
-            assert!(!analysis.suspicious_indicators.has_macros);
-        }
-        Err(_) => {
-            // ZIP parsing might fail with minimal header, which is acceptable
-        }
+    if let Ok(analysis) = result {
+        assert!(matches!(analysis.file_type, OleFileType::OfficeOpenXml));
+        assert!(analysis.ole_structure.is_none());
+        assert!(analysis.vba_project.is_none());
+        assert!(analysis.macros.is_empty());
+        assert!(!analysis.suspicious_indicators.has_macros);
+    } else {
+        // ZIP parsing might fail with minimal header, which is acceptable
     }
 }
 
@@ -1729,14 +1762,11 @@ fn test_corrupted_ole_file_handling() {
     let result = analyze_ole_vba(temp_file.path());
 
     // Should either fail gracefully or return analysis with minimal data
-    match result {
-        Ok(analysis) => {
-            // If it succeeds, should at least detect as OLE type
-            assert!(!matches!(analysis.file_type, OleFileType::NotOleFile));
-        }
-        Err(_) => {
-            // Failure is acceptable for corrupted files
-        }
+    if let Ok(analysis) = result {
+        // If it succeeds, should at least detect as OLE type
+        assert!(!matches!(analysis.file_type, OleFileType::NotOleFile));
+    } else {
+        // Failure is acceptable for corrupted files
     }
 }
 
@@ -1755,13 +1785,10 @@ fn test_large_file_handling() {
     let result = analyze_ole_vba(temp_file.path());
 
     // Should handle larger files without issues
-    match result {
-        Ok(_analysis) => {
-            // Successfully handled large file
-        }
-        Err(_) => {
-            // Parsing might fail due to invalid structure, which is acceptable
-        }
+    if let Ok(_analysis) = result {
+        // Successfully handled large file
+    } else {
+        // Parsing might fail due to invalid structure, which is acceptable
     }
 }
 
@@ -1780,12 +1807,11 @@ fn test_binary_data_in_streams() {
         let entropy = calculate_entropy(pattern);
 
         match i {
-            0 | 1 | 3 => assert!(entropy < 2.0, "Pattern {} should have low entropy", i),
-            2 => assert!(entropy > 7.5, "Pattern {} should have high entropy", i),
+            0 | 1 | 3 => assert!(entropy < 2.0, "Pattern {i} should have low entropy"),
+            2 => assert!(entropy > 7.5, "Pattern {i} should have high entropy"),
             4 => assert!(
                 entropy > 4.0 && entropy < 7.0,
-                "Pattern {} should have medium entropy",
-                i
+                "Pattern {i} should have medium entropy"
             ),
             _ => {}
         }
@@ -1854,14 +1880,13 @@ fn test_performance_with_large_vba_code() {
     for i in 0..100 {
         large_vba.push_str(&format!(
             r#"
-Sub Procedure{}()
-    Dim var{} As String
-    var{} = "value_{}"
-    Shell "cmd.exe /c echo {}"
+Sub Procedure{i}()
+    Dim var{i} As String
+    var{i} = "value_{i}"
+    Shell "cmd.exe /c echo {i}"
     CreateObject("WScript.Shell")
 End Sub
-"#,
-            i, i, i, i, i
+"#
         ));
     }
 
@@ -1883,8 +1908,7 @@ End Sub
     // Should complete within reasonable time (adjust threshold as needed)
     assert!(
         elapsed.as_millis() < 1000,
-        "Large VBA processing took too long: {:?}",
-        elapsed
+        "Large VBA processing took too long: {elapsed:?}"
     );
 }
 
@@ -1919,7 +1943,7 @@ End Function
 #[test]
 fn test_malformed_vba_syntax() {
     // Test with malformed VBA syntax
-    let malformed_vba = r#"
+    let malformed_vba = r"
 Sub MalformedSub(
     ' Missing closing parenthesis
     Dim x As
@@ -1940,7 +1964,7 @@ End Sub
 Sub
 ' Missing procedure name
 End Sub
-"#;
+";
 
     // Should handle malformed syntax gracefully
     let procedures = extract_procedures_from_source(malformed_vba);
@@ -1982,7 +2006,7 @@ End Sub
 #[test]
 fn test_nested_procedure_structures() {
     // Test with nested structures (which VBA doesn't really support, but test parser robustness)
-    let nested_code = r#"
+    let nested_code = r"
 Sub OuterProcedure()
     If True Then
         Sub NestedSub()
@@ -1998,7 +2022,7 @@ Function ComplexFunction()
         End If
     Next i
 End Function
-"#;
+";
 
     let procedures = extract_procedures_from_source(nested_code);
 

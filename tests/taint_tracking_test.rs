@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use std::io::Write;
 use std::path::Path;
 use tempfile::NamedTempFile;
@@ -36,16 +81,13 @@ fn test_analyze_taint_flows_function() {
 
     let result = analyze_taint_flows(temp_file.path());
 
-    match result {
-        Ok(_analysis) => {
-            // Should detect at least one source and one sink
-            // Vec length is always >= 0
-            // Vec length is always >= 0
-            // total_flows is usize, always >= 0
-        }
-        Err(_) => {
-            // File analysis might fail in some environments, which is acceptable
-        }
+    if let Ok(_analysis) = result {
+        // Should detect at least one source and one sink
+        // Vec length is always >= 0
+        // Vec length is always >= 0
+        // total_flows is usize, always >= 0
+    } else {
+        // File analysis might fail in some environments, which is acceptable
     }
 }
 
@@ -80,24 +122,21 @@ fn test_analyze_sql_injection_pattern() {
 
     let result = analyze_taint_flows(temp_file.path());
 
-    match result {
-        Ok(analysis) => {
-            // Check that we detect SQL injection sources and sinks
-            let has_user_input_sources = analysis
-                .sources
-                .iter()
-                .any(|s| matches!(s.source_type, SourceType::UserInput));
-            let has_sql_sinks = analysis
-                .sinks
-                .iter()
-                .any(|s| matches!(s.sink_type, SinkType::SqlQuery));
+    if let Ok(analysis) = result {
+        // Check that we detect SQL injection sources and sinks
+        let has_user_input_sources = analysis
+            .sources
+            .iter()
+            .any(|s| matches!(s.source_type, SourceType::UserInput));
+        let has_sql_sinks = analysis
+            .sinks
+            .iter()
+            .any(|s| matches!(s.sink_type, SinkType::SqlQuery));
 
-            // At least one of these should be detected in a well-functioning analysis
-            assert!(has_user_input_sources || has_sql_sinks || analysis.sources.is_empty());
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable in test environment
-        }
+        // At least one of these should be detected in a well-functioning analysis
+        assert!(has_user_input_sources || has_sql_sinks || analysis.sources.is_empty());
+    } else {
+        // Analysis might fail, which is acceptable in test environment
     }
 }
 
@@ -116,20 +155,17 @@ fn test_analyze_command_injection_pattern() {
 
     let result = analyze_taint_flows(temp_file.path());
 
-    match result {
-        Ok(analysis) => {
-            // Check that we detect command injection patterns
-            let has_command_sinks = analysis
-                .sinks
-                .iter()
-                .any(|s| matches!(s.sink_type, SinkType::SystemCommand));
+    if let Ok(analysis) = result {
+        // Check that we detect command injection patterns
+        let has_command_sinks = analysis
+            .sinks
+            .iter()
+            .any(|s| matches!(s.sink_type, SinkType::SystemCommand));
 
-            // Command injection should be detected or analysis should complete without error
-            assert!(has_command_sinks || analysis.sinks.is_empty());
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        // Command injection should be detected or analysis should complete without error
+        assert!(has_command_sinks || analysis.sinks.is_empty());
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -147,19 +183,16 @@ fn test_analyze_xss_pattern() {
 
     let result = analyze_taint_flows(temp_file.path());
 
-    match result {
-        Ok(analysis) => {
-            // Check that we detect XSS patterns
-            let has_http_response_sinks = analysis
-                .sinks
-                .iter()
-                .any(|s| matches!(s.sink_type, SinkType::HttpResponse));
+    if let Ok(analysis) = result {
+        // Check that we detect XSS patterns
+        let has_http_response_sinks = analysis
+            .sinks
+            .iter()
+            .any(|s| matches!(s.sink_type, SinkType::HttpResponse));
 
-            assert!(has_http_response_sinks || analysis.sinks.is_empty());
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        assert!(has_http_response_sinks || analysis.sinks.is_empty());
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -179,18 +212,15 @@ fn test_analyze_file_with_sanitization() {
 
     let result = analyze_taint_flows(temp_file.path());
 
-    match result {
-        Ok(analysis) => {
-            // Should detect sanitizers
-            let has_sanitizers = !analysis.sanitizers.is_empty();
-            let has_sanitized_flows = analysis.flow_summary.sanitized_flows > 0;
+    if let Ok(analysis) = result {
+        // Should detect sanitizers
+        let has_sanitizers = !analysis.sanitizers.is_empty();
+        let has_sanitized_flows = analysis.flow_summary.sanitized_flows > 0;
 
-            // Either sanitizers should be detected or analysis should complete
-            assert!(has_sanitizers || has_sanitized_flows || analysis.sanitizers.is_empty());
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        // Either sanitizers should be detected or analysis should complete
+        assert!(has_sanitizers || has_sanitized_flows || analysis.sanitizers.is_empty());
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -342,15 +372,12 @@ fn test_analyze_python_pattern() {
 
     let result = analyze_taint_flows(temp_file.path());
 
-    match result {
-        Ok(_analysis) => {
-            // Python patterns should be detected
-            // Vec length is always >= 0
-            // Vec length is always >= 0
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+    if let Ok(_analysis) = result {
+        // Python patterns should be detected
+        // Vec length is always >= 0
+        // Vec length is always >= 0
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -369,19 +396,16 @@ fn test_analyze_environment_variable_source() {
 
     let result = analyze_taint_flows(temp_file.path());
 
-    match result {
-        Ok(analysis) => {
-            // Environment variable sources might be detected
-            let has_env_sources = analysis
-                .sources
-                .iter()
-                .any(|s| matches!(s.source_type, SourceType::EnvironmentVariable));
+    if let Ok(analysis) = result {
+        // Environment variable sources might be detected
+        let has_env_sources = analysis
+            .sources
+            .iter()
+            .any(|s| matches!(s.source_type, SourceType::EnvironmentVariable));
 
-            assert!(has_env_sources || analysis.sources.is_empty());
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        assert!(has_env_sources || analysis.sources.is_empty());
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -400,19 +424,16 @@ fn test_analyze_file_read_source() {
 
     let result = analyze_taint_flows(temp_file.path());
 
-    match result {
-        Ok(analysis) => {
-            // File read sources might be detected
-            let has_file_sources = analysis
-                .sources
-                .iter()
-                .any(|s| matches!(s.source_type, SourceType::FileRead));
+    if let Ok(analysis) = result {
+        // File read sources might be detected
+        let has_file_sources = analysis
+            .sources
+            .iter()
+            .any(|s| matches!(s.source_type, SourceType::FileRead));
 
-            assert!(has_file_sources || analysis.sources.is_empty());
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        assert!(has_file_sources || analysis.sources.is_empty());
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -422,18 +443,15 @@ fn test_analyze_empty_file() {
 
     let result = analyze_taint_flows(temp_file.path());
 
-    match result {
-        Ok(analysis) => {
-            // Empty file should have no sources, sinks, or flows
-            assert_eq!(analysis.sources.len(), 0);
-            assert_eq!(analysis.sinks.len(), 0);
-            assert_eq!(analysis.taint_flows.len(), 0);
-            assert_eq!(analysis.vulnerabilities.len(), 0);
-            assert_eq!(analysis.flow_summary.total_flows, 0);
-        }
-        Err(_) => {
-            // File read might fail, which is acceptable
-        }
+    if let Ok(analysis) = result {
+        // Empty file should have no sources, sinks, or flows
+        assert_eq!(analysis.sources.len(), 0);
+        assert_eq!(analysis.sinks.len(), 0);
+        assert_eq!(analysis.taint_flows.len(), 0);
+        assert_eq!(analysis.vulnerabilities.len(), 0);
+        assert_eq!(analysis.flow_summary.total_flows, 0);
+    } else {
+        // File read might fail, which is acceptable
     }
 }
 
@@ -500,7 +518,7 @@ fn test_taint_analysis_structures() {
 
     let sanitizer = Sanitizer {
         sanitizer_id: "san_1".to_string(),
-        location: code_location.clone(),
+        location: code_location,
         sanitizer_type: SanitizerType::HtmlEscape,
         effectiveness: SanitizerEffectiveness::Complete,
         handles_data_types: vec![DataType::Html, DataType::String],
@@ -582,31 +600,28 @@ fn test_complex_taint_flow_scenario() {
 
     let result = analyze_taint_flows(temp_file.path());
 
-    match result {
-        Ok(analysis) => {
-            // Complex scenario should detect multiple sources and sinks
-            // Vec length is always >= 0
-            // Vec length is always >= 0
-            // total_flows is usize, always >= 0
+    if let Ok(analysis) = result {
+        // Complex scenario should detect multiple sources and sinks
+        // Vec length is always >= 0
+        // Vec length is always >= 0
+        // total_flows is usize, always >= 0
 
-            // If vulnerabilities are detected, they should have proper CWE IDs
-            for vuln in &analysis.vulnerabilities {
-                match vuln.vulnerability_type {
-                    VulnerabilityType::SqlInjection => {
-                        assert_eq!(vuln.cwe_id, Some("CWE-89".to_string()));
-                    }
-                    VulnerabilityType::CommandInjection => {
-                        assert_eq!(vuln.cwe_id, Some("CWE-78".to_string()));
-                    }
-                    VulnerabilityType::CrossSiteScripting => {
-                        assert_eq!(vuln.cwe_id, Some("CWE-79".to_string()));
-                    }
-                    _ => {}
+        // If vulnerabilities are detected, they should have proper CWE IDs
+        for vuln in &analysis.vulnerabilities {
+            match vuln.vulnerability_type {
+                VulnerabilityType::SqlInjection => {
+                    assert_eq!(vuln.cwe_id, Some("CWE-89".to_string()));
                 }
+                VulnerabilityType::CommandInjection => {
+                    assert_eq!(vuln.cwe_id, Some("CWE-78".to_string()));
+                }
+                VulnerabilityType::CrossSiteScripting => {
+                    assert_eq!(vuln.cwe_id, Some("CWE-79".to_string()));
+                }
+                _ => {}
             }
         }
-        Err(_) => {
-            // Complex analysis might fail, which is acceptable
-        }
+    } else {
+        // Complex analysis might fail, which is acceptable
     }
 }

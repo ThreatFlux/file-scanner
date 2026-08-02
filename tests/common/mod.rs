@@ -8,7 +8,7 @@ pub mod fixtures;
 pub mod utils {
     use super::*;
 
-    /// Compare two FileMetadata structs, ignoring timestamps
+    /// Compare two `FileMetadata` structs, ignoring timestamps
     pub fn assert_metadata_equal_ignore_time(actual: &FileMetadata, expected: &FileMetadata) {
         assert_eq!(actual.file_path, expected.file_path);
         assert_eq!(actual.file_size, expected.file_size);
@@ -37,14 +37,12 @@ pub mod utils {
         expected_msg: &str,
     ) {
         match result {
-            Ok(_) => panic!("Expected error containing '{}', but got Ok", expected_msg),
+            Ok(_) => panic!("Expected error containing '{expected_msg}', but got Ok"),
             Err(e) => {
                 let error_msg = e.to_string();
                 assert!(
                     error_msg.contains(expected_msg),
-                    "Error message '{}' does not contain '{}'",
-                    error_msg,
-                    expected_msg
+                    "Error message '{error_msg}' does not contain '{expected_msg}'"
                 );
             }
         }
@@ -116,7 +114,7 @@ pub mod generators {
     /// Generate a string with specific pattern
     pub fn generate_string_pattern(base: &str, count: usize) -> String {
         (0..count)
-            .map(|i| format!("{}{}", base, i))
+            .map(|i| format!("{base}{i}"))
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -153,9 +151,7 @@ pub mod assertions {
         for item in items {
             assert!(
                 vec.contains(item),
-                "Vector {:?} does not contain {:?}",
-                vec,
-                item
+                "Vector {vec:?} does not contain {item:?}"
             );
         }
     }
@@ -166,9 +162,7 @@ pub mod assertions {
         for needle in needles {
             assert!(
                 haystack.contains(needle),
-                "String '{}' does not contain '{}'",
-                haystack,
-                needle
+                "String '{haystack}' does not contain '{needle}'"
             );
         }
     }

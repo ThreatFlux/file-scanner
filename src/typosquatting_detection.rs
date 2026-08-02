@@ -339,11 +339,11 @@ impl TyposquattingDetector {
         // Certain similarity types are more suspicious
         match similarity_type {
             SimilarityType::VisualSimilarity | SimilarityType::KeyboardProximity => {
-                risk_score += 2.0
+                risk_score += 2.0;
             }
             SimilarityType::CharacterSubstitution => risk_score += 1.5,
             SimilarityType::CharacterAddition | SimilarityType::CharacterDeletion => {
-                risk_score += 1.0
+                risk_score += 1.0;
             }
             _ => risk_score += 0.5,
         }
@@ -463,7 +463,7 @@ impl TyposquattingDetector {
         }
 
         // Check for common typosquatting indicators
-        if package_name.contains("1") || package_name.contains("0") {
+        if package_name.contains('1') || package_name.contains('0') {
             patterns.push(SuspiciousPattern {
                 pattern_type: "Number Substitution".to_string(),
                 description: "Package name uses numbers that might substitute letters".to_string(),
@@ -737,8 +737,7 @@ pub fn analyze_typosquatting(package_name: &str, ecosystem: &str) -> Result<Typo
 /// Quick check if a package name is potentially typosquatting
 pub fn is_potential_typosquatting(package_name: &str, ecosystem: &str) -> bool {
     analyze_typosquatting(package_name, ecosystem)
-        .map(|analysis| analysis.is_potential_typosquatting)
-        .unwrap_or(false)
+        .is_ok_and(|analysis| analysis.is_potential_typosquatting)
 }
 
 /// Get similarity score between two package names

@@ -12,7 +12,7 @@ pub enum ThreatError {
     #[error("YARA engine error: {0}")]
     YaraError(String),
 
-    /// ClamAV engine error
+    /// `ClamAV` engine error
     #[error("ClamAV engine error: {0}")]
     ClamAVError(String),
 
@@ -76,35 +76,35 @@ pub enum ThreatError {
 #[cfg(feature = "yara-engine")]
 impl From<yara_x::ScanError> for ThreatError {
     fn from(err: yara_x::ScanError) -> Self {
-        ThreatError::YaraError(err.to_string())
+        Self::YaraError(err.to_string())
     }
 }
 
 #[cfg(feature = "yara-engine")]
 impl From<yara_x::errors::CompileError> for ThreatError {
     fn from(err: yara_x::errors::CompileError) -> Self {
-        ThreatError::YaraError(err.to_string())
+        Self::YaraError(err.to_string())
     }
 }
 
-#[cfg(feature = "serde-support")]
+#[cfg(feature = "serde")]
 impl From<serde_json::Error> for ThreatError {
     fn from(err: serde_json::Error) -> Self {
-        ThreatError::SerializationError(err.to_string())
+        Self::SerializationError(err.to_string())
     }
 }
 
 #[cfg(feature = "rule-management")]
 impl From<reqwest::Error> for ThreatError {
     fn from(err: reqwest::Error) -> Self {
-        ThreatError::NetworkError(err.to_string())
+        Self::NetworkError(err.to_string())
     }
 }
 
 #[cfg(feature = "rule-management")]
 impl From<git2::Error> for ThreatError {
     fn from(err: git2::Error) -> Self {
-        ThreatError::RuleUpdateError(format!("Git error: {}", err))
+        Self::RuleUpdateError(format!("Git error: {err}"))
     }
 }
 
@@ -114,7 +114,7 @@ impl ThreatError {
         Self::YaraError(msg.into())
     }
 
-    /// Create a new ClamAV error
+    /// Create a new `ClamAV` error
     pub fn clamav<S: Into<String>>(msg: S) -> Self {
         Self::ClamAVError(msg.into())
     }
@@ -155,12 +155,12 @@ impl ThreatError {
     }
 
     /// Create a new scan timeout error
-    pub fn scan_timeout(timeout_secs: u64) -> Self {
+    pub const fn scan_timeout(timeout_secs: u64) -> Self {
         Self::ScanTimeout { timeout_secs }
     }
 
     /// Create a new file too large error
-    pub fn file_too_large(size: u64, max_size: u64) -> Self {
+    pub const fn file_too_large(size: u64, max_size: u64) -> Self {
         Self::FileTooLarge { size, max_size }
     }
 

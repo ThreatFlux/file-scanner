@@ -144,10 +144,10 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
     let cross_references = Vec::new();
 
     // Analyze ELF symbols
-    for sym in elf.syms.iter() {
+    for sym in &elf.syms {
         let name = elf.strtab.get_at(sym.st_name).unwrap_or("").to_string();
 
-        if name.is_empty() || name.starts_with("$") {
+        if name.is_empty() || name.starts_with('$') {
             continue;
         }
 
@@ -227,7 +227,7 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
     }
 
     // Analyze dynamic symbols if available
-    for sym in elf.dynsyms.iter() {
+    for sym in &elf.dynsyms {
         let name = elf.dynstrtab.get_at(sym.st_name).unwrap_or("").to_string();
 
         if name.is_empty() || functions.iter().any(|f| f.name == name) {
@@ -292,7 +292,7 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
     let cross_references = Vec::new();
 
     // Analyze PE imports
-    for import in pe.imports.iter() {
+    for import in &pe.imports {
         imports.push(ImportInfo {
             name: import.name.to_string(),
             library: Some(import.dll.to_string()),
@@ -316,7 +316,7 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
     }
 
     // Analyze PE exports
-    for export in pe.exports.iter() {
+    for export in &pe.exports {
         let export_name = export.name.unwrap_or("").to_string();
         let export_address = export.rva as u64;
 
@@ -584,26 +584,26 @@ mod tests {
             // Test round-trip serialization
             match convention {
                 CallingConvention::Cdecl => {
-                    assert!(matches!(deserialized, CallingConvention::Cdecl))
+                    assert!(matches!(deserialized, CallingConvention::Cdecl));
                 }
                 CallingConvention::Stdcall => {
-                    assert!(matches!(deserialized, CallingConvention::Stdcall))
+                    assert!(matches!(deserialized, CallingConvention::Stdcall));
                 }
                 CallingConvention::Fastcall => {
-                    assert!(matches!(deserialized, CallingConvention::Fastcall))
+                    assert!(matches!(deserialized, CallingConvention::Fastcall));
                 }
                 CallingConvention::Thiscall => {
-                    assert!(matches!(deserialized, CallingConvention::Thiscall))
+                    assert!(matches!(deserialized, CallingConvention::Thiscall));
                 }
                 CallingConvention::Vectorcall => {
-                    assert!(matches!(deserialized, CallingConvention::Vectorcall))
+                    assert!(matches!(deserialized, CallingConvention::Vectorcall));
                 }
                 CallingConvention::SysV => assert!(matches!(deserialized, CallingConvention::SysV)),
                 CallingConvention::Win64 => {
-                    assert!(matches!(deserialized, CallingConvention::Win64))
+                    assert!(matches!(deserialized, CallingConvention::Win64));
                 }
                 CallingConvention::Unknown => {
-                    assert!(matches!(deserialized, CallingConvention::Unknown))
+                    assert!(matches!(deserialized, CallingConvention::Unknown));
                 }
             }
         }
@@ -667,7 +667,7 @@ mod tests {
                 VariableType::Global => assert!(matches!(deserialized, VariableType::Global)),
                 VariableType::Static => assert!(matches!(deserialized, VariableType::Static)),
                 VariableType::ThreadLocal => {
-                    assert!(matches!(deserialized, VariableType::ThreadLocal))
+                    assert!(matches!(deserialized, VariableType::ThreadLocal));
                 }
                 VariableType::Const => assert!(matches!(deserialized, VariableType::Const)),
             }
@@ -708,10 +708,10 @@ mod tests {
                 ReferenceType::Call => assert!(matches!(deserialized, ReferenceType::Call)),
                 ReferenceType::Jump => assert!(matches!(deserialized, ReferenceType::Jump)),
                 ReferenceType::DataReference => {
-                    assert!(matches!(deserialized, ReferenceType::DataReference))
+                    assert!(matches!(deserialized, ReferenceType::DataReference));
                 }
                 ReferenceType::StringReference => {
-                    assert!(matches!(deserialized, ReferenceType::StringReference))
+                    assert!(matches!(deserialized, ReferenceType::StringReference));
                 }
                 ReferenceType::Import => assert!(matches!(deserialized, ReferenceType::Import)),
                 ReferenceType::Export => assert!(matches!(deserialized, ReferenceType::Export)),
@@ -1187,12 +1187,12 @@ mod tests {
 
         // Test parameter with extreme values
         let extreme_param = Parameter {
-            name: Some("".to_string()), // Empty name
+            name: Some(String::new()), // Empty name
             param_type: Some("very_long_type_name_that_exceeds_normal_bounds".to_string()),
             size: Some(u32::MAX),
         };
 
-        assert_eq!(extreme_param.name, Some("".to_string()));
+        assert_eq!(extreme_param.name, Some(String::new()));
         assert_eq!(extreme_param.size, Some(u32::MAX));
 
         // Test cross-reference with same from/to address

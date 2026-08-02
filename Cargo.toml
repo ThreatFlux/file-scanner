@@ -15,7 +15,7 @@ exclude = ["threatflux-package-security"]
 # Workspace-wide dependency specifications for consistency
 [workspace.dependencies]
 # Core Rust async and runtime
-tokio = { version = "1.47", features = ["full"] }
+tokio = { version = "1.53", features = ["full"] }
 async-trait = "0.1"
 
 # Error handling
@@ -23,18 +23,18 @@ anyhow = "1.0"
 thiserror = "2.0"
 
 # Serialization
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 
 # CLI and configuration
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.5", features = ["derive"] }
 
 # File and system utilities
 filetime = "0.2"
-chrono = { version = "0.4.42", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
 memmap2 = "0.9"
-walkdir = "2.4"
+walkdir = "2.5"
 
 # Hashing algorithms
 sha2 = "0.11.0"
@@ -42,76 +42,76 @@ md-5 = "0.11"
 blake3 = "1.8"
 
 # String processing
-regex = "1.10"
+regex = "1.13"
 encoding_rs = "0.8"
 
 # Binary parsing
 goblin = "0.10"
-object = "0.39.1"
+object = "0.40.0"
 
 # Cryptography and signatures
 ring = "0.17"
 
 # MCP SDK
-rmcp = { version = "=1.4.0", features = ["transport-io"] }
-schemars = "1.0"
+rmcp = { version = "=3.1.0", features = ["transport-io"] }
+schemars = "1.2"
 
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors"] }
-hyper = "1.5"
+tower-http = { version = "0.7", features = ["cors"] }
+hyper = "1.11"
 tokio-stream = "0.1"
 futures-util = "0.3"
-uuid = { version = "1.23.1", features = ["v4"] }
+uuid = { version = "1.24.0", features = ["v4"] }
 
 # OpenAPI documentation
-utoipa = { version = "5.4", features = ["axum_extras", "chrono", "uuid"] }
+utoipa = { version = "5.5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-redoc = { version = "6.0", features = ["axum"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
 # Static analysis
-addr2line = "0.26.1"
+addr2line = "0.27.1"
 capstone = "0.14"
-petgraph = "0.8.2"
+petgraph = "0.8.3"
 
 # Threat detection
-yara-x = "1.17.0"
+yara-x = "1.19.0"
 
 # Network and repository checks
 strsim = "0.11"
-reqwest = { version = "0.13.3", features = ["json", "blocking"] }
+reqwest = { version = "0.13.4", features = ["json", "blocking"] }
 git2 = "0.21"
 url = "2.5"
 edit-distance = "2.2"
 
 # Archive handling
 cfb = "0.14.0"
-zip = "8.5.0"
-flate2 = "1.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+flate2 = "1.1"
 tar = "0.4"
 
 # XML and data processing
 quick-xml = "0.41"
-base64 = "0.22"
+base64 = "0.23"
 
 # Test dependencies
-tempfile = "3.23.0"
-mockall = "0.14"
-proptest = "1.8"
+tempfile = "3.27.0"
+mockall = "0.15"
+proptest = "1.11"
 rstest = "0.26"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 pretty_assertions = "1.4"
 test-case = "3.3"
-serial_test = "3.0"
-predicates = "3.0"
+serial_test = "4.0"
+predicates = "3.1"
 assert_fs = "1.1"
-assert_cmd = "2.0"
+assert_cmd = "2.2"
 rand = "0.10"
 libc = "0.2"
 tokio-test = "0.4"
 wiremock = "0.6"
-once_cell = "1.19"
+once_cell = "1.21"
 
 [workspace.metadata.docs]
 # Workspace-wide documentation configuration
@@ -133,7 +133,7 @@ pre-release-replacements = [
 name = "file-scanner"
 version = "0.3.3"
 edition = "2021"
-rust-version = "1.96.0"
+rust-version = "1.97.1"
 authors = ["File Scanner Project <dev@threatflux.com>"]
 description = "A comprehensive file analysis framework for security research, malware detection, and forensic investigation"
 homepage = "https://github.com/ThreatFlux/file-scanner"
@@ -151,7 +151,7 @@ threatflux-string-analysis = { version = "0.1.1" }
 threatflux-cache = { version = "0.1.8" } # TODO: Update library to use utoipa 5.4.0 for openapi feature
 threatflux-binary-analysis = { version = "0.2.0", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis (local workspace)
-threatflux-threat-detection = { version = "0.1.0", path = "threatflux-threat-detection", features = ["builtin-rules", "pattern-matching", "serde-support", "async-scanning"] }
+threatflux-threat-detection = { version = "0.1.0", path = "threatflux-threat-detection", features = ["builtin-rules", "pattern-matching", "serde", "async-scanning"] }
 # threatflux-package-security = { version = "0.1.0" } # Not used in actual source code
 
 # Core dependencies (using workspace versions)

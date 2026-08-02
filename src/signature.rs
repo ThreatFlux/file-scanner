@@ -41,15 +41,12 @@ pub fn verify_signature(path: &Path) -> Result<SignatureInfo> {
     if cfg!(target_os = "macos") {
         // Only check codesign for Mach-O binaries
         if let Ok(buffer) = fs::read(path) {
-            match Object::parse(&buffer) {
-                Ok(Object::Mach(_)) => {
-                    if let Ok(codesign_info) = check_macos_codesign(path) {
-                        return Ok(codesign_info);
-                    }
+            if let Ok(Object::Mach(_)) = Object::parse(&buffer) {
+                if let Ok(codesign_info) = check_macos_codesign(path) {
+                    return Ok(codesign_info);
                 }
-                _ => {
-                    // Not a Mach-O binary, skip macOS codesign check
-                }
+            } else {
+                // Not a Mach-O binary, skip macOS codesign check
             }
         }
     }
@@ -171,12 +168,12 @@ fn check_macos_codesign(path: &Path) -> Result<SignatureInfo> {
 
             // Parse authority
             if let Some(auth_line) = stderr.lines().find(|l| l.starts_with("Authority=")) {
-                info.signer = Some(auth_line.replace("Authority=", "").to_string());
+                info.signer = Some(auth_line.replace("Authority=", ""));
             }
 
             // Parse timestamp
             if let Some(ts_line) = stderr.lines().find(|l| l.starts_with("Timestamp=")) {
-                info.timestamp = Some(ts_line.replace("Timestamp=", "").to_string());
+                info.timestamp = Some(ts_line.replace("Timestamp=", ""));
             }
 
             // Verify signature
@@ -644,7 +641,7 @@ gpg: WARNING: This key is not certified with a trusted signature!
             let filename = if ext.is_empty() {
                 "file"
             } else {
-                &format!("file.{}", ext)
+                &format!("file.{ext}")
             };
 
             let file_path = temp_dir.path().join(filename);
@@ -654,7 +651,7 @@ gpg: WARNING: This key is not certified with a trusted signature!
             let sig_extension = if ext.is_empty() {
                 "sig".to_string()
             } else {
-                format!("{}.sig", ext)
+                format!("{ext}.sig")
             };
 
             let sig_path = file_path.with_extension(&sig_extension);
@@ -739,9 +736,9 @@ gpg: WARNING: This key is not certified with a trusted signature!
         // Test adding certificates
         for i in 0..5 {
             info.certificate_chain.push(CertificateInfo {
-                subject: format!("CN=Cert{}", i),
-                issuer: format!("CN=Issuer{}", i),
-                serial_number: format!("{:X}", i),
+                subject: format!("CN=Cert{i}"),
+                issuer: format!("CN=Issuer{i}"),
+                serial_number: format!("{i:X}"),
                 not_before: "2024-01-01".to_string(),
                 not_after: "2025-01-01".to_string(),
             });
@@ -861,7 +858,7 @@ gpg: WARNING: This key is not certified with a trusted signature!
 
     #[test]
     fn test_parse_osslsigncode_complex_output() {
-        let output = r#"
+        let output = r"
 Current PE checksum   : 00012345
 Calculated PE checksum: 00012345
 
@@ -899,7 +896,7 @@ Number of certificates: 3
 Signature verification: ok
 
 Number of signatures  : 1
-"#;
+";
 
         let signer = extract_signer_from_output(output);
         assert_eq!(

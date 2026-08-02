@@ -10,6 +10,10 @@ on:
     - cron: '0 3 * * 0'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -17,11 +21,12 @@ jobs:
   benchmark:
     name: Performance Benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Install system dependencies
         run: |
@@ -29,7 +34,7 @@ jobs:
           sudo apt-get install -y build-essential pkg-config libssl-dev jq bc
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -43,7 +48,12 @@ jobs:
         run: |
           cargo build --release --all-features
 
+      - name: Compile benchmarks for PRs
+        if: github.event_name == 'pull_request'
+        run: cargo bench --all-features --no-run
+
       - name: Run benchmarks
+        if: github.event_name != 'pull_request'
         run: |
           # Run benchmarks and capture JSON output from Criterion
           echo "Running benchmarks..."
@@ -87,52 +97,56 @@ jobs:
             done
 
             # Build JSON array from deduplicated results
-            echo '[' > benchmark_results.json
-            first=true
-            for name in "${!benchmark_results[@]}"; do
-              if [ "$first" = false ]; then
-                echo ',' >> benchmark_results.json
-              fi
-              echo "  {" >> benchmark_results.json
-              echo "    \"name\": \"$name\"," >> benchmark_results.json
-              echo "    \"value\": ${benchmark_results[$name]}," >> benchmark_results.json
-              echo "    \"unit\": \"ns\"" >> benchmark_results.json
-              echo "  }" >> benchmark_results.json
-              first=false
-            done
-            echo ']' >> benchmark_results.json
+            {
+              echo '['
+              first=true
+              for name in "${!benchmark_results[@]}"; do
+                if [ "$first" = false ]; then
+                  echo ','
+                fi
+                echo "  {"
+                echo "    \"name\": \"$name\","
+                echo "    \"value\": ${benchmark_results[$name]},"
+                echo "    \"unit\": \"ns\""
+                echo "  }"
+                first=false
+              done
+              echo ']'
+            } > benchmark_results.json
           elif [ -s "benchmark_output.txt" ]; then
             # Try to parse criterion output from stdout/stderr
             echo "No criterion directory found, trying to parse output directly..."
 
             # Look for Criterion benchmark results in output
             if grep -q "time:" benchmark_output.txt; then
-              echo '[' > benchmark_results.json
-              first=true
+              {
+                echo '['
+                first=true
 
-              # Extract benchmark names and times from output
-              grep "time:" benchmark_output.txt | while read -r line; do
-                benchmark_name=$(echo "$line" | sed 's/.*\[\([^]]*\)\].*/\1/' | tr ' ' '_')
-                time_value=$(echo "$line" | grep -o '[0-9.]*[[:space:]]*[μnms]*s' | head -1 | sed 's/[^0-9.]//g')
+                # Extract benchmark names and times from output
+                grep "time:" benchmark_output.txt | while read -r line; do
+                  benchmark_name=$(echo "$line" | sed 's/.*\[\([^]]*\)\].*/\1/' | tr ' ' '_')
+                  time_value=$(echo "$line" | grep -o '[0-9.]*[[:space:]]*[μnms]*s' | head -1 | sed 's/[^0-9.]//g')
 
-                if [ -n "$benchmark_name" ] && [ -n "$time_value" ]; then
-                  if [ "$first" = false ]; then
-                    echo ',' >> benchmark_results.json
+                  if [ -n "$benchmark_name" ] && [ -n "$time_value" ]; then
+                    if [ "$first" = false ]; then
+                      echo ','
+                    fi
+
+                    # Convert to nanoseconds if needed (simple heuristic)
+                    value_ns=$(echo "$time_value * 1000000000" | bc -l 2>/dev/null || echo "$time_value")
+
+                    echo "  {"
+                    echo "    \"name\": \"$benchmark_name\","
+                    echo "    \"value\": $value_ns,"
+                    echo "    \"unit\": \"ns\""
+                    echo "  }"
+                    first=false
                   fi
+                done
 
-                  # Convert to nanoseconds if needed (simple heuristic)
-                  value_ns=$(echo "$time_value * 1000000000" | bc -l 2>/dev/null || echo "$time_value")
-
-                  echo "  {" >> benchmark_results.json
-                  echo "    \"name\": \"$benchmark_name\"," >> benchmark_results.json
-                  echo "    \"value\": $value_ns," >> benchmark_results.json
-                  echo "    \"unit\": \"ns\"" >> benchmark_results.json
-                  echo "  }" >> benchmark_results.json
-                  first=false
-                fi
-              done
-
-              echo ']' >> benchmark_results.json
+                echo ']'
+              } > benchmark_results.json
             fi
           fi
 
@@ -151,6 +165,7 @@ jobs:
           cat benchmark_results.json
 
       - name: Prepare for benchmark storage
+        if: github.event_name != 'pull_request'
         run: |
           # Save benchmark results to a safe location
           cp benchmark_results.json /tmp/benchmark_results.json
@@ -163,7 +178,8 @@ jobs:
           cp /tmp/benchmark_results.json benchmark_results.json
 
       - name: Store benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
+        if: github.event_name != 'pull_request'
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         with:
           name: Rust Benchmark
           tool: 'customSmallerIsBetter'
@@ -215,10 +231,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Install Valgrind
         run: |
@@ -246,10 +262,10 @@ jobs:
     name: Compile Time Benchmark
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Clean build timing
         run: |

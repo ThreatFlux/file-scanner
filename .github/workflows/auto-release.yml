@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Wait for CI workflows
-        uses: lewagon/wait-on-check-action@96d9100b431964d10e0136aff8b9ccb92470505e # v1.8.0
+        uses: lewagon/wait-on-check-action@2271c86c146b96545b4e871b855e10ffa6f50773 # v1.9.0
         with:
           ref: ${{ github.sha }}
           check-regexp: '^(Build Cache|Lint|Test|Integration Tests|Code Coverage)$'
@@ -40,7 +40,7 @@ jobs:
           allowed-conclusions: success
 
       - name: Wait for Security Audit
-        uses: lewagon/wait-on-check-action@96d9100b431964d10e0136aff8b9ccb92470505e # v1.8.0
+        uses: lewagon/wait-on-check-action@2271c86c146b96545b4e871b855e10ffa6f50773 # v1.9.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Security Audit'
@@ -62,7 +62,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
@@ -94,7 +94,7 @@ jobs:
               COMMIT_RANGE="$LAST_TAG..HEAD"
             fi
 
-            COMMIT_MESSAGES=$(git log --pretty=format:"%s" $COMMIT_RANGE)
+            COMMIT_MESSAGES=$(git log --pretty=format:"%s" "$COMMIT_RANGE")
 
             if echo "$COMMIT_MESSAGES" | grep -q "BREAKING CHANGE\|!:" ; then
               BUMP_TYPE="major"
@@ -135,11 +135,11 @@ jobs:
           perl -0pi -e 's/(\[\[package\]\]\nname = "file-scanner"\nversion = ")[^"]+(")/$1$ENV{NEW_VERSION}$2/m' Cargo.lock
 
           echo "New version: $NEW_VERSION"
-          echo "new_version=v$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "new_version=v$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
           # Check if version actually changed
           if [ "$CURRENT_VERSION" != "$NEW_VERSION" ]; then
-            echo "version_changed=true" >> $GITHUB_OUTPUT
+            echo "version_changed=true" >> "$GITHUB_OUTPUT"
 
             # Commit version change
             git add Cargo.toml Cargo.lock
@@ -149,7 +149,7 @@ jobs:
 
             # Get the commit SHA
             RELEASE_SHA=$(git rev-parse HEAD)
-            echo "release_sha=$RELEASE_SHA" >> $GITHUB_OUTPUT
+            echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
 
             # Create and push tag
             git tag -a "v$NEW_VERSION" -m "Release v$NEW_VERSION"
@@ -158,8 +158,8 @@ jobs:
 
             echo "Tagged release v$NEW_VERSION at commit $RELEASE_SHA"
           else
-            echo "version_changed=false" >> $GITHUB_OUTPUT
-            echo "release_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "version_changed=false" >> "$GITHUB_OUTPUT"
+            echo "release_sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
           fi
 
   # Build and test release
@@ -182,12 +182,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.version-bump.outputs.release_sha }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -195,7 +195,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -217,22 +217,28 @@ jobs:
           # Set up OpenSSL environment for cross-compilation
           if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
             echo "Setting up OpenSSL for aarch64-apple-darwin cross-compilation"
-            export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+            OPENSSL_ROOT_DIR="$(brew --prefix openssl)"
+            export OPENSSL_ROOT_DIR
             export OPENSSL_LIB_DIR="$OPENSSL_ROOT_DIR/lib"
             export OPENSSL_INCLUDE_DIR="$OPENSSL_ROOT_DIR/include"
-            echo "OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR" >> $GITHUB_ENV
-            echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR" >> $GITHUB_ENV
-            echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR" >> $GITHUB_ENV
-            echo "PKG_CONFIG_PATH=$OPENSSL_ROOT_DIR/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+            {
+              echo "OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR"
+              echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR"
+              echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR"
+              echo "PKG_CONFIG_PATH=$OPENSSL_ROOT_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+            } >> "$GITHUB_ENV"
           else
             echo "Setting up OpenSSL for x86_64-apple-darwin"
-            export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+            OPENSSL_ROOT_DIR="$(brew --prefix openssl)"
+            export OPENSSL_ROOT_DIR
             export OPENSSL_LIB_DIR="$OPENSSL_ROOT_DIR/lib"
             export OPENSSL_INCLUDE_DIR="$OPENSSL_ROOT_DIR/include"
-            echo "OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR" >> $GITHUB_ENV
-            echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR" >> $GITHUB_ENV
-            echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR" >> $GITHUB_ENV
-            echo "PKG_CONFIG_PATH=$OPENSSL_ROOT_DIR/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+            {
+              echo "OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR"
+              echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR"
+              echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR"
+              echo "PKG_CONFIG_PATH=$OPENSSL_ROOT_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Build release
@@ -243,11 +249,13 @@ jobs:
         run: |
           # Set additional OpenSSL environment variables for macOS
           if [ "${{ runner.os }}" = "macOS" ]; then
-            export OPENSSL_DIR=$(brew --prefix openssl)
-            export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+            OPENSSL_DIR="$(brew --prefix openssl)"
+            export OPENSSL_DIR
+            OPENSSL_ROOT_DIR="$(brew --prefix openssl)"
+            export OPENSSL_ROOT_DIR
             export OPENSSL_LIB_DIR="$OPENSSL_DIR/lib"
             export OPENSSL_INCLUDE_DIR="$OPENSSL_DIR/include"
-            export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:$PKG_CONFIG_PATH"
+            export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
             # Additional environment variables for openssl-sys crate
             export OPENSSL_NO_VENDOR=1
@@ -257,10 +265,10 @@ jobs:
             ls -la "$OPENSSL_DIR/lib" || echo "OpenSSL lib directory not found"
           fi
 
-          cargo build --release --all-features --target ${{ matrix.target }}
+          cargo build --release --all-features --target "${{ matrix.target }}"
 
       - name: Run tests
-        run: cargo test --release --all-features --target ${{ matrix.target }}
+        run: cargo test --release --all-features --target "${{ matrix.target }}"
 
   # Create GitHub release
   create-release:
@@ -273,7 +281,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.version-bump.outputs.release_sha }}
           fetch-depth: 0
@@ -304,7 +312,7 @@ jobs:
           echo "" >> release_notes.md
 
           # Generate changelog from commits
-          git log --pretty=format:"- %s (%h)" $COMMIT_RANGE | grep -v "^- chore(release):" >> release_notes.md || echo "- Initial release" >> release_notes.md
+          git log --pretty=format:"- %s (%h)" "$COMMIT_RANGE" | grep -v "^- chore(release):" >> release_notes.md || echo "- Initial release" >> release_notes.md
 
           echo "" >> release_notes.md
           echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${LAST_TAG}...${{ needs.version-bump.outputs.new_version }}" >> release_notes.md
@@ -329,15 +337,15 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.version-bump.outputs.release_sha }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -375,7 +383,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.version-bump.outputs.release_sha }}
 
@@ -387,7 +395,7 @@ jobs:
             image=moby/buildkit:latest
 
       - name: Log in to Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -395,7 +403,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
@@ -415,13 +423,15 @@ jobs:
       - name: Generate build args
         id: build_args
         run: |
-          echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
-          echo "VCS_REF=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          {
+            echo "VERSION=${GITHUB_REF#refs/tags/}"
+            echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "VCS_REF=$(git rev-parse --short HEAD)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -438,7 +448,7 @@ jobs:
       - name: Generate image reference
         id: image-ref
         run: |
-          echo "image-ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}" >> $GITHUB_OUTPUT
+          echo "image-ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
   # Build and release binaries for all platforms
   build-binaries:
@@ -468,12 +478,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ needs.version-bump.outputs.release_sha }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -492,13 +502,16 @@ jobs:
           brew install openssl pkg-config
 
           # Set up OpenSSL environment for cross-compilation
-          export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+          OPENSSL_ROOT_DIR="$(brew --prefix openssl)"
+          export OPENSSL_ROOT_DIR
           export OPENSSL_LIB_DIR="$OPENSSL_ROOT_DIR/lib"
           export OPENSSL_INCLUDE_DIR="$OPENSSL_ROOT_DIR/include"
-          echo "OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=$OPENSSL_ROOT_DIR/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+          {
+            echo "OPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR"
+            echo "OPENSSL_LIB_DIR=$OPENSSL_LIB_DIR"
+            echo "OPENSSL_INCLUDE_DIR=$OPENSSL_INCLUDE_DIR"
+            echo "PKG_CONFIG_PATH=$OPENSSL_ROOT_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          } >> "$GITHUB_ENV"
 
       - name: Build binary
         shell: bash
@@ -508,11 +521,13 @@ jobs:
         run: |
           # Set additional OpenSSL environment variables for macOS
           if [ "${{ runner.os }}" = "macOS" ]; then
-            export OPENSSL_DIR=$(brew --prefix openssl)
-            export OPENSSL_ROOT_DIR=$(brew --prefix openssl)
+            OPENSSL_DIR="$(brew --prefix openssl)"
+            export OPENSSL_DIR
+            OPENSSL_ROOT_DIR="$(brew --prefix openssl)"
+            export OPENSSL_ROOT_DIR
             export OPENSSL_LIB_DIR="$OPENSSL_DIR/lib"
             export OPENSSL_INCLUDE_DIR="$OPENSSL_DIR/include"
-            export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:$PKG_CONFIG_PATH"
+            export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 
             # Additional environment variables for openssl-sys crate
             export OPENSSL_NO_VENDOR=1
@@ -522,24 +537,24 @@ jobs:
             ls -la "$OPENSSL_DIR/lib" || echo "OpenSSL lib directory not found"
           fi
 
-          cargo build --release --all-features --target ${{ matrix.target }}
+          cargo build --release --all-features --target "${{ matrix.target }}"
 
       - name: Create archive (Unix)
         if: runner.os != 'Windows'
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.tar.gz file-scanner
+          cd "target/${{ matrix.target }}/release"
+          tar czf "../../../file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.tar.gz" file-scanner
           cd ../../../
-          shasum -a 256 file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.tar.gz > file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.tar.gz.sha256
+          shasum -a 256 "file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.tar.gz" > "file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.tar.gz.sha256"
 
       - name: Create archive (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
-          7z a ../../../file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.zip file-scanner.exe
+          cd "target/${{ matrix.target }}/release"
+          7z a "../../../file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.zip" file-scanner.exe
           cd ../../../
-          sha256sum file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.zip > file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.zip.sha256
+          sha256sum "file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.zip" > "file-scanner-${{ needs.version-bump.outputs.new_version }}-${{ matrix.name }}.zip.sha256"
 
       - name: Upload binary to release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2

@@ -164,7 +164,7 @@ impl ControlFlowAnalyzer {
             .syntax(arch::x86::ArchSyntax::Intel)
             .detail(true)
             .build()
-            .map_err(|e| anyhow!("Failed to build x86_64 capstone engine: {:?}", e))?;
+            .map_err(|e| anyhow!("Failed to build x86_64 capstone engine: {e:?}"))?;
 
         Ok(Self { capstone })
     }
@@ -231,7 +231,7 @@ impl ControlFlowAnalyzer {
             0.0
         } else {
             cfgs.iter()
-                .map(|cfg| cfg.complexity.cyclomatic_complexity as f64)
+                .map(|cfg| f64::from(cfg.complexity.cyclomatic_complexity))
                 .sum::<f64>()
                 / cfgs.len() as f64
         };
@@ -239,13 +239,12 @@ impl ControlFlowAnalyzer {
         let (max_complexity, function_with_max_complexity) = cfgs
             .iter()
             .max_by_key(|cfg| cfg.complexity.cyclomatic_complexity)
-            .map(|cfg| {
+            .map_or((0, None), |cfg| {
                 (
                     cfg.complexity.cyclomatic_complexity,
                     Some(cfg.function_name.clone()),
                 )
-            })
-            .unwrap_or((0, None));
+            });
 
         let analyzed_functions = cfgs.len();
 
@@ -319,7 +318,7 @@ impl ControlFlowAnalyzer {
         let instructions = self
             .capstone
             .disasm_all(bytes, base_address)
-            .map_err(|e| anyhow!("Failed to disassemble: {:?}", e))?;
+            .map_err(|e| anyhow!("Failed to disassemble: {e:?}"))?;
 
         let mut result = Vec::new();
 
@@ -548,7 +547,7 @@ impl ControlFlowAnalyzer {
         basic_blocks
     }
 
-    pub fn determine_block_type(&self, instructions: &[Instruction]) -> BlockType {
+    pub const fn determine_block_type(&self, instructions: &[Instruction]) -> BlockType {
         if let Some(last_insn) = instructions.last() {
             match &last_insn.flow_control {
                 FlowControl::Return => BlockType::Return,

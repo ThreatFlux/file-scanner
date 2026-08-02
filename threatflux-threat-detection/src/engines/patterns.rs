@@ -11,7 +11,7 @@ pub struct PatternEngine {
 
 impl PatternEngine {
     /// Create new pattern engine
-    pub async fn new() -> Result<Self> {
+    pub const fn new() -> Result<Self> {
         Ok(Self { _placeholder: () })
     }
 }
@@ -31,7 +31,7 @@ impl DetectionEngine for PatternEngine {
         let scan_duration = start_time.elapsed();
 
         let file_size = match &target {
-            ScanTarget::File(path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+            ScanTarget::File(path) => std::fs::metadata(path).map_or(0, |m| m.len()),
             ScanTarget::Memory { data, .. } => data.len() as u64,
             ScanTarget::Directory(_) => 0,
         };

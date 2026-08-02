@@ -175,9 +175,9 @@ fn validate_tar_checksum(header: &[u8; TAR_HEADER_SIZE]) -> bool {
     let mut calculated_checksum = 0u32;
     for (i, &byte) in header.iter().enumerate() {
         if (148..156).contains(&i) {
-            calculated_checksum += b' ' as u32; // Treat checksum field as spaces
+            calculated_checksum += u32::from(b' '); // Treat checksum field as spaces
         } else {
-            calculated_checksum += byte as u32;
+            calculated_checksum += u32::from(byte);
         }
     }
 
@@ -191,7 +191,7 @@ fn count_tar_entries<R: Read + Seek>(reader: &mut BufReader<R>) -> Result<usize>
     let mut count = 0;
     let mut buffer = [0u8; TAR_HEADER_SIZE];
 
-    while let Ok(()) = reader.read_exact(&mut buffer) {
+    while matches!(reader.read_exact(&mut buffer), Ok(())) {
         // Check if this is a valid header
         if is_empty_block(&buffer) {
             // Two consecutive empty blocks indicate end of archive
@@ -223,7 +223,7 @@ fn is_empty_block(block: &[u8; TAR_HEADER_SIZE]) -> bool {
 }
 
 /// Get human-readable name for TAR variant
-fn get_tar_variant_name(archive_type: &ArchiveType) -> &'static str {
+const fn get_tar_variant_name(archive_type: &ArchiveType) -> &'static str {
     match archive_type {
         ArchiveType::Tar => "uncompressed",
         ArchiveType::TarGz => "gzip compressed",
@@ -303,7 +303,7 @@ fn analyze_tar_security(path: &Path) -> Result<SuspiciousArchiveIndicators> {
 }
 
 /// Determine overall risk level for TAR archive
-fn determine_tar_risk(indicators: &SuspiciousArchiveIndicators) -> RiskLevel {
+const fn determine_tar_risk(indicators: &SuspiciousArchiveIndicators) -> RiskLevel {
     if indicators.risk_score > 60 {
         RiskLevel::High
     } else if indicators.risk_score > 30 {
@@ -356,12 +356,12 @@ mod tests {
 
         // Calculate checksum
         let mut checksum = 0u32;
-        for &byte in tar[0..TAR_HEADER_SIZE].iter() {
-            checksum += byte as u32;
+        for &byte in &tar[0..TAR_HEADER_SIZE] {
+            checksum += u32::from(byte);
         }
 
         // Set checksum in proper format
-        let checksum_str = format!("{:06o}\0 ", checksum);
+        let checksum_str = format!("{checksum:06o}\0 ");
         tar[148..156].copy_from_slice(checksum_str.as_bytes());
 
         tar

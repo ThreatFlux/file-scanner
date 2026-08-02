@@ -323,7 +323,7 @@ fn is_version_affected(version: &str, ranges: &[VersionRange]) -> bool {
         || version.starts_with("==")
     {
         &version[2..]
-    } else if version.starts_with(">") || version.starts_with("<") {
+    } else if version.starts_with('>') || version.starts_with('<') {
         &version[1..]
     } else {
         version
@@ -586,7 +586,7 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
                 "-dev" | "-test" | "-py" | "-python" | "2" | "3" | "-lib"
             ) || suffix.is_empty()
             {
-                similar_packages.push(format!("{} (suspicious suffix: {})", popular, suffix));
+                similar_packages.push(format!("{popular} (suspicious suffix: {suffix})"));
             }
         }
 
@@ -594,7 +594,7 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
         if package_name.ends_with(popular) && package_name.len() > popular.len() {
             let prefix = &package_name[..package_name.len() - popular.len()];
             if matches!(prefix, "python-" | "py-" | "lib-") {
-                similar_packages.push(format!("{} (suspicious prefix: {})", popular, prefix));
+                similar_packages.push(format!("{popular} (suspicious prefix: {prefix})"));
             }
         }
     }
@@ -620,7 +620,7 @@ fn levenshtein_distance(s1: &str, s2: &str) -> usize {
 
     for (i, c1) in s1.chars().enumerate() {
         for (j, c2) in s2.chars().enumerate() {
-            let cost = if c1 == c2 { 0 } else { 1 };
+            let cost = usize::from(c1 != c2);
             matrix[i + 1][j + 1] = std::cmp::min(
                 std::cmp::min(matrix[i][j + 1] + 1, matrix[i + 1][j] + 1),
                 matrix[i][j] + cost,

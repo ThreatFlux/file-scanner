@@ -2,7 +2,7 @@
 name = "threatflux-threat-detection"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.96.0"
+rust-version = "1.97.1"
 authors = ["ThreatFlux Team"]
 description = "Comprehensive threat detection library with YARA integration and malware analysis"
 license = "MIT"
@@ -21,31 +21,31 @@ rule-management = ["git2", "reqwest"]
 builtin-rules = []
 metrics = ["prometheus"]
 async-scanning = ["tokio"]
-serde-support = ["serde", "serde_json"]
+serde = ["dep:serde", "dep:serde_json"]
 
 [dependencies]
 # Core dependencies
 anyhow = "1.0"
-thiserror = "2.0.18"
+thiserror = "2.0.19"
 log = "0.4"
-walkdir = "2.3"
+walkdir = "2.5"
 async-trait = "0.1"
 
 # Detection engines
-yara-x = { version = "1.17.0", optional = true }
+yara-x = { version = "1.19.0", optional = true }
 # Temporarily disabled due to shlex security vulnerability RUSTSEC-2024-0006
 # clamav-rs = { version = "0.5.5", optional = true }
 
 # Pattern matching (optional)
 aho-corasick = { version = "1.1", optional = true }
-regex = { version = "1.10", optional = true }
+regex = { version = "1.13", optional = true }
 
 # Rule management (optional)
-git2 = { version = "0.20", optional = true }
-reqwest = { version = "0.13.3", features = ["json"], optional = true }
+git2 = { version = "0.21", optional = true }
+reqwest = { version = "0.13.4", features = ["json"], optional = true }
 
 # Async support (optional)
-tokio = { version = "1.0", features = ["full"], optional = true }
+tokio = { version = "1.53", features = ["full"], optional = true }
 
 # Serialization (optional)
 serde = { version = "1.0", features = ["derive"], optional = true }
@@ -56,24 +56,24 @@ prometheus = { version = "0.14", optional = true }
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1.8", features = ["v4"] }
+uuid = { version = "1.24", features = ["v4"] }
 
 [dev-dependencies]
-tempfile = "3.0"
+tempfile = "3.27"
 criterion = { version = "0.8.2", features = ["html_reports"] }
-proptest = "1.0"
+proptest = "1.11"
 tokio-test = "0.4"
 # Testing utilities
 rstest = "0.26"
 pretty_assertions = "1.4"
 test-case = "3.3"
-serial_test = "3.0"
-once_cell = "1.19"
+serial_test = "4.0"
+once_cell = "1.21"
 env_logger = "0.11"
 # Async testing
 futures = "0.3"
 # Mock and test data
-rand = "0.10.1"
+rand = "0.10.2"
 
 # Examples and benchmarks currently disabled - files not implemented yet
 # [[example]]

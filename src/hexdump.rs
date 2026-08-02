@@ -68,7 +68,7 @@ pub fn generate_hex_dump(path: &Path, options: HexDumpOptions) -> Result<HexDump
     for chunk in buffer.chunks(options.bytes_per_line) {
         let hex_bytes = chunk
             .iter()
-            .map(|b| format!("{:02x}", b))
+            .map(|b| format!("{b:02x}"))
             .collect::<Vec<_>>()
             .join(" ");
 

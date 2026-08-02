@@ -328,7 +328,7 @@ impl TaintTracker {
                         location: CodeLocation {
                             file_path: file_path_str.clone(),
                             line_number: line_num as u32 + 1,
-                            column: captures.get(0).map(|m| m.start() as u32).unwrap_or(0),
+                            column: captures.get(0).map_or(0, |m| m.start() as u32),
                             function_name: self.extract_function_name(lines, line_num),
                             code_snippet: line.to_string(),
                         },
@@ -363,7 +363,7 @@ impl TaintTracker {
                         location: CodeLocation {
                             file_path: file_path_str.clone(),
                             line_number: line_num as u32 + 1,
-                            column: captures.get(0).map(|m| m.start() as u32).unwrap_or(0),
+                            column: captures.get(0).map_or(0, |m| m.start() as u32),
                             function_name: self.extract_function_name(lines, line_num),
                             code_snippet: line.to_string(),
                         },
@@ -371,8 +371,7 @@ impl TaintTracker {
                         description: pattern.description.clone(),
                         dangerous_function: captures
                             .get(1)
-                            .map(|m| m.as_str().to_string())
-                            .unwrap_or_else(|| "unknown".to_string()),
+                            .map_or_else(|| "unknown".to_string(), |m| m.as_str().to_string()),
                         impact: pattern.impact.clone(),
                     };
                     sinks.push(sink);
@@ -411,7 +410,7 @@ impl TaintTracker {
         Ok(sanitizers)
     }
 
-    fn build_control_flow_graph(&self, _lines: &[&str]) -> Result<ControlFlowGraph> {
+    const fn build_control_flow_graph(&self, _lines: &[&str]) -> Result<ControlFlowGraph> {
         // Simplified CFG - in a real implementation, this would parse the AST
         Ok(ControlFlowGraph::new())
     }
@@ -695,7 +694,7 @@ impl TaintTracker {
         false
     }
 
-    fn determine_vulnerability_type(&self, sink_type: &SinkType) -> VulnerabilityType {
+    const fn determine_vulnerability_type(&self, sink_type: &SinkType) -> VulnerabilityType {
         match sink_type {
             SinkType::SqlQuery => VulnerabilityType::SqlInjection,
             SinkType::SystemCommand => VulnerabilityType::CommandInjection,
@@ -771,7 +770,10 @@ impl TaintTracker {
         }
     }
 
-    fn get_vulnerability_severity(&self, vuln_type: &VulnerabilityType) -> VulnerabilitySeverity {
+    const fn get_vulnerability_severity(
+        &self,
+        vuln_type: &VulnerabilityType,
+    ) -> VulnerabilitySeverity {
         match vuln_type {
             VulnerabilityType::SqlInjection | VulnerabilityType::CommandInjection => {
                 VulnerabilitySeverity::Critical
@@ -784,7 +786,7 @@ impl TaintTracker {
         }
     }
 
-    fn get_exploitability(&self, vuln_type: &VulnerabilityType) -> Exploitability {
+    const fn get_exploitability(&self, vuln_type: &VulnerabilityType) -> Exploitability {
         match vuln_type {
             VulnerabilityType::SqlInjection | VulnerabilityType::CrossSiteScripting => {
                 Exploitability::Simple
@@ -844,7 +846,7 @@ struct ControlFlowGraph {
 }
 
 impl ControlFlowGraph {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {}
     }
 }
@@ -863,7 +865,5 @@ pub fn analyze_taint_flows(file_path: &Path) -> Result<TaintAnalysis> {
 
 /// Quick check for potential taint vulnerabilities
 pub fn has_taint_vulnerabilities(file_path: &Path) -> bool {
-    analyze_taint_flows(file_path)
-        .map(|analysis| !analysis.vulnerabilities.is_empty())
-        .unwrap_or(false)
+    analyze_taint_flows(file_path).is_ok_and(|analysis| !analysis.vulnerabilities.is_empty())
 }

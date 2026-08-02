@@ -1,6 +1,6 @@
 CARGO ?= cargo
-RUST_MSRV ?= 1.96.0
-RUST_TOOLCHAIN ?= 1.96.0
+RUST_MSRV ?= 1.97.1
+RUST_TOOLCHAIN ?= 1.97.1
 BINARY_NAME ?= file-scanner
 BINARY_PACKAGE ?= file-scanner
 SBOM_MANIFEST_PATH ?= Cargo.toml

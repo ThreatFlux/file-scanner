@@ -483,7 +483,7 @@ fn determine_ole_document_type(file: &mut File) -> Result<OleFileType> {
     Ok(OleFileType::Ole2Document)
 }
 
-fn determine_ooxml_type(_file: &mut File) -> Result<OleFileType> {
+const fn determine_ooxml_type(_file: &mut File) -> Result<OleFileType> {
     // For OOXML files, we would need to examine the content types
     // This is a simplified implementation
     Ok(OleFileType::OfficeOpenXml)
@@ -561,7 +561,7 @@ pub fn determine_stream_type(name: &str) -> StreamType {
         "WordDocument" => StreamType::WordDocument,
         "Workbook" | "Book" => StreamType::ExcelWorkbook,
         "PowerPoint Document" => StreamType::PowerPointDocument,
-        name if name.starts_with("\x05") => StreamType::Metadata,
+        name if name.starts_with('\x05') => StreamType::Metadata,
         _ => StreamType::Unknown,
     }
 }
@@ -595,7 +595,7 @@ pub fn calculate_entropy(data: &[u8]) -> f64 {
     for &count in &frequency {
         if count > 0 {
             let probability = count as f64 / len;
-            entropy -= probability * probability.log2();
+            entropy = probability.mul_add(-probability.log2(), entropy);
         }
     }
 
@@ -650,7 +650,7 @@ fn extract_vba_project(file: &mut File) -> Result<Option<VbaProject>> {
             for line in content.lines() {
                 if let Some(stripped) = line.strip_prefix("Name=") {
                     project_name = stripped.to_string();
-                } else if line.contains("=") {
+                } else if line.contains('=') {
                     let parts: Vec<&str> = line.splitn(2, '=').collect();
                     if parts.len() == 2 {
                         properties.insert(parts[0].to_string(), parts[1].to_string());
@@ -885,7 +885,7 @@ pub fn perform_security_assessment(
         if high_risk_calls > 0 {
             risk_factors.push(RiskFactor {
                 factor_type: RiskFactorType::SuspiciousApiCalls,
-                description: format!("Found {} high-risk API calls", high_risk_calls),
+                description: format!("Found {high_risk_calls} high-risk API calls"),
                 severity: RiskLevel::High,
                 confidence: 0.8,
             });
@@ -1014,9 +1014,9 @@ pub fn parse_vba_reference(reference_str: &str) -> VbaReference {
 
     VbaReference {
         name: parts.get(1).unwrap_or(&"Unknown").to_string(),
-        guid: parts.first().map(|s| s.to_string()),
-        version: parts.get(2).map(|s| s.to_string()),
-        path: parts.get(3).map(|s| s.to_string()),
+        guid: parts.first().map(std::string::ToString::to_string),
+        version: parts.get(2).map(std::string::ToString::to_string),
+        path: parts.get(3).map(std::string::ToString::to_string),
         reference_type: VbaReferenceType::TypeLib,
     }
 }
@@ -1151,7 +1151,7 @@ pub fn detect_suspicious_vba_patterns(source: &str) -> Vec<String> {
 
     for keyword in suspicious_keywords {
         if source_lower.contains(keyword) {
-            patterns.push(format!("Suspicious keyword: {}", keyword));
+            patterns.push(format!("Suspicious keyword: {keyword}"));
         }
     }
 
@@ -1208,7 +1208,7 @@ pub fn detect_suspicious_api_calls(source: &str, module_name: &str) -> Vec<Suspi
                 api_name: api.to_string(),
                 module_name: module_name.to_string(),
                 call_count: source_lower.matches(api).count() as u32,
-                context: format!("Found in module {}", module_name),
+                context: format!("Found in module {module_name}"),
                 risk_level: risk,
                 description: desc.to_string(),
             });

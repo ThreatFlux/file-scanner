@@ -8,8 +8,8 @@ use std::path::Path;
 
 use crate::core::{
     AnalysisResult, Dependency, DependencyAnalysis, DependencyType, MaliciousPattern,
-    PackageAnalyzer, PackageInfo, PackageMetadata, PatternMatcher, RiskAssessment, RiskCalculator,
-    Vulnerability,
+    PackageAnalyzer, PackageInfo, PackageMetadata, PatternCategory, PatternMatcher,
+    PatternSeverity, RiskAssessment, RiskCalculator, Vulnerability,
 };
 use crate::utils::typosquatting::TyposquattingDetector;
 use crate::vulnerability_db::VulnerabilityDatabase;
@@ -466,7 +466,28 @@ impl PackageAnalyzer for PythonAnalyzer {
         if path.join("setup.py").exists() {
             all_content.push_str(&tokio::fs::read_to_string(path.join("setup.py")).await?);
         }
-        let malicious_patterns = self.pattern_matcher.scan(&all_content, Some("setup.py"));
+        let mut malicious_patterns = self.pattern_matcher.scan(&all_content, Some("setup.py"));
+        for operation in &setup_analysis.dangerous_operations {
+            malicious_patterns.push(MaliciousPattern {
+                pattern_id: format!("PY_SETUP_{}", operation.replace(' ', "_").to_uppercase()),
+                pattern_name: "Suspicious Python setup operation".to_string(),
+                description: if operation.contains("Network") {
+                    "Network access detected in setup.py via urllib or requests".to_string()
+                } else {
+                    format!("{operation} detected in setup.py")
+                },
+                category: if operation.contains("Network") || operation.contains("HTTP") {
+                    PatternCategory::NetworkAccess
+                } else {
+                    PatternCategory::CodeExecution
+                },
+                severity: PatternSeverity::High,
+                indicators: vec![operation.clone()],
+                regex_patterns: vec![],
+                file_patterns: vec!["setup.py".to_string()],
+                evidence: setup_analysis.external_downloads.clone(),
+            });
+        }
 
         // Check typosquatting
         let typosquatting_risk = if self.typo_detector.is_typosquatting(&package.metadata.name) {

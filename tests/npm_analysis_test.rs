@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use anyhow::Result;
 use file_scanner::npm_analysis::{analyze_npm_package, RiskLevel};
 use file_scanner::npm_vuln_db::{check_package_vulnerabilities, check_typosquatting_similarity};
@@ -9,8 +54,8 @@ use tempfile::TempDir;
 fn create_test_npm_package(temp_dir: &Path, name: &str, version: &str, deps: &str) -> Result<()> {
     let package_json = format!(
         r#"{{
-  "name": "{}",
-  "version": "{}",
+  "name": "{name}",
+  "version": "{version}",
   "description": "A test package",
   "main": "index.js",
   "scripts": {{
@@ -19,9 +64,8 @@ fn create_test_npm_package(temp_dir: &Path, name: &str, version: &str, deps: &st
   "keywords": ["test"],
   "author": "test@example.com",
   "license": "MIT",
-  "dependencies": {}
-}}"#,
-        name, version, deps
+  "dependencies": {deps}
+}}"#
     );
 
     fs::write(temp_dir.join("package.json"), package_json)?;
@@ -371,13 +415,13 @@ fn test_comprehensive_npm_analysis() -> Result<()> {
     fs::write(temp_dir.path().join("package.json"), package_json)?;
     fs::write(
         temp_dir.path().join("index.js"),
-        r#"
+        r"
 const express = require('express');
 const _ = require('lodash');
 
 const app = express();
 module.exports = app;
-"#,
+",
     )?;
     fs::write(
         temp_dir.path().join("README.md"),

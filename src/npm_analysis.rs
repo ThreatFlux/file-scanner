@@ -438,7 +438,7 @@ fn extract_package_info(package_json: &Value) -> Result<PackageJsonInfo> {
         }),
         private: obj
             .get("private")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         publish_config: obj
             .get("publishConfig")
@@ -666,7 +666,7 @@ fn analyze_scripts(package_json: &Value) -> Result<ScriptsAnalysis> {
         }
 
         // Check for shell injection
-        if content.contains("$") || content.contains("`") || content.contains("eval") {
+        if content.contains('$') || content.contains('`') || content.contains("eval") {
             shell_injection_risk = true;
         }
     }
@@ -895,7 +895,7 @@ fn detect_network_patterns(
                 .to_string(),
                 is_suspicious: is_suspicious_url(&url),
                 reputation_score: None, // TODO: Implement reputation checking
-                found_in: format!("script:{}", name),
+                found_in: format!("script:{name}"),
             });
         }
     }
@@ -1112,7 +1112,9 @@ fn detect_malicious_indicators(
         overall_risk_score += 45.0;
     }
 
-    overall_risk_score += security.supply_chain_risk_score * 0.5;
+    overall_risk_score = security
+        .supply_chain_risk_score
+        .mul_add(0.5, overall_risk_score);
 
     let risk_level = match overall_risk_score {
         x if x >= 80.0 => RiskLevel::Critical,
@@ -1233,7 +1235,7 @@ fn detect_known_malicious_patterns(
                             description: db_pattern.description.clone(),
                             found_in: script.script_name.clone(),
                             severity: db_pattern.severity.clone(),
-                            evidence: format!("Pattern '{}' found", indicator),
+                            evidence: format!("Pattern '{indicator}' found"),
                         });
                     }
                 }
@@ -1318,7 +1320,7 @@ fn detect_backdoor_indicators(security: &NpmSecurityAnalysis) -> Vec<BackdoorInd
             if script.script_content.contains(pattern) {
                 indicators.push(BackdoorIndicator {
                     indicator_type: "Reverse shell".to_string(),
-                    description: format!("Possible reverse shell using {}", pattern),
+                    description: format!("Possible reverse shell using {pattern}"),
                     evidence: vec![script.script_name.clone()],
                     confidence: 0.8,
                 });
@@ -1394,8 +1396,7 @@ fn calculate_quality_metrics(
     if package_json
         .get("keywords")
         .and_then(|v| v.as_array())
-        .map(|a| !a.is_empty())
-        .unwrap_or(false)
+        .is_some_and(|a| !a.is_empty())
     {
         documentation_score += 20.0;
     }
@@ -1403,7 +1404,7 @@ fn calculate_quality_metrics(
     let maintenance_score =
         if has_tests { 50.0 } else { 0.0 } + if has_ci_config { 50.0 } else { 0.0 };
 
-    let overall_quality_score = (documentation_score + maintenance_score) / 2.0;
+    let overall_quality_score = f32::midpoint(documentation_score, maintenance_score);
 
     Ok(PackageQualityMetrics {
         has_readme,

@@ -29,7 +29,7 @@ pub struct Instruction {
     pub size: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum InstructionType {
     Arithmetic,
     Logic,
@@ -305,7 +305,7 @@ fn detect_architecture_and_code(buffer: &[u8]) -> Result<(Arch, Mode, CodeSectio
                     let end = start + section.size_of_raw_data as usize;
                     let code_section = CodeSection {
                         data: buffer[start..end].to_vec(),
-                        address: pe.image_base + section.virtual_address as u64,
+                        address: pe.image_base + u64::from(section.virtual_address),
                     };
                     return Ok((arch.0, arch.1, code_section));
                 }
@@ -345,7 +345,7 @@ fn detect_architecture_and_code(buffer: &[u8]) -> Result<(Arch, Mode, CodeSectio
 
 fn create_capstone(arch: Arch, mode: Mode) -> Result<Capstone> {
     let cs = Capstone::new_raw(arch, mode, NO_EXTRA_MODE, None)
-        .map_err(|e| anyhow::anyhow!("Failed to create Capstone instance: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create Capstone instance: {e:?}"))?;
     Ok(cs)
 }
 
@@ -354,7 +354,7 @@ fn disassemble_code(cs: &Capstone, code: &[u8], base_address: u64) -> Result<Vec
 
     let insns = cs
         .disasm_all(code, base_address)
-        .map_err(|e| anyhow::anyhow!("Disassembly failed: {:?}", e))?;
+        .map_err(|e| anyhow::anyhow!("Disassembly failed: {e:?}"))?;
 
     for insn in insns.iter() {
         let flow_control = detect_flow_control(insn);
@@ -377,7 +377,7 @@ fn disassemble_code(cs: &Capstone, code: &[u8], base_address: u64) -> Result<Vec
 fn detect_flow_control(insn: &capstone::Insn) -> Option<FlowControl> {
     let mnemonic = insn.mnemonic()?;
 
-    if mnemonic.starts_with("j") {
+    if mnemonic.starts_with('j') {
         let conditional = mnemonic != "jmp";
         let target = None; // Would need detail access
         Some(FlowControl::Jump {
@@ -421,7 +421,7 @@ fn classify_instruction(insn: &capstone::Insn) -> InstructionType {
         "mov" | "movzx" | "movsx" | "lea" | "ld" | "st" | "ldr" | "str" => InstructionType::Memory,
 
         // Control
-        m if m.starts_with("j") || m == "call" || m == "ret" || m == "int" => {
+        m if m.starts_with('j') || m == "call" || m == "ret" || m == "int" => {
             InstructionType::Control
         }
 
@@ -442,8 +442,8 @@ fn classify_instruction(insn: &capstone::Insn) -> InstructionType {
         }
 
         // Vector
-        m if m.starts_with("v")
-            || m.starts_with("p") && (m.contains("mm") || m.contains("xmm")) =>
+        m if m.starts_with('v')
+            || m.starts_with('p') && (m.contains("mm") || m.contains("xmm")) =>
         {
             InstructionType::Vector
         }
@@ -648,7 +648,7 @@ fn detect_suspicious_patterns(instructions: &[Instruction]) -> Vec<SuspiciousPat
                 patterns.push(SuspiciousPattern {
                     pattern_type: PatternType::NopSled,
                     addresses: vec![instructions[nop_start].address],
-                    description: format!("NOP sled of {} instructions", consecutive_nops),
+                    description: format!("NOP sled of {consecutive_nops} instructions"),
                     severity: Severity::Medium,
                 });
             }
@@ -880,7 +880,7 @@ fn generate_assembly_listing(instructions: &[Instruction]) -> String {
             insn.address,
             insn.bytes
                 .iter()
-                .map(|b| format!("{:02x}", b))
+                .map(|b| format!("{b:02x}"))
                 .collect::<Vec<_>>()
                 .join(" "),
             insn.mnemonic,
@@ -932,7 +932,7 @@ fn generate_graph_data(functions: &[DisassembledFunction]) -> GraphVisualization
                 if let Some(target) = exit.target {
                     edges.push(GraphEdge {
                         source: block_id.clone(),
-                        target: format!("block_{:x}", target),
+                        target: format!("block_{target:x}"),
                         edge_type: format!("{:?}", exit.exit_type),
                         label: Some(format!("{:?}", exit.exit_type)),
                     });
@@ -973,7 +973,7 @@ mod tests {
     }
 
     fn detect_mock_flow_control(mnemonic: &str, operands: &str) -> Option<FlowControl> {
-        if mnemonic.starts_with("j") {
+        if mnemonic.starts_with('j') {
             let conditional = mnemonic != "jmp";
             Some(FlowControl::Jump {
                 target: None,
@@ -1007,7 +1007,7 @@ mod tests {
             "mov" | "movzx" | "movsx" | "lea" | "ld" | "st" | "ldr" | "str" => {
                 InstructionType::Memory
             }
-            m if m.starts_with("j") || m == "call" || m == "ret" || m == "int" => {
+            m if m.starts_with('j') || m == "call" || m == "ret" || m == "int" => {
                 InstructionType::Control
             }
             "push" | "pop" | "pushf" | "popf" | "enter" | "leave" => InstructionType::Stack,
@@ -1016,7 +1016,7 @@ mod tests {
             "aesenc" | "aesdec" | "aesimc" | "aeskeygen" | "sha256" | "pclmulqdq" => {
                 InstructionType::Crypto
             }
-            m if m.starts_with("v") || m.starts_with("p") => InstructionType::Vector,
+            m if m.starts_with('v') || m.starts_with('p') => InstructionType::Vector,
             _ => InstructionType::Other,
         }
     }
@@ -1112,8 +1112,7 @@ mod tests {
             let insn = create_mock_instruction(0x1000, mnemonic, "", vec![0x90]);
             assert_eq!(
                 insn.instruction_type, expected,
-                "Failed for mnemonic: {}",
-                mnemonic
+                "Failed for mnemonic: {mnemonic}"
             );
         }
     }
@@ -1567,14 +1566,14 @@ mod tests {
         let output_formats = generate_output_formats(&instructions, &functions, architecture);
 
         assert!(!output_formats.assembly.is_empty());
-        assert!(
+        assert_eq!(
             output_formats
                 .json_structured
                 .get("architecture")
                 .unwrap()
                 .as_str()
-                .unwrap()
-                == "x86_64"
+                .unwrap(),
+            "x86_64"
         );
         assert_eq!(
             output_formats

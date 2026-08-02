@@ -654,7 +654,7 @@ fn detect_network_patterns(
     if let Some(strings) = strings {
         for (indicator, port, desc) in &port_indicators {
             if strings.ascii_strings.iter().any(|s| s.contains(indicator)) {
-                found_ports.push(format!("{} ({})", port, desc));
+                found_ports.push(format!("{port} ({desc})"));
                 port_numbers.push(*port);
             }
         }
@@ -966,7 +966,7 @@ fn detect_process_operations(
                 found_by_type
                     .entry(op_type.clone())
                     .or_default()
-                    .extend(techniques.iter().map(|s| s.to_string()));
+                    .extend(techniques.iter().map(std::string::ToString::to_string));
             }
         }
     }
@@ -995,7 +995,10 @@ fn detect_process_operations(
         operations.push(ProcessOperation {
             operation_type: ProcessOpType::ProcessHollowing,
             targets: vec!["Process hollowing capability detected".to_string()],
-            techniques: hollowing_apis.iter().map(|s| s.to_string()).collect(),
+            techniques: hollowing_apis
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
         });
     }
 

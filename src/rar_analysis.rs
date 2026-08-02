@@ -49,7 +49,7 @@ pub fn analyze_rar<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
         has_encryption: detect_encryption(&mut reader)?,
         has_password: false, // Would need to check
         comment: None,
-        created_by: Some(format!("RAR {}", version)),
+        created_by: Some(format!("RAR {version}")),
         creation_date: None,
     };
 
@@ -148,7 +148,7 @@ fn analyze_rar_security(path: &Path) -> Result<SuspiciousArchiveIndicators> {
 }
 
 /// Determine overall risk level for RAR archive
-fn determine_rar_risk(indicators: &SuspiciousArchiveIndicators) -> RiskLevel {
+const fn determine_rar_risk(indicators: &SuspiciousArchiveIndicators) -> RiskLevel {
     if indicators.risk_score > 60 {
         RiskLevel::High
     } else if indicators.risk_score > 30 {

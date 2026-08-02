@@ -1,6 +1,5 @@
 //! Basic usage example for ThreatFlux Package Security
 
-use std::path::Path;
 use threatflux_package_security::PackageSecurityAnalyzer;
 
 #[tokio::main]

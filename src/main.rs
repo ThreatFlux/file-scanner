@@ -1,6 +1,47 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::only_used_in_recursion,
+    clippy::ref_option,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::similar_names,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::struct_excessive_bools,
+    clippy::struct_field_names,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines,
+    clippy::unnecessary_wraps,
+    clippy::unnecessary_debug_formatting,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm
+)]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -18,7 +59,6 @@ mod function_analysis;
 mod hash;
 mod hexdump;
 mod java_analysis;
-mod mcp;
 mod mcp_server;
 mod mcp_transport;
 mod metadata;
@@ -50,7 +90,9 @@ use entropy_analysis::analyze_entropy;
 use function_analysis::analyze_symbols;
 use hexdump::{extract_footer_hex, extract_header_hex, generate_hex_dump, HexDumpOptions};
 use java_analysis::{analyze_class_file, analyze_java_archive};
-use mcp_server::YaraIndicators;
+use mcp_server::{
+    analyze_file_llm, yara_scan_files, LlmFileAnalysisRequest, YaraIndicators, YaraScanRequest,
+};
 use mcp_transport::McpTransportServer;
 use metadata::FileMetadata;
 use npm_analysis::analyze_npm_package;
@@ -248,7 +290,7 @@ async fn main() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("File path is required for scanning mode"))?;
 
     if !file_path.exists() {
-        anyhow::bail!("File not found: {:?}", file_path);
+        anyhow::bail!("File not found: {}", file_path.display());
     }
 
     let mut metadata = FileMetadata::new(&file_path)?;
@@ -407,7 +449,7 @@ async fn main() -> Result<()> {
                         line.raw_bytes
                             .iter()
                             .take(16)
-                            .map(|b| format!("{:02X}", b))
+                            .map(|b| format!("{b:02X}"))
                             .collect::<Vec<_>>()
                             .join(" ")
                     })
@@ -424,8 +466,7 @@ async fn main() -> Result<()> {
                 entropy: metadata
                     .entropy_analysis
                     .as_ref()
-                    .map(|e| e.overall_entropy)
-                    .unwrap_or(0.0),
+                    .map_or(0.0, |e| e.overall_entropy),
                 unique_strings: metadata
                     .extracted_strings
                     .as_ref()
@@ -446,8 +487,7 @@ async fn main() -> Result<()> {
                 is_packed: metadata
                     .entropy_analysis
                     .as_ref()
-                    .map(|e| e.overall_entropy > 7.0) // High entropy indicates packing
-                    .unwrap_or(false),
+                    .is_some_and(|e| e.overall_entropy > 7.0),
             };
             metadata.yara_indicators = Some(indicators);
         }
@@ -468,28 +508,55 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// TODO: Temporarily disabled during refactoring
 async fn handle_llm_analyze(
-    _file_path: PathBuf,
-    _token_limit: usize,
-    _min_string_length: usize,
-    _max_strings: usize,
-    _max_imports: usize,
-    _suggest_yara_rule: bool,
+    file_path: PathBuf,
+    token_limit: usize,
+    min_string_length: usize,
+    max_strings: usize,
+    max_imports: usize,
+    suggest_yara_rule: bool,
 ) -> Result<()> {
-    println!("LLM analysis temporarily disabled during refactoring");
+    let result = analyze_file_llm(LlmFileAnalysisRequest {
+        file_path: file_path.to_string_lossy().into_owned(),
+        token_limit: Some(token_limit),
+        min_string_length: Some(min_string_length),
+        max_strings: Some(max_strings),
+        max_imports: Some(max_imports),
+        max_opcodes: None,
+        hex_pattern_size: None,
+        suggest_yara_rule: Some(suggest_yara_rule),
+    })
+    .await?;
+    println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }
 
-// TODO: Temporarily disabled during refactoring
 async fn handle_yara_scan(
-    _path: PathBuf,
-    _rule: String,
-    _recursive: bool,
-    _max_file_size_mb: u64,
-    _detailed: bool,
+    path: PathBuf,
+    rule: String,
+    recursive: bool,
+    max_file_size_mb: u64,
+    detailed: bool,
 ) -> Result<()> {
-    println!("YARA scanning temporarily disabled during refactoring");
+    let rule_path = PathBuf::from(&rule);
+    let yara_rule = if rule_path.exists() {
+        std::fs::read_to_string(&rule_path)
+            .with_context(|| format!("failed to read YARA rule file: {}", rule_path.display()))?
+    } else {
+        rule
+    };
+    let max_file_size = max_file_size_mb
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| anyhow::anyhow!("maximum file size is too large"))?;
+    let result = yara_scan_files(YaraScanRequest {
+        path: path.to_string_lossy().into_owned(),
+        yara_rule,
+        recursive: Some(recursive),
+        max_file_size: Some(max_file_size),
+        detailed_matches: Some(detailed),
+    })
+    .await?;
+    println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }
 
@@ -510,12 +577,10 @@ async fn handle_java_analysis(file_path: PathBuf) -> Result<()> {
     let extension = file_path
         .extension()
         .and_then(|ext| ext.to_str())
-        .map(|s| s.to_lowercase());
+        .map(str::to_lowercase);
 
     let result = match extension.as_deref() {
-        Some("jar") | Some("war") | Some("ear") | Some("apk") | Some("aar") => {
-            analyze_java_archive(&file_path)?
-        }
+        Some("jar" | "war" | "ear" | "apk" | "aar") => analyze_java_archive(&file_path)?,
         Some("class") => analyze_class_file(&file_path)?,
         _ => {
             // Try to detect based on content

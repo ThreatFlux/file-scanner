@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use file_scanner::binary_parser::*;
 use std::fs;
 use std::io::Write;
@@ -126,13 +171,10 @@ fn test_parse_binary_invalid_format() {
 
     // ThreatFlux is more resilient and can analyze unknown/raw formats
     // so we expect success with "Raw" or "Unknown" format instead of an error
-    match result {
-        Ok(binary_info) => {
-            assert!(binary_info.format == "Raw" || binary_info.format == "Unknown");
-        }
-        Err(_) => {
-            // Goblin fallback might still return error, which is also acceptable
-        }
+    if let Ok(binary_info) = result {
+        assert!(binary_info.format == "Raw" || binary_info.format == "Unknown");
+    } else {
+        // Goblin fallback might still return error, which is also acceptable
     }
 }
 
@@ -270,7 +312,7 @@ fn test_binary_info_debug_format() {
         java_analysis: None,
     };
 
-    let debug_string = format!("{:?}", info);
+    let debug_string = format!("{info:?}");
     assert!(debug_string.contains("BinaryInfo"));
     assert!(debug_string.contains("ELF"));
     assert!(debug_string.contains("x86_64"));
@@ -350,18 +392,18 @@ fn test_binary_info_edge_cases() {
 #[test]
 fn test_binary_info_empty_strings() {
     let info = BinaryInfo {
-        format: "".to_string(),
-        architecture: "".to_string(),
-        compiler: Some("".to_string()),
-        linker: Some("".to_string()),
+        format: String::new(),
+        architecture: String::new(),
+        compiler: Some(String::new()),
+        linker: Some(String::new()),
         sections: vec![SectionInfo {
-            name: "".to_string(),
+            name: String::new(),
             size: 0,
             virtual_address: 0,
-            characteristics: "".to_string(),
+            characteristics: String::new(),
         }],
-        imports: vec!["".to_string()],
-        exports: vec!["".to_string()],
+        imports: vec![String::new()],
+        exports: vec![String::new()],
         entry_point: Some(0),
         is_stripped: false,
         has_debug_info: false,
@@ -370,7 +412,7 @@ fn test_binary_info_empty_strings() {
 
     assert!(info.format.is_empty());
     assert!(info.architecture.is_empty());
-    assert_eq!(info.compiler, Some("".to_string()));
+    assert_eq!(info.compiler, Some(String::new()));
     assert_eq!(info.sections[0].name, "");
     assert_eq!(info.sections[0].size, 0);
     assert_eq!(info.sections[0].virtual_address, 0);
@@ -422,7 +464,7 @@ fn test_binary_info_long_strings() {
             characteristics: long_name.clone(),
         }],
         imports: vec![long_name.clone()],
-        exports: vec![long_name.clone()],
+        exports: vec![long_name],
         entry_point: Some(0x1000),
         is_stripped: false,
         has_debug_info: true,
@@ -440,10 +482,10 @@ fn test_binary_info_many_sections() {
     let mut sections = Vec::new();
     for i in 0..1000 {
         sections.push(SectionInfo {
-            name: format!(".section_{}", i),
+            name: format!(".section_{i}"),
             size: i as u64,
             virtual_address: 0x1000 + (i as u64 * 0x1000),
-            characteristics: format!("char_{}", i),
+            characteristics: format!("char_{i}"),
         });
     }
 
@@ -474,8 +516,8 @@ fn test_binary_info_many_imports_exports() {
     let mut exports = Vec::new();
 
     for i in 0..500 {
-        imports.push(format!("import_{}.dll", i));
-        exports.push(format!("export_function_{}", i));
+        imports.push(format!("import_{i}.dll"));
+        exports.push(format!("export_function_{i}"));
     }
 
     let info = BinaryInfo {
@@ -541,7 +583,7 @@ fn test_binary_info_clone() {
     };
 
     // This test verifies that BinaryInfo derives Debug and Clone (if it does)
-    let debug_str = format!("{:?}", info);
+    let debug_str = format!("{info:?}");
     assert!(debug_str.contains("BinaryInfo"));
 }
 
@@ -612,13 +654,10 @@ fn test_parse_binary_with_real_elf_like_data() {
 
     // The parsing might succeed or fail depending on goblin's validation
     // Just ensure it doesn't panic
-    match result {
-        Ok(info) => {
-            assert!(!info.format.is_empty());
-        }
-        Err(_) => {
-            // Parsing failed, which is acceptable for minimal/invalid data
-        }
+    if let Ok(info) = result {
+        assert!(!info.format.is_empty());
+    } else {
+        // Parsing failed, which is acceptable for minimal/invalid data
     }
 }
 
@@ -634,13 +673,10 @@ fn test_parse_binary_with_real_pe_like_data() {
     let result = parse_binary(&file_path);
 
     // The parsing might succeed or fail depending on goblin's validation
-    match result {
-        Ok(info) => {
-            assert!(!info.format.is_empty());
-        }
-        Err(_) => {
-            // Parsing failed, which is acceptable for minimal/invalid data
-        }
+    if let Ok(info) = result {
+        assert!(!info.format.is_empty());
+    } else {
+        // Parsing failed, which is acceptable for minimal/invalid data
     }
 }
 
@@ -656,12 +692,9 @@ fn test_parse_binary_with_real_macho_like_data() {
     let result = parse_binary(&file_path);
 
     // The parsing might succeed or fail depending on goblin's validation
-    match result {
-        Ok(info) => {
-            assert!(!info.format.is_empty());
-        }
-        Err(_) => {
-            // Parsing failed, which is acceptable for minimal/invalid data
-        }
+    if let Ok(info) = result {
+        assert!(!info.format.is_empty());
+    } else {
+        // Parsing failed, which is acceptable for minimal/invalid data
     }
 }

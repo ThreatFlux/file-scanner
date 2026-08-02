@@ -179,7 +179,7 @@ pub struct CodeInjectionPattern {
     pub risk_level: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum RiskLevel {
     Critical,
     High,
@@ -452,7 +452,7 @@ fn analyze_python_directory(dir_path: &Path) -> Result<PythonPackageAnalysis> {
                 files.push(PythonFileAnalysis {
                     file_path: file_name,
                     file_type: detect_python_file_type(&path.to_string_lossy()),
-                    size: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                    size: entry.metadata().map_or(0, |m| m.len()),
                     suspicious_content: vec![],
                     imports: vec![],
                     obfuscation_score: 0.0,
@@ -863,8 +863,11 @@ fn analyze_dependencies(
         extract_pyproject_dependencies(content, &mut install_requires)?;
     }
 
-    let dependency_count =
-        install_requires.len() + extras_require.values().map(|m| m.len()).sum::<usize>();
+    let dependency_count = install_requires.len()
+        + extras_require
+            .values()
+            .map(std::collections::HashMap::len)
+            .sum::<usize>();
 
     let vulnerability_summary = calculate_vulnerability_summary(&install_requires);
 
@@ -910,7 +913,7 @@ fn extract_setup_py_dependencies(
 /// Extract a list from setup.py
 fn extract_list_from_setup_py(content: &str, field_name: &str) -> Option<Vec<String>> {
     // Simple regex to extract list contents
-    let pattern = format!(r"{}\s*=\s*\[([\s\S]*?)\]", field_name);
+    let pattern = format!(r"{field_name}\s*=\s*\[([\s\S]*?)\]");
     if let Ok(re) = regex::Regex::new(&pattern) {
         if let Some(cap) = re.captures(content) {
             let list_content = &cap[1];
@@ -1311,7 +1314,7 @@ fn detect_network_patterns(
 }
 
 /// Detect filesystem patterns
-fn detect_filesystem_patterns(
+const fn detect_filesystem_patterns(
     _files: &[PythonFileAnalysis],
     _setup_analysis: &SetupAnalysis,
 ) -> Vec<FileSystemAccess> {
@@ -1381,7 +1384,10 @@ fn detect_obfuscation_in_content(content: &str) -> bool {
 }
 
 /// Detect crypto mining
-fn detect_crypto_mining(_files: &[PythonFileAnalysis], _imports: &[SuspiciousImport]) -> bool {
+const fn detect_crypto_mining(
+    _files: &[PythonFileAnalysis],
+    _imports: &[SuspiciousImport],
+) -> bool {
     false // TODO: Implement
 }
 
@@ -1478,7 +1484,9 @@ fn detect_malicious_indicators(
         overall_risk_score += 35.0;
     }
 
-    overall_risk_score += security.supply_chain_risk_score * 0.5;
+    overall_risk_score = security
+        .supply_chain_risk_score
+        .mul_add(0.5, overall_risk_score);
 
     let risk_level = match overall_risk_score {
         x if x >= 80.0 => RiskLevel::Critical,
@@ -1697,7 +1705,7 @@ fn calculate_quality_metrics(files: &[PythonFileAnalysis]) -> Result<PackageQual
     let code_quality_score =
         if has_tests { 50.0 } else { 0.0 } + if has_ci_config { 50.0 } else { 0.0 };
 
-    let overall_quality_score = (documentation_score + code_quality_score) / 2.0;
+    let overall_quality_score = f32::midpoint(documentation_score, code_quality_score);
 
     Ok(PackageQualityMetrics {
         has_readme,
@@ -1789,14 +1797,14 @@ fn scan_directory_recursive(
                 files.push(PythonFileAnalysis {
                     file_path: file_name,
                     file_type: detect_python_file_type(&path.to_string_lossy()),
-                    size: entry.metadata().map(|m| m.len()).unwrap_or(0),
+                    size: entry.metadata().map_or(0, |m| m.len()),
                     suspicious_content: vec![],
                     imports: vec![],
                     obfuscation_score: 0.0,
                 });
             } else if path.is_dir() {
                 let subdir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let new_prefix = format!("{}/{}", prefix, subdir_name);
+                let new_prefix = format!("{prefix}/{subdir_name}");
                 scan_directory_recursive(&path, files, &new_prefix)?;
             }
         }

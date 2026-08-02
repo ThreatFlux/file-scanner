@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 //! Common test fixtures for the file-scanner project
 
 use std::fs;
@@ -82,7 +127,7 @@ pub mod binaries {
         ]
     }
 
-    /// Create a WebAssembly module for testing
+    /// Create a `WebAssembly` module for testing
     pub fn create_wasm_module() -> Vec<u8> {
         vec![
             0x00, 0x61, 0x73, 0x6d, // WASM magic
@@ -138,7 +183,7 @@ pub mod strings {
 /// Test package data for package security analysis
 pub mod packages {
     /// Create an npm package.json with vulnerabilities
-    pub fn vulnerable_npm_package() -> &'static str {
+    pub const fn vulnerable_npm_package() -> &'static str {
         r#"{
             "name": "vulnerable-test-package",
             "version": "1.0.0",
@@ -152,7 +197,7 @@ pub mod packages {
     }
 
     /// Create a benign npm package.json
-    pub fn benign_npm_package() -> &'static str {
+    pub const fn benign_npm_package() -> &'static str {
         r#"{
             "name": "benign-test-package",
             "version": "1.0.0",
@@ -165,7 +210,7 @@ pub mod packages {
     }
 
     /// Create a Python setup.py with vulnerabilities
-    pub fn vulnerable_python_package() -> &'static str {
+    pub const fn vulnerable_python_package() -> &'static str {
         r#"
 from setuptools import setup
 
@@ -183,7 +228,7 @@ setup(
     }
 
     /// Create a malicious Python setup.py
-    pub fn malicious_python_package() -> &'static str {
+    pub const fn malicious_python_package() -> &'static str {
         r#"
 import subprocess
 from setuptools import setup
@@ -203,7 +248,7 @@ setup(
 /// Test YARA rules for threat detection
 pub mod yara_rules {
     /// Simple test rule
-    pub fn simple_test_rule() -> &'static str {
+    pub const fn simple_test_rule() -> &'static str {
         r#"
 rule test_rule {
     strings:
@@ -215,7 +260,7 @@ rule test_rule {
     }
 
     /// Malware detection rule
-    pub fn malware_detection_rule() -> &'static str {
+    pub const fn malware_detection_rule() -> &'static str {
         r#"
 rule detect_malware {
     strings:
@@ -230,7 +275,7 @@ rule detect_malware {
     }
 
     /// PE header detection rule
-    pub fn pe_header_rule() -> &'static str {
+    pub const fn pe_header_rule() -> &'static str {
         r#"
 rule pe_file {
     strings:
@@ -344,10 +389,7 @@ pub mod performance {
         let (result, duration) = measure_time(f);
         assert!(
             duration <= max_duration,
-            "{} took {:?}, expected under {:?}",
-            description,
-            duration,
-            max_duration
+            "{description} took {duration:?}, expected under {max_duration:?}"
         );
         result
     }
@@ -373,17 +415,17 @@ pub mod assertions {
 
     /// Assert that a file exists and is readable
     pub fn assert_file_readable(path: &Path) {
-        assert!(path.exists(), "File should exist: {:?}", path);
-        assert!(path.is_file(), "Path should be a file: {:?}", path);
+        assert!(path.exists(), "File should exist: {path:?}");
+        assert!(path.is_file(), "Path should be a file: {path:?}");
 
         let metadata = std::fs::metadata(path).unwrap();
-        assert!(metadata.len() > 0, "File should not be empty: {:?}", path);
+        assert!(metadata.len() > 0, "File should not be empty: {path:?}");
     }
 
     /// Assert that a directory exists and is readable
     pub fn assert_directory_readable(path: &Path) {
-        assert!(path.exists(), "Directory should exist: {:?}", path);
-        assert!(path.is_dir(), "Path should be a directory: {:?}", path);
+        assert!(path.exists(), "Directory should exist: {path:?}");
+        assert!(path.is_dir(), "Path should be a directory: {path:?}");
     }
 
     /// Assert that a value is within a range
@@ -393,21 +435,13 @@ pub mod assertions {
     {
         assert!(
             value >= min && value <= max,
-            "{} should be within range [{:?}, {:?}], got {:?}",
-            description,
-            min,
-            max,
-            value
+            "{description} should be within range [{min:?}, {max:?}], got {value:?}"
         );
     }
 
     /// Assert that a collection is not empty
     pub fn assert_not_empty<T>(collection: &[T], description: &str) {
-        assert!(
-            !collection.is_empty(),
-            "{} should not be empty",
-            description
-        );
+        assert!(!collection.is_empty(), "{description} should not be empty");
     }
 
     /// Assert that a string contains expected substrings
@@ -415,10 +449,7 @@ pub mod assertions {
         for expected_substring in expected {
             assert!(
                 text.contains(expected_substring),
-                "{} should contain '{}' but got: {}",
-                description,
-                expected_substring,
-                text
+                "{description} should contain '{expected_substring}' but got: {text}"
             );
         }
     }

@@ -7,9 +7,11 @@ use std::collections::HashMap;
 use std::path::Path;
 use zip::ZipArchive;
 
+use crate::core::dependency::VulnerabilitySummary;
 use crate::core::{
-    AnalysisResult, DependencyAnalysis, MaliciousPattern, PackageAnalyzer, PackageInfo,
-    PackageMetadata, PatternMatcher, RiskAssessment, RiskCalculator, Vulnerability,
+    AnalysisResult, Dependency, DependencyAnalysis, DependencyType, MaliciousPattern,
+    PackageAnalyzer, PackageInfo, PackageMetadata, PatternMatcher, RiskAssessment, RiskCalculator,
+    Vulnerability,
 };
 use crate::utils::typosquatting::TyposquattingDetector;
 use crate::vulnerability_db::VulnerabilityDatabase;
@@ -105,7 +107,7 @@ impl AnalysisResult for JavaAnalysisResult {
 }
 
 /// Java-specific security analysis
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JavaSecurityAnalysis {
     pub uses_reflection: bool,
     pub uses_jni: bool,
@@ -117,7 +119,7 @@ pub struct JavaSecurityAnalysis {
 
 /// Java package analyzer
 pub struct JavaAnalyzer {
-    _vuln_db: Box<dyn VulnerabilityDatabase>,
+    vuln_db: Box<dyn VulnerabilityDatabase>,
     pattern_matcher: PatternMatcher,
     _typo_detector: TyposquattingDetector,
 }
@@ -126,7 +128,7 @@ impl JavaAnalyzer {
     /// Create a new Java analyzer
     pub fn new() -> Result<Self> {
         Ok(Self {
-            _vuln_db: crate::vulnerability_db::create_java_database()?,
+            vuln_db: crate::vulnerability_db::create_java_database()?,
             pattern_matcher: PatternMatcher::new()?,
             _typo_detector: TyposquattingDetector::new(),
         })
@@ -135,7 +137,7 @@ impl JavaAnalyzer {
     /// Create analyzer with custom database path
     pub fn with_db_path(db_path: &Path) -> Result<Self> {
         Ok(Self {
-            _vuln_db: crate::vulnerability_db::create_java_database_with_path(db_path)?,
+            vuln_db: crate::vulnerability_db::create_java_database_with_path(db_path)?,
             pattern_matcher: PatternMatcher::new()?,
             _typo_detector: TyposquattingDetector::new(),
         })
@@ -232,15 +234,79 @@ impl JavaAnalyzer {
         })
     }
 
-    /// Analyze dependencies (from pom.xml or gradle files if present)
-    async fn analyze_dependencies(&self, _path: &Path) -> Result<DependencyAnalysis> {
-        // TODO: Implement dependency analysis for Java
-        // This would require parsing:
-        // - pom.xml for Maven projects
-        // - build.gradle for Gradle projects
-        // - lib/ directories in archives
+    /// Parse Maven project metadata from pom.xml
+    async fn parse_project(&self, path: &Path) -> Result<JavaPackage> {
+        let pom_path = path.join("pom.xml");
+        let content = tokio::fs::read_to_string(&pom_path).await?;
+        let artifact_id =
+            extract_xml_text(&content, "artifactId").unwrap_or_else(|| "unknown".to_string());
+        let version =
+            extract_xml_text(&content, "version").unwrap_or_else(|| "unknown".to_string());
+        let group_id = extract_xml_text(&content, "groupId");
 
-        Ok(DependencyAnalysis::default())
+        Ok(JavaPackage {
+            metadata: PackageMetadata {
+                name: artifact_id,
+                version,
+                description: None,
+                author: group_id,
+                license: None,
+                homepage: None,
+                repository: None,
+                keywords: Vec::new(),
+                publish_date: None,
+            },
+            archive_type: JavaArchiveType::Jar,
+            main_class: None,
+            manifest_attributes: HashMap::new(),
+            is_signed: false,
+            android_info: None,
+        })
+    }
+
+    /// Analyze dependencies (from pom.xml or gradle files if present)
+    async fn analyze_dependencies(&self, path: &Path) -> Result<DependencyAnalysis> {
+        let mut analysis = DependencyAnalysis::default();
+        if !path.is_dir() || !path.join("pom.xml").exists() {
+            return Ok(analysis);
+        }
+
+        let content = tokio::fs::read_to_string(path.join("pom.xml")).await?;
+        let dependency_re = regex::Regex::new(r"(?s)<dependency>\s*(.*?)\s*</dependency>")?;
+        for dependency in dependency_re.captures_iter(&content) {
+            let Some(block) = dependency.get(1).map(|m| m.as_str()) else {
+                continue;
+            };
+            let Some(artifact_id) = extract_xml_text(block, "artifactId") else {
+                continue;
+            };
+            let version = extract_xml_text(block, "version").unwrap_or_else(|| "*".to_string());
+            let vulnerabilities = self
+                .vuln_db
+                .check_package(&artifact_id, &version, "java")
+                .await?;
+
+            analysis.dependency_tree.push(Dependency {
+                name: artifact_id.clone(),
+                version_spec: version,
+                resolved_version: None,
+                dependency_type: DependencyType::Runtime,
+                is_direct: true,
+                is_dev: false,
+                vulnerabilities,
+                license: None,
+                dependencies: Vec::new(),
+            });
+            analysis.direct_dependencies += 1;
+        }
+
+        analysis.total_dependencies = analysis.dependency_tree.len();
+        summarize_dependency_vulnerabilities(
+            &mut analysis.vulnerability_summary,
+            &analysis.dependency_tree,
+        );
+
+        Ok(analysis)
     }
 
     /// Analyze security aspects
@@ -273,19 +339,49 @@ impl JavaAnalyzer {
     }
 }
 
+fn summarize_dependency_vulnerabilities(
+    summary: &mut VulnerabilitySummary,
+    dependencies: &[Dependency],
+) {
+    for dependency in dependencies {
+        for vulnerability in &dependency.vulnerabilities {
+            summary.total_vulnerabilities += 1;
+            match vulnerability.severity {
+                crate::core::VulnerabilitySeverity::Critical => summary.critical_count += 1,
+                crate::core::VulnerabilitySeverity::High => summary.high_count += 1,
+                crate::core::VulnerabilitySeverity::Medium => summary.medium_count += 1,
+                crate::core::VulnerabilitySeverity::Low => summary.low_count += 1,
+                crate::core::VulnerabilitySeverity::None => {}
+            }
+            if !summary.vulnerable_dependencies.contains(&dependency.name) {
+                summary
+                    .vulnerable_dependencies
+                    .push(dependency.name.clone());
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl PackageAnalyzer for JavaAnalyzer {
     type Package = JavaPackage;
     type Analysis = JavaAnalysisResult;
 
     async fn analyze(&self, path: &Path) -> Result<Self::Analysis> {
-        let package = self.parse_archive(path).await?;
+        let package = if path.is_dir() {
+            self.parse_project(path).await?
+        } else {
+            self.parse_archive(path).await?
+        };
         let dependency_analysis = self.analyze_dependencies(path).await?;
 
-        // Open archive for security analysis
-        let file = std::fs::File::open(path)?;
-        let mut archive = ZipArchive::new(file)?;
-        let security_analysis = self.analyze_security(&mut archive)?;
+        let security_analysis = if path.is_dir() {
+            JavaSecurityAnalysis::default()
+        } else {
+            let file = std::fs::File::open(path)?;
+            let mut archive = ZipArchive::new(file)?;
+            self.analyze_security(&mut archive)?
+        };
 
         // Check for malicious patterns in manifest
         let manifest_content = serde_json::to_string(&package.manifest_attributes)?;
@@ -344,10 +440,14 @@ impl PackageAnalyzer for JavaAnalyzer {
     }
 
     fn can_analyze(&self, path: &Path) -> bool {
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| matches!(ext, "jar" | "war" | "ear" | "apk" | "aar"))
-            .unwrap_or(false)
+        if path.is_dir() {
+            path.join("pom.xml").exists() || path.join("build.gradle").exists()
+        } else {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| matches!(ext, "jar" | "war" | "ear" | "apk" | "aar"))
+                .unwrap_or(false)
+        }
     }
 
     fn name(&self) -> &str {
@@ -357,4 +457,13 @@ impl PackageAnalyzer for JavaAnalyzer {
     fn supported_extensions(&self) -> Vec<&str> {
         vec!["jar", "war", "ear", "apk", "aar"]
     }
+}
+
+fn extract_xml_text(content: &str, tag: &str) -> Option<String> {
+    let pattern = format!(r"(?s)<{tag}>\s*([^<]+)\s*</{tag}>");
+    regex::Regex::new(&pattern)
+        .ok()?
+        .captures(content)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().trim().to_string())
 }

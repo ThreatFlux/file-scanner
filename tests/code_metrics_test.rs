@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use file_scanner::code_metrics::*;
 use file_scanner::control_flow::{
     AnalysisStats, BasicBlock, BlockType, CfgEdge, ControlFlowAnalysis, ControlFlowGraph,
@@ -7,7 +52,7 @@ use file_scanner::control_flow::{
 use file_scanner::function_analysis::{SymbolCounts, SymbolTable};
 
 // Helper function to create an empty symbol table
-fn create_empty_symbol_table() -> SymbolTable {
+const fn create_empty_symbol_table() -> SymbolTable {
     SymbolTable {
         functions: vec![],
         global_variables: vec![],
@@ -385,7 +430,7 @@ fn create_control_flow_analysis(cfgs: Vec<ControlFlowGraph>) -> ControlFlowAnaly
     let total_basic_blocks = cfgs.iter().map(|cfg| cfg.basic_blocks.len()).sum();
     let average_complexity = if total_functions > 0 {
         cfgs.iter()
-            .map(|cfg| cfg.complexity.cyclomatic_complexity as f64)
+            .map(|cfg| f64::from(cfg.complexity.cyclomatic_complexity))
             .sum::<f64>()
             / total_functions as f64
     } else {
@@ -394,13 +439,12 @@ fn create_control_flow_analysis(cfgs: Vec<ControlFlowGraph>) -> ControlFlowAnaly
     let (max_complexity, function_with_max_complexity) = cfgs
         .iter()
         .max_by_key(|cfg| cfg.complexity.cyclomatic_complexity)
-        .map(|cfg| {
+        .map_or((0, None), |cfg| {
             (
                 cfg.complexity.cyclomatic_complexity,
                 Some(cfg.function_name.clone()),
             )
-        })
-        .unwrap_or((0, None));
+        });
 
     ControlFlowAnalysis {
         cfgs,

@@ -162,7 +162,7 @@ fn test_threat_indicator_construction() {
         "Suspicious process injection technique detected"
     );
     assert_eq!(indicator.severity, Severity::High);
-    assert_eq!(indicator.confidence, 0.85);
+    assert!((indicator.confidence - 0.85).abs() < f32::EPSILON);
     assert_eq!(indicator.mitre_technique, Some("T1055".to_string()));
     assert_eq!(indicator.context.len(), 2);
 }
@@ -293,13 +293,13 @@ fn test_rule_source_types() {
 #[test]
 fn test_scan_config_construction() {
     let config = ScanConfig {
-        max_file_size: 50 * 1024 * 1024,        // 50MB
-        scan_timeout: Duration::from_secs(180), // 3 minutes
+        max_file_size: 50 * 1024 * 1024,      // 50MB
+        scan_timeout: Duration::from_mins(3), // 3 minutes
         max_concurrent_scans: 8,
     };
 
     assert_eq!(config.max_file_size, 50 * 1024 * 1024);
-    assert_eq!(config.scan_timeout, Duration::from_secs(180));
+    assert_eq!(config.scan_timeout, Duration::from_mins(3));
     assert_eq!(config.max_concurrent_scans, 8);
 }
 
@@ -307,7 +307,7 @@ fn test_scan_config_construction() {
 fn test_scan_config_default() {
     let config = ScanConfig::default();
     assert_eq!(config.max_file_size, 100 * 1024 * 1024);
-    assert_eq!(config.scan_timeout, Duration::from_secs(300));
+    assert_eq!(config.scan_timeout, Duration::from_mins(5));
     assert_eq!(config.max_concurrent_scans, 4);
 }
 
@@ -436,16 +436,16 @@ fn test_confidence_score_validation() {
         confidence: 1.0,
         ..indicator.clone()
     };
-    assert_eq!(high_confidence.confidence, 1.0);
+    assert!((high_confidence.confidence - 1.0).abs() < f32::EPSILON);
 
     let low_confidence = ThreatIndicator {
         confidence: 0.0,
         ..indicator
     };
-    assert_eq!(low_confidence.confidence, 0.0);
+    assert!(low_confidence.confidence.abs() < f32::EPSILON);
 }
 
-#[cfg(feature = "serde-support")]
+#[cfg(feature = "serde")]
 #[test]
 fn test_serialization() {
     use serde_json;

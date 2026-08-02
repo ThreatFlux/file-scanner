@@ -6,7 +6,7 @@ use anyhow::Result;
 // Re-export types from the library that match the original API
 pub use threatflux_string_analysis::{StringContext, StringEntry, StringFilter, StringStatistics};
 
-/// Wrapper around the threatflux-string-analysis StringTracker
+/// Wrapper around the threatflux-string-analysis `StringTracker`
 /// that maintains backward compatibility
 #[derive(Clone)]
 pub struct StringTracker {
@@ -20,7 +20,7 @@ impl Default for StringTracker {
 }
 
 impl StringTracker {
-    /// Create a new StringTracker with file-scanner specific configuration
+    /// Create a new `StringTracker` with file-scanner specific configuration
     pub fn new() -> Self {
         // Create the tracker with file-scanner specific patterns
         let tracker = threatflux_string_analysis::StringTracker::new().with_max_occurrences(1000);
@@ -76,6 +76,6 @@ impl StringTracker {
     /// Clear all tracked strings
     #[allow(dead_code)]
     pub fn clear(&self) {
-        self.inner.clear()
+        self.inner.clear();
     }
 }

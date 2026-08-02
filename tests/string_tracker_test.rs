@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use chrono::Utc;
 use file_scanner::string_tracker_compat::{
     StringContext, StringEntry, StringFilter, StringStatistics, StringTracker,
@@ -62,8 +107,8 @@ fn test_multiple_occurrences_same_string() {
         tracker
             .track_string(
                 "shared_string",
-                &format!("/path/file{}.txt", i),
-                &format!("hash{}", i),
+                &format!("/path/file{i}.txt"),
+                &format!("hash{i}"),
                 "scanner",
                 StringContext::FileString {
                     offset: Some(i * 100),
@@ -197,8 +242,7 @@ fn test_suspicious_string_detection() {
         let entry = tracker.get_string_details(string).unwrap();
         assert!(
             entry.is_suspicious,
-            "String '{}' should be marked as suspicious",
-            string
+            "String '{string}' should be marked as suspicious"
         );
     }
 
@@ -224,8 +268,7 @@ fn test_suspicious_string_detection() {
         let entry = tracker.get_string_details(string).unwrap();
         assert!(
             !entry.is_suspicious,
-            "String '{}' should not be marked as suspicious",
-            string
+            "String '{string}' should not be marked as suspicious"
         );
     }
 }
@@ -261,8 +304,7 @@ fn test_entropy_based_suspicion() {
         let entry = tracker.get_string_details(string).unwrap();
         assert_eq!(
             entry.is_suspicious, should_be_suspicious,
-            "String '{}' suspicious flag mismatch",
-            string
+            "String '{string}' suspicious flag mismatch"
         );
     }
 }
@@ -290,8 +332,8 @@ fn test_string_filtering() {
             tracker
                 .track_string(
                     string,
-                    &format!("/file{}.txt", i),
-                    &format!("hash{}", i),
+                    &format!("/file{i}.txt"),
+                    &format!("hash{i}"),
                     "scanner",
                     StringContext::FileString { offset: None },
                 )
@@ -506,15 +548,15 @@ fn test_statistics_generation() {
 
     // Add variety of strings
     for i in 0..20 {
-        let string = format!("string_{}", i);
+        let string = format!("string_{i}");
         let count = (i % 5) + 1; // Variable occurrence counts
 
         for j in 0..count {
             tracker
                 .track_string(
                     &string,
-                    &format!("/file{}.txt", j),
-                    &format!("hash{}", j),
+                    &format!("/file{j}.txt"),
+                    &format!("hash{j}"),
                     "scanner",
                     StringContext::FileString { offset: None },
                 )
@@ -647,12 +689,12 @@ fn test_concurrent_access() {
         let tracker_clone = Arc::clone(&tracker);
         let handle = thread::spawn(move || {
             for i in 0..100 {
-                let string = format!("thread_{}_string_{}", thread_id, i);
+                let string = format!("thread_{thread_id}_string_{i}");
                 tracker_clone
                     .track_string(
                         &string,
-                        &format!("/thread{}/file{}.txt", thread_id, i),
-                        &format!("hash_{}_{}", thread_id, i),
+                        &format!("/thread{thread_id}/file{i}.txt"),
+                        &format!("hash_{thread_id}_{i}"),
                         "concurrent_scanner",
                         StringContext::FileString { offset: Some(i) },
                     )
@@ -895,7 +937,10 @@ fn test_serialization_roundtrip() {
         first_seen: Utc::now(),
         last_seen: Utc::now(),
         total_occurrences: 5,
-        unique_files: ["hash1", "hash2"].iter().map(|s| s.to_string()).collect(),
+        unique_files: ["hash1", "hash2"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
         occurrences: vec![StringOccurrence {
             file_path: "/test/file.txt".to_string(),
             file_hash: "hash1".to_string(),
@@ -905,7 +950,10 @@ fn test_serialization_roundtrip() {
                 library: "test.dll".to_string(),
             },
         }],
-        categories: ["import"].iter().map(|s| s.to_string()).collect(),
+        categories: ["import"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
         is_suspicious: false,
         entropy: std::f64::consts::PI,
     };
@@ -1019,7 +1067,7 @@ fn test_clear_functionality() {
     for i in 0..10 {
         tracker
             .track_string(
-                &format!("string_{}", i),
+                &format!("string_{i}"),
                 "/file",
                 "hash",
                 "scanner",

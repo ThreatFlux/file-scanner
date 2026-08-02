@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use file_scanner::archive_analysis::*;
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -376,7 +421,7 @@ fn test_file_type_variants() {
     for file_type in types {
         let json = serde_json::to_string(&file_type).unwrap();
         let deserialized: FileType = serde_json::from_str(&json).unwrap();
-        assert_eq!(format!("{:?}", file_type), format!("{:?}", deserialized));
+        assert_eq!(format!("{file_type:?}"), format!("{:?}", deserialized));
     }
 }
 
@@ -427,7 +472,7 @@ fn test_empty_archive_edge_case() {
     ));
 }
 
-fn determine_overall_risk(
+const fn determine_overall_risk(
     suspicious_files: &[SuspiciousFile],
     path_traversal_risks: &[PathTraversalRisk],
     zip_bomb_indicators: &ZipBombIndicators,

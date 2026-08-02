@@ -9,13 +9,17 @@ pub mod utils;
 pub mod vulnerability_db;
 
 pub use core::{
-    AnalysisResult, MaliciousPattern, PackageAnalyzer, PackageInfo, RiskLevel, RiskScore,
-    Vulnerability, VulnerabilitySeverity,
+    AnalysisResult, MaliciousPattern, PackageAnalyzer, PackageInfo, PackageType,
+    QualityMetricsSummary, RiskLevel, RiskScore, TyposquattingRiskSummary, Vulnerability,
+    VulnerabilitySeverity,
 };
 
 pub use analyzers::{java::JavaAnalyzer, npm::NpmAnalyzer, python::PythonAnalyzer};
 
 pub use vulnerability_db::VulnerabilityDatabase;
+
+pub type SecurityAnalysisResult = Box<dyn AnalysisResult>;
+pub type VulnerabilityInfo = Vulnerability;
 
 use anyhow::Result;
 use std::path::Path;
@@ -91,7 +95,9 @@ impl PackageSecurityAnalyzer {
 
     /// Check if path is a Java package
     fn is_java_package(&self, path: &Path) -> bool {
-        if let Some(ext) = path.extension() {
+        if path.is_dir() {
+            path.join("pom.xml").exists() || path.join("build.gradle").exists()
+        } else if let Some(ext) = path.extension() {
             matches!(
                 ext.to_str(),
                 Some("jar") | Some("war") | Some("ear") | Some("apk") | Some("aar")

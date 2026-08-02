@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -29,17 +74,14 @@ async fn test_analyze_repository_integrity_function() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Analysis should complete without error
-            assert_eq!(analysis.package_info.package_name, "test-package");
-            assert_eq!(analysis.package_info.package_version, "1.0.0");
-            assert!(analysis.trust_score >= 0.0 && analysis.trust_score <= 100.0);
-            assert!(!analysis.recommendations.is_empty());
-        }
-        Err(_) => {
-            // Analysis might fail in test environment, which is acceptable
-        }
+    if let Ok(analysis) = result {
+        // Analysis should complete without error
+        assert_eq!(analysis.package_info.package_name, "test-package");
+        assert_eq!(analysis.package_info.package_version, "1.0.0");
+        assert!(analysis.trust_score >= 0.0 && analysis.trust_score <= 100.0);
+        assert!(!analysis.recommendations.is_empty());
+    } else {
+        // Analysis might fail in test environment, which is acceptable
     }
 }
 
@@ -78,25 +120,22 @@ async fn test_npm_package_analysis() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Should extract repository URL from package.json
-            assert!(analysis.package_info.repository_url.is_some());
-            assert!(analysis.package_info.homepage_url.is_some());
+    if let Ok(analysis) = result {
+        // Should extract repository URL from package.json
+        assert!(analysis.package_info.repository_url.is_some());
+        assert!(analysis.package_info.homepage_url.is_some());
 
-            // Should have integrity checks
-            assert!(!analysis.integrity_checks.is_empty());
+        // Should have integrity checks
+        assert!(!analysis.integrity_checks.is_empty());
 
-            // Should check repository existence
-            let has_repo_check = analysis
-                .integrity_checks
-                .iter()
-                .any(|check| matches!(check.check_type, IntegrityCheckType::RepositoryExists));
-            assert!(has_repo_check);
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        // Should check repository existence
+        let has_repo_check = analysis
+            .integrity_checks
+            .iter()
+            .any(|check| matches!(check.check_type, IntegrityCheckType::RepositoryExists));
+        assert!(has_repo_check);
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -124,19 +163,16 @@ setup(
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::PyPI)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Should extract repository URL from setup.py
-            if let Some(repository_url) = &analysis.package_info.repository_url {
-                assert!(repository_url.contains("github.com"));
-            }
+    if let Ok(analysis) = result {
+        // Should extract repository URL from setup.py
+        if let Some(repository_url) = &analysis.package_info.repository_url {
+            assert!(repository_url.contains("github.com"));
+        }
 
-            // Should have integrity checks
-            assert!(!analysis.integrity_checks.is_empty());
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        // Should have integrity checks
+        assert!(!analysis.integrity_checks.is_empty());
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -249,24 +285,21 @@ async fn test_package_without_repository_url() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Should handle missing repository URL gracefully
-            assert!(analysis.package_info.repository_url.is_none());
-            assert_eq!(
-                analysis.package_info.repository_status,
-                RepositoryStatus::NotFound
-            );
+    if let Ok(analysis) = result {
+        // Should handle missing repository URL gracefully
+        assert!(analysis.package_info.repository_url.is_none());
+        assert_eq!(
+            analysis.package_info.repository_status,
+            RepositoryStatus::NotFound
+        );
 
-            // Should have lower trust score
-            assert!(analysis.trust_score < 100.0);
+        // Should have lower trust score
+        assert!(analysis.trust_score < 100.0);
 
-            // Should have recommendations
-            assert!(!analysis.recommendations.is_empty());
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        // Should have recommendations
+        assert!(!analysis.recommendations.is_empty());
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -292,22 +325,19 @@ async fn test_package_with_invalid_repository_url() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Should detect invalid URL
-            if let Some(url) = &analysis.package_info.repository_url {
-                assert_eq!(url, "invalid-url");
-            }
+    if let Ok(analysis) = result {
+        // Should detect invalid URL
+        if let Some(url) = &analysis.package_info.repository_url {
+            assert_eq!(url, "invalid-url");
+        }
 
-            // Repository status should reflect the invalid URL
-            assert!(matches!(
-                analysis.package_info.repository_status,
-                RepositoryStatus::InvalidUrl | RepositoryStatus::Unknown
-            ));
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        // Repository status should reflect the invalid URL
+        assert!(matches!(
+            analysis.package_info.repository_status,
+            RepositoryStatus::InvalidUrl | RepositoryStatus::Unknown
+        ));
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -320,27 +350,24 @@ async fn test_trust_score_calculation() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Trust score should be between 0 and 100
-            assert!(analysis.trust_score >= 0.0);
-            assert!(analysis.trust_score <= 100.0);
+    if let Ok(analysis) = result {
+        // Trust score should be between 0 and 100
+        assert!(analysis.trust_score >= 0.0);
+        assert!(analysis.trust_score <= 100.0);
 
-            // Trust score should be influenced by integrity checks
-            let failed_checks = analysis
-                .integrity_checks
-                .iter()
-                .filter(|check| matches!(check.status, CheckStatus::Fail))
-                .count();
+        // Trust score should be influenced by integrity checks
+        let failed_checks = analysis
+            .integrity_checks
+            .iter()
+            .filter(|check| matches!(check.status, CheckStatus::Fail))
+            .count();
 
-            if failed_checks > 0 {
-                // Should have reduced trust score for failed checks
-                assert!(analysis.trust_score < 100.0);
-            }
+        if failed_checks > 0 {
+            // Should have reduced trust score for failed checks
+            assert!(analysis.trust_score < 100.0);
         }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -353,27 +380,24 @@ async fn test_risk_indicators_identification() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Risk indicators should be properly structured
-            for indicator in &analysis.risk_indicators {
-                assert!(!indicator.indicator_type.is_empty());
-                assert!(!indicator.description.is_empty());
-                assert!(!indicator.evidence.is_empty());
-            }
+    if let Ok(analysis) = result {
+        // Risk indicators should be properly structured
+        for indicator in &analysis.risk_indicators {
+            assert!(!indicator.indicator_type.is_empty());
+            assert!(!indicator.description.is_empty());
+            assert!(!indicator.evidence.is_empty());
+        }
 
-            // If repository is not accessible, should have corresponding risk indicator
-            if analysis.package_info.repository_status == RepositoryStatus::NotFound {
-                let has_repo_not_accessible = analysis
-                    .risk_indicators
-                    .iter()
-                    .any(|indicator| indicator.indicator_type == "Repository Not Accessible");
-                assert!(has_repo_not_accessible);
-            }
+        // If repository is not accessible, should have corresponding risk indicator
+        if analysis.package_info.repository_status == RepositoryStatus::NotFound {
+            let has_repo_not_accessible = analysis
+                .risk_indicators
+                .iter()
+                .any(|indicator| indicator.indicator_type == "Repository Not Accessible");
+            assert!(has_repo_not_accessible);
         }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -386,32 +410,29 @@ async fn test_recommendations_generation() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Should always have recommendations
-            assert!(!analysis.recommendations.is_empty());
+    if let Ok(analysis) = result {
+        // Should always have recommendations
+        assert!(!analysis.recommendations.is_empty());
 
-            // Low trust score should have high-risk recommendations
-            if analysis.trust_score < 30.0 {
-                let has_high_risk_recommendation = analysis
-                    .recommendations
-                    .iter()
-                    .any(|rec| rec.contains("HIGH RISK"));
-                assert!(has_high_risk_recommendation);
-            }
+        // Low trust score should have high-risk recommendations
+        if analysis.trust_score < 30.0 {
+            let has_high_risk_recommendation = analysis
+                .recommendations
+                .iter()
+                .any(|rec| rec.contains("HIGH RISK"));
+            assert!(has_high_risk_recommendation);
+        }
 
-            // Medium trust score should have caution recommendations
-            if analysis.trust_score >= 30.0 && analysis.trust_score < 50.0 {
-                let has_caution_recommendation = analysis
-                    .recommendations
-                    .iter()
-                    .any(|rec| rec.contains("caution"));
-                assert!(has_caution_recommendation);
-            }
+        // Medium trust score should have caution recommendations
+        if analysis.trust_score >= 30.0 && analysis.trust_score < 50.0 {
+            let has_caution_recommendation = analysis
+                .recommendations
+                .iter()
+                .any(|rec| rec.contains("caution"));
+            assert!(has_caution_recommendation);
         }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -438,16 +459,13 @@ repository = "https://github.com/test/test-package"
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::PyPI)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Should extract repository URL from pyproject.toml
-            if let Some(url) = &analysis.package_info.repository_url {
-                assert!(url.contains("github.com"));
-            }
+    if let Ok(analysis) = result {
+        // Should extract repository URL from pyproject.toml
+        if let Some(url) = &analysis.package_info.repository_url {
+            assert!(url.contains("github.com"));
         }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -473,18 +491,15 @@ async fn test_url_normalization() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Should normalize URL (remove git+ prefix and .git suffix)
-            if let Some(url) = &analysis.package_info.repository_url {
-                assert!(!url.starts_with("git+"));
-                assert!(!url.ends_with(".git"));
-                assert!(url.starts_with("https://"));
-            }
+    if let Ok(analysis) = result {
+        // Should normalize URL (remove git+ prefix and .git suffix)
+        if let Some(url) = &analysis.package_info.repository_url {
+            assert!(!url.starts_with("git+"));
+            assert!(!url.ends_with(".git"));
+            assert!(url.starts_with("https://"));
         }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -497,15 +512,12 @@ async fn test_unknown_registry_type() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Unknown)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Should handle unknown registry type gracefully
-            assert_eq!(analysis.package_info.package_name, "test-package");
-            assert!(analysis.trust_score >= 0.0);
-        }
-        Err(_) => {
-            // Analysis might fail for unknown registry types, which is acceptable
-        }
+    if let Ok(analysis) = result {
+        // Should handle unknown registry type gracefully
+        assert_eq!(analysis.package_info.package_name, "test-package");
+        assert!(analysis.trust_score >= 0.0);
+    } else {
+        // Analysis might fail for unknown registry types, which is acceptable
     }
 }
 
@@ -518,18 +530,15 @@ async fn test_empty_directory() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Empty directory should be handled gracefully
-            assert!(analysis.package_info.repository_url.is_none());
-            assert_eq!(
-                analysis.package_info.repository_status,
-                RepositoryStatus::NotFound
-            );
-        }
-        Err(_) => {
-            // Analysis might fail for empty directories, which is acceptable
-        }
+    if let Ok(analysis) = result {
+        // Empty directory should be handled gracefully
+        assert!(analysis.package_info.repository_url.is_none());
+        assert_eq!(
+            analysis.package_info.repository_status,
+            RepositoryStatus::NotFound
+        );
+    } else {
+        // Analysis might fail for empty directories, which is acceptable
     }
 }
 
@@ -542,13 +551,10 @@ async fn test_nonexistent_directory() {
             .await;
 
     // Should handle nonexistent directories gracefully
-    match result {
-        Ok(_) => {
-            // Analysis might succeed with default values
-        }
-        Err(_) => {
-            // Or it might fail, which is also acceptable
-        }
+    if let Ok(_) = result {
+        // Analysis might succeed with default values
+    } else {
+        // Or it might fail, which is also acceptable
     }
 }
 
@@ -561,20 +567,17 @@ async fn test_maintainer_verification_structure() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Maintainer verification should have proper structure
-            let _mv = &analysis.maintainer_verification;
+    if let Ok(analysis) = result {
+        // Maintainer verification should have proper structure
+        let _mv = &analysis.maintainer_verification;
 
-            // Lists should be initialized (empty is fine)
-            // Vec length is always >= 0
-            // Vec length is always >= 0
-            // Vec length is always >= 0
-            // Vec length is always >= 0
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        // Lists should be initialized (empty is fine)
+        // Vec length is always >= 0
+        // Vec length is always >= 0
+        // Vec length is always >= 0
+        // Vec length is always >= 0
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -587,19 +590,16 @@ async fn test_timeline_analysis_structure() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Timeline analysis should have proper structure
-            let _ta = &analysis.timeline_analysis;
+    if let Ok(analysis) = result {
+        // Timeline analysis should have proper structure
+        let _ta = &analysis.timeline_analysis;
 
-            // Lists should be initialized (empty is fine)
-            // Vec length is always >= 0
-            // Vec length is always >= 0
-            // Vec length is always >= 0
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        // Lists should be initialized (empty is fine)
+        // Vec length is always >= 0
+        // Vec length is always >= 0
+        // Vec length is always >= 0
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }
 
@@ -612,24 +612,21 @@ async fn test_source_comparison_structure() {
         analyze_repository_integrity(package_path, "test-package", "1.0.0", RegistryType::Npm)
             .await;
 
-    match result {
-        Ok(analysis) => {
-            // Source comparison should have proper structure
-            let sc = &analysis.source_comparison;
+    if let Ok(analysis) = result {
+        // Source comparison should have proper structure
+        let sc = &analysis.source_comparison;
 
-            // Counts should be non-negative
-            // files_compared is usize, always >= 0
-            // files_matched is usize, always >= 0
-            // files_different is usize, always >= 0
-            assert!(sc.similarity_score >= 0.0 && sc.similarity_score <= 1.0);
+        // Counts should be non-negative
+        // files_compared is usize, always >= 0
+        // files_matched is usize, always >= 0
+        // files_different is usize, always >= 0
+        assert!(sc.similarity_score >= 0.0 && sc.similarity_score <= 1.0);
 
-            // Lists should be initialized
-            // Vec length is usize, always >= 0
-            // Vec length is usize, always >= 0
-            // Vec length is usize, always >= 0
-        }
-        Err(_) => {
-            // Analysis might fail, which is acceptable
-        }
+        // Lists should be initialized
+        // Vec length is usize, always >= 0
+        // Vec length is usize, always >= 0
+        // Vec length is usize, always >= 0
+    } else {
+        // Analysis might fail, which is acceptable
     }
 }

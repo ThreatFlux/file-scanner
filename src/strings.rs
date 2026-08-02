@@ -30,7 +30,7 @@ pub fn extract_strings(path: &Path, min_length: usize) -> Result<ExtractedString
     let mut buffer = Vec::with_capacity(file_size.min(100_000_000)); // Cap at 100MB
     reader.read_to_end(&mut buffer)?;
 
-    let ascii_pattern = format!(r"[\x20-\x7E]{{{},}}", min_length);
+    let ascii_pattern = format!(r"[\x20-\x7E]{{{min_length},}}");
     let ascii_regex = Regex::new(&ascii_pattern)?;
 
     let mut ascii_strings = Vec::new();
@@ -50,7 +50,7 @@ pub fn extract_strings(path: &Path, min_length: usize) -> Result<ExtractedString
         }
     }
 
-    let utf16_le_pattern = format!(r"(?:[\x00-\x7F]\x00){{{},}}", min_length);
+    let utf16_le_pattern = format!(r"(?:[\x00-\x7F]\x00){{{min_length},}}");
     let utf16_le_regex = Regex::new(&utf16_le_pattern)?;
 
     for mat in utf16_le_regex.find_iter(&buffer) {
@@ -66,7 +66,7 @@ pub fn extract_strings(path: &Path, min_length: usize) -> Result<ExtractedString
         }
     }
 
-    let utf16_be_pattern = format!(r"(?:\x00[\x00-\x7F]){{{},}}", min_length);
+    let utf16_be_pattern = format!(r"(?:\x00[\x00-\x7F]){{{min_length},}}");
     let utf16_be_regex = Regex::new(&utf16_be_pattern)?;
 
     for mat in utf16_be_regex.find_iter(&buffer) {
@@ -110,7 +110,7 @@ fn categorize_string(s: &str, offset: usize) -> Option<InterestingString> {
         (r"(?i)(?:debug|trace|info).*", "Debug Info"),
     ];
 
-    for (pattern, category) in patterns.iter() {
+    for (pattern, category) in &patterns {
         if let Ok(regex) = Regex::new(pattern) {
             if regex.is_match(s.as_bytes()) {
                 return Some(InterestingString {
@@ -433,7 +433,7 @@ mod tests {
         // Create a file with more than 1000 strings
         let mut content = Vec::new();
         for i in 0..1500 {
-            content.extend_from_slice(format!("String number {}\x00", i).as_bytes());
+            content.extend_from_slice(format!("String number {i}\x00").as_bytes());
         }
 
         let (_temp_dir, file_path) = create_test_file(&content).unwrap();
