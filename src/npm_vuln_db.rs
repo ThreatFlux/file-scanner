@@ -848,22 +848,22 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
 
         // More sophisticated similarity checking
         if distance > 0 && distance <= 2 {
-            similar_packages.push(format!("{} (distance: {})", popular, distance));
+            similar_packages.push(format!("{popular} (distance: {distance})"));
         }
 
         // Character substitution patterns
         if check_character_substitution(package_name, popular) {
-            similar_packages.push(format!("{} (character substitution)", popular));
+            similar_packages.push(format!("{popular} (character substitution)"));
         }
 
         // Keyboard proximity typos
         if check_keyboard_proximity(package_name, popular) {
-            similar_packages.push(format!("{} (keyboard typo)", popular));
+            similar_packages.push(format!("{popular} (keyboard typo)"));
         }
 
         // Visual similarity (0/o, 1/l, etc.)
         if check_visual_similarity(package_name, popular) {
-            similar_packages.push(format!("{} (visual confusion)", popular));
+            similar_packages.push(format!("{popular} (visual confusion)"));
         }
 
         // Common typosquatting patterns
@@ -895,7 +895,7 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
                     | "4"
                     | "5"
             ) {
-                similar_packages.push(format!("{} (suspicious suffix: {})", popular, suffix));
+                similar_packages.push(format!("{popular} (suspicious suffix: {suffix})"));
             }
         }
 
@@ -921,7 +921,7 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
                     | "lib-"
                     | "core-"
             ) {
-                similar_packages.push(format!("{} (suspicious prefix: {})", popular, prefix));
+                similar_packages.push(format!("{popular} (suspicious prefix: {prefix})"));
             }
         }
     }

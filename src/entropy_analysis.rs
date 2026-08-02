@@ -98,7 +98,7 @@ fn calculate_entropy(data: &[u8]) -> f64 {
     for &count in &frequency {
         if count > 0 {
             let probability = count as f64 / len;
-            entropy -= probability * probability.log2();
+            entropy = probability.mul_add(-probability.log2(), entropy);
         }
     }
 
@@ -197,8 +197,8 @@ fn analyze_pe_sections(pe: &PE, buffer: &[u8]) -> Result<Vec<SectionEntropy>> {
 
             sections.push(SectionEntropy {
                 name,
-                offset: section.pointer_to_raw_data as u64,
-                size: section.size_of_raw_data as u64,
+                offset: u64::from(section.pointer_to_raw_data),
+                size: u64::from(section.size_of_raw_data),
                 entropy,
                 is_suspicious,
                 characteristics,
@@ -231,7 +231,7 @@ fn analyze_mach_sections(mach: &Mach, buffer: &[u8]) -> Result<Vec<SectionEntrop
 
                         sections.push(SectionEntropy {
                             name: name.to_string(),
-                            offset: section.offset as u64,
+                            offset: u64::from(section.offset),
                             size: section.size,
                             entropy,
                             is_suspicious,
@@ -470,7 +470,7 @@ fn calculate_obfuscation_score(
 
     // Base score from entropy
     let avg_entropy = sections.iter().map(|s| s.entropy).sum::<f64>() / sections.len() as f64;
-    score += (avg_entropy / 8.0) * 30.0; // Max 30 points for entropy
+    score = (avg_entropy / 8.0).mul_add(30.0, score); // Max 30 points for entropy
 
     // Packing indicators
     if packed.likely_packed {
@@ -492,7 +492,9 @@ fn calculate_obfuscation_score(
     }
 
     // Section anomalies
-    score += (packed.section_anomalies.len() as f64).min(3.0) * 5.0;
+    score = (packed.section_anomalies.len() as f64)
+        .min(3.0)
+        .mul_add(5.0, score);
 
     score.min(100.0) // Cap at 100
 }

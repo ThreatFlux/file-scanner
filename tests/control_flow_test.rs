@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use file_scanner::control_flow::*;
 use file_scanner::function_analysis::{FunctionInfo, FunctionType, SymbolCounts, SymbolTable};
 use std::fs;
@@ -234,14 +279,11 @@ fn test_analyze_control_flow_empty_file() {
 
     let result = analyze_control_flow(&test_file, &symbol_table);
     // Empty file should either error or return empty analysis
-    match result {
-        Ok(analysis) => {
-            assert_eq!(analysis.overall_metrics.total_functions, 0);
-        }
-        Err(_) => {
-            // Also acceptable for empty files
-            // Test passed
-        }
+    if let Ok(analysis) = result {
+        assert_eq!(analysis.overall_metrics.total_functions, 0);
+    } else {
+        // Also acceptable for empty files
+        // Test passed
     }
 }
 
@@ -288,19 +330,15 @@ fn test_analyze_control_flow_simple_binary() {
 
     let result = analyze_control_flow(&test_file, &symbol_table);
     // This may succeed or fail depending on binary format support, both are valid
-    match result {
-        Ok(analysis) => {
-            // If it succeeds, basic structure should be valid
-            // total_functions is usize, so always >= 0
-            assert!(
-                analysis.overall_metrics.total_functions
-                    == analysis.overall_metrics.total_functions
-            );
-        }
-        Err(_) => {
-            // If it fails, that's also expected for non-valid binaries
-            // Test passed
-        }
+    if let Ok(analysis) = result {
+        // If it succeeds, basic structure should be valid
+        // total_functions is usize, so always >= 0
+        assert!(
+            analysis.overall_metrics.total_functions == analysis.overall_metrics.total_functions
+        );
+    } else {
+        // If it fails, that's also expected for non-valid binaries
+        // Test passed
     }
 }
 
@@ -445,7 +483,7 @@ fn test_control_flow_analyzer_find_basic_block_boundaries() {
             address: 0x1003,
             bytes: vec![0x90],
             mnemonic: "nop".to_string(),
-            operands: "".to_string(),
+            operands: String::new(),
             instruction_type: InstructionType::Nop,
             flow_control: FlowControl::Fall,
             size: 1,
@@ -454,7 +492,7 @@ fn test_control_flow_analyzer_find_basic_block_boundaries() {
             address: 0x1013,
             bytes: vec![0xc3],
             mnemonic: "ret".to_string(),
-            operands: "".to_string(),
+            operands: String::new(),
             instruction_type: InstructionType::Return,
             flow_control: FlowControl::Return,
             size: 1,
@@ -486,7 +524,7 @@ fn test_control_flow_analyzer_create_basic_blocks() {
             address: 0x1001,
             bytes: vec![0xc3],
             mnemonic: "ret".to_string(),
-            operands: "".to_string(),
+            operands: String::new(),
             instruction_type: InstructionType::Return,
             flow_control: FlowControl::Return,
             size: 1,
@@ -533,7 +571,7 @@ fn test_control_flow_analyzer_build_edges() {
                 address: 0x1003,
                 bytes: vec![0x90],
                 mnemonic: "nop".to_string(),
-                operands: "".to_string(),
+                operands: String::new(),
                 instruction_type: InstructionType::Nop,
                 flow_control: FlowControl::Fall,
                 size: 1,
@@ -551,7 +589,7 @@ fn test_control_flow_analyzer_build_edges() {
                 address: 0x1010,
                 bytes: vec![0xc3],
                 mnemonic: "ret".to_string(),
-                operands: "".to_string(),
+                operands: String::new(),
                 instruction_type: InstructionType::Return,
                 flow_control: FlowControl::Return,
                 size: 1,
@@ -777,7 +815,7 @@ fn test_control_flow_analyzer_determine_block_type() {
                 address: 0x1000,
                 bytes: vec![0xc3],
                 mnemonic: "ret".to_string(),
-                operands: "".to_string(),
+                operands: String::new(),
                 instruction_type: InstructionType::Return,
                 flow_control: FlowControl::Return,
                 size: 1,
@@ -1009,24 +1047,21 @@ fn test_analyze_functions_integration() {
     );
 
     // Should successfully analyze functions or have predictable errors
-    match result {
-        Ok(analysis) => {
-            // If successful, validate the analysis
-            assert!(analysis.overall_metrics.total_functions > 0);
-            // Duration is always >= 0 for u64 type, so just verify it exists
-            let _duration = analysis.analysis_stats.analysis_duration;
+    if let Ok(analysis) = result {
+        // If successful, validate the analysis
+        assert!(analysis.overall_metrics.total_functions > 0);
+        // Duration is always >= 0 for u64 type, so just verify it exists
+        let _duration = analysis.analysis_stats.analysis_duration;
 
-            // Check that we attempted to analyze the exported functions
-            if !analysis.cfgs.is_empty() {
-                assert!(analysis.cfgs[0].function_address >= text_section_addr);
-                assert!(!analysis.cfgs[0].function_name.is_empty());
-            }
+        // Check that we attempted to analyze the exported functions
+        if !analysis.cfgs.is_empty() {
+            assert!(analysis.cfgs[0].function_address >= text_section_addr);
+            assert!(!analysis.cfgs[0].function_name.is_empty());
         }
-        Err(_) => {
-            // Errors are expected for incomplete test data
-            // The important thing is that the function executes without panicking
-            // Test passed
-        }
+    } else {
+        // Errors are expected for incomplete test data
+        // The important thing is that the function executes without panicking
+        // Test passed
     }
 }
 

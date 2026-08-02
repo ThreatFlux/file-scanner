@@ -267,7 +267,7 @@ async fn test_llm_analyze_file_token_limit() {
     // Create a large file with many strings
     let mut content = Vec::new();
     for i in 0..1000 {
-        content.extend_from_slice(format!("String number {}\x00", i).as_bytes());
+        content.extend_from_slice(format!("String number {i}\x00").as_bytes());
     }
 
     let test_file = create_test_file(&temp_dir, "large_file.bin", &content);

@@ -17,7 +17,7 @@ pub struct ScriptAnalysis {
 }
 
 /// Types of scripts supported
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ScriptType {
     PowerShell,
     Python,
@@ -54,7 +54,7 @@ pub struct ScriptSecurityAnalysis {
 }
 
 /// Risk levels for scripts
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RiskLevel {
     Low,
     Medium,
@@ -100,7 +100,7 @@ impl Default for ObfuscationIndicators {
     }
 }
 
-/// Analyze a PowerShell script file
+/// Analyze a `PowerShell` script file
 pub fn analyze_powershell<P: AsRef<Path>>(path: P) -> Result<ScriptAnalysis> {
     let path = path.as_ref();
     let content = fs::read_to_string(path).context("Failed to read PowerShell script")?;
@@ -133,7 +133,7 @@ pub fn analyze_powershell<P: AsRef<Path>>(path: P) -> Result<ScriptAnalysis> {
     })
 }
 
-/// Analyze PowerShell script metadata
+/// Analyze `PowerShell` script metadata
 fn analyze_powershell_metadata(content: &str) -> ScriptMetadata {
     let lines: Vec<&str> = content.lines().collect();
     let line_count = if content.is_empty() { 0 } else { lines.len() };
@@ -163,7 +163,7 @@ fn analyze_powershell_metadata(content: &str) -> ScriptMetadata {
     }
 }
 
-/// Detect PowerShell version from script content
+/// Detect `PowerShell` version from script content
 fn detect_powershell_version(content: &str) -> Option<String> {
     // Look for #Requires statements
     for line in content.lines() {
@@ -184,7 +184,7 @@ fn detect_powershell_version(content: &str) -> Option<String> {
     None
 }
 
-/// Extract PowerShell commands, functions, and imports
+/// Extract `PowerShell` commands, functions, and imports
 fn extract_powershell_elements(content: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut commands = Vec::new();
     let mut functions = Vec::new();
@@ -262,7 +262,7 @@ fn extract_powershell_elements(content: &str) -> (Vec<String>, Vec<String>, Vec<
     (commands, functions, imports)
 }
 
-/// Extract function name from PowerShell function definition
+/// Extract function name from `PowerShell` function definition
 fn extract_function_name(line: &str) -> Option<String> {
     let line = line.trim();
     let line_lower = line.to_lowercase();
@@ -281,7 +281,7 @@ fn extract_function_name(line: &str) -> Option<String> {
     }
 }
 
-/// Analyze PowerShell security indicators
+/// Analyze `PowerShell` security indicators
 fn analyze_powershell_security(content: &str) -> SuspiciousScriptIndicators {
     let mut indicators = SuspiciousScriptIndicators::default();
 
@@ -429,7 +429,7 @@ fn analyze_powershell_security(content: &str) -> SuspiciousScriptIndicators {
     indicators
 }
 
-/// Detect PowerShell obfuscation techniques
+/// Detect `PowerShell` obfuscation techniques
 fn detect_powershell_obfuscation(content: &str) -> ObfuscationIndicators {
     let mut indicators = ObfuscationIndicators {
         entropy_score: calculate_entropy(content),
@@ -440,7 +440,7 @@ fn detect_powershell_obfuscation(content: &str) -> ObfuscationIndicators {
     let mut techniques = Vec::new();
 
     // String concatenation obfuscation - look for various patterns
-    let concat_count = content.matches("+").count(); // Count all + signs
+    let concat_count = content.matches('+').count(); // Count all + signs
     indicators.string_concatenation_count = concat_count;
     if concat_count > 5 {
         techniques.push("String concatenation".to_string());
@@ -498,7 +498,7 @@ fn calculate_entropy(content: &str) -> f64 {
     let mut entropy = 0.0;
     for &count in freq.values() {
         let p = count / len;
-        entropy -= p * p.log2();
+        entropy = p.mul_add(-p.log2(), entropy);
     }
 
     entropy
@@ -509,32 +509,29 @@ fn extract_malicious_patterns(content: &str, script_type: ScriptType) -> Vec<Str
     let mut patterns = Vec::new();
     let content_lower = content.to_lowercase();
 
-    match script_type {
-        ScriptType::PowerShell => {
-            let malicious_patterns = [
-                "invoke-expression",
-                "downloadstring",
-                "encodedcommand",
-                "bypass",
-                "unrestricted",
-                "hidden",
-                "windowstyle",
-                "noprofile",
-                "noninteractive",
-                "reflectivepeinjection",
-                "invoke-shellcode",
-                "invoke-mimikatz",
-            ];
+    if script_type == ScriptType::PowerShell {
+        let malicious_patterns = [
+            "invoke-expression",
+            "downloadstring",
+            "encodedcommand",
+            "bypass",
+            "unrestricted",
+            "hidden",
+            "windowstyle",
+            "noprofile",
+            "noninteractive",
+            "reflectivepeinjection",
+            "invoke-shellcode",
+            "invoke-mimikatz",
+        ];
 
-            for &pattern in &malicious_patterns {
-                if content_lower.contains(pattern) {
-                    patterns.push(pattern.to_string());
-                }
+        for &pattern in &malicious_patterns {
+            if content_lower.contains(pattern) {
+                patterns.push(pattern.to_string());
             }
         }
-        _ => {
-            // Add patterns for other script types later
-        }
+    } else {
+        // Add patterns for other script types later
     }
 
     patterns
@@ -701,7 +698,7 @@ fn extract_data_exfiltration(content: &str, script_type: ScriptType) -> Vec<Stri
 }
 
 /// Determine overall risk level based on indicators
-fn determine_script_risk(indicators: &SuspiciousScriptIndicators) -> RiskLevel {
+const fn determine_script_risk(indicators: &SuspiciousScriptIndicators) -> RiskLevel {
     if indicators.risk_score > 80 {
         RiskLevel::Critical
     } else if indicators.risk_score > 50 {
@@ -713,7 +710,7 @@ fn determine_script_risk(indicators: &SuspiciousScriptIndicators) -> RiskLevel {
     }
 }
 
-/// Check if a file is a PowerShell script
+/// Check if a file is a `PowerShell` script
 pub fn is_powershell_script<P: AsRef<Path>>(path: P) -> bool {
     let path = path.as_ref();
 

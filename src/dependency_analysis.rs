@@ -39,7 +39,7 @@ pub enum LibraryType {
     Framework,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum DependencySource {
     Import,          // From import table
     DynamicLink,     // From dynamic section
@@ -631,18 +631,15 @@ impl DependencyAnalyzer {
     fn get_recommended_action(&self, lib_name: &str, severity: &VulnerabilitySeverity) -> String {
         match severity {
             VulnerabilitySeverity::Critical => {
-                format!(
-                    "Immediately update {} to the latest patched version",
-                    lib_name
-                )
+                format!("Immediately update {lib_name} to the latest patched version")
             }
             VulnerabilitySeverity::High => {
-                format!("Update {} as soon as possible", lib_name)
+                format!("Update {lib_name} as soon as possible")
             }
             VulnerabilitySeverity::Medium => {
-                format!("Plan to update {} in your next release", lib_name)
+                format!("Plan to update {lib_name} in your next release")
             }
-            _ => format!("Monitor {} for updates", lib_name),
+            _ => format!("Monitor {lib_name} for updates"),
         }
     }
 
@@ -663,9 +660,9 @@ impl DependencyAnalyzer {
         let vuln_ratio = vuln_deps as f32 / dependencies.len() as f32;
 
         let mut score = 100.0;
-        score -= critical as f32 * 20.0;
-        score -= high as f32 * 10.0;
-        score -= vuln_ratio * 30.0;
+        score = (critical as f32).mul_add(-20.0, score);
+        score = (high as f32).mul_add(-10.0, score);
+        score = vuln_ratio.mul_add(-30.0, score);
 
         score.max(0.0)
     }
@@ -1143,7 +1140,7 @@ mod tests {
             published_date: Some("2023-01-01".to_string()),
         };
 
-        db.add_vulnerability("testlib", vuln.clone());
+        db.add_vulnerability("testlib", vuln);
 
         // Test checking vulnerabilities with version
         let vulns = db.check_vulnerabilities("testlib", Some("1.0.0"));
@@ -1656,7 +1653,7 @@ mod tests {
             cross_references: vec![],
             imports: vec![
                 ImportInfo {
-                    name: "".to_string(),
+                    name: String::new(),
                     address: None,
                     library: None,
                     ordinal: None,
@@ -1722,7 +1719,7 @@ mod tests {
         let vulnerabilities = [
             KnownVulnerability {
                 cve_id: "CVE-1".to_string(),
-                severity: low.clone(),
+                severity: low,
                 description: "Low".to_string(),
                 affected_versions: vec![],
                 fixed_in: None,
@@ -1731,7 +1728,7 @@ mod tests {
             },
             KnownVulnerability {
                 cve_id: "CVE-2".to_string(),
-                severity: critical.clone(),
+                severity: critical,
                 description: "Critical".to_string(),
                 affected_versions: vec![],
                 fixed_in: None,
@@ -1740,7 +1737,7 @@ mod tests {
             },
             KnownVulnerability {
                 cve_id: "CVE-3".to_string(),
-                severity: medium.clone(),
+                severity: medium,
                 description: "Medium".to_string(),
                 affected_versions: vec![],
                 fixed_in: None,

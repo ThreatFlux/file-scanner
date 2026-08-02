@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use file_scanner::disassembly::*;
 use file_scanner::function_analysis::{FunctionInfo, FunctionType, SymbolCounts, SymbolTable};
 use std::collections::HashMap;
@@ -142,7 +187,7 @@ mod disassembly_tests {
             }
             Err(e) => {
                 // It's okay if it fails with our minimal binary
-                println!("Expected error for minimal binary: {}", e);
+                println!("Expected error for minimal binary: {e}");
             }
         }
     }
@@ -694,7 +739,7 @@ mod disassembly_tests {
                 assert!(!disasm.instructions.is_empty());
             }
             Err(e) => {
-                println!("PE binary test error (may be expected): {}", e);
+                println!("PE binary test error (may be expected): {e}");
             }
         }
     }
@@ -757,7 +802,7 @@ mod disassembly_tests {
                 assert!(!disasm.instructions.is_empty());
             }
             Err(e) => {
-                println!("Mach-O binary test error (may be expected): {}", e);
+                println!("Mach-O binary test error (may be expected): {e}");
             }
         }
     }
@@ -847,7 +892,7 @@ mod disassembly_tests {
                 assert!(!disasm.instructions.is_empty());
             }
             Err(e) => {
-                println!("ARM64 binary test error (may be expected): {}", e);
+                println!("ARM64 binary test error (may be expected): {e}");
             }
         }
     }
@@ -939,7 +984,7 @@ mod disassembly_tests {
                 assert!(!disasm.instructions.is_empty());
             }
             Err(e) => {
-                println!("x86-32 binary test error (may be expected): {}", e);
+                println!("x86-32 binary test error (may be expected): {e}");
             }
         }
     }
@@ -1055,7 +1100,7 @@ mod disassembly_tests {
                 assert_eq!(disasm.architecture, "x86");
             }
             Err(e) => {
-                println!("PE 32-bit test error (may be expected): {}", e);
+                println!("PE 32-bit test error (may be expected): {e}");
             }
         }
     }
@@ -1243,7 +1288,7 @@ mod disassembly_tests {
                 assert!(!analysis.memory_accesses.is_empty());
             }
             Err(e) => {
-                println!("Comprehensive analysis test error (may be expected): {}", e);
+                println!("Comprehensive analysis test error (may be expected): {e}");
             }
         }
     }
@@ -1297,7 +1342,7 @@ mod disassembly_tests {
                 assert!(disasm.analysis.control_flow_summary.unconditional_jumps > 0);
             }
             Err(e) => {
-                println!("Complex control flow test error (may be expected): {}", e);
+                println!("Complex control flow test error (may be expected): {e}");
             }
         }
     }
@@ -1505,10 +1550,7 @@ mod disassembly_tests {
                     .any(|p| matches!(p.pattern_type, PatternType::IndirectJumps)));
             }
             Err(e) => {
-                println!(
-                    "Pattern detection edge case test error (may be expected): {}",
-                    e
-                );
+                println!("Pattern detection edge case test error (may be expected): {e}");
             }
         }
     }
@@ -1543,8 +1585,7 @@ mod disassembly_tests {
             // Test that the instruction was classified correctly
             assert_eq!(
                 instruction.instruction_type, expected_type,
-                "Failed for mnemonic: {}",
-                mnemonic
+                "Failed for mnemonic: {mnemonic}"
             );
         }
     }
@@ -1705,7 +1746,7 @@ mod disassembly_tests {
                 address: 0x1000,
                 bytes: vec![0x90],
                 mnemonic: mnemonic.to_string(),
-                operands: "".to_string(),
+                operands: String::new(),
                 instruction_type: expected_type.clone(),
                 flow_control: None,
                 size: 1,
@@ -1714,8 +1755,7 @@ mod disassembly_tests {
             // The instruction should have been classified correctly during creation
             assert_eq!(
                 instruction.instruction_type, expected_type,
-                "Failed for mnemonic: {}",
-                mnemonic
+                "Failed for mnemonic: {mnemonic}"
             );
         }
     }

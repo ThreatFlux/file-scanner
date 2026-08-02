@@ -36,7 +36,7 @@ pub struct SectionInfo {
 }
 
 // Temporarily disabled ThreatFlux conversion function
-/// Convert ThreatFlux types to BinaryInfo
+/// Convert `ThreatFlux` types to `BinaryInfo`
 fn convert_threatflux_to_binary_info(
     analysis: &threatflux_binary_analysis::AnalysisResult,
     compiler_info: Option<String>,
@@ -151,13 +151,13 @@ pub fn parse_binary(path: &Path) -> Result<BinaryInfo> {
     }
 }
 
-/// Try to create ThreatFlux analyzer, return error if library has compilation issues
+/// Try to create `ThreatFlux` analyzer, return error if library has compilation issues
 fn try_create_threatflux_analyzer() -> Result<BinaryAnalyzer> {
     Ok(BinaryAnalyzer::new())
 }
 
 /// Extract enhanced compiler and linker information using legacy methods
-/// This provides more detailed detection than basic ThreatFlux analysis
+/// This provides more detailed detection than basic `ThreatFlux` analysis
 fn extract_legacy_compiler_info(buffer: &[u8]) -> Result<(Option<String>, Option<String>)> {
     let mut compiler_info = None;
     let mut linker_info = None;
@@ -183,7 +183,7 @@ fn extract_legacy_compiler_info(buffer: &[u8]) -> Result<(Option<String>, Option
                 let major_version = optional_header.standard_fields.major_linker_version;
                 let minor_version = optional_header.standard_fields.minor_linker_version;
 
-                linker_info = Some(format!("Linker v{}.{}", major_version, minor_version));
+                linker_info = Some(format!("Linker v{major_version}.{minor_version}"));
 
                 compiler_info = match major_version {
                     14..=16 => Some("MSVC 2015-2022".to_string()),
@@ -288,7 +288,7 @@ fn parse_pe(pe: pe::PE, _buffer: &[u8]) -> Result<BinaryInfo> {
         sections: Vec::new(),
         imports: Vec::new(),
         exports: Vec::new(),
-        entry_point: Some(pe.entry as u64),
+        entry_point: Some(u64::from(pe.entry)),
         is_stripped: pe.debug_data.is_none(),
         has_debug_info: pe.debug_data.is_some(),
         java_analysis: None,
@@ -297,8 +297,8 @@ fn parse_pe(pe: pe::PE, _buffer: &[u8]) -> Result<BinaryInfo> {
     for section in &pe.sections {
         info.sections.push(SectionInfo {
             name: section.name()?.to_string(),
-            size: section.virtual_size as u64,
-            virtual_address: section.virtual_address as u64,
+            size: u64::from(section.virtual_size),
+            virtual_address: u64::from(section.virtual_address),
             characteristics: format!("{:x}", section.characteristics),
         });
     }
@@ -322,7 +322,7 @@ fn parse_pe(pe: pe::PE, _buffer: &[u8]) -> Result<BinaryInfo> {
             optional_header.standard_fields.major_linker_version,
             optional_header.standard_fields.minor_linker_version
         );
-        info.linker = Some(format!("Linker v{}", linker_version));
+        info.linker = Some(format!("Linker v{linker_version}"));
 
         match optional_header.standard_fields.major_linker_version {
             14..=16 => info.compiler = Some("MSVC 2015-2022".to_string()),
@@ -382,7 +382,7 @@ fn parse_mach(mach: goblin::mach::Mach) -> Result<BinaryInfo> {
             let exports = mach_o.exports()?;
             if !exports.is_empty() {
                 for export in exports {
-                    info.exports.push(export.name.to_string());
+                    info.exports.push(export.name.clone());
                 }
             }
         }
@@ -465,8 +465,7 @@ fn parse_java_class(path: &Path) -> Result<BinaryInfo> {
         has_debug_info: java_analysis
             .classes
             .first()
-            .map(|c| c.source_file.is_some())
-            .unwrap_or(false),
+            .is_some_and(|c| c.source_file.is_some()),
         java_analysis: Some(java_analysis),
     })
 }
@@ -625,13 +624,10 @@ mod tests {
 
         let result = parse_binary(&file_path);
         // ThreatFlux is more resilient and can analyze unknown/raw formats
-        match result {
-            Ok(binary_info) => {
-                assert!(binary_info.format == "Raw" || binary_info.format == "Unknown");
-            }
-            Err(_) => {
-                // Goblin fallback might still return error, which is also acceptable
-            }
+        if let Ok(binary_info) = result {
+            assert!(binary_info.format == "Raw" || binary_info.format == "Unknown");
+        } else {
+            // Goblin fallback might still return error, which is also acceptable
         }
     }
 

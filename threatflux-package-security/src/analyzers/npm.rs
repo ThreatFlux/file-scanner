@@ -9,8 +9,8 @@ use std::path::Path;
 
 use crate::core::{
     AnalysisResult, Dependency, DependencyAnalysis, DependencyType, MaliciousPattern,
-    PackageAnalyzer, PackageInfo, PackageMetadata, PatternMatcher, RiskAssessment, RiskCalculator,
-    Vulnerability,
+    PackageAnalyzer, PackageInfo, PackageMetadata, PatternCategory, PatternMatcher,
+    PatternSeverity, RiskAssessment, RiskCalculator, Vulnerability,
 };
 use crate::utils::typosquatting::TyposquattingDetector;
 use crate::vulnerability_db::VulnerabilityDatabase;
@@ -376,7 +376,39 @@ impl PackageAnalyzer for NpmAnalyzer {
         let scripts_analysis = self.analyze_scripts(&package.scripts);
 
         // Check for malicious patterns
-        let malicious_patterns = self.pattern_matcher.scan(&content, Some("package.json"));
+        let mut malicious_patterns = self.pattern_matcher.scan(&content, Some("package.json"));
+        for suspicious_script in &scripts_analysis.suspicious_scripts {
+            let is_external_download = suspicious_script.reason.contains("Downloads");
+            malicious_patterns.push(MaliciousPattern {
+                pattern_id: format!("NPM_SCRIPT_{}", suspicious_script.script_name),
+                pattern_name: format!("Suspicious npm {} script", suspicious_script.script_name),
+                description: if is_external_download {
+                    format!(
+                        "Remote execution/download behavior detected in npm {} script via curl or wget",
+                        suspicious_script.script_name
+                    )
+                } else {
+                    format!(
+                        "{} detected in npm {} script",
+                        suspicious_script.reason, suspicious_script.script_name
+                    )
+                },
+                category: if is_external_download {
+                    PatternCategory::NetworkAccess
+                } else {
+                    PatternCategory::CodeExecution
+                },
+                severity: if suspicious_script.risk_level == "Critical" {
+                    PatternSeverity::Critical
+                } else {
+                    PatternSeverity::High
+                },
+                indicators: vec![suspicious_script.reason.clone()],
+                regex_patterns: vec![],
+                file_patterns: vec!["package.json".to_string()],
+                evidence: scripts_analysis.external_downloads.clone(),
+            });
+        }
 
         // Check typosquatting
         let typosquatting_risk = if self.typo_detector.is_typosquatting(&package.metadata.name) {

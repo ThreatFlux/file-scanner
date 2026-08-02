@@ -126,7 +126,7 @@ impl Default for CodeQualityAnalyzer {
 }
 
 impl CodeQualityAnalyzer {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 
@@ -259,13 +259,14 @@ impl CodeQualityAnalyzer {
         let length = total_operators + total_operands;
 
         let volume = if vocabulary > 0 {
-            length as f64 * (vocabulary as f64).log2()
+            f64::from(length) * f64::from(vocabulary).log2()
         } else {
             0.0
         };
 
         let difficulty = if distinct_operands > 0 && operands.values().sum::<u32>() > 0 {
-            (distinct_operators as f64 / 2.0) * (total_operands as f64 / distinct_operands as f64)
+            (f64::from(distinct_operators) / 2.0)
+                * (f64::from(total_operands) / f64::from(distinct_operands))
         } else {
             0.0
         };
@@ -296,7 +297,7 @@ impl CodeQualityAnalyzer {
                 c == ',' || c == ' ' || c == '[' || c == ']' || c == '+' || c == '-' || c == '*'
             })
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect()
     }
 
@@ -309,16 +310,19 @@ impl CodeQualityAnalyzer {
         // Microsoft's Maintainability Index formula
         // MI = 171 - 5.2 * ln(V) - 0.23 * CC - 16.2 * ln(LOC)
         let volume = halstead.volume.max(1.0);
-        let loc = lines_of_code.max(1) as f64;
-        let cc = cyclomatic_complexity as f64;
+        let loc = f64::from(lines_of_code.max(1));
+        let cc = f64::from(cyclomatic_complexity);
 
-        let mi = 171.0 - 5.2 * volume.ln() - 0.23 * cc - 16.2 * loc.ln();
+        let mi = 16.2f64.mul_add(
+            -loc.ln(),
+            0.23f64.mul_add(-cc, 5.2f64.mul_add(-volume.ln(), 171.0)),
+        );
 
         // Normalize to 0-100 scale
         (mi * 100.0 / 171.0).clamp(0.0, 100.0)
     }
 
-    fn estimate_technical_debt(
+    const fn estimate_technical_debt(
         &self,
         cyclomatic_complexity: u32,
         cognitive_complexity: u32,
@@ -381,7 +385,7 @@ impl CodeQualityAnalyzer {
         let average_complexity = if total_functions > 0 {
             function_metrics
                 .iter()
-                .map(|m| m.cyclomatic_complexity as f64)
+                .map(|m| f64::from(m.cyclomatic_complexity))
                 .sum::<f64>()
                 / total_functions as f64
         } else {
@@ -391,7 +395,7 @@ impl CodeQualityAnalyzer {
         let average_function_length = if total_functions > 0 {
             function_metrics
                 .iter()
-                .map(|m| m.function_length as f64)
+                .map(|m| f64::from(m.function_length))
                 .sum::<f64>()
                 / total_functions as f64
         } else {
@@ -411,8 +415,9 @@ impl CodeQualityAnalyzer {
         let (most_complex_function, highest_complexity) = function_metrics
             .iter()
             .max_by_key(|m| m.cyclomatic_complexity)
-            .map(|m| (Some(m.function_name.clone()), m.cyclomatic_complexity))
-            .unwrap_or((None, 0));
+            .map_or((None, 0), |m| {
+                (Some(m.function_name.clone()), m.cyclomatic_complexity)
+            });
 
         OverallCodeMetrics {
             total_functions,
@@ -537,7 +542,7 @@ impl CodeQualityAnalyzer {
                 / function_metrics.len() as f64
         };
 
-        let overall_quality_score = (complexity_score + maintainability_score) / 2.0;
+        let overall_quality_score = f64::midpoint(complexity_score, maintainability_score);
 
         let code_health = match overall_quality_score {
             score if score >= 90.0 => CodeHealth::Excellent,
@@ -569,7 +574,7 @@ impl CodeQualityAnalyzer {
             recommendations.push("Code quality is good - maintain current standards".to_string());
         }
 
-        let technical_debt_hours = total_debt_minutes as f64 / 60.0;
+        let technical_debt_hours = f64::from(total_debt_minutes) / 60.0;
 
         QualityReport {
             overall_quality_score,
@@ -587,11 +592,11 @@ impl CodeQualityAnalyzer {
         if average_complexity <= 5.0 {
             100.0
         } else if average_complexity <= 10.0 {
-            90.0 - (average_complexity - 5.0) * 4.0
+            (average_complexity - 5.0).mul_add(-4.0, 90.0)
         } else if average_complexity <= 20.0 {
-            70.0 - (average_complexity - 10.0) * 3.0
+            (average_complexity - 10.0).mul_add(-3.0, 70.0)
         } else if average_complexity <= 30.0 {
-            40.0 - (average_complexity - 20.0) * 2.0
+            (average_complexity - 20.0).mul_add(-2.0, 40.0)
         } else {
             20.0_f64.max(20.0 - (average_complexity - 30.0))
         }
@@ -1209,9 +1214,9 @@ mod tests {
         let total_operands = 30;
         let vocabulary = distinct_operators + distinct_operands;
         let length = total_operators + total_operands;
-        let volume = length as f64 * (vocabulary as f64).log2();
-        let difficulty =
-            (distinct_operators as f64 / 2.0) * (total_operands as f64 / distinct_operands as f64);
+        let volume = f64::from(length) * f64::from(vocabulary).log2();
+        let difficulty = (f64::from(distinct_operators) / 2.0)
+            * (f64::from(total_operands) / f64::from(distinct_operands));
         let effort = difficulty * volume;
         let time_to_program = effort / 18.0;
         let delivered_bugs = volume / 3000.0;
@@ -1230,8 +1235,14 @@ mod tests {
             delivered_bugs,
         };
 
-        assert!(halstead.vocabulary == halstead.distinct_operators + halstead.distinct_operands);
-        assert!(halstead.length == halstead.total_operators + halstead.total_operands);
+        assert_eq!(
+            halstead.vocabulary,
+            halstead.distinct_operators + halstead.distinct_operands
+        );
+        assert_eq!(
+            halstead.length,
+            halstead.total_operators + halstead.total_operands
+        );
         assert!((halstead.effort - halstead.difficulty * halstead.volume).abs() < f64::EPSILON);
         assert!((halstead.time_to_program - halstead.effort / 18.0).abs() < f64::EPSILON);
         assert!((halstead.delivered_bugs - halstead.volume / 3000.0).abs() < f64::EPSILON);

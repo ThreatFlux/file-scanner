@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use chrono::{Duration, Utc};
 use file_scanner::cache::{
     AnalysisCache, CacheEntry, CacheMetadata, CacheSearchQuery, CacheStatistics,
@@ -108,7 +153,7 @@ mod entry_operations_tests {
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
         for i in 0..5 {
-            let entry = create_test_entry("hash123", &format!("tool_{}", i), "/test/file.bin");
+            let entry = create_test_entry("hash123", &format!("tool_{i}"), "/test/file.bin");
             cache.add_entry(entry).await.unwrap();
         }
 
@@ -132,7 +177,7 @@ mod entry_operations_tests {
         let now = Utc::now();
         let timestamps = [now - Duration::hours(2), now - Duration::hours(1), now];
 
-        for timestamp in timestamps.iter() {
+        for timestamp in &timestamps {
             let entry = create_custom_entry(
                 "hash123",
                 "test_tool",
@@ -216,7 +261,7 @@ mod entry_operations_tests {
 
         // Add more than 100 entries (the default max_entries_per_file)
         for i in 0..150 {
-            let entry = create_test_entry("hash123", &format!("tool_{}", i), "/test/file.bin");
+            let entry = create_test_entry("hash123", &format!("tool_{i}"), "/test/file.bin");
             cache.add_entry(entry).await.unwrap();
         }
 
@@ -549,7 +594,7 @@ mod persistence_tests {
 
         // Add some entries
         for i in 0..3 {
-            let entry = create_test_entry(&format!("hash{}", i), "tool", "/file.bin");
+            let entry = create_test_entry(&format!("hash{i}"), "tool", "/file.bin");
             cache.add_entry(entry).await.unwrap();
         }
 
@@ -559,7 +604,7 @@ mod persistence_tests {
         // Verify files exist
         let cache_files: Vec<_> = std::fs::read_dir(temp_dir.path())
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
             .collect();
         assert!(!cache_files.is_empty());
@@ -570,7 +615,7 @@ mod persistence_tests {
         // Verify files are removed
         let cache_files_after: Vec<_> = std::fs::read_dir(temp_dir.path())
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
             .collect();
         assert!(cache_files_after.is_empty());
@@ -619,9 +664,9 @@ mod concurrency_tests {
             let handle = tokio::spawn(async move {
                 for j in 0..10 {
                     let entry = create_test_entry(
-                        &format!("hash_{}", i),
-                        &format!("tool_{}_{}", i, j),
-                        &format!("/file_{}.bin", i),
+                        &format!("hash_{i}"),
+                        &format!("tool_{i}_{j}"),
+                        &format!("/file_{i}.bin"),
                     );
                     cache_clone.add_entry(entry).await.unwrap();
                 }
@@ -646,7 +691,7 @@ mod concurrency_tests {
 
         // Add initial entries
         for i in 0..5 {
-            let entry = create_test_entry(&format!("hash{}", i), "tool", "/file.bin");
+            let entry = create_test_entry(&format!("hash{i}"), "tool", "/file.bin");
             cache.add_entry(entry).await.unwrap();
         }
 
@@ -657,7 +702,7 @@ mod concurrency_tests {
             let cache_clone = cache.clone();
             let handle = tokio::spawn(async move {
                 for _ in 0..20 {
-                    let _entries = cache_clone.get_entries(&format!("hash{}", i)).await;
+                    let _entries = cache_clone.get_entries(&format!("hash{i}")).await;
                     let _all = cache_clone.get_all_entries().await;
                     let _metadata = cache_clone.get_metadata().await;
                 }
@@ -670,11 +715,8 @@ mod concurrency_tests {
             let cache_clone = cache.clone();
             let handle = tokio::spawn(async move {
                 for j in 0..10 {
-                    let entry = create_test_entry(
-                        &format!("hash{}", i),
-                        &format!("tool_{}", j),
-                        "/file.bin",
-                    );
+                    let entry =
+                        create_test_entry(&format!("hash{i}"), &format!("tool_{j}"), "/file.bin");
                     cache_clone.add_entry(entry).await.unwrap();
                 }
             });
@@ -699,7 +741,7 @@ mod concurrency_tests {
         // Add test data
         for i in 0..100 {
             let entry = create_test_entry(
-                &format!("hash{}", i),
+                &format!("hash{i}"),
                 if i % 2 == 0 { "tool_even" } else { "tool_odd" },
                 &format!("/path/{}/file.bin", i % 10),
             );
@@ -718,7 +760,7 @@ mod concurrency_tests {
                     } else {
                         Some("tool_odd".to_string())
                     },
-                    file_path_pattern: Some(format!("/{}/", i)),
+                    file_path_pattern: Some(format!("/{i}/")),
                     start_time: None,
                     end_time: None,
                     min_file_size: None,
@@ -750,7 +792,7 @@ mod memory_management_tests {
 
         // Add entries with known sizes
         for i in 0..10 {
-            let mut entry = create_test_entry(&format!("hash{}", i), "tool", "/file.bin");
+            let mut entry = create_test_entry(&format!("hash{i}"), "tool", "/file.bin");
             entry.result = serde_json::json!({
                 "data": "x".repeat(1000) // Large result data
             });
@@ -768,7 +810,7 @@ mod memory_management_tests {
 
         // Add exactly 100 entries
         for i in 0..100 {
-            let entry = create_test_entry("hash1", &format!("tool_{}", i), "/file.bin");
+            let entry = create_test_entry("hash1", &format!("tool_{i}"), "/file.bin");
             cache.add_entry(entry).await.unwrap();
         }
 
@@ -992,7 +1034,7 @@ mod edge_case_tests {
         ];
 
         for (i, path) in test_files.iter().enumerate() {
-            let entry = create_test_entry(&format!("hash{}", i), "tool", path);
+            let entry = create_test_entry(&format!("hash{i}"), "tool", path);
             cache.add_entry(entry).await.unwrap();
         }
 

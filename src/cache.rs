@@ -88,7 +88,7 @@ impl AnalysisCache {
             }
 
             // Enforce global cache limit with LRU eviction
-            let total_entries: usize = entries.values().map(|v| v.len()).sum();
+            let total_entries: usize = entries.values().map(std::vec::Vec::len).sum();
             if total_entries > self.max_total_entries {
                 self.evict_oldest(&mut entries).await;
             }
@@ -154,7 +154,7 @@ impl AnalysisCache {
     pub async fn get_metadata(&self) -> CacheMetadata {
         let entries = self.entries.read().await;
 
-        let total_entries: usize = entries.values().map(|v| v.len()).sum();
+        let total_entries: usize = entries.values().map(std::vec::Vec::len).sum();
         let total_unique_files = entries.len();
 
         // More efficient size calculation without serialization
@@ -239,8 +239,8 @@ impl AnalysisCache {
         };
 
         // Only save recently modified entries (simplified approach)
-        for (hash, file_entries) in entries.iter() {
-            let cache_file = self.cache_dir.join(format!("{}.json", hash));
+        for (hash, file_entries) in &entries {
+            let cache_file = self.cache_dir.join(format!("{hash}.json"));
             let json = serde_json::to_string_pretty(file_entries)?;
 
             let mut file = File::create(&cache_file).await?;
@@ -308,7 +308,7 @@ impl AnalysisCache {
             }
         }
 
-        let total_entries: usize = entries.values().map(|v| v.len()).sum();
+        let total_entries: usize = entries.values().map(std::vec::Vec::len).sum();
         let avg_execution_time = if total_entries > 0 {
             total_execution_time / total_entries as u64
         } else {
@@ -695,7 +695,7 @@ mod tests {
 
         // Add more entries than the limit
         for i in 0..5 {
-            let entry = create_test_entry("hash123", &format!("tool{}", i), "/test/file.bin");
+            let entry = create_test_entry("hash123", &format!("tool{i}"), "/test/file.bin");
             cache.add_entry(entry).await.unwrap();
         }
 

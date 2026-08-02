@@ -30,7 +30,7 @@ pub struct CallGraphNode {
 }
 
 /// Type of node in the call graph
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NodeType {
     EntryPoint,
     Library,
@@ -52,7 +52,7 @@ pub struct CallGraphEdge {
 }
 
 /// Type of function call
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CallType {
     Direct,
     Indirect,
@@ -413,10 +413,7 @@ impl CallGraph {
                     let new_depth = depth + 1;
 
                     // Update if we found a shorter path or first path
-                    let should_update = depths
-                        .get(&edge.callee)
-                        .map(|&d| new_depth < d)
-                        .unwrap_or(true);
+                    let should_update = depths.get(&edge.callee).is_none_or(|&d| new_depth < d);
 
                     if should_update {
                         depths.insert(edge.callee, new_depth);
@@ -454,13 +451,13 @@ impl CallGraph {
         let total_out_degree: u32 = self.nodes.iter().map(|n| n.out_degree).sum();
 
         let avg_in_degree = if total_nodes > 0 {
-            total_in_degree as f64 / total_nodes as f64
+            f64::from(total_in_degree) / total_nodes as f64
         } else {
             0.0
         };
 
         let avg_out_degree = if total_nodes > 0 {
-            total_out_degree as f64 / total_nodes as f64
+            f64::from(total_out_degree) / total_nodes as f64
         } else {
             0.0
         };

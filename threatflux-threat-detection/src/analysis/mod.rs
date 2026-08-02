@@ -145,7 +145,7 @@ pub fn generate_recommendations(
     // Add YARA rule specific recommendations
     for yara_match in matches {
         if let Some(recommendation) = yara_match.metadata.get("recommendation") {
-            recommendations.push(format!("Rule recommendation: {}", recommendation));
+            recommendations.push(format!("Rule recommendation: {recommendation}"));
         }
     }
 
@@ -201,27 +201,29 @@ pub fn calculate_confidence_score(
     file_size: u64,
 ) -> f32 {
     let mut confidence = 0.0;
-    let mut factors = 0;
+    let mut factors = 0_u8;
 
     // Factor 1: Number of rule matches
     if !matches.is_empty() {
-        confidence += (matches.len() as f32 * 0.2).min(1.0);
+        let match_count = u16::try_from(matches.len().min(5)).unwrap_or(u16::MAX);
+        confidence += (f32::from(match_count) * 0.2).min(1.0);
         factors += 1;
     }
 
     // Factor 2: Quality of indicators
     if !indicators.is_empty() {
+        let indicator_count = u16::try_from(indicators.len()).unwrap_or(u16::MAX);
         let avg_indicator_confidence: f32 =
-            indicators.iter().map(|i| i.confidence).sum::<f32>() / indicators.len() as f32;
+            indicators.iter().map(|i| i.confidence).sum::<f32>() / f32::from(indicator_count);
         confidence += avg_indicator_confidence;
         factors += 1;
     }
 
     // Factor 3: File size (very small or very large files might be less reliable)
-    let size_factor = if !(1024..=50 * 1024 * 1024).contains(&file_size) {
-        0.8
-    } else {
+    let size_factor = if (1024..=50 * 1024 * 1024).contains(&file_size) {
         1.0
+    } else {
+        0.8
     };
     confidence *= size_factor;
 
@@ -237,7 +239,7 @@ pub fn calculate_confidence_score(
     }
 
     if factors > 0 {
-        (confidence / factors as f32).clamp(0.0, 1.0)
+        (confidence / f32::from(factors)).clamp(0.0, 1.0)
     } else {
         0.0
     }

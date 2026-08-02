@@ -51,7 +51,7 @@ pub struct McpServerState {
 
 impl McpServerState {
     #[allow(dead_code)]
-    pub fn new_for_testing(
+    pub const fn new_for_testing(
         handler: FileScannerMcp,
         sse_clients: Arc<Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<SseEvent>>>>,
         cache: Arc<AnalysisCache>,
@@ -96,7 +96,7 @@ pub struct JsonRpcResponse {
     pub error: Option<JsonRpcError>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, ToSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
@@ -173,14 +173,14 @@ impl McpTransportServer {
                             stdout.flush().await?;
                         }
                         Err(e) => {
-                            eprintln!("Parse error: {}", e);
+                            eprintln!("Parse error: {e}");
                             let error = JsonRpcResponse {
                                 jsonrpc: "2.0".to_string(),
                                 id: None,
                                 result: None,
                                 error: Some(JsonRpcError {
                                     code: -32700,
-                                    message: format!("Parse error: {}", e),
+                                    message: format!("Parse error: {e}"),
                                     data: None,
                                 }),
                             };
@@ -192,7 +192,7 @@ impl McpTransportServer {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Read error: {}", e);
+                    eprintln!("Read error: {e}");
                     break;
                 }
             }
@@ -230,8 +230,8 @@ impl McpTransportServer {
             .with_state(state)
             .layer(ServiceBuilder::new().layer(axum::middleware::from_fn(cors_middleware)));
 
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        println!("MCP HTTP server listening on http://localhost:{}", port);
+        let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+        println!("MCP HTTP server listening on http://localhost:{port}");
         println!("Endpoints:");
         println!("  - POST /mcp - MCP JSON-RPC endpoint");
         println!("  - GET /health - Health check");
@@ -254,13 +254,10 @@ impl McpTransportServer {
         println!("  - GET /api/info - API information and endpoints");
         println!();
         println!("Test with MCP Inspector:");
-        println!(
-            "  npx @modelcontextprotocol/inspector http://localhost:{}/mcp",
-            port
-        );
+        println!("  npx @modelcontextprotocol/inspector http://localhost:{port}/mcp");
         println!();
         println!("API Schema:");
-        println!("  http://localhost:{}/api-docs/openapi.json", port);
+        println!("  http://localhost:{port}/api-docs/openapi.json");
 
         axum::serve(listener, app).await?;
         Ok(())
@@ -282,18 +279,15 @@ impl McpTransportServer {
             .with_state(state)
             .layer(ServiceBuilder::new().layer(axum::middleware::from_fn(cors_middleware)));
 
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        println!("MCP SSE server listening on http://localhost:{}", port);
+        let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+        println!("MCP SSE server listening on http://localhost:{port}");
         println!("Endpoints:");
         println!("  - GET /sse - SSE connection endpoint");
         println!("  - POST /mcp - MCP JSON-RPC over SSE");
         println!("  - GET /health - Health check");
         println!();
         println!("Test with MCP Inspector:");
-        println!(
-            "  npx @modelcontextprotocol/inspector http://localhost:{}/sse",
-            port
-        );
+        println!("  npx @modelcontextprotocol/inspector http://localhost:{port}/sse");
 
         axum::serve(listener, app).await?;
         Ok(())
@@ -1038,7 +1032,7 @@ async fn handle_mcp_sse_request(
     };
 
     let clients = state.sse_clients.lock().unwrap();
-    for (_, sender) in clients.iter() {
+    for sender in clients.values() {
         let _ = sender.send(event.clone());
     }
 
@@ -1193,7 +1187,7 @@ async fn get_cache_stats(
 
 async fn clear_cache(State(state): State<McpServerState>) -> Result<AxumJson<Value>, StatusCode> {
     match state.cache.clear().await {
-        Ok(_) => Ok(AxumJson(json!({
+        Ok(()) => Ok(AxumJson(json!({
             "status": "success",
             "message": "Cache cleared successfully"
         }))),
@@ -1227,7 +1221,10 @@ async fn search_strings(
     AxumJson(params): AxumJson<HashMap<String, Value>>,
 ) -> Result<AxumJson<Value>, StatusCode> {
     let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
-    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+    let limit = params
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(100) as usize;
 
     let results = state.string_tracker.search_strings(query, limit);
     Ok(AxumJson(json!({
@@ -1255,7 +1252,10 @@ async fn handle_strings_related(
     AxumJson(params): AxumJson<HashMap<String, Value>>,
 ) -> Result<AxumJson<Value>, StatusCode> {
     let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
-    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let limit = params
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(20) as usize;
 
     let related = state.string_tracker.get_related_strings(value, limit);
     Ok(AxumJson(json!({
@@ -1397,7 +1397,7 @@ mod tests {
         let query: SseQuery = serde_json::from_str(json_str).unwrap();
         assert_eq!(query.client_id.unwrap(), "test_client");
 
-        let json_str_no_client = r#"{}"#;
+        let json_str_no_client = r"{}";
         let query_no_client: SseQuery = serde_json::from_str(json_str_no_client).unwrap();
         assert!(query_no_client.client_id.is_none());
     }

@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use anyhow::Result;
 use file_scanner::hash::{calculate_all_hashes, Hashes};
 use std::fs;
@@ -127,8 +172,8 @@ async fn test_concurrent_hash_calculation() -> Result<()> {
     // Create multiple files
     let mut files = Vec::new();
     for i in 0..5 {
-        let file_path = temp_dir.path().join(format!("file{}.txt", i));
-        fs::write(&file_path, format!("Content for file {}", i))?;
+        let file_path = temp_dir.path().join(format!("file{i}.txt"));
+        fs::write(&file_path, format!("Content for file {i}"))?;
         files.push(file_path);
     }
 
@@ -149,21 +194,18 @@ async fn test_concurrent_hash_calculation() -> Result<()> {
     // Verify all calculations completed
     assert_eq!(results.len(), 5);
     for (i, hashes) in results.iter().enumerate() {
-        assert!(!hashes.md5.is_empty(), "MD5 hash missing for file {}", i);
+        assert!(!hashes.md5.is_empty(), "MD5 hash missing for file {i}");
         assert!(
             !hashes.sha256.is_empty(),
-            "SHA256 hash missing for file {}",
-            i
+            "SHA256 hash missing for file {i}"
         );
         assert!(
             !hashes.sha512.is_empty(),
-            "SHA512 hash missing for file {}",
-            i
+            "SHA512 hash missing for file {i}"
         );
         assert!(
             !hashes.blake3.is_empty(),
-            "BLAKE3 hash missing for file {}",
-            i
+            "BLAKE3 hash missing for file {i}"
         );
     }
 
@@ -268,7 +310,7 @@ mod performance_tests {
         let hashes = calculate_all_hashes(&test_file).await?;
         let duration = start.elapsed();
 
-        println!("Hash calculation for 10MB took: {:?}", duration);
+        println!("Hash calculation for 10MB took: {duration:?}");
         println!("MD5: {}", &hashes.md5[..16]);
         println!("SHA256: {}", &hashes.sha256[..16]);
         println!("SHA512: {}", &hashes.sha512[..16]);
@@ -288,7 +330,7 @@ mod performance_tests {
         // Create 10 files of 1MB each
         let mut files = Vec::new();
         for i in 0..10 {
-            let file_path = temp_dir.path().join(format!("perf{}.bin", i));
+            let file_path = temp_dir.path().join(format!("perf{i}.bin"));
             let content = vec![i as u8; 1024 * 1024];
             fs::write(&file_path, content)?;
             files.push(file_path);
@@ -309,10 +351,7 @@ mod performance_tests {
         }
 
         let duration = start.elapsed();
-        println!(
-            "Concurrent hash calculation for 10x1MB files took: {:?}",
-            duration
-        );
+        println!("Concurrent hash calculation for 10x1MB files took: {duration:?}");
 
         // Should benefit from concurrency
         assert!(duration.as_secs() < 3);

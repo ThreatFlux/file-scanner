@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use file_scanner::script_analysis::*;
 use tempfile::{NamedTempFile, TempDir};
 
@@ -177,10 +222,10 @@ fn test_obfuscated_powershell_analysis() {
 #[test]
 fn test_powershell_version_detection() {
     let temp_file = NamedTempFile::with_suffix(".ps1").unwrap();
-    let content = r#"
+    let content = r"
 #Requires -Version 5.1
 Get-Process
-"#;
+";
     std::fs::write(temp_file.path(), content).unwrap();
 
     let analysis = analyze_powershell(temp_file.path()).unwrap();
@@ -190,9 +235,9 @@ Get-Process
 #[test]
 fn test_powershell_with_shebang() {
     let temp_file = NamedTempFile::with_suffix(".ps1").unwrap();
-    let content = r#"#!/usr/bin/env pwsh
+    let content = r"#!/usr/bin/env pwsh
 Get-Process | Where-Object { $_.Name -eq 'bash' }
-"#;
+";
     std::fs::write(temp_file.path(), content).unwrap();
 
     let analysis = analyze_powershell(temp_file.path()).unwrap();
@@ -206,7 +251,7 @@ Get-Process | Where-Object { $_.Name -eq 'bash' }
 #[test]
 fn test_function_extraction() {
     let temp_file = NamedTempFile::with_suffix(".ps1").unwrap();
-    let content = r#"
+    let content = r"
 function Test-Function1 {
     param($param1)
     return $param1
@@ -219,7 +264,7 @@ Function Test-Function2($param2) {
 function Global:Test-Function3 {
     # Global function
 }
-"#;
+";
     std::fs::write(temp_file.path(), content).unwrap();
 
     let analysis = analyze_powershell(temp_file.path()).unwrap();
@@ -492,7 +537,7 @@ fn test_empty_powershell_file() {
 #[test]
 fn test_malformed_powershell() {
     let temp_file = NamedTempFile::with_suffix(".ps1").unwrap();
-    let content = r#"
+    let content = r"
 # Malformed PowerShell with syntax errors
 function BrokenFunction {
     param($param1
@@ -501,7 +546,7 @@ function BrokenFunction {
     # Incomplete pipeline
 }
 # Unclosed function
-"#;
+";
     std::fs::write(temp_file.path(), content).unwrap();
 
     // Should still analyze without crashing

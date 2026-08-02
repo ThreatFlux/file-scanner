@@ -342,8 +342,8 @@ mod tests {
             let mut metadata = FileMetadata::new(&file_path).unwrap();
             metadata.extract_basic_info().unwrap();
 
-            assert_eq!(metadata.permissions, expected_perm, "Mode: {:#o}", mode);
-            assert_eq!(metadata.is_executable, expected_exec, "Mode: {:#o}", mode);
+            assert_eq!(metadata.permissions, expected_perm, "Mode: {mode:#o}");
+            assert_eq!(metadata.is_executable, expected_exec, "Mode: {mode:#o}");
         }
     }
 

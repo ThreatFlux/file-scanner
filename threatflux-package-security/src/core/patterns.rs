@@ -19,6 +19,12 @@ pub struct MaliciousPattern {
     pub evidence: Vec<String>,
 }
 
+impl MaliciousPattern {
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+}
+
 /// Pattern categories
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum PatternCategory {

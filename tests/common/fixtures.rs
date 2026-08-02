@@ -1,6 +1,5 @@
 #![allow(dead_code)] // Test fixtures may not all be used immediately
 
-use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -12,39 +11,40 @@ use tempfile::TempDir;
 /// its own temporary files.
 ///
 /// Shared temporary directory for all tests
-pub static SHARED_TEST_DIR: Lazy<Arc<TempDir>> =
-    Lazy::new(|| Arc::new(TempDir::new().expect("Failed to create shared test directory")));
+pub static SHARED_TEST_DIR: std::sync::LazyLock<Arc<TempDir>> = std::sync::LazyLock::new(|| {
+    Arc::new(TempDir::new().expect("Failed to create shared test directory"))
+});
 
 /// Small test file (1KB) for basic operations
-pub static SMALL_TEST_FILE: Lazy<PathBuf> = Lazy::new(|| {
+pub static SMALL_TEST_FILE: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
     let path = SHARED_TEST_DIR.path().join("small_test.txt");
     std::fs::write(&path, "x".repeat(1024)).expect("Failed to create small test file");
     path
 });
 
 /// Medium test file (64KB) for moderate operations
-pub static MEDIUM_TEST_FILE: Lazy<PathBuf> = Lazy::new(|| {
+pub static MEDIUM_TEST_FILE: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
     let path = SHARED_TEST_DIR.path().join("medium_test.txt");
     std::fs::write(&path, "x".repeat(64 * 1024)).expect("Failed to create medium test file");
     path
 });
 
 /// Large test file (1MB) for performance testing only
-pub static LARGE_TEST_FILE: Lazy<PathBuf> = Lazy::new(|| {
+pub static LARGE_TEST_FILE: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
     let path = SHARED_TEST_DIR.path().join("large_test.txt");
     std::fs::write(&path, "x".repeat(1024 * 1024)).expect("Failed to create large test file");
     path
 });
 
 /// Empty test file
-pub static EMPTY_FILE: Lazy<PathBuf> = Lazy::new(|| {
+pub static EMPTY_FILE: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
     let path = SHARED_TEST_DIR.path().join("empty.txt");
     std::fs::write(&path, "").expect("Failed to create empty test file");
     path
 });
 
 /// Binary test file with ELF header
-pub static ELF_BINARY_FILE: Lazy<PathBuf> = Lazy::new(|| {
+pub static ELF_BINARY_FILE: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
     let path = SHARED_TEST_DIR.path().join("test.elf");
     let elf_data = create_minimal_elf();
     std::fs::write(&path, elf_data).expect("Failed to create ELF test file");
@@ -52,7 +52,7 @@ pub static ELF_BINARY_FILE: Lazy<PathBuf> = Lazy::new(|| {
 });
 
 /// Binary test file with PE header  
-pub static PE_BINARY_FILE: Lazy<PathBuf> = Lazy::new(|| {
+pub static PE_BINARY_FILE: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
     let path = SHARED_TEST_DIR.path().join("test.exe");
     let pe_data = create_minimal_pe();
     std::fs::write(&path, pe_data).expect("Failed to create PE test file");
@@ -60,7 +60,7 @@ pub static PE_BINARY_FILE: Lazy<PathBuf> = Lazy::new(|| {
 });
 
 /// JSON test file with known content
-pub static JSON_TEST_FILE: Lazy<PathBuf> = Lazy::new(|| {
+pub static JSON_TEST_FILE: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
     let path = SHARED_TEST_DIR.path().join("test.json");
     let json_content = r#"{"name": "test", "version": "1.0.0", "type": "test-package"}"#;
     std::fs::write(&path, json_content).expect("Failed to create JSON test file");
@@ -68,7 +68,7 @@ pub static JSON_TEST_FILE: Lazy<PathBuf> = Lazy::new(|| {
 });
 
 /// Archive test file (ZIP)
-pub static ZIP_TEST_FILE: Lazy<PathBuf> = Lazy::new(|| {
+pub static ZIP_TEST_FILE: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
     let path = SHARED_TEST_DIR.path().join("test.zip");
     let zip_data = create_minimal_zip();
     std::fs::write(&path, zip_data).expect("Failed to create ZIP test file");
@@ -76,7 +76,7 @@ pub static ZIP_TEST_FILE: Lazy<PathBuf> = Lazy::new(|| {
 });
 
 /// High entropy test file (random data)
-pub static HIGH_ENTROPY_FILE: Lazy<PathBuf> = Lazy::new(|| {
+pub static HIGH_ENTROPY_FILE: std::sync::LazyLock<PathBuf> = std::sync::LazyLock::new(|| {
     let path = SHARED_TEST_DIR.path().join("high_entropy.bin");
     let random_data = generate_random_data(4096);
     std::fs::write(&path, random_data).expect("Failed to create high entropy test file");
@@ -86,10 +86,9 @@ pub static HIGH_ENTROPY_FILE: Lazy<PathBuf> = Lazy::new(|| {
 /// Pre-computed hash values for test files to avoid recalculation
 pub mod known_hashes {
     use file_scanner::hash::Hashes;
-    use once_cell::sync::Lazy;
 
-    /// Hashes for SMALL_TEST_FILE (1KB of 'x' characters)
-    pub static SMALL_FILE_HASHES: Lazy<Hashes> = Lazy::new(|| {
+    /// Hashes for `SMALL_TEST_FILE` (1KB of 'x' characters)
+    pub static SMALL_FILE_HASHES: std::sync::LazyLock<Hashes> = std::sync::LazyLock::new(|| {
         Hashes {
         md5: "b2f5ff47436671b6e533d8dc3614845d".to_string(),
         sha256: "cb33b2c7e6f4e7b8f8ad4a2d4c6b7c5c8b7e8f9d4a6b8c9e7f8a9b6c5d8e7f9a".to_string(),
@@ -99,7 +98,7 @@ pub mod known_hashes {
     });
 
     /// Empty file hashes
-    pub static EMPTY_FILE_HASHES: Lazy<Hashes> = Lazy::new(|| {
+    pub static EMPTY_FILE_HASHES: std::sync::LazyLock<Hashes> = std::sync::LazyLock::new(|| {
         Hashes {
         md5: "d41d8cd98f00b204e9800998ecf8427e".to_string(),
         sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),

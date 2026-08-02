@@ -227,8 +227,8 @@ pub struct PythonAnalysisRequest {
 pub struct FileScannerMcp;
 
 impl FileScannerMcp {
-    pub fn new() -> Self {
-        FileScannerMcp
+    pub const fn new() -> Self {
+        Self
     }
 
     pub async fn analyze_file(
@@ -315,7 +315,7 @@ impl FileScannerMcp {
         // Hex dump
         if request.hex_dump.unwrap_or(false) || all {
             // When 'all' is selected, show the ENTIRE file (with a reasonable safety limit)
-            let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let file_size = std::fs::metadata(&path).map_or(0, |m| m.len());
             let max_allowed = 100 * 1024 * 1024; // 100MB safety limit
 
             let default_size = if all {
@@ -443,7 +443,7 @@ impl FileScannerMcp {
                     result.threats = Some(enhanced_threats);
                 }
                 Err(e) => {
-                    eprintln!("Enhanced threat analysis failed: {}", e);
+                    eprintln!("Enhanced threat analysis failed: {e}");
                     // Fallback to regular threat analysis
                     if let Ok(threats) = analyze_threats(&path) {
                         result.threats = Some(threats);
@@ -477,17 +477,16 @@ impl FileScannerMcp {
             let file_size = file_metadata.len();
 
             // Get hashes if not already calculated
-            let hashes = match &result.hashes {
-                Some(h) => h.clone(),
-                None => {
-                    let h = calculate_all_hashes(&path)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    if result.hashes.is_none() {
-                        result.hashes = Some(h.clone());
-                    }
-                    h
+            let hashes = if let Some(h) = &result.hashes {
+                h.clone()
+            } else {
+                let h = calculate_all_hashes(&path)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if result.hashes.is_none() {
+                    result.hashes = Some(h.clone());
                 }
+                h
             };
 
             // Get magic bytes
@@ -504,7 +503,7 @@ impl FileScannerMcp {
                 .map(|line| {
                     line.raw_bytes
                         .iter()
-                        .map(|b| format!("{:02X}", b))
+                        .map(|b| format!("{b:02X}"))
                         .collect::<Vec<_>>()
                         .join(" ")
                 })
@@ -702,7 +701,7 @@ impl FileScannerMcp {
                 let hex_pattern = line
                     .raw_bytes
                     .iter()
-                    .map(|b| format!("{:02X}", b))
+                    .map(|b| format!("{b:02X}"))
                     .collect::<Vec<_>>()
                     .join(" ");
                 patterns.push(hex_pattern);
@@ -724,7 +723,7 @@ impl FileScannerMcp {
                         let hex_pattern = line
                             .raw_bytes
                             .iter()
-                            .map(|b| format!("{:02X}", b))
+                            .map(|b| format!("{b:02X}"))
                             .collect::<Vec<_>>()
                             .join(" ");
                         patterns.push(hex_pattern);
@@ -763,7 +762,7 @@ impl FileScannerMcp {
                         // Function prologue
                         let pattern = window
                             .iter()
-                            .map(|b| format!("{:02X}", b))
+                            .map(|b| format!("{b:02X}"))
                             .collect::<Vec<_>>()
                             .join(" ");
                         if !opcodes.contains(&pattern) {
@@ -782,10 +781,7 @@ impl FileScannerMcp {
         analysis: &LlmFileAnalysisResult,
         file_name: &str,
     ) -> String {
-        let rule_name = file_name
-            .replace("/", "_")
-            .replace(".", "_")
-            .replace("-", "_");
+        let rule_name = file_name.replace(['/', '.', '-'], "_");
         let mut conditions = Vec::new();
 
         // Add file size condition
@@ -810,7 +806,7 @@ impl FileScannerMcp {
         }
 
         // Build the rule
-        let mut rule = format!("rule {} {{\n", rule_name);
+        let mut rule = format!("rule {rule_name} {{\n");
         rule.push_str("    meta:\n");
         rule.push_str(&format!("        md5 = \"{}\"\n", analysis.md5));
         rule.push_str(&format!("        filesize = {}\n", analysis.file_size));
@@ -819,12 +815,12 @@ impl FileScannerMcp {
 
         // Add hex patterns
         if let Some(header) = analysis.hex_patterns.first() {
-            rule.push_str(&format!("        $header = {{ {} }}\n", header));
+            rule.push_str(&format!("        $header = {{ {header} }}\n"));
         }
 
         // Add key strings
         for (i, s) in analysis.key_strings.iter().take(10).enumerate() {
-            let escaped = s.replace("\\", "\\\\").replace("\"", "\\\"");
+            let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
             rule.push_str(&format!("        $s{} = \"{}\"\n", i + 1, escaped));
         }
 
@@ -921,8 +917,7 @@ impl FileScannerMcp {
         let is_class_file = path
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_lowercase() == "class")
-            .unwrap_or(false);
+            .is_some_and(|ext| ext.to_lowercase() == "class");
 
         let analysis_result = if is_class_file {
             analyze_class_file(&path).map_err(|e| e.to_string())?
@@ -1559,10 +1554,10 @@ rule TestRule {
         let result = LlmFileAnalysisResult {
             md5: "abc123".to_string(),
             file_size: 1024,
-            key_strings: (0..50).map(|i| format!("string_{}", i)).collect(),
+            key_strings: (0..50).map(|i| format!("string_{i}")).collect(),
             hex_patterns: vec!["4D 5A".to_string()],
-            imports: (0..40).map(|i| format!("import_{}.dll", i)).collect(),
-            opcodes: (0..20).map(|i| format!("opcode_{:02X}", i)).collect(),
+            imports: (0..40).map(|i| format!("import_{i}.dll")).collect(),
+            opcodes: (0..20).map(|i| format!("opcode_{i:02X}")).collect(),
             entropy: Some(6.5),
             yara_rule_suggestion: Some("very long yara rule here".to_string()),
         };

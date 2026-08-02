@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[cfg(feature = "serde-support")]
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 /// Main threat analysis result
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ThreatAnalysis {
     /// Detected matches from all engines
     pub matches: Vec<YaraMatch>,
@@ -27,7 +27,7 @@ pub struct ThreatAnalysis {
 
 /// Threat severity levels
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ThreatLevel {
     None,
     #[default]
@@ -40,18 +40,18 @@ pub enum ThreatLevel {
 impl std::fmt::Display for ThreatLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ThreatLevel::None => write!(f, "None"),
-            ThreatLevel::Clean => write!(f, "Clean"),
-            ThreatLevel::Suspicious => write!(f, "Suspicious"),
-            ThreatLevel::Malicious => write!(f, "Malicious"),
-            ThreatLevel::Critical => write!(f, "Critical"),
+            Self::None => write!(f, "None"),
+            Self::Clean => write!(f, "Clean"),
+            Self::Suspicious => write!(f, "Suspicious"),
+            Self::Malicious => write!(f, "Malicious"),
+            Self::Critical => write!(f, "Critical"),
         }
     }
 }
 
 /// Threat classification categories
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ThreatClassification {
     Trojan,
     Virus,
@@ -79,34 +79,34 @@ pub enum ThreatClassification {
 impl std::fmt::Display for ThreatClassification {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ThreatClassification::Trojan => write!(f, "Trojan"),
-            ThreatClassification::Virus => write!(f, "Virus"),
-            ThreatClassification::Worm => write!(f, "Worm"),
-            ThreatClassification::Rootkit => write!(f, "Rootkit"),
-            ThreatClassification::Adware => write!(f, "Adware"),
-            ThreatClassification::Spyware => write!(f, "Spyware"),
-            ThreatClassification::Ransomware => write!(f, "Ransomware"),
-            ThreatClassification::Apt => write!(f, "APT"),
-            ThreatClassification::Pua => write!(f, "PUA"),
-            ThreatClassification::Banker => write!(f, "Banker"),
-            ThreatClassification::Downloader => write!(f, "Downloader"),
-            ThreatClassification::Backdoor => write!(f, "Backdoor"),
-            ThreatClassification::Exploit => write!(f, "Exploit"),
-            ThreatClassification::Cryptominer => write!(f, "Cryptominer"),
-            ThreatClassification::InfoStealer => write!(f, "InfoStealer"),
-            ThreatClassification::Botnet => write!(f, "Botnet"),
-            ThreatClassification::WebShell => write!(f, "WebShell"),
-            ThreatClassification::Keylogger => write!(f, "Keylogger"),
-            ThreatClassification::ScreenCapture => write!(f, "ScreenCapture"),
-            ThreatClassification::RemoteAccess => write!(f, "RemoteAccess"),
-            ThreatClassification::Other(s) => write!(f, "{}", s),
+            Self::Trojan => write!(f, "Trojan"),
+            Self::Virus => write!(f, "Virus"),
+            Self::Worm => write!(f, "Worm"),
+            Self::Rootkit => write!(f, "Rootkit"),
+            Self::Adware => write!(f, "Adware"),
+            Self::Spyware => write!(f, "Spyware"),
+            Self::Ransomware => write!(f, "Ransomware"),
+            Self::Apt => write!(f, "APT"),
+            Self::Pua => write!(f, "PUA"),
+            Self::Banker => write!(f, "Banker"),
+            Self::Downloader => write!(f, "Downloader"),
+            Self::Backdoor => write!(f, "Backdoor"),
+            Self::Exploit => write!(f, "Exploit"),
+            Self::Cryptominer => write!(f, "Cryptominer"),
+            Self::InfoStealer => write!(f, "InfoStealer"),
+            Self::Botnet => write!(f, "Botnet"),
+            Self::WebShell => write!(f, "WebShell"),
+            Self::Keylogger => write!(f, "Keylogger"),
+            Self::ScreenCapture => write!(f, "ScreenCapture"),
+            Self::RemoteAccess => write!(f, "RemoteAccess"),
+            Self::Other(s) => write!(f, "{s}"),
         }
     }
 }
 
 /// YARA rule match information
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct YaraMatch {
     /// Rule identifier/name
     pub rule_identifier: String,
@@ -120,7 +120,7 @@ pub struct YaraMatch {
 
 /// String match within a YARA rule
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct StringMatch {
     /// String identifier from the rule
     pub identifier: String,
@@ -134,7 +134,7 @@ pub struct StringMatch {
 
 /// Threat indicators
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ThreatIndicator {
     /// Type of indicator
     pub indicator_type: IndicatorType,
@@ -152,7 +152,7 @@ pub struct ThreatIndicator {
 
 /// Types of threat indicators
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum IndicatorType {
     KnownMalwareFamily,
     SuspiciousBehavior,
@@ -176,7 +176,7 @@ pub enum IndicatorType {
 
 /// Severity levels for indicators
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum Severity {
     #[default]
     Low,
@@ -188,17 +188,17 @@ pub enum Severity {
 impl std::fmt::Display for Severity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Severity::Low => write!(f, "Low"),
-            Severity::Medium => write!(f, "Medium"),
-            Severity::High => write!(f, "High"),
-            Severity::Critical => write!(f, "Critical"),
+            Self::Low => write!(f, "Low"),
+            Self::Medium => write!(f, "Medium"),
+            Self::High => write!(f, "High"),
+            Self::Critical => write!(f, "Critical"),
         }
     }
 }
 
 /// Scan statistics
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ScanStatistics {
     /// Total scan duration
     pub scan_duration: Duration,
@@ -212,7 +212,7 @@ pub struct ScanStatistics {
 
 /// Scan target specification
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ScanTarget {
     /// Scan a file on disk
     File(PathBuf),
@@ -250,7 +250,7 @@ pub trait DetectionEngine: Send + Sync {
 
 /// Engine configuration
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct EngineConfig {
     /// Engine-specific configuration
     pub settings: HashMap<String, String>,
@@ -262,7 +262,7 @@ pub struct EngineConfig {
 
 /// Rule source configuration
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RuleSource {
     /// Source name/identifier
     pub name: String,
@@ -276,7 +276,7 @@ pub struct RuleSource {
 
 /// Types of rule sources
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum RuleSourceType {
     /// Git repository
     Git,
@@ -290,7 +290,7 @@ pub enum RuleSourceType {
 
 /// Global scan configuration
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ScanConfig {
     /// Maximum file size to scan
     pub max_file_size: u64,
@@ -302,7 +302,7 @@ pub struct ScanConfig {
 
 /// Rule compilation result
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct CompiledRules {
     /// Number of rules compiled
     pub rule_count: usize,
@@ -316,7 +316,7 @@ pub struct CompiledRules {
 
 /// Metadata for individual rules
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "serde-support", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RuleMetadata {
     /// Rule name
     pub name: String,
@@ -335,8 +335,8 @@ pub struct RuleMetadata {
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
-            max_file_size: 100 * 1024 * 1024,       // 100MB
-            scan_timeout: Duration::from_secs(300), // 5 minutes
+            max_file_size: 100 * 1024 * 1024,     // 100MB
+            scan_timeout: Duration::from_mins(5), // 5 minutes
             max_concurrent_scans: 4,
         }
     }

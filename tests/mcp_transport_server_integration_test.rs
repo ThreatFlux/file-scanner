@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use file_scanner::mcp_transport::{JsonRpcRequest, McpTransportServer};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -64,8 +109,8 @@ async fn test_http_mcp_endpoint_integration() {
 
     // Test health endpoint
     let health_result = client
-        .get(format!("http://localhost:{}/health", port))
-        .timeout(Duration::from_millis(1000))
+        .get(format!("http://localhost:{port}/health"))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -90,9 +135,9 @@ async fn test_http_mcp_endpoint_integration() {
     };
 
     let mcp_result = client
-        .post(format!("http://localhost:{}/mcp", port))
+        .post(format!("http://localhost:{port}/mcp"))
         .json(&initialize_request)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -133,9 +178,9 @@ async fn test_http_tools_endpoints() {
     };
 
     let tools_result = client
-        .post(format!("http://localhost:{}/tools/list", port))
+        .post(format!("http://localhost:{port}/tools/list"))
         .json(&tools_request)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -162,9 +207,9 @@ async fn test_http_tools_endpoints() {
     });
 
     let call_result = client
-        .post(format!("http://localhost:{}/tools/call", port))
+        .post(format!("http://localhost:{port}/tools/call"))
         .json(&call_request)
-        .timeout(Duration::from_millis(2000))
+        .timeout(Duration::from_secs(2))
         .send()
         .await;
 
@@ -195,8 +240,8 @@ async fn test_cache_endpoints() {
 
     // Test cache stats endpoint
     let stats_result = client
-        .get(format!("http://localhost:{}/cache/stats", port))
-        .timeout(Duration::from_millis(1000))
+        .get(format!("http://localhost:{port}/cache/stats"))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -213,8 +258,8 @@ async fn test_cache_endpoints() {
 
     // Test cache list endpoint
     let list_result = client
-        .get(format!("http://localhost:{}/cache/list", port))
-        .timeout(Duration::from_millis(1000))
+        .get(format!("http://localhost:{port}/cache/list"))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -233,9 +278,9 @@ async fn test_cache_endpoints() {
     });
 
     let search_result = client
-        .post(format!("http://localhost:{}/cache/search", port))
+        .post(format!("http://localhost:{port}/cache/search"))
         .json(&search_body)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -266,8 +311,8 @@ async fn test_string_endpoints() {
 
     // Test string stats endpoint
     let stats_result = client
-        .get(format!("http://localhost:{}/strings/stats", port))
-        .timeout(Duration::from_millis(1000))
+        .get(format!("http://localhost:{port}/strings/stats"))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -289,9 +334,9 @@ async fn test_string_endpoints() {
     });
 
     let search_result = client
-        .post(format!("http://localhost:{}/strings/search", port))
+        .post(format!("http://localhost:{port}/strings/search"))
         .json(&search_body)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -310,9 +355,9 @@ async fn test_string_endpoints() {
     });
 
     let details_result = client
-        .post(format!("http://localhost:{}/strings/details", port))
+        .post(format!("http://localhost:{port}/strings/details"))
         .json(&details_body)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -333,9 +378,9 @@ async fn test_string_endpoints() {
     });
 
     let filter_result = client
-        .post(format!("http://localhost:{}/strings/filter", port))
+        .post(format!("http://localhost:{port}/strings/filter"))
         .json(&filter_body)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -366,8 +411,8 @@ async fn test_api_documentation_endpoints() {
 
     // Test OpenAPI endpoint
     let openapi_result = client
-        .get(format!("http://localhost:{}/api-docs/openapi.json", port))
-        .timeout(Duration::from_millis(1000))
+        .get(format!("http://localhost:{port}/api-docs/openapi.json"))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -385,8 +430,8 @@ async fn test_api_documentation_endpoints() {
 
     // Test API info endpoint
     let info_result = client
-        .get(format!("http://localhost:{}/api/info", port))
-        .timeout(Duration::from_millis(1000))
+        .get(format!("http://localhost:{port}/api/info"))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -420,9 +465,9 @@ async fn test_cors_middleware() {
 
     // Test CORS headers on health endpoint
     let cors_result = client
-        .get(format!("http://localhost:{}/health", port))
+        .get(format!("http://localhost:{port}/health"))
         .header("Origin", "http://localhost:3000")
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -459,10 +504,10 @@ async fn test_sse_connection_attempt() {
 
     // Test SSE endpoint connection attempt
     let sse_result = client
-        .get(format!("http://localhost:{}/sse", port))
+        .get(format!("http://localhost:{port}/sse"))
         .header("Accept", "text/event-stream")
         .header("Cache-Control", "no-cache")
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -489,9 +534,9 @@ async fn test_sse_connection_attempt() {
     };
 
     let mcp_sse_result = client
-        .post(format!("http://localhost:{}/mcp", port))
+        .post(format!("http://localhost:{port}/mcp"))
         .json(&mcp_sse_request)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -522,10 +567,10 @@ async fn test_error_handling_invalid_requests() {
 
     // Test invalid JSON request
     let invalid_json_result = client
-        .post(format!("http://localhost:{}/mcp", port))
+        .post(format!("http://localhost:{port}/mcp"))
         .header("Content-Type", "application/json")
         .body("invalid json")
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 
@@ -547,9 +592,9 @@ async fn test_error_handling_invalid_requests() {
     });
 
     let missing_method_result = client
-        .post(format!("http://localhost:{}/mcp", port))
+        .post(format!("http://localhost:{port}/mcp"))
         .json(&missing_method)
-        .timeout(Duration::from_millis(1000))
+        .timeout(Duration::from_secs(1))
         .send()
         .await;
 

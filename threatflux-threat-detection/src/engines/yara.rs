@@ -12,12 +12,12 @@ pub struct YaraEngine {
 
 impl YaraEngine {
     /// Create new YARA engine
-    pub async fn new() -> Result<Self> {
+    pub const fn new() -> Result<Self> {
         Ok(Self { _placeholder: () })
     }
 
     /// Compile YARA rule from string
-    pub async fn compile_rule(&self, rule_content: &str) -> Result<()> {
+    pub fn compile_rule(&self, rule_content: &str) -> Result<()> {
         // Placeholder implementation
         if rule_content.is_empty() {
             return Err(ThreatError::invalid_rule("Rule content cannot be empty"));
@@ -47,7 +47,7 @@ impl DetectionEngine for YaraEngine {
 
         let scan_duration = start_time.elapsed();
         let file_size = match &target {
-            ScanTarget::File(path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+            ScanTarget::File(path) => std::fs::metadata(path).map_or(0, |m| m.len()),
             ScanTarget::Memory { data, .. } => data.len() as u64,
             ScanTarget::Directory(_) => 0,
         };
@@ -73,7 +73,7 @@ impl DetectionEngine for YaraEngine {
         rule: &str,
     ) -> Result<ThreatAnalysis> {
         // Compile the custom rule first
-        self.compile_rule(rule).await?;
+        self.compile_rule(rule)?;
 
         // Then scan with it
         self.scan(target).await

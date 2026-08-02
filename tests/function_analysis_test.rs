@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use file_scanner::function_analysis::*;
 use std::collections::HashSet;
 use std::io::Write;
@@ -49,7 +94,7 @@ fn test_analyze_symbols_with_elf() {
         }
         Err(e) => {
             // Expected to fail on minimal ELF
-            eprintln!("Expected error: {}", e);
+            eprintln!("Expected error: {e}");
         }
     }
 }
@@ -81,7 +126,7 @@ fn test_analyze_symbols_with_real_binary() {
                 assert!(main_fn.is_some(), "Should find main function");
             }
             Err(e) => {
-                eprintln!("Function analysis failed (may be expected): {}", e);
+                eprintln!("Function analysis failed (may be expected): {e}");
             }
         }
     }
@@ -481,7 +526,7 @@ fn test_analyze_symbols_with_multiple_binaries() {
     for path_str in test_binaries {
         let path = Path::new(path_str);
         if path.exists() {
-            println!("Testing function analysis on {}", path_str);
+            println!("Testing function analysis on {path_str}");
 
             match analyze_symbols(path) {
                 Ok(symbol_table) => {
@@ -511,14 +556,13 @@ fn test_analyze_symbols_with_multiple_binaries() {
                     // Each binary should have at least some functions
                     assert!(
                         !symbol_table.functions.is_empty(),
-                        "Binary {} should have functions",
-                        path_str
+                        "Binary {path_str} should have functions"
                     );
 
                     successful_analyses += 1;
                 }
                 Err(e) => {
-                    eprintln!("Function analysis failed for {}: {}", path_str, e);
+                    eprintln!("Function analysis failed for {path_str}: {e}");
                 }
             }
         }
@@ -649,7 +693,7 @@ fn test_analyze_symbols_with_pe_binary() {
                 // Test PE-specific features
                 if !symbol_table.imports.is_empty() {
                     let has_library = symbol_table.imports.iter().any(|i| i.library.is_some());
-                    println!("Has library imports: {}", has_library);
+                    println!("Has library imports: {has_library}");
                 }
 
                 // Check exports if any
@@ -658,7 +702,7 @@ fn test_analyze_symbols_with_pe_binary() {
                 }
             }
             Err(e) => {
-                println!("PE analysis error (expected for non-PE): {}", e);
+                println!("PE analysis error (expected for non-PE): {e}");
             }
         }
     }
@@ -725,7 +769,7 @@ fn test_analyze_symbols_comprehensive_elf() {
                     .iter()
                     .filter(|f| f.is_entry_point)
                     .count();
-                println!("Entry points found: {}", entry_points);
+                println!("Entry points found: {entry_points}");
 
                 // Verify calling conventions are set for some functions
                 let with_calling_conv = symbol_table
@@ -733,7 +777,7 @@ fn test_analyze_symbols_comprehensive_elf() {
                     .iter()
                     .filter(|f| f.calling_convention.is_some())
                     .count();
-                println!("Functions with calling conventions: {}", with_calling_conv);
+                println!("Functions with calling conventions: {with_calling_conv}");
 
                 // Test variable analysis
                 println!(
@@ -742,7 +786,7 @@ fn test_analyze_symbols_comprehensive_elf() {
                 );
                 for var in symbol_table.global_variables.iter().take(5) {
                     assert!(!var.name.is_empty());
-                    assert!(var.size > 0 || var.name.starts_with("_"));
+                    assert!(var.size > 0 || var.name.starts_with('_'));
                 }
 
                 // Test import/export analysis
@@ -753,7 +797,7 @@ fn test_analyze_symbols_comprehensive_elf() {
                 );
             }
             Err(e) => {
-                println!("Analysis failed for {}: {}", binary_path, e);
+                println!("Analysis failed for {binary_path}: {e}");
             }
         }
     }
@@ -838,15 +882,11 @@ fn test_symbol_table_statistics_accuracy() {
         assert!(manual_total >= manual_local + manual_imported);
 
         println!("Statistics verification passed:");
-        println!("  Total functions: {}", manual_total);
+        println!("  Total functions: {manual_total}");
         println!(
-            "  Local: {}, Imported: {}, Exported: {}",
-            manual_local, manual_imported, manual_exported
+            "  Local: {manual_local}, Imported: {manual_imported}, Exported: {manual_exported}"
         );
-        println!(
-            "  Variables: {}, Cross-references: {}",
-            manual_variables, manual_xrefs
-        );
+        println!("  Variables: {manual_variables}, Cross-references: {manual_xrefs}");
     }
 }
 
@@ -865,7 +905,7 @@ fn test_dynamic_symbol_analysis() {
             .filter(|f| f.is_imported && matches!(f.function_type, FunctionType::Imported))
             .count();
 
-        println!("Dynamic imports found: {}", dynamic_imports);
+        println!("Dynamic imports found: {dynamic_imports}");
 
         // Check that imported functions have reasonable properties
         for func in symbol_table
@@ -911,36 +951,30 @@ fn test_elf_symbol_parsing_detailed() {
     // Create a minimal ELF for testing individual function parsing
     let elf_data = create_minimal_elf_with_symbols();
 
-    match Elf::parse(&elf_data) {
-        Ok(elf) => {
-            let result = analyze_elf_symbols(elf, &elf_data);
-            match result {
-                Ok(symbol_table) => {
-                    // Test basic structure
-                    // Test basic structure (len() is always >= 0 for Vec, so just verify structure exists)
-                    let _ = symbol_table.functions.len();
-                    let _ = symbol_table.global_variables.len();
-                    let _ = symbol_table.imports.len();
-                    let _ = symbol_table.exports.len();
+    if let Ok(elf) = Elf::parse(&elf_data) {
+        let result = analyze_elf_symbols(elf, &elf_data);
+        if let Ok(symbol_table) = result {
+            // Test basic structure
+            // Test basic structure (len() is always >= 0 for Vec, so just verify structure exists)
+            let _ = symbol_table.functions.len();
+            let _ = symbol_table.global_variables.len();
+            let _ = symbol_table.imports.len();
+            let _ = symbol_table.exports.len();
 
-                    // Test symbol count consistency
-                    assert_eq!(
-                        symbol_table.functions.len(),
-                        symbol_table.symbol_count.total_functions
-                    );
-                    assert_eq!(
-                        symbol_table.global_variables.len(),
-                        symbol_table.symbol_count.global_variables
-                    );
-                }
-                Err(_) => {
-                    // Expected for minimal ELF without proper symbol table
-                }
-            }
+            // Test symbol count consistency
+            assert_eq!(
+                symbol_table.functions.len(),
+                symbol_table.symbol_count.total_functions
+            );
+            assert_eq!(
+                symbol_table.global_variables.len(),
+                symbol_table.symbol_count.global_variables
+            );
+        } else {
+            // Expected for minimal ELF without proper symbol table
         }
-        Err(_) => {
-            // Expected for our minimal test ELF
-        }
+    } else {
+        // Expected for our minimal test ELF
     }
 }
 
@@ -1084,7 +1118,7 @@ fn test_parameter_analysis() {
         size: 500,
         function_type: FunctionType::EntryPoint,
         calling_convention: Some(CallingConvention::SysV),
-        parameters: vec![param1.clone(), param2.clone(), param3.clone()],
+        parameters: vec![param1, param2, param3],
         is_entry_point: true,
         is_exported: false,
         is_imported: false,
@@ -1427,8 +1461,7 @@ fn test_entry_point_detection() {
         let is_entry_point = name == "_start" || name == "main";
         assert_eq!(
             is_entry_point, expected_entry,
-            "Entry point detection failed for {}",
-            name
+            "Entry point detection failed for {name}"
         );
     }
 }
@@ -1447,11 +1480,10 @@ fn test_symbol_name_filtering() {
     ];
 
     for (name, should_filter) in symbol_names {
-        let filtered = name.is_empty() || name.starts_with("$");
+        let filtered = name.is_empty() || name.starts_with('$');
         assert_eq!(
             filtered, should_filter,
-            "Symbol filtering failed for '{}'",
-            name
+            "Symbol filtering failed for '{name}'"
         );
     }
 }
@@ -1471,8 +1503,7 @@ fn test_address_validation() {
         assert_eq!(
             address == 0,
             is_null,
-            "Address validation failed for 0x{:x}",
-            address
+            "Address validation failed for 0x{address:x}"
         );
     }
 }
@@ -1492,8 +1523,7 @@ fn test_function_size_analysis() {
         let is_reasonable_size = size <= 0x1000000; // 16MB max
         assert!(
             is_reasonable_size,
-            "Function {} has unreasonable size: {}",
-            name, size
+            "Function {name} has unreasonable size: {size}"
         );
 
         let is_imported = name.contains("imported");
@@ -1695,40 +1725,34 @@ fn test_pe_symbol_analysis_detailed() {
     // Create minimal PE data for testing
     let pe_data = create_minimal_pe_data();
 
-    match PE::parse(&pe_data) {
-        Ok(pe) => {
-            let result = analyze_pe_symbols(pe, &pe_data);
-            match result {
-                Ok(symbol_table) => {
-                    // Test PE-specific properties
-                    assert_eq!(
-                        symbol_table.functions.len(),
-                        symbol_table.symbol_count.total_functions
-                    );
+    if let Ok(pe) = PE::parse(&pe_data) {
+        let result = analyze_pe_symbols(pe, &pe_data);
+        if let Ok(symbol_table) = result {
+            // Test PE-specific properties
+            assert_eq!(
+                symbol_table.functions.len(),
+                symbol_table.symbol_count.total_functions
+            );
 
-                    // PE imports should have library names
-                    for import in &symbol_table.imports {
-                        if let Some(library) = &import.library {
-                            assert!(!library.is_empty());
-                        }
-                    }
-
-                    // PE functions should have appropriate calling conventions
-                    for func in &symbol_table.functions {
-                        if let Some(conv) = &func.calling_convention {
-                            // PE typically uses Stdcall
-                            assert!(matches!(conv, CallingConvention::Stdcall));
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Expected for minimal PE data
+            // PE imports should have library names
+            for import in &symbol_table.imports {
+                if let Some(library) = &import.library {
+                    assert!(!library.is_empty());
                 }
             }
+
+            // PE functions should have appropriate calling conventions
+            for func in &symbol_table.functions {
+                if let Some(conv) = &func.calling_convention {
+                    // PE typically uses Stdcall
+                    assert!(matches!(conv, CallingConvention::Stdcall));
+                }
+            }
+        } else {
+            // Expected for minimal PE data
         }
-        Err(_) => {
-            // Expected for our test data
-        }
+    } else {
+        // Expected for our test data
     }
 }
 
@@ -1741,40 +1765,34 @@ fn test_mach_o_symbol_analysis_detailed() {
     // Create minimal Mach-O data for testing
     let macho_data = create_minimal_macho_data();
 
-    match Mach::parse(&macho_data) {
-        Ok(mach) => {
-            let result = analyze_mach_symbols(mach, &macho_data);
-            match result {
-                Ok(symbol_table) => {
-                    // Test Mach-O specific properties
-                    assert_eq!(
-                        symbol_table.functions.len(),
-                        symbol_table.symbol_count.total_functions
-                    );
+    if let Ok(mach) = Mach::parse(&macho_data) {
+        let result = analyze_mach_symbols(mach, &macho_data);
+        if let Ok(symbol_table) = result {
+            // Test Mach-O specific properties
+            assert_eq!(
+                symbol_table.functions.len(),
+                symbol_table.symbol_count.total_functions
+            );
 
-                    // Mach-O functions should use SysV calling convention
-                    for func in &symbol_table.functions {
-                        if let Some(conv) = &func.calling_convention {
-                            assert!(matches!(conv, CallingConvention::SysV));
-                        }
-                    }
-
-                    // Check for proper entry point detection
-                    let entry_points = symbol_table
-                        .functions
-                        .iter()
-                        .filter(|f| f.is_entry_point)
-                        .count();
-                    println!("Mach-O entry points: {}", entry_points);
-                }
-                Err(_) => {
-                    // Expected for minimal Mach-O data
+            // Mach-O functions should use SysV calling convention
+            for func in &symbol_table.functions {
+                if let Some(conv) = &func.calling_convention {
+                    assert!(matches!(conv, CallingConvention::SysV));
                 }
             }
+
+            // Check for proper entry point detection
+            let entry_points = symbol_table
+                .functions
+                .iter()
+                .filter(|f| f.is_entry_point)
+                .count();
+            println!("Mach-O entry points: {entry_points}");
+        } else {
+            // Expected for minimal Mach-O data
         }
-        Err(_) => {
-            // Expected for our test data
-        }
+    } else {
+        // Expected for our test data
     }
 }
 
@@ -1857,7 +1875,7 @@ fn test_symbol_deduplication() {
     ];
 
     // Simulate deduplication
-    symbols.sort();
+    symbols.sort_unstable();
     symbols.dedup();
 
     let expected = vec!["free", "main", "malloc", "printf"];
@@ -1878,7 +1896,7 @@ fn test_large_address_space_handling() {
 
     for addr in large_addresses {
         let func = FunctionInfo {
-            name: format!("func_at_{:x}", addr),
+            name: format!("func_at_{addr:x}"),
             address: addr,
             size: 100,
             function_type: FunctionType::Local,
@@ -1976,18 +1994,15 @@ fn test_symbol_visibility_detection() {
         match binding {
             STB_LOCAL => assert!(
                 matches!(function_type, FunctionType::Local),
-                "Failed for {}",
-                description
+                "Failed for {description}"
             ),
             STB_GLOBAL => assert!(
                 matches!(function_type, FunctionType::Exported),
-                "Failed for {}",
-                description
+                "Failed for {description}"
             ),
             _ => assert!(
                 matches!(function_type, FunctionType::Local),
-                "Failed for {}",
-                description
+                "Failed for {description}"
             ),
         }
     }
@@ -2067,11 +2082,7 @@ fn test_dynamic_linking_analysis() {
     for import in &dynamic_imports {
         if let Some(addr) = import.address {
             // PLT/GOT addresses are typically in specific ranges
-            assert!(
-                addr >= 0x600000,
-                "Import address seems too low: 0x{:x}",
-                addr
-            );
+            assert!(addr >= 0x600000, "Import address seems too low: 0x{addr:x}");
         }
     }
 }
@@ -2094,8 +2105,7 @@ fn test_exception_handling_symbols() {
 
         assert!(
             is_eh_symbol,
-            "Symbol {} should be recognized as exception handling",
-            symbol
+            "Symbol {symbol} should be recognized as exception handling"
         );
     }
 }
@@ -2156,8 +2166,7 @@ fn test_constructor_destructor_detection() {
             (FunctionType::Constructor, FunctionType::Constructor) => {}
             (FunctionType::Destructor, FunctionType::Destructor) => {}
             _ => panic!(
-                "Function type detection failed for {}: expected {:?}, got {:?}",
-                name, expected_type, func_type
+                "Function type detection failed for {name}: expected {expected_type:?}, got {func_type:?}"
             ),
         }
     }
@@ -2198,8 +2207,7 @@ fn test_arm_thumb_interworking() {
         let detected_thumb = (addr & 1) == 1;
         assert_eq!(
             detected_thumb, is_thumb,
-            "Thumb detection failed for address 0x{:x}",
-            addr
+            "Thumb detection failed for address 0x{addr:x}"
         );
 
         // Clean address (remove Thumb bit)

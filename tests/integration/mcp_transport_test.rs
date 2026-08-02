@@ -367,8 +367,10 @@ mod tests {
             McpServerState::new_for_testing(handler, sse_clients.clone(), cache, string_tracker);
 
         // Test that state can be cloned
-        let _cloned_state = state.clone();
+        let cloned_state = state.clone();
         assert_eq!(Arc::strong_count(&sse_clients), 3); // Original + state + cloned_state
+        drop(cloned_state);
+        assert_eq!(Arc::strong_count(&sse_clients), 2); // Original + state
     }
 
     #[tokio::test]

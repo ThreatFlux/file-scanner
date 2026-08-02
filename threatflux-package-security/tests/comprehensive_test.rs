@@ -2,10 +2,7 @@
 
 use std::fs;
 use tempfile::TempDir;
-use threatflux_package_security::{
-    PackageInfo, PackageSecurityAnalyzer, PackageType, RiskLevel, SecurityAnalysisResult,
-    VulnerabilityInfo,
-};
+use threatflux_package_security::{PackageSecurityAnalyzer, RiskLevel};
 
 // Helper to create test package files
 fn create_npm_package(dir: &TempDir, package_json: &str) {
@@ -418,8 +415,6 @@ async fn test_benign_package_analysis() {
         "Benign package should have low risk"
     );
 
-    // Should have minimal or no vulnerabilities (recent versions)
-    let vulnerabilities = result.vulnerabilities();
     // Note: Even recent packages might have some vulnerabilities, so we don't assert empty
 
     // Should not be flagged as typosquatting

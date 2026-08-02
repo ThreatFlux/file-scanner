@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use anyhow::Result;
 use file_scanner::python_analysis::{analyze_python_package, PackageFormat, RiskLevel};
 use flate2::write::GzEncoder;
@@ -12,15 +57,15 @@ use zip::CompressionMethod;
 
 // Helper function to create a test wheel package
 fn create_test_wheel(dir: &Path, name: &str, version: &str) -> Result<()> {
-    let wheel_path = dir.join(format!("{}-{}-py3-none-any.whl", name, version));
+    let wheel_path = dir.join(format!("{name}-{version}-py3-none-any.whl"));
     let file = File::create(&wheel_path)?;
     let mut zip = ZipWriter::new(file);
 
     // Add METADATA file
     let metadata = format!(
-        r#"Metadata-Version: 2.1
-Name: {}
-Version: {}
+        r"Metadata-Version: 2.1
+Name: {name}
+Version: {version}
 Summary: Test wheel package
 Author: Test Author
 Author-email: test@example.com
@@ -32,34 +77,30 @@ Requires-Dist: requests>=2.25.0
 Requires-Dist: numpy<2.0.0
 Provides-Extra: dev
 Requires-Dist: pytest>=6.0.0; extra == 'dev'
-"#,
-        name, version
+"
     );
 
     zip.start_file(
-        format!("{}-{}.dist-info/METADATA", name, version),
+        format!("{name}-{version}.dist-info/METADATA"),
         SimpleFileOptions::default(),
     )?;
     zip.write_all(metadata.as_bytes())?;
 
     // Add WHEEL file
-    let wheel_info = r#"Wheel-Version: 1.0
+    let wheel_info = r"Wheel-Version: 1.0
 Generator: test-wheel 1.0
 Root-Is-Purelib: true
 Tag: py3-none-any
-"#;
+";
 
     zip.start_file(
-        format!("{}-{}.dist-info/WHEEL", name, version),
+        format!("{name}-{version}.dist-info/WHEEL"),
         SimpleFileOptions::default(),
     )?;
     zip.write_all(wheel_info.as_bytes())?;
 
     // Add a Python file
-    zip.start_file(
-        format!("{}/__init__.py", name),
-        SimpleFileOptions::default(),
-    )?;
+    zip.start_file(format!("{name}/__init__.py"), SimpleFileOptions::default())?;
     zip.write_all(b"# Test package\n__version__ = '1.0.0'\n")?;
 
     zip.finish()?;
@@ -143,14 +184,14 @@ setup(
     tar.append(&header, setup_py.as_bytes())?;
 
     // Add PKG-INFO
-    let pkg_info = r#"Metadata-Version: 1.2
+    let pkg_info = r"Metadata-Version: 1.2
 Name: test-tar-package
 Version: 1.0.0
 Summary: Test tar.gz package
 Author: Tar Author
 Author-email: tar@example.com
 License: Apache-2.0
-"#;
+";
 
     let mut header = Header::new_gnu();
     header.set_path("test-package-1.0.0/PKG-INFO")?;
@@ -160,13 +201,13 @@ License: Apache-2.0
     tar.append(&header, pkg_info.as_bytes())?;
 
     // Add setup.cfg
-    let setup_cfg = r#"[metadata]
+    let setup_cfg = r"[metadata]
 name = test-tar-package
 version = 1.0.0
 
 [options]
 python_requires = >=3.7
-"#;
+";
 
     let mut header = Header::new_gnu();
     header.set_path("test-package-1.0.0/setup.cfg")?;
@@ -375,7 +416,7 @@ fn test_malicious_wheel_package() -> Result<()> {
     let mut zip = ZipWriter::new(file);
 
     // Add METADATA for typosquatting package
-    let metadata = r#"Metadata-Version: 2.1
+    let metadata = r"Metadata-Version: 2.1
 Name: colourama
 Version: 0.4.5
 Summary: Cross-platform colored terminal text
@@ -383,7 +424,7 @@ Author: Malicious Actor
 License: MIT
 Requires-Dist: requests
 Requires-Dist: crypto
-"#;
+";
 
     zip.start_file(
         "colourama-0.4.5.dist-info/METADATA",
@@ -447,8 +488,8 @@ fn test_directory_recursive_scanning() -> Result<()> {
     // Create package structure
     fs::write(
         temp_dir.path().join("setup.py"),
-        r#"from setuptools import setup
-setup(name='recursive-test', version='1.0.0')"#,
+        r"from setuptools import setup
+setup(name='recursive-test', version='1.0.0')",
     )?;
 
     // Create nested directories
@@ -482,7 +523,7 @@ setup(name='recursive-test', version='1.0.0')"#,
 fn test_network_access_detection() -> Result<()> {
     let temp_dir = TempDir::new()?;
 
-    let setup_py = r#"
+    let setup_py = r"
 import urllib.request
 import requests
 import socket
@@ -501,7 +542,7 @@ setup(
     name='network-test',
     version='1.0.0',
 )
-"#;
+";
 
     fs::write(temp_dir.path().join("setup.py"), setup_py)?;
 
@@ -534,7 +575,7 @@ setup(
 fn test_obfuscation_detection() -> Result<()> {
     let temp_dir = TempDir::new()?;
 
-    let setup_py = r#"
+    let setup_py = r"
 from setuptools import setup
 
 # Various obfuscation techniques
@@ -558,7 +599,7 @@ url = 'h' + 't' + 't' + 'p' + ':' + '/' + '/' + 'e' + 'v' + 'i' + 'l' + '.' + 'c
 ''.join(chr(i) for i in [115, 121, 115, 116, 101, 109])
 
 setup(name='obfuscated', version='1.0.0')
-"#;
+";
 
     fs::write(temp_dir.path().join("setup.py"), setup_py)?;
 
@@ -672,14 +713,14 @@ fn test_wheel_dependency_confusion() -> Result<()> {
     let file = File::create(&wheel_path)?;
     let mut zip = ZipWriter::new(file);
 
-    let metadata = r#"Metadata-Version: 2.1
+    let metadata = r"Metadata-Version: 2.1
 Name: internal-auth-lib
 Version: 1.0.0
 Summary: Internal authentication library
 Requires-Dist: requests
 Requires-Dist: company-common-utils
 Requires-Dist: private-config-manager
-"#;
+";
 
     zip.start_file(
         "internal-auth-lib-1.0.0.dist-info/METADATA",
@@ -984,7 +1025,7 @@ fn test_maintainer_analysis() -> Result<()> {
     let file = File::create(&wheel_path)?;
     let mut zip = ZipWriter::new(file);
 
-    let metadata = r#"Metadata-Version: 2.1
+    let metadata = r"Metadata-Version: 2.1
 Name: maintained-package
 Version: 1.0.0
 Author: Original Author
@@ -992,7 +1033,7 @@ Author-email: original@example.com
 Maintainer: Current Maintainer
 Maintainer-email: maintainer@example.com
 License: MIT
-"#;
+";
 
     zip.start_file(
         "maintained-1.0.0.dist-info/METADATA",
@@ -1043,7 +1084,7 @@ fn test_python_imports_analysis() -> Result<()> {
     // Create Python files with various imports
     fs::write(
         temp_dir.path().join("suspicious.py"),
-        r#"
+        r"
 import os
 import subprocess
 import socket
@@ -1056,7 +1097,7 @@ import ctypes
 import multiprocessing
 from urllib import request
 from cryptography.fernet import Fernet
-"#,
+",
     )?;
 
     let analysis = analyze_python_package(temp_dir.path())?;
@@ -1102,10 +1143,10 @@ fn test_package_without_extension() -> Result<()> {
     let file = File::create(&no_ext_path)?;
     let mut zip = ZipWriter::new(file);
 
-    let metadata = r#"Metadata-Version: 2.1
+    let metadata = r"Metadata-Version: 2.1
 Name: no-ext-package
 Version: 1.0.0
-"#;
+";
 
     zip.start_file(
         "no-ext-package-1.0.0.dist-info/METADATA",
@@ -1134,20 +1175,20 @@ fn test_large_metadata() -> Result<()> {
 
     // Create metadata with many classifiers and dependencies
     let mut metadata = String::from(
-        r#"Metadata-Version: 2.1
+        r"Metadata-Version: 2.1
 Name: large-metadata-package
 Version: 1.0.0
-"#,
+",
     );
 
     // Add many classifiers
     for i in 0..100 {
-        metadata.push_str(&format!("Classifier: Test Classifier {}\n", i));
+        metadata.push_str(&format!("Classifier: Test Classifier {i}\n"));
     }
 
     // Add many dependencies
     for i in 0..50 {
-        metadata.push_str(&format!("Requires-Dist: package-{} (>=1.0.0)\n", i));
+        metadata.push_str(&format!("Requires-Dist: package-{i} (>=1.0.0)\n"));
     }
 
     zip.start_file(
@@ -1171,7 +1212,7 @@ Version: 1.0.0
 fn test_special_characters_in_metadata() -> Result<()> {
     let temp_dir = TempDir::new()?;
 
-    let setup_py = r#"# -*- coding: utf-8 -*-
+    let setup_py = r"# -*- coding: utf-8 -*-
 from setuptools import setup
 
 setup(
@@ -1182,7 +1223,7 @@ setup(
     author_email='tëst@example.com',
     keywords=['ünicode', 'tëst', '中文', '日本語', 'émoji🎉'],
 )
-"#;
+";
 
     fs::write(temp_dir.path().join("setup.py"), setup_py)?;
 

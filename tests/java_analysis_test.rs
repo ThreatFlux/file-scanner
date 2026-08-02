@@ -1,3 +1,48 @@
+#![allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::collection_is_never_read,
+    clippy::field_reassign_with_default,
+    clippy::format_push_string,
+    clippy::float_cmp,
+    clippy::if_not_else,
+    clippy::ignore_without_reason,
+    clippy::items_after_statements,
+    clippy::iter_on_single_items,
+    clippy::large_futures,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::manual_assert_eq,
+    clippy::manual_let_else,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::no_effect_underscore_binding,
+    clippy::option_if_let_else,
+    clippy::ref_option,
+    clippy::redundant_clone,
+    clippy::redundant_pattern_matching,
+    clippy::self_only_used_in_recursion,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::single_option_map,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_debug_formatting,
+    clippy::unreadable_literal,
+    clippy::unused_async,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    clippy::useless_let_if_seq,
+    clippy::wildcard_enum_match_arm,
+    clippy::ignored_unit_patterns
+)]
+
 use anyhow::Result;
 use file_scanner::java_analysis::*;
 use std::fs::File;
@@ -363,12 +408,11 @@ fn test_resource_classification() -> Result<()> {
     // Check that resources are properly classified
     for (name, expected_type) in test_files {
         let resource = result.resources.iter().find(|r| r.path == name);
-        assert!(resource.is_some(), "Resource {} not found", name);
+        assert!(resource.is_some(), "Resource {name} not found");
         assert_eq!(
             resource.unwrap().resource_type,
             expected_type,
-            "Wrong type for {}",
-            name
+            "Wrong type for {name}"
         );
     }
 
@@ -402,13 +446,13 @@ fn test_manifest_parsing_with_custom_attributes() -> Result<()> {
     // Add manifest with custom attributes
     zip.start_file("META-INF/MANIFEST.MF", SimpleFileOptions::default())?;
     zip.write_all(
-        br#"Manifest-Version: 1.0
+        br"Manifest-Version: 1.0
 Main-Class: com.example.Main
 Implementation-Title: Test App
 Custom-Attribute: Custom Value
 Another-Header: Another Value
 Class-Path: lib1.jar lib2.jar lib3.jar
-"#,
+",
     )?;
 
     zip.finish()?;
@@ -562,11 +606,7 @@ fn test_file_extension_detection() -> Result<()> {
         zip.finish()?;
 
         let result = analyze_java_archive(&path)?;
-        assert_eq!(
-            result.archive_type, expected_type,
-            "Failed for {}",
-            filename
-        );
+        assert_eq!(result.archive_type, expected_type, "Failed for {filename}");
     }
 
     Ok(())

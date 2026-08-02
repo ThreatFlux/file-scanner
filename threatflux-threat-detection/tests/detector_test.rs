@@ -1,4 +1,4 @@
-//! Tests for the main ThreatDetector functionality
+//! Tests for the main `ThreatDetector` functionality
 
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -158,13 +158,10 @@ async fn test_scan_directory() {
 
     // Directory scanning might succeed or fail depending on permissions
     // Just ensure it doesn't panic
-    match result {
-        Ok(results) => {
-            assert!(!results.is_empty());
-        }
-        Err(_) => {
-            // Acceptable - might not have permission or directory might not exist
-        }
+    if let Ok(results) = result {
+        assert!(!results.is_empty());
+    } else {
+        // Acceptable - might not have permission or directory might not exist
     }
 }
 
@@ -259,13 +256,10 @@ async fn test_scan_large_file() {
     let result = detector.scan_file(large_file.path()).await;
     // Behavior might vary - could succeed with truncated scan or fail
     // Just ensure it doesn't panic
-    match result {
-        Ok(analysis) => {
-            assert_eq!(analysis.threat_level, ThreatLevel::Clean);
-        }
-        Err(_) => {
-            // Acceptable - file might be too large
-        }
+    if let Ok(analysis) = result {
+        assert_eq!(analysis.threat_level, ThreatLevel::Clean);
+    } else {
+        // Acceptable - file might be too large
     }
 }
 
@@ -328,7 +322,7 @@ async fn test_concurrent_scans() {
     // Create multiple test files
     let test_files: Vec<_> = (0..5)
         .map(|i| {
-            let content = format!("Test file content {}", i);
+            let content = format!("Test file content {i}");
             create_test_file(content.as_bytes())
         })
         .collect();
@@ -405,7 +399,10 @@ async fn test_analysis_result_structure() {
     assert_eq!(result.matches.len(), 0);
     assert_eq!(result.indicators.len(), 0);
     assert_eq!(result.classifications.len(), 0);
-    assert_eq!(result.recommendations.len(), 0);
+    assert_eq!(result.recommendations.len(), 2);
+    assert!(result
+        .recommendations
+        .contains(&"No immediate threats detected".to_string()));
 
     // Verify scan statistics
     assert!(result.scan_stats.scan_duration.as_nanos() > 0);

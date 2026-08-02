@@ -69,7 +69,7 @@ pub enum ThreatLevel {
     Critical,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ThreatClassification {
     Trojan,
     Virus,
@@ -152,7 +152,7 @@ pub fn analyze_threats(path: &Path) -> Result<ThreatAnalysis> {
 
     // Process the scan results based on compiled rules
     let rules_text = get_builtin_rules();
-    for rule_text in rules_text.iter() {
+    for rule_text in &rules_text {
         // Extract rule name from the rule text
         if let Some(rule_name) = extract_rule_name(rule_text) {
             // Check if this rule matched (simplified approach)
@@ -224,7 +224,7 @@ pub async fn analyze_threats_enhanced(path: &Path) -> Result<ThreatAnalysis> {
             );
         }
         Err(e) => {
-            eprintln!("Enhanced analysis failed: {}", e);
+            eprintln!("Enhanced analysis failed: {e}");
             legacy_analysis.enhanced_analysis = Some(EnhancedAnalysisInfo {
                 enabled: false,
                 confidence_score: 0.0,
@@ -260,10 +260,10 @@ async fn run_enhanced_analysis(path: &Path) -> Result<EnhancedAnalysisInfo> {
         .context("Failed to scan file with threatflux detector")?;
 
     // Calculate metrics
-    let confidence_score = if !result.indicators.is_empty() {
-        result.indicators.iter().map(|i| i.confidence).sum::<f32>() / result.indicators.len() as f32
-    } else {
+    let confidence_score = if result.indicators.is_empty() {
         0.5 // Default confidence
+    } else {
+        result.indicators.iter().map(|i| i.confidence).sum::<f32>() / result.indicators.len() as f32
     };
 
     let analysis_depth = match (result.indicators.len(), result.matches.len()) {
@@ -293,7 +293,7 @@ fn compile_rules() -> Result<yara_x::Rules> {
     for rule in get_builtin_rules() {
         compiler
             .add_source(rule)
-            .map_err(|e| anyhow::anyhow!("Failed to add rule: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to add rule: {e:?}"))?;
     }
 
     // Compile rules
@@ -483,7 +483,10 @@ pub fn extract_tags_from_rule(rule_text: &str) -> Vec<String> {
             let tags_start = colon_pos + 3;
             if tags_start < brace_pos && tags_start < rule_text.len() {
                 let tags_str = &rule_text[tags_start..brace_pos];
-                tags = tags_str.split_whitespace().map(|s| s.to_string()).collect();
+                tags = tags_str
+                    .split_whitespace()
+                    .map(std::string::ToString::to_string)
+                    .collect();
             }
         }
     }
@@ -803,7 +806,7 @@ pub async fn scan_with_custom_rule(
             Err(e) => {
                 result.errors.push(YaraScanError {
                     file_path: file_path.display().to_string(),
-                    error: format!("Task error: {}", e),
+                    error: format!("Task error: {e}"),
                 });
             }
         }
@@ -828,7 +831,7 @@ fn collect_files_to_scan(path: &Path, recursive: bool, max_file_size: u64) -> Re
             for entry in WalkDir::new(path)
                 .follow_links(false)
                 .into_iter()
-                .filter_map(|e| e.ok())
+                .filter_map(std::result::Result::ok)
             {
                 if entry.file_type().is_file() {
                     if let Ok(metadata) = entry.metadata() {
@@ -841,7 +844,7 @@ fn collect_files_to_scan(path: &Path, recursive: bool, max_file_size: u64) -> Re
         } else {
             // Non-recursive directory scan
             if let Ok(entries) = fs::read_dir(path) {
-                for entry in entries.filter_map(|e| e.ok()) {
+                for entry in entries.filter_map(std::result::Result::ok) {
                     let path = entry.path();
                     if path.is_file() {
                         if let Ok(metadata) = entry.metadata() {
@@ -897,7 +900,7 @@ fn scan_single_file(
                     yara_x::MetaValue::Integer(i) => i.to_string(),
                     yara_x::MetaValue::Float(f) => f.to_string(),
                     yara_x::MetaValue::String(s) => s.to_string(),
-                    yara_x::MetaValue::Bytes(b) => format!("{:?}", b),
+                    yara_x::MetaValue::Bytes(b) => format!("{b:?}"),
                 },
             );
         }
@@ -1715,23 +1718,20 @@ rule test_rule {
         let result = analyze_threats(&test_file);
 
         // In test environments, YARA compilation might fail, so we handle both cases
-        match result {
-            Ok(analysis) => {
-                // Verify the analysis completed successfully
-                // Check that scan statistics are populated (duration is always non-negative)
-                assert_eq!(analysis.scan_stats.rules_evaluated, 10); // Number of builtin rules
-                assert_eq!(
-                    analysis.scan_stats.file_size_scanned,
-                    suspicious_content.len() as u64
-                );
+        if let Ok(analysis) = result {
+            // Verify the analysis completed successfully
+            // Check that scan statistics are populated (duration is always non-negative)
+            assert_eq!(analysis.scan_stats.rules_evaluated, 10); // Number of builtin rules
+            assert_eq!(
+                analysis.scan_stats.file_size_scanned,
+                suspicious_content.len() as u64
+            );
 
-                // Check that recommendations are generated
-                assert!(!analysis.recommendations.is_empty());
-            }
-            Err(_) => {
-                // Expected in test environment without proper YARA setup
-                // The important thing is that the function doesn't panic
-            }
+            // Check that recommendations are generated
+            assert!(!analysis.recommendations.is_empty());
+        } else {
+            // Expected in test environment without proper YARA setup
+            // The important thing is that the function doesn't panic
         }
     }
 
@@ -1744,18 +1744,15 @@ rule test_rule {
         let result = analyze_threats(&test_file);
 
         // Handle potential YARA compilation issues gracefully
-        match result {
-            Ok(analysis) => {
-                // Should have minimal or no matches for clean content
-                assert!(!analysis.recommendations.is_empty());
-                assert_eq!(
-                    analysis.scan_stats.file_size_scanned,
-                    clean_content.len() as u64
-                );
-            }
-            Err(_) => {
-                // Expected in test environment without proper YARA setup
-            }
+        if let Ok(analysis) = result {
+            // Should have minimal or no matches for clean content
+            assert!(!analysis.recommendations.is_empty());
+            assert_eq!(
+                analysis.scan_stats.file_size_scanned,
+                clean_content.len() as u64
+            );
+        } else {
+            // Expected in test environment without proper YARA setup
         }
     }
 
@@ -1818,7 +1815,7 @@ rule test_rule {
             ("unknown", Severity::Medium), // Should default to Medium
         ];
 
-        for (severity_str, expected_severity) in severities.iter() {
+        for (severity_str, expected_severity) in &severities {
             let mut metadata = HashMap::new();
             metadata.insert("severity".to_string(), severity_str.to_string());
 
@@ -1853,14 +1850,17 @@ rule test_rule {
         for (tags, expected_type) in test_cases {
             let rule_match = YaraMatch {
                 rule_identifier: "test_rule".to_string(),
-                tags: tags.into_iter().map(|s| s.to_string()).collect(),
+                tags: tags
+                    .into_iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
                 metadata: HashMap::new(),
             };
 
             let indicator = create_threat_indicator(&rule_match).unwrap();
-            assert!(
-                std::mem::discriminant(&indicator.indicator_type)
-                    == std::mem::discriminant(&expected_type)
+            assert_eq!(
+                std::mem::discriminant(&indicator.indicator_type),
+                std::mem::discriminant(&expected_type)
             );
         }
 

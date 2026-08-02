@@ -9,51 +9,71 @@ on:
       - '.github/workflows/**'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ACTIONLINT_VERSION: v1.7.12
+  YAMLLINT_VERSION: 1.38.0
+
 jobs:
   validate-workflows:
     name: Validate Workflow Files
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      - uses: actions/checkout@v7.0.1
 
       - name: Install workflow validation tools
         run: |
-          pip install yamllint
+          python3 -m venv "${RUNNER_TEMP}/workflow-tools"
+          "${RUNNER_TEMP}/workflow-tools/bin/python" -m pip install --upgrade pip
+          "${RUNNER_TEMP}/workflow-tools/bin/python" -m pip install "yamllint==${YAMLLINT_VERSION}"
+          echo "${RUNNER_TEMP}/workflow-tools/bin" >> "$GITHUB_PATH"
+          actionlint_archive="actionlint_${ACTIONLINT_VERSION#v}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/${actionlint_archive}"
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION#v}_checksums.txt"
+          grep " ${actionlint_archive}$" "actionlint_${ACTIONLINT_VERSION#v}_checksums.txt" | sha256sum -c -
+          tar -xzf "${actionlint_archive}" actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint -version
+          "${RUNNER_TEMP}/workflow-tools/bin/yamllint" --version
 
       - name: Validate YAML syntax
         run: |
           echo "Validating workflow YAML files..."
           yamllint .github/workflows/
 
-      - name: Run project CI checks (includes lint and format validation)
-        run: make ci-local
+      - name: Validate GitHub Actions syntax
+        run: actionlint .github/workflows/*.yml
 
       - name: Check for required workflow files
         run: |
           echo "Checking for required workflow files..."
-          test -f .github/workflows/release.yml && echo "✓ Release workflow found" || echo "✗ Release workflow missing"
-          test -f .github/workflows/docker.yml && echo "✓ Docker workflow found" || echo "✗ Docker workflow missing"
-          test -f .github/workflows/ci.yml && echo "✓ CI workflow found" || echo "✗ CI workflow missing"
+          for workflow in auto-release.yml ci.yml docker.yml security.yml validate.yml; do
+            test -f ".github/workflows/${workflow}"
+            echo "${workflow} found"
+          done
 
   test-docker-build:
     name: Test Docker Build
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
+    timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Test Docker build (no push)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           platforms: linux/amd64

@@ -18,7 +18,7 @@ pub struct JavaAnalysisResult {
     pub metadata: JavaArchiveMetadata,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum JavaArchiveType {
     Jar,       // Java Archive
     War,       // Web Application Archive
@@ -158,7 +158,7 @@ pub struct ResourceInfo {
     pub resource_type: ResourceType,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ResourceType {
     Image,
     Layout,
@@ -183,7 +183,7 @@ pub struct JavaSecurityAnalysis {
     pub malware_indicators: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SecurityThreatLevel {
     Low,
     Medium,
@@ -200,7 +200,7 @@ pub struct SecurityVulnerability {
     pub recommendation: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CodeSigningStatus {
     Signed,
     Unsigned,
@@ -230,7 +230,7 @@ pub fn analyze_java_archive(file_path: &Path) -> Result<JavaAnalysisResult> {
     let archive_type = detect_archive_type(file_path, &mut archive)?;
 
     let mut result = JavaAnalysisResult {
-        archive_type: archive_type.clone(),
+        archive_type,
         manifest: None,
         android_manifest: None,
         certificates: Vec::new(),
@@ -501,7 +501,10 @@ fn parse_java_manifest(contents: &str) -> Result<JavaManifest> {
         match key {
             "Main-Class" => manifest.main_class = Some(value.to_string()),
             "Class-Path" => {
-                manifest.class_path = value.split_whitespace().map(|s| s.to_string()).collect()
+                manifest.class_path = value
+                    .split_whitespace()
+                    .map(std::string::ToString::to_string)
+                    .collect();
             }
             "Implementation-Title" => manifest.implementation_title = Some(value.to_string()),
             "Implementation-Version" => manifest.implementation_version = Some(value.to_string()),
@@ -672,7 +675,7 @@ fn perform_security_analysis(result: &mut JavaAnalysisResult) {
     result.security_analysis.threat_level = threat_level;
 }
 
-fn calculate_metadata(result: &mut JavaAnalysisResult) {
+const fn calculate_metadata(result: &mut JavaAnalysisResult) {
     // Metadata is mostly calculated during parsing, but we can add final touches here
     if let Some(manifest) = &result.manifest {
         if let Some(_created_by) = &manifest.created_by {

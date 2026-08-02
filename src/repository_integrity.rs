@@ -48,7 +48,7 @@ pub enum RegistryType {
     Unknown,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum RepositoryStatus {
     Accessible,
     NotFound,
@@ -422,7 +422,7 @@ impl RepositoryIntegrityChecker {
         package_path: &Path,
         registry_type: &RegistryType,
     ) -> Result<Option<String>> {
-        if let RegistryType::Npm = registry_type {
+        if matches!(registry_type, RegistryType::Npm) {
             let package_json_path = package_path.join("package.json");
             if package_json_path.exists() {
                 let content = std::fs::read_to_string(&package_json_path)?;
@@ -475,7 +475,7 @@ impl RepositoryIntegrityChecker {
     }
 
     async fn fetch_npm_registry_info(&self, package_name: &str) -> Result<RegistryInfo> {
-        let url = format!("https://registry.npmjs.org/{}", package_name);
+        let url = format!("https://registry.npmjs.org/{package_name}");
 
         match self.client.get(&url).send().await {
             Ok(response) if response.status().is_success() => {
@@ -515,7 +515,7 @@ impl RepositoryIntegrityChecker {
     }
 
     async fn fetch_pypi_registry_info(&self, package_name: &str) -> Result<RegistryInfo> {
-        let url = format!("https://pypi.org/pypi/{}/json", package_name);
+        let url = format!("https://pypi.org/pypi/{package_name}/json");
 
         match self.client.get(&url).send().await {
             Ok(response) if response.status().is_success() => {
@@ -640,19 +640,15 @@ impl RepositoryIntegrityChecker {
         // For GitHub repositories, check if tag exists via API
         if repo_url.contains("github.com") {
             if let Some((owner, repo)) = self.extract_github_owner_repo(repo_url) {
-                let tag_url = format!(
-                    "https://api.github.com/repos/{}/{}/git/refs/tags/v{}",
-                    owner, repo, version
-                );
+                let tag_url =
+                    format!("https://api.github.com/repos/{owner}/{repo}/git/refs/tags/v{version}");
                 if let Ok(response) = self.client.get(&tag_url).send().await {
                     return response.status().is_success();
                 }
 
                 // Try without 'v' prefix
-                let tag_url = format!(
-                    "https://api.github.com/repos/{}/{}/git/refs/tags/{}",
-                    owner, repo, version
-                );
+                let tag_url =
+                    format!("https://api.github.com/repos/{owner}/{repo}/git/refs/tags/{version}");
                 if let Ok(response) = self.client.get(&tag_url).send().await {
                     return response.status().is_success();
                 }
@@ -747,7 +743,7 @@ impl RepositoryIntegrityChecker {
 
         // Adjust for source comparison
         if source_comparison.comparison_possible {
-            score += source_comparison.similarity_score * 20.0;
+            score = source_comparison.similarity_score.mul_add(20.0, score);
         }
 
         // Adjust for maintainer verification
@@ -884,6 +880,7 @@ pub async fn has_integrity_issues(
 ) -> bool {
     analyze_repository_integrity(package_path, package_name, package_version, registry_type)
         .await
-        .map(|analysis| analysis.trust_score < 70.0 || !analysis.risk_indicators.is_empty())
-        .unwrap_or(true)
+        .map_or(true, |analysis| {
+            analysis.trust_score < 70.0 || !analysis.risk_indicators.is_empty()
+        })
 }

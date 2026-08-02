@@ -152,7 +152,7 @@ fn analyze_7z_security(path: &Path) -> Result<SuspiciousArchiveIndicators> {
 }
 
 /// Determine overall risk level for 7z archive
-fn determine_7z_risk(indicators: &SuspiciousArchiveIndicators) -> RiskLevel {
+const fn determine_7z_risk(indicators: &SuspiciousArchiveIndicators) -> RiskLevel {
     if indicators.risk_score > 70 {
         RiskLevel::Critical
     } else if indicators.risk_score > 50 {
