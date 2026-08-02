@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "file-scanner"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "addr2line 0.27.1",
  "anyhow",
