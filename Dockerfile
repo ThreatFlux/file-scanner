@@ -1,7 +1,7 @@
 # ThreatFlux Rust Dockerfile
 # Multi-stage build for file-scanner using the standard ThreatFlux Rust template.
 
-FROM rust:1.97.1-bookworm AS rust-base
+FROM rust:1.98.0-bookworm AS rust-base
 
 ARG VERSION=0.2.9
 ARG BUILD_DATE=unknown
