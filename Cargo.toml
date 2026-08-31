@@ -92,7 +92,7 @@ flate2 = "1.1"
 tar = "0.4"
 
 # XML and data processing
-quick-xml = "0.41"
+quick-xml = "0.42"
 base64 = "0.23"
 
 # Test dependencies
