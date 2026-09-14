@@ -35,7 +35,7 @@ zip = { version = "8.6", default-features = false, features = ["deflate"] }  # F
 tar = "0.4"  # For Python packages
 flate2 = "1.1"  # For compressed archives
 toml = "1.1"  # For parsing pyproject.toml
-dirs = "6.0"  # For finding cache directories
+dirs = "7.0"  # For finding cache directories
 
 # Optional features
 dashmap = { version = "6.2", optional = true }
