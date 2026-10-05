@@ -27,7 +27,7 @@ do not compare the reporting thumbprint.
 Primary references: [TLSH source](https://github.com/trendmicro/tlsh/blob/master/src/tlsh_impl.cpp),
 [YARA-X ELF documentation](https://virustotal.github.io/yara-x/docs/modules/elf/),
 [YARA-X PE documentation](https://virustotal.github.io/yara-x/docs/modules/pe/),
-and the [pinned upstream source](https://github.com/VirusTotal/yara-x/tree/7b2637d4655155fdfaf68177edadb9a39406ece0/lib).
+and the [pinned upstream source][upstream].
 
 ## Review guard and retained evidence
 
@@ -48,8 +48,12 @@ every other result is preserved. No repository alert is dismissed through the AP
 
 This post-processing is necessary because Rust inline suppression is
 [not implemented upstream](https://github.com/github/codeql/issues/21637), and
-`suppressions` is absent from GitHub's [supported SARIF fields](https://docs.github.com/en/code-security/reference/code-scanning/sarif-files/sarif-support).
-The [official analysis action](https://github.com/github/codeql-action/blob/2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2/analyze/action.yml)
+`suppressions` is absent from GitHub's [supported SARIF fields][sarif].
+The [official analysis action][action]
 supports generating SARIF for post-processing before upload. Analysis failures
 remain failures. Remove this review mechanism when the upstream Rust queries
 recognize these non-security uses; re-review it when the vendor is updated.
+
+[upstream]: https://github.com/VirusTotal/yara-x/tree/7b2637d4655155fdfaf68177edadb9a39406ece0/lib
+[sarif]: https://docs.github.com/en/code-security/reference/code-scanning/sarif-files/sarif-support
+[action]: https://github.com/github/codeql-action/blob/2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2/analyze/action.yml
