@@ -1,0 +1,4 @@
+# Keep verified upstream bytes, including fixture whitespace, unchanged.
+vendor/yara-x-1.21.0/** linguist-vendored -whitespace
+# Unified diff context lines intentionally contain the blank-line prefix.
+vendor/yara-x-1.21.0.patch -whitespace

@@ -2,9 +2,11 @@ name: Security
 
 on:
   push:
-    branches: [ main, develop ]
+    branches:
+      - main
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
   schedule:
     # Run security checks daily at 3 AM UTC
     - cron: '0 3 * * *'
@@ -14,139 +16,147 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+  CARGO_TARGET_DIR: ${{ github.workspace }}/threatflux-threat-detection/target
 jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: threatflux-threat-detection -> target
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0  # v2.87.24
+        with:
+          tool: cargo-audit@0.22.2
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      - name: Run cargo audit
+        run: |
+          audit_status=0
+          python3 ../scripts/check-rsa-exception.py
+          (cd .. && cargo audit --json) > audit-results.json || audit_status=$?
+          jq -e ' .vulnerabilities.list | type == "array"' audit-results.json > /dev/null
+          exit "$audit_status"
 
-    - name: Setup Rust cache
-      uses: Swatinem/rust-cache@v2
-
-    - name: Install cargo-audit
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cargo-audit
-
-    - name: Run cargo audit
-      run: |
-        cargo audit --json > audit-results.json || true
-        cargo audit
-
-    - name: Upload audit results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: security-audit-results
-        path: audit-results.json
-        retention-days: 30
+      - name: Upload audit results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: security-audit-results
+          path: |
+            threatflux-threat-detection/audit-results.json
+          retention-days: 30
 
   clippy-security:
     name: Security Lints (Clippy)
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          components: clippy
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: clippy
+          toolchain: 1.99.0
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: threatflux-threat-detection -> target
+      - name: Install YARA
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libyara-dev yara
 
-    - name: Setup Rust cache
-      uses: Swatinem/rust-cache@v2
-
-    - name: Install YARA
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libyara-dev yara
-
-    - name: Run security-focused clippy lints
-      run: |
-        cargo clippy --all-features --all-targets -- \
-          -W clippy::suspicious \
-          -W clippy::security \
-          -W clippy::panic \
-          -W clippy::unwrap_used \
-          -W clippy::expect_used \
-          -W clippy::panic_in_result_fn \
-          -W clippy::todo \
-          -W clippy::unimplemented \
-          -W clippy::unreachable \
-          -W clippy::mem_forget \
-          -W clippy::mem_replace_with_uninit \
-          -W clippy::cast_ptr_alignment \
-          -W clippy::fn_to_numeric_cast_with_truncation \
-          -W clippy::integer_arithmetic \
-          -W clippy::lossy_float_literal \
-          -W clippy::wildcard_dependencies \
-          -W clippy::print_stdout \
-          -W clippy::print_stderr \
-          -W clippy::dbg_macro \
-          -A clippy::integer_arithmetic  # Allow for controlled arithmetic in crypto/hashing
+      - name: Run security-focused clippy lints
+        run: |
+          cargo clippy --locked --all-features --all-targets -- \
+            -W clippy::suspicious \
+              -W clippy::panic \
+            -W clippy::unwrap_used \
+            -W clippy::expect_used \
+            -W clippy::panic_in_result_fn \
+            -W clippy::todo \
+            -W clippy::unimplemented \
+            -W clippy::unreachable \
+            -W clippy::mem_forget \
+            -W clippy::mem_replace_with_uninit \
+            -W clippy::cast_ptr_alignment \
+            -W clippy::fn_to_numeric_cast_with_truncation \
+            -W clippy::arithmetic_side_effects \
+            -W clippy::lossy_float_literal \
+            -W clippy::wildcard_dependencies \
+            -W clippy::print_stdout \
+            -W clippy::print_stderr \
+            -W clippy::dbg_macro \
+            -A clippy::arithmetic_side_effects  # Allow for controlled arithmetic in crypto/hashing
 
   dependency-check:
     name: Dependency Security Check
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: threatflux-threat-detection -> target
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0  # v2.87.24
+        with:
+          tool: cargo-deny@0.20.2
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      - name: Check dependencies with cargo-deny
+        run: |
+          cargo deny --locked --manifest-path Cargo.toml --config ../deny.toml --all-features check
 
-    - name: Setup Rust cache
-      uses: Swatinem/rust-cache@v2
 
-    - name: Install cargo-deny
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cargo-deny
+      - name: Generate dependency report
+        run: |
+          cargo tree --all-features --locked > dependency-tree.txt
+          cargo tree --all-features --locked --duplicates > duplicate-dependencies.txt
 
-    - name: Check dependencies with cargo-deny
-      run: cargo deny check
-
-    - name: Generate dependency report
-      run: |
-        cargo tree --all-features > dependency-tree.txt
-        cargo tree --all-features --duplicates > duplicate-dependencies.txt || true
-
-    - name: Upload dependency reports
-      uses: actions/upload-artifact@v4
-      with:
-        name: dependency-reports
-        path: |
-          dependency-tree.txt
-          duplicate-dependencies.txt
-        retention-days: 30
+      - name: Upload dependency reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dependency-reports
+          path: |
+            threatflux-threat-detection/dependency-tree.txt
+            threatflux-threat-detection/duplicate-dependencies.txt
+          retention-days: 30
 
   semgrep:
     name: Static Analysis (Semgrep)
     runs-on: ubuntu-latest
     if: github.repository == 'ThreatFlux/threatflux-threat-detection'
-    container:
-      image: returntocorp/semgrep
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Run Semgrep
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/semgrep"
+          "${RUNNER_TEMP}/semgrep/bin/python" -m pip install "semgrep==1.179.0"
+          "${RUNNER_TEMP}/semgrep/bin/semgrep" scan --config auto --error --json --output semgrep-results.json src/
 
-    - name: Run Semgrep
-      run: |
-        semgrep --config=auto --json --output=semgrep-results.json src/ || true
-        semgrep --config=auto src/
-
-    - name: Upload Semgrep results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: semgrep-results
-        path: semgrep-results.json
-        retention-days: 30
+      - name: Upload Semgrep results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: semgrep-results
+          path: |
+            threatflux-threat-detection/semgrep-results.json
+          retention-days: 30
 
   codeql:
     name: CodeQL Analysis
@@ -160,100 +170,112 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'rust' ]
+        language: ['rust']
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
 
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
-      with:
-        languages: ${{ matrix.language }}
-        queries: security-extended,security-and-quality
+          source-root: ${{ github.workspace }}/threatflux-threat-detection
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: threatflux-threat-detection -> target
+      - name: Install YARA
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libyara-dev yara
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      - name: Build for CodeQL
+        run: |
+          cargo build --locked --all-features
 
-    - name: Setup Rust cache
-      uses: Swatinem/rust-cache@v2
-
-    - name: Install YARA
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libyara-dev yara
-
-    - name: Build for CodeQL
-      run: |
-        cargo build --all-features
-
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
-      with:
-        category: "/language:${{matrix.language}}"
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          category: "/language:${{matrix.language}}"
 
   supply-chain:
     name: Supply Chain Security
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: threatflux-threat-detection -> target
+      - name: Install cargo-supply-chain
+        run: |
+          cargo install cargo-supply-chain --locked --version 0.3.7
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
 
-    - name: Setup Rust cache
-      uses: Swatinem/rust-cache@v2
+      - name: Check supply chain
+        run: |
+          cargo supply-chain update
+          cargo supply-chain publishers --all-features > publishers-report.txt
+          cargo supply-chain json --all-features > publishers-report.json
 
-    - name: Install cargo-supply-chain
-      run: cargo install cargo-supply-chain
+      - name: Analyze dependency publishers
+        run: |
+          jq -e '.crates_io_crates | type == "object"' publishers-report.json > /dev/null
+          {
+            echo '=== Dependencies with fewer than three listed publishers ==='
+            jq -r '.crates_io_crates | to_entries[] | select(.value | length < 3) | "\(.key): \(.value | length) publishers"' publishers-report.json
+            echo 'Publisher counts are review signals, not a vulnerability verdict.'
+          } > supply-chain-analysis.txt
 
-    - name: Check supply chain
-      run: |
-        cargo supply-chain update
-        cargo supply-chain publishers > publishers-report.txt || true
-
-    - name: Analyze dependency publishers
-      run: |
-        echo "=== High-risk dependencies (few publishers) ===" >> supply-chain-analysis.txt
-        cargo supply-chain publishers --json | jq -r '.[] | select(.publisher_count < 3) | "\(.name): \(.publisher_count) publishers"' >> supply-chain-analysis.txt || true
-        
-        echo -e "\n=== Recently updated dependencies ===" >> supply-chain-analysis.txt
-        cargo supply-chain publishers --json | jq -r '.[] | select(.last_updated_days < 30) | "\(.name): updated \(.last_updated_days) days ago"' >> supply-chain-analysis.txt || true
-
-    - name: Upload supply chain reports
-      uses: actions/upload-artifact@v4
-      with:
-        name: supply-chain-reports
-        path: |
-          publishers-report.txt
-          supply-chain-analysis.txt
-        retention-days: 30
+      - name: Upload supply chain reports
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: supply-chain-reports
+          path: |
+            threatflux-threat-detection/publishers-report.txt
+            threatflux-threat-detection/supply-chain-analysis.txt
+            threatflux-threat-detection/publishers-report.json
+          retention-days: 30
 
   osv-scanner:
     name: OSV Vulnerability Scanner
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Run OSV Scanner
-      uses: google/osv-scanner-action@v1
-      with:
-        scan-args: |-
-          --format json
-          --output osv-results.json
-          --recursive
-          ./
-        fail-build: false
-
-    - name: Upload OSV results
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: osv-scan-results
-        path: osv-results.json
-        retention-days: 30
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Report informational OSV findings
+        uses: google/osv-scanner-action/osv-scanner-action@a345acffa64b0eaede81a3d9aae6141214d9c8fc  # v2.6.0
+        with:
+          scan-args: |
+            --format=json
+            --output=threatflux-threat-detection/osv-results.json
+            --recursive
+            ./
+        continue-on-error: true
+      - name: Verify OSV scan produced valid results
+        if: always()
+        run: |
+          test -s osv-results.json
+          jq empty osv-results.json
+      - name: Upload OSV results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: always()
+        with:
+          name: osv-scan-results
+          path: |
+            threatflux-threat-detection/osv-results.json
+          retention-days: 30
 
   security-report:
     name: Generate Security Report
@@ -261,74 +283,82 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Download all security artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: threatflux-threat-detection/security-reports
 
-    - name: Download all security artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: security-reports
+      - name: Generate security summary
+        run: |
+          {
+            echo "# Security Analysis Report"
+            echo "Generated on: $(date)"
+            echo ""
+            echo "## Audit Results"
+          } > security-summary.md
+          if [ -f security-reports/security-audit-results/audit-results.json ]; then
+            echo "- Cargo audit completed" >> security-summary.md
+            # Parse audit results if needed
+          else
+            echo "- Cargo audit: No results available" >> security-summary.md
+          fi
+          {
+            echo ""
+            echo "## Dependency Analysis"
+          } >> security-summary.md
+          if [ -f security-reports/dependency-reports/dependency-tree.txt ]; then
+            TOTAL_DEPS=$(grep -c "^" security-reports/dependency-reports/dependency-tree.txt || echo "Unknown")
+            echo "- Total dependencies: $TOTAL_DEPS" >> security-summary.md
+          fi
 
-    - name: Generate security summary
-      run: |
-        echo "# Security Analysis Report" > security-summary.md
-        echo "Generated on: $(date)" >> security-summary.md
-        echo "" >> security-summary.md
-        
-        echo "## Audit Results" >> security-summary.md
-        if [ -f security-reports/security-audit-results/audit-results.json ]; then
-          echo "- Cargo audit completed" >> security-summary.md
-          # Parse audit results if needed
-        else
-          echo "- Cargo audit: No results available" >> security-summary.md
-        fi
-        echo "" >> security-summary.md
-        
-        echo "## Dependency Analysis" >> security-summary.md
-        if [ -f security-reports/dependency-reports/dependency-tree.txt ]; then
-          TOTAL_DEPS=$(grep -c "^" security-reports/dependency-reports/dependency-tree.txt || echo "Unknown")
-          echo "- Total dependencies: $TOTAL_DEPS" >> security-summary.md
-        fi
-        
-        if [ -f security-reports/dependency-reports/duplicate-dependencies.txt ]; then
-          DUPLICATE_DEPS=$(wc -l < security-reports/dependency-reports/duplicate-dependencies.txt || echo "0")
-          echo "- Duplicate dependencies: $DUPLICATE_DEPS" >> security-summary.md
-        fi
-        echo "" >> security-summary.md
-        
-        echo "## Supply Chain" >> security-summary.md
-        if [ -f security-reports/supply-chain-reports/supply-chain-analysis.txt ]; then
-          echo "- Supply chain analysis completed" >> security-summary.md
-        else
-          echo "- Supply chain analysis: Not available" >> security-summary.md
-        fi
-        echo "" >> security-summary.md
-        
-        echo "## Recommendations" >> security-summary.md
-        echo "1. Review all high and critical severity vulnerabilities" >> security-summary.md
-        echo "2. Update dependencies regularly" >> security-summary.md
-        echo "3. Monitor dependency publishers and supply chain" >> security-summary.md
-        echo "4. Address any clippy security warnings" >> security-summary.md
+          if [ -f security-reports/dependency-reports/duplicate-dependencies.txt ]; then
+            DUPLICATE_DEPS=$(wc -l < security-reports/dependency-reports/duplicate-dependencies.txt || echo "0")
+            echo "- Duplicate dependencies: $DUPLICATE_DEPS" >> security-summary.md
+          fi
+          {
+            echo ""
+            echo "## Supply Chain"
+          } >> security-summary.md
+          if [ -f security-reports/supply-chain-reports/supply-chain-analysis.txt ]; then
+            echo "- Supply chain analysis completed" >> security-summary.md
+          else
+            echo "- Supply chain analysis: Not available" >> security-summary.md
+          fi
+          {
+            echo ""
+            echo "## Recommendations"
+            echo "1. Review all high and critical severity vulnerabilities"
+            echo "2. Update dependencies regularly"
+            echo "3. Monitor dependency publishers and supply chain"
+            echo "4. Address any clippy security warnings"
+          } >> security-summary.md
 
-    - name: Upload security summary
-      uses: actions/upload-artifact@v4
-      with:
-        name: security-summary
-        path: security-summary.md
-        retention-days: 90
+      - name: Upload security summary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: security-summary
+          path: |
+            threatflux-threat-detection/security-summary.md
+          retention-days: 90
 
-    - name: Comment on PR (if applicable)
-      if: github.event_name == 'pull_request'
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const fs = require('fs');
-          if (fs.existsSync('security-summary.md')) {
-            const summary = fs.readFileSync('security-summary.md', 'utf8');
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `## 🔒 Security Analysis Results\n\n${summary}`
-            });
-          }
+      - name: Comment on PR (if applicable)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          script: |-
+            const fs = require('fs');
+            if (fs.existsSync('threatflux-threat-detection/security-summary.md')) {
+              const summary = fs.readFileSync('threatflux-threat-detection/security-summary.md', 'utf8');
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## 🔒 Security Analysis Results\n\n${summary}`
+              });
+            }
+defaults:
+  run:
+    shell: bash
+    working-directory: threatflux-threat-detection

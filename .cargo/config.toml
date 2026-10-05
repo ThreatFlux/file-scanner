@@ -61,7 +61,7 @@ test-no-default = "test --workspace --no-default-features"
 test-all-features = "test --workspace --all-features"
 
 # Parallel testing
-test-parallel = "test --workspace -- --test-threads=0"
+test-parallel = "test --locked --workspace --all-features"
 test-sequential = "test --workspace -- --test-threads=1"
 
 # Coverage and reporting

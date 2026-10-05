@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+IFS= read -r subject < "$1"
+if [[ ! "$subject" =~ ^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|deps)(\([^\)]+\))?\!?:\ .+ ]]; then
+  echo "Use a conventional commit subject, for example: chore: update stable Rust and dependencies" >&2
+  exit 1
+fi

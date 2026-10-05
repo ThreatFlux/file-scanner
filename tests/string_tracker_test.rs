@@ -45,12 +45,11 @@
 
 use chrono::Utc;
 use file_scanner::string_tracker_compat::{
-    StringContext, StringEntry, StringFilter, StringStatistics, StringTracker,
+    StringContext, StringEntry, StringFilter, StringOccurrence, StringStatistics, StringTracker,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
-use threatflux_string_analysis::StringOccurrence;
 
 #[test]
 fn test_string_tracker_initialization() {
@@ -865,7 +864,6 @@ fn test_category_filtering() {
 }
 
 #[test]
-#[ignore] // File hash filtering needs enhancement in threatflux-string-analysis v0.1.1
 fn test_file_hash_filtering() {
     let tracker = StringTracker::new();
 

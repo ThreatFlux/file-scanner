@@ -373,6 +373,23 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
     })
 }
 
+fn mach_import_library<'a>(
+    macho: &mach::MachO<'a>,
+    symbol: &mach::symbols::Nlist,
+) -> Option<&'a str> {
+    let ordinal = usize::from(symbol.n_desc >> 8);
+    if macho.header.flags & mach::header::MH_TWOLEVEL == 0
+        || symbol.n_value != 0
+        || ordinal == 0
+        || ordinal == usize::from(u8::MAX)
+    {
+        return None;
+    }
+    // Goblin reserves libs[0] for self. An existing libs[254] is the legacy
+    // library ordinal; otherwise 254 denotes an unresolved dynamic lookup.
+    macho.libs.get(ordinal).copied()
+}
+
 pub fn analyze_mach_symbols(mach: mach::Mach, _buffer: &[u8]) -> Result<SymbolTable> {
     let mut functions = Vec::new();
     let mut global_variables = Vec::new();
@@ -454,7 +471,7 @@ pub fn analyze_mach_symbols(mach: mach::Mach, _buffer: &[u8]) -> Result<SymbolTa
                 if nlist.is_undefined() && !name.is_empty() {
                     imports.push(ImportInfo {
                         name: name.clone(),
-                        library: None, // Mach-O doesn't specify library directly
+                        library: mach_import_library(&macho, &nlist).map(str::to_owned),
                         address: None,
                         ordinal: None,
                         is_delayed: false,

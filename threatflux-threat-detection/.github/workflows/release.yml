@@ -15,6 +15,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+  CARGO_TARGET_DIR: ${{ github.workspace }}/threatflux-threat-detection/target
 jobs:
   validate:
     name: Validate Release
@@ -22,63 +23,71 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: threatflux-threat-detection -> target
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${WORKFLOW_VALUE_0}" = "workflow_dispatch" ]; then
+            VERSION="${WORKFLOW_VALUE_1}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Release version: ${VERSION}"
 
-    - name: Setup Rust cache
-      uses: Swatinem/rust-cache@v2
+        env:
+          WORKFLOW_VALUE_0: ${{ github.event_name }}
+          WORKFLOW_VALUE_1: ${{ github.event.inputs.version }}
+      - name: Validate version format
+        run: |
+          VERSION="${WORKFLOW_VALUE_0}"
+          if [[ ! $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
+            echo "Invalid version format: $VERSION"
+            echo "Expected format: vX.Y.Z or vX.Y.Z-suffix"
+            exit 1
+          fi
 
-    - name: Extract version
-      id: version
-      run: |
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          VERSION="${{ github.event.inputs.version }}"
-        else
-          VERSION="${GITHUB_REF#refs/tags/}"
-        fi
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-        echo "Release version: ${VERSION}"
+        env:
+          WORKFLOW_VALUE_0: ${{ steps.version.outputs.version }}
+      - name: Check if Cargo.toml version matches
+        run: |
+          CARGO_VERSION="v$(cargo pkgid --package threatflux-threat-detection | sed 's/.*@//')"
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "Version mismatch: tag=$VERSION, Cargo.toml=$CARGO_VERSION"
+            exit 1
+          fi
 
-    - name: Validate version format
-      run: |
-        VERSION="${{ steps.version.outputs.version }}"
-        if [[ ! $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
-          echo "Invalid version format: $VERSION"
-          echo "Expected format: vX.Y.Z or vX.Y.Z-suffix"
-          exit 1
-        fi
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+      - name: Install YARA
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libyara-dev yara
 
-    - name: Check if Cargo.toml version matches
-      run: |
-        VERSION="${{ steps.version.outputs.version }}"
-        CARGO_VERSION="v$(cargo pkgid | cut -d# -f2 | cut -d: -f2)"
-        if [ "$VERSION" != "$CARGO_VERSION" ]; then
-          echo "Version mismatch: tag=$VERSION, Cargo.toml=$CARGO_VERSION"
-          exit 1
-        fi
+      - name: Run full test suite
+        run: |
+          cargo test --locked --all-features
+          cargo test --locked --no-default-features
 
-    - name: Install YARA
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libyara-dev yara
-
-    - name: Run full test suite
-      run: |
-        cargo test --all-features
-        cargo test --no-default-features
-
-    - name: Verify clean working directory
-      run: |
-        if [ -n "$(git status --porcelain)" ]; then
-          echo "Working directory is not clean"
-          git status
-          exit 1
-        fi
+      - name: Verify clean working directory
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Working directory is not clean"
+            git status
+            exit 1
+          fi
 
   build:
     name: Build Release Artifacts
@@ -99,65 +108,85 @@ jobs:
             artifact_suffix: macos-x86_64
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          targets: ${{ matrix.target }}
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: ${{ matrix.target }}
+          toolchain: 1.99.0
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          key: release-${{ matrix.target }}
 
-    - name: Setup Rust cache
-      uses: Swatinem/rust-cache@v2
-      with:
-        key: release-${{ matrix.target }}
+          workspaces: threatflux-threat-detection -> target
+      - name: Install YARA (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libyara-dev yara
 
-    - name: Install YARA (Ubuntu)
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libyara-dev yara
+      - name: Install YARA (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install yara
 
-    - name: Install YARA (macOS)
-      if: matrix.os == 'macos-latest'
-      run: |
-        brew install yara
+      - name: Install YARA (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          vcpkg install yara:x64-windows
+        shell: cmd
 
-    - name: Install YARA (Windows)
-      if: matrix.os == 'windows-latest'
-      run: |
-        vcpkg install yara:x64-windows
-      shell: cmd
+      - name: Build release
+        run: |
+          cargo build --locked --release --all-features --target "${WORKFLOW_VALUE_0}"
 
-    - name: Build release
-      run: cargo build --release --all-features --target ${{ matrix.target }}
 
-    - name: Run tests
-      run: cargo test --release --all-features --target ${{ matrix.target }}
+        env:
+          WORKFLOW_VALUE_0: ${{ matrix.target }}
+      - name: Run tests
+        run: |
+          cargo test --locked --release --all-features --target "${WORKFLOW_VALUE_0}"
 
-    - name: Package artifacts (Unix)
-      if: matrix.os != 'windows-latest'
-      run: |
-        mkdir -p artifacts
-        tar -czf artifacts/threatflux-threat-detection-${{ needs.validate.outputs.version }}-${{ matrix.artifact_suffix }}.tar.gz \
-          -C target/${{ matrix.target }}/release \
-          libthreartflux_threat_detection.* 2>/dev/null || true
-        
-    - name: Package artifacts (Windows)
-      if: matrix.os == 'windows-latest'
-      run: |
-        mkdir artifacts
-        7z a artifacts/threatflux-threat-detection-${{ needs.validate.outputs.version }}-${{ matrix.artifact_suffix }}.zip `
-          ./target/${{ matrix.target }}/release/threatflux_threat_detection.dll.lib `
-          ./target/${{ matrix.target }}/release/threatflux_threat_detection.dll 2>$null || echo "Some files may not exist"
-      shell: pwsh
 
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: threatflux-threat-detection-${{ matrix.artifact_suffix }}
-        path: artifacts/*
-        retention-days: 30
+        env:
+          WORKFLOW_VALUE_0: ${{ matrix.target }}
+      - name: Package artifacts (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p artifacts
+          release_dir="target/${TARGET}/release"
+          shopt -s nullglob
+          files=("${release_dir}"/libthreatflux_threat_detection.*)
+          if [ "${#files[@]}" -eq 0 ]; then echo 'No built library artifacts'; exit 1; fi
+          tar -czf "artifacts/threatflux-threat-detection-${VERSION}-${ARTIFACT_SUFFIX}.tar.gz" "${files[@]}"
+
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          ARTIFACT_SUFFIX: ${{ matrix.artifact_suffix }}
+      - name: Package artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          New-Item -ItemType Directory -Force artifacts
+          $files = @(Get-ChildItem "target/$env:TARGET/release" -File | Where-Object { $_.Name -match '^(lib)?threatflux_threat_detection\.(rlib|dll|dll\.lib|lib)$' })
+          if ($files.Count -eq 0) { throw 'No built library artifacts' }
+          Compress-Archive -Path $files.FullName -DestinationPath "artifacts/threatflux-threat-detection-$env:VERSION-$env:ARTIFACT_SUFFIX.zip"
+        shell: pwsh
+
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          ARTIFACT_SUFFIX: ${{ matrix.artifact_suffix }}
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: threatflux-threat-detection-${{ matrix.artifact_suffix }}
+          path: |
+            threatflux-threat-detection/artifacts/*
+          retention-days: 30
 
   publish-crates:
     name: Publish to crates.io
@@ -165,26 +194,28 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: threatflux-threat-detection -> target
+      - name: Install YARA
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libyara-dev yara
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
+        run: |
+          cargo publish --all-features
 
-    - name: Setup Rust cache
-      uses: Swatinem/rust-cache@v2
 
-    - name: Install YARA
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libyara-dev yara
-
-    - name: Login to crates.io
-      run: cargo login ${{ secrets.CRATES_IO_TOKEN }}
-
-    - name: Publish to crates.io
-      run: cargo publish --all-features
-
+        env:
+          CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
   create-release:
     name: Create GitHub Release
     needs: [validate, build, publish-crates]
@@ -192,91 +223,99 @@ jobs:
     permissions:
       contents: write
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
 
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: release-artifacts
+      - name: Download all artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: threatflux-threat-detection/release-artifacts
 
-    - name: Generate changelog
-      id: changelog
-      run: |
-        # Extract changelog for this version
-        VERSION="${{ needs.validate.outputs.version }}"
-        
-        # Create changelog content
-        cat > release-notes.md << EOF
-        ## What's Changed
-        
-        This release includes improvements to the ThreatFlux Threat Detection library.
-        
-        ### Key Features
-        - YARA-X integration for advanced threat detection
-        - Comprehensive malware analysis capabilities
-        - Support for multiple detection engines
-        - Async scanning capabilities
-        - Built-in rule management
-        
-        ### Installation
-        
-        \`\`\`toml
-        [dependencies]
-        threatflux-threat-detection = "${{ needs.validate.outputs.version }}"
-        \`\`\`
-        
-        ### Documentation
-        
-        Full documentation is available at [docs.rs](https://docs.rs/threatflux-threat-detection).
-        
-        **Full Changelog**: https://github.com/${{ github.repository }}/compare/$(git describe --tags --abbrev=0 HEAD~1)...${{ needs.validate.outputs.version }}
-        EOF
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Extract changelog for this version
 
-    - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: ${{ needs.validate.outputs.version }}
-        name: ThreatFlux Threat Detection ${{ needs.validate.outputs.version }}
-        body_path: release-notes.md
-        files: release-artifacts/**/*
-        draft: false
-        prerelease: ${{ contains(needs.validate.outputs.version, '-') }}
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Create changelog content
+          cat > release-notes.md << EOF
+          ## What's Changed
+
+          This release includes improvements to the ThreatFlux Threat Detection library.
+
+          ### Key Features
+          - YARA-X integration for advanced threat detection
+          - Comprehensive malware analysis capabilities
+          - Support for multiple detection engines
+          - Async scanning capabilities
+          - Built-in rule management
+
+          ### Installation
+
+          \`\`\`toml
+          [dependencies]
+          threatflux-threat-detection = "${WORKFLOW_VALUE_0}"
+          \`\`\`
+
+          ### Documentation
+
+          Full documentation is available at [docs.rs](https://docs.rs/threatflux-threat-detection).
+
+          **Full Changelog**: https://github.com/${WORKFLOW_VALUE_1}/compare/$(git describe --tags --abbrev=0 HEAD~1)...${WORKFLOW_VALUE_0}
+          EOF
+
+        env:
+          WORKFLOW_VALUE_0: ${{ needs.validate.outputs.version }}
+          WORKFLOW_VALUE_1: ${{ github.repository }}
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        with:
+          tag_name: ${{ needs.validate.outputs.version }}
+          name: ThreatFlux Threat Detection ${{ needs.validate.outputs.version }}
+          body_path: threatflux-threat-detection/release-notes.md
+          files: |
+            threatflux-threat-detection/release-artifacts/**/*
+          draft: false
+          prerelease: ${{ contains(needs.validate.outputs.version, '-') }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   update-docs:
     name: Update Documentation
     needs: [validate, create-release]
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: threatflux-threat-detection -> target
+      - name: Install YARA
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libyara-dev yara
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      - name: Generate documentation
+        run: |
+          cargo doc --locked --all-features --no-deps
+          echo '<meta http-equiv="refresh" content="0; url=threatflux_threat_detection">' > target/doc/index.html
 
-    - name: Setup Rust cache
-      uses: Swatinem/rust-cache@v2
-
-    - name: Install YARA
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libyara-dev yara
-
-    - name: Generate documentation
-      run: |
-        cargo doc --all-features --no-deps
-        echo '<meta http-equiv="refresh" content="0; url=threatflux_threat_detection">' > target/doc/index.html
-
-    - name: Deploy to GitHub Pages
-      uses: peaceiris/actions-gh-pages@v3
-      if: github.repository == 'ThreatFlux/threatflux-threat-detection'
-      with:
-        github_token: ${{ secrets.GITHUB_TOKEN }}
-        publish_dir: ./target/doc
-        publish_branch: gh-pages
-        force_orphan: true
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4.1.0
+        if: github.repository == 'ThreatFlux/threatflux-threat-detection'
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: threatflux-threat-detection/target/doc
+          publish_branch: gh-pages
+          force_orphan: true
+defaults:
+  run:
+    shell: bash
+    working-directory: threatflux-threat-detection

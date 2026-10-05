@@ -6,7 +6,7 @@
 [![Security Audit](https://github.com/ThreatFlux/file-scanner/workflows/Security%20Audit/badge.svg)](https://github.com/ThreatFlux/file-scanner/actions)
 [![Performance](https://github.com/ThreatFlux/file-scanner/workflows/Performance%20Benchmarks/badge.svg)](https://github.com/ThreatFlux/file-scanner/actions)
 [![codecov](https://codecov.io/github/ThreatFlux/file-scanner/graph/badge.svg?token=rcBpaFdgV3)](https://codecov.io/github/ThreatFlux/file-scanner)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.97.1%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-blue.svg)](https://modelcontextprotocol.io)
@@ -38,10 +38,10 @@ File Scanner leverages specialized libraries available on crates.io:
 
 | Library | Version | Purpose | crates.io |
 |---------|---------|---------|-----------|
-| **threatflux-hashing** | 0.1.8 | High-performance cryptographic hash calculations | [![Crates.io](https://img.shields.io/crates/v/threatflux-hashing.svg)](https://crates.io/crates/threatflux-hashing) |
-| **threatflux-string-analysis** | 0.1.1 | String extraction and pattern analysis | [![Crates.io](https://img.shields.io/crates/v/threatflux-string-analysis.svg)](https://crates.io/crates/threatflux-string-analysis) |
-| **threatflux-cache** | 0.1.8 | Flexible caching system with multiple backends | [![Crates.io](https://img.shields.io/crates/v/threatflux-cache.svg)](https://crates.io/crates/threatflux-cache) |
-| **threatflux-binary-analysis** | 0.1.1 | Binary format parsing (PE/ELF/Mach-O) | [![Crates.io](https://img.shields.io/crates/v/threatflux-binary-analysis.svg)](https://crates.io/crates/threatflux-binary-analysis) |
+| **threatflux-hashing** | 1.7.0 | High-performance cryptographic hash calculations | [![Crates.io](https://img.shields.io/crates/v/threatflux-hashing.svg)](https://crates.io/crates/threatflux-hashing) |
+| **threatflux-string-analysis** | 0.2.2 | String extraction and pattern analysis | [![Crates.io](https://img.shields.io/crates/v/threatflux-string-analysis.svg)](https://crates.io/crates/threatflux-string-analysis) |
+| **threatflux-cache** | 0.2.0 | Flexible caching system with multiple backends | [![Crates.io](https://img.shields.io/crates/v/threatflux-cache.svg)](https://crates.io/crates/threatflux-cache) |
+| **threatflux-binary-analysis** | 0.3.0 | Binary format parsing (PE/ELF/Mach-O) | [![Crates.io](https://img.shields.io/crates/v/threatflux-binary-analysis.svg)](https://crates.io/crates/threatflux-binary-analysis) |
 
 ## 🚀 Quick Start
 
@@ -51,10 +51,10 @@ File Scanner leverages specialized libraries available on crates.io:
 # Clone and build
 git clone https://github.com/ThreatFlux/file-scanner.git
 cd file-scanner
-cargo build --release
+cargo build --release --locked
 
 # Or install directly from source
-cargo install --path .
+cargo install --path . --locked
 ```
 
 ### Basic Usage
@@ -213,6 +213,11 @@ The project uses comprehensive GitHub Actions workflows:
 
 ## 🤝 Contributing
 
+Development uses Rust **1.99.0**; the consumer MSRV remains **1.97.1**.
+The root workspace and the separate `threatflux-package-security` crate are both
+checked by `make ci-local`. Workflow validation uses actionlint 1.7.12 and
+yamllint 1.38.0; set `ACTIONLINT_BIN` and `YAMLLINT_BIN` for tools outside `PATH`.
+
 We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
 
 ```bash
@@ -223,19 +228,21 @@ cd file-scanner
 # Create feature branch
 git checkout -b feature/amazing-feature
 
-# Install pre-commit hooks
-pip install pre-commit
-pre-commit install
+# Install repository hooks
+make hooks-install
 
-# Make changes and test
-cargo test
-cargo fmt
-cargo clippy
+# Make changes and run the full local gate
+make ci-local
 
 # Submit pull request
 ```
 
 ## 🔒 Security
+
+Source builds and Docker images use a documented temporary YARA-X patch with
+patched stable Wasmtime. Cargo does not propagate this root override to published
+library consumers; see the [patch provenance and distribution limits](vendor/README.md).
+The existing RSA advisory exception remains limited to public-key verification.
 
 For security vulnerabilities, please see our [Security Policy](SECURITY.md) or email security@threatflux.com.
 

@@ -612,12 +612,16 @@ impl McpTransportServer {
                                     )
                                     .await
                                     {
-                                        let _ = self.string_tracker.track_strings_from_results(
-                                            strings,
-                                            file_path,
-                                            &hashes.sha256,
-                                            "analyze_file",
-                                        );
+                                        if let Err(error) =
+                                            self.string_tracker.track_strings_from_results(
+                                                strings,
+                                                file_path,
+                                                &hashes.sha256,
+                                                "analyze_file",
+                                            )
+                                        {
+                                            eprintln!("String indexing skipped values outside tracker bounds: {error}");
+                                        }
                                     }
                                 }
 
@@ -1226,7 +1230,10 @@ async fn search_strings(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(100) as usize;
 
-    let results = state.string_tracker.search_strings(query, limit);
+    let results = state
+        .string_tracker
+        .try_search_strings(query, limit)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(AxumJson(json!({
         "results": results,
         "count": results.len()
@@ -1257,7 +1264,10 @@ async fn handle_strings_related(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(20) as usize;
 
-    let related = state.string_tracker.get_related_strings(value, limit);
+    let related = state
+        .string_tracker
+        .try_get_related_strings(value, limit)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(AxumJson(json!({
         "related": related,
         "count": related.len()
@@ -1268,9 +1278,15 @@ async fn handle_strings_filter(
     State(state): State<McpServerState>,
     AxumJson(filter): AxumJson<StringFilter>,
 ) -> Result<AxumJson<Value>, StatusCode> {
-    let stats = state.string_tracker.get_statistics(Some(&filter));
+    let stats = state
+        .string_tracker
+        .try_get_statistics(Some(&filter))
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(AxumJson(json!(stats)))
 }
+
+#[cfg(test)]
+mod tracking_tests;
 
 #[cfg(test)]
 mod tests {

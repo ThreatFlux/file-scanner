@@ -3,7 +3,7 @@
 ## Project Overview
 
 A comprehensive native file scanner written in Rust that provides detailed metadata, hash calculations,
-string extraction, binary analysis, hex dumping, and digital signature verification. Built using Rust 1.96.0
+string extraction, binary analysis, hex dumping, and digital signature verification. Built using Rust 1.99.0
 with modern async capabilities and multiple output formats.
 
 ## Key Features
@@ -132,7 +132,7 @@ All test binaries simulate malicious behaviors including:
 
 ## Development Notes
 
-- Built with the project Rust 1.96.0 toolchain
+- Built with the project Rust 1.99.0 toolchain
 - Uses async processing for hash calculations to improve performance on large files
 - Modular design allows easy extension for new file formats or analysis types
 - Comprehensive error handling with descriptive messages

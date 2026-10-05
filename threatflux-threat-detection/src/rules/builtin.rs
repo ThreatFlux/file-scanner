@@ -22,6 +22,7 @@ pub fn get_builtin_rules() -> Vec<&'static str> {
     Vec::new()
 }
 
+#[cfg(feature = "builtin-rules")]
 const MALWARE_GENERIC_RULE: &str = r#"
 rule Generic_Malware_Indicators
 {
@@ -56,6 +57,7 @@ rule Generic_Malware_Indicators
 }
 "#;
 
+#[cfg(feature = "builtin-rules")]
 const TROJAN_DETECTION_RULE: &str = r#"
 rule Trojan_Behavior_Detection
 {
@@ -90,6 +92,7 @@ rule Trojan_Behavior_Detection
 }
 "#;
 
+#[cfg(feature = "builtin-rules")]
 const RANSOMWARE_DETECTION_RULE: &str = r#"
 rule Ransomware_Detection
 {
@@ -129,6 +132,7 @@ rule Ransomware_Detection
 }
 "#;
 
+#[cfg(feature = "builtin-rules")]
 const APT_DETECTION_RULE: &str = r#"
 rule APT_Techniques_Detection
 {
@@ -166,6 +170,7 @@ rule APT_Techniques_Detection
 }
 "#;
 
+#[cfg(feature = "builtin-rules")]
 const CRYPTOMINER_DETECTION_RULE: &str = r#"
 rule Cryptominer_Detection
 {
@@ -199,6 +204,7 @@ rule Cryptominer_Detection
 }
 "#;
 
+#[cfg(feature = "builtin-rules")]
 const INFOSTEALER_DETECTION_RULE: &str = r#"
 rule InfoStealer_Detection
 {
@@ -236,6 +242,7 @@ rule InfoStealer_Detection
 }
 "#;
 
+#[cfg(feature = "builtin-rules")]
 const BACKDOOR_DETECTION_RULE: &str = r#"
 rule Backdoor_Detection
 {
@@ -269,6 +276,7 @@ rule Backdoor_Detection
 }
 "#;
 
+#[cfg(feature = "builtin-rules")]
 const WEBSHELL_DETECTION_RULE: &str = r#"
 rule WebShell_Detection
 {
@@ -302,6 +310,7 @@ rule WebShell_Detection
 }
 "#;
 
+#[cfg(feature = "builtin-rules")]
 const EXPLOIT_DETECTION_RULE: &str = r#"
 rule Exploit_Detection
 {
@@ -340,6 +349,7 @@ rule Exploit_Detection
 }
 "#;
 
+#[cfg(feature = "builtin-rules")]
 const PACKER_DETECTION_RULE: &str = r#"
 rule Packer_Detection
 {

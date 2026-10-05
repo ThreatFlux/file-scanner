@@ -3,43 +3,23 @@
 
 [graph]
 # The path where the output will be written to, this path is relative to `cwd` used by the command line.
-output-file = "graph.txt"
+targets = []
 
 [advisories]
 # The path where the advisory database is cloned/fetched into
 db-path = "~/.cargo/advisory-db"
 # The url(s) of the advisory databases to use
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# The lint level for security vulnerabilities
-vulnerability = "deny"
-# The lint level for unmaintained crates
-unmaintained = "warn"
-# The lint level for crates that have been yanked from their source registry
-yanked = "warn"
-# The lint level for crates with security notices. Note that as of
-# 2019-12-17 there are no security notice advisories in
-# https://github.com/rustsec/advisory-db
-notice = "warn"
-# A list of advisory IDs to ignore. Note that ignored advisories will still
-# output a note when they are encountered.
-ignore = [
-    # Example: "RUSTSEC-2020-0001",
-]
-# Threshold for security vulnerabilities, any vulnerability with a CVSS score
-# lower than this value will be ignored. Note that ignored advisories will still
-# output a note when they are encountered.
-# * None (default) - CVSS Score 0.0
-# * Low - CVSS Score 0.1 - 3.9
-# * Medium - CVSS Score 4.0 - 6.9  
-# * High - CVSS Score 7.0 - 8.9
-# * Critical - CVSS Score 9.0 - 10.0
-severity-threshold = "low"
+# Root workspace policy is authoritative for this local workspace member.
+# Keep only the root workspace's existing maintenance/public-verification exceptions.
+# Existing RSA exemption: RUSTSEC-2023-0071 has no patched stable release.
+# YARA-X uses RsaPublicKey/PKCS#1 signature verification only; it never loads
+# private keys or invokes RSA signing/decryption (vendor source crypto.rs).
+# Reassess this exemption if upstream or scanner usage adds private operations.
+ignore = ["RUSTSEC-2025-0141", "RUSTSEC-2023-0071"]
 
 [licenses]
-# The lint level for crates which do not have a detectable license
-unlicensed = "deny"
-# List of explicitly allowed licenses
-# See https://spdx.org/licenses/ for list of possible licenses
+version = 2
 allow = [
     "MIT",
     "Apache-2.0",
@@ -47,47 +27,22 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
-    "Unicode-DFS-2016",
+    "Unicode-3.0",
     "CC0-1.0",
-]
-# List of explicitly disallowed licenses
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "AGPL-1.0",
-    "AGPL-3.0",
-    "LGPL-2.0",
-    "LGPL-2.1",
-    "LGPL-3.0",
+    "MIT-0",
+    "Unlicense",
+    "BSL-1.0",
+    "LGPL-2.1-or-later",
+    "Zlib",
+    "bzip2-1.0.6",
     "MPL-2.0",
+    "CDLA-Permissive-2.0",
 ]
-# Lint level for when multiple versions of the same license are detected
-copyleft = "warn"
-# The confidence threshold for detecting a license from a license text.
-# The higher the value, the more closely the license text must match the
-# canonical license text of a valid SPDX license file.
-# [possible values: any between 0.0 and 1.0].
-confidence-threshold = 0.8
-# Allow 1 or more licenses on a per-crate basis, so that particular licenses
-# aren't accepted for every possible crate as with the normal allow list
 exceptions = [
-    # Each entry is the crate and version constraint, and its the license
-    # { allow = ["Zlib"], name = "adler32", version = "*" },
+    # Allow specific packages with incompatible licenses if necessary
+    # { allow = ["ISC"], name = "package-name" },
 ]
-
-[[licenses.clarify]]
-# The name of the crate the clarification applies to
-name = "ring"
-# The optional version constraint for the crate  
-version = "*"
-# The SPDX expression for the license requirements of the crate
-expression = "MIT AND ISC AND OpenSSL"
-# One or more files in the crate's source used as the "source of truth" for
-# the license expression. If the files are missing, or do not contain the
-# referenced license text, the clarification will fail
-license-files = [
-    { path = "LICENSE", hash = 0xbd0eed23 }
-]
+confidence-threshold = 0.8
 
 [bans]
 # Lint level for when multiple versions of the same crate are detected

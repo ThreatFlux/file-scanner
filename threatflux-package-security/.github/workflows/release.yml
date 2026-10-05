@@ -19,6 +19,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+  CARGO_TARGET_DIR: ${{ github.workspace }}/threatflux-package-security/target
 jobs:
   # Validate release conditions
   validate-release:
@@ -27,33 +28,40 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
-      
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Determine version
         id: version
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            VERSION="${{ github.event.inputs.version }}"
-            IS_PRERELEASE="${{ github.event.inputs.prerelease }}"
+          if [[ "${WORKFLOW_VALUE_0}" == "workflow_dispatch" ]]; then
+            VERSION="${WORKFLOW_VALUE_1}"
+            IS_PRERELEASE="${WORKFLOW_VALUE_2}"
           else
-            VERSION="${{ github.ref_name }}"
+            VERSION="${WORKFLOW_VALUE_3}"
             IS_PRERELEASE="false"
             if [[ "$VERSION" =~ -[a-zA-Z] ]]; then
               IS_PRERELEASE="true"
             fi
           fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+          {
+            echo "version=$VERSION"
+            echo "is_prerelease=$IS_PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
           echo "Release version: $VERSION (prerelease: $IS_PRERELEASE)"
 
+        env:
+          WORKFLOW_VALUE_0: ${{ github.event_name }}
+          WORKFLOW_VALUE_1: ${{ github.event.inputs.version }}
+          WORKFLOW_VALUE_2: ${{ github.event.inputs.prerelease }}
+          WORKFLOW_VALUE_3: ${{ github.ref_name }}
       - name: Validate version format
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${WORKFLOW_VALUE_0}"
           if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.-]+)?$ ]]; then
             echo "Invalid version format: $VERSION"
             echo "Expected format: v1.2.3 or v1.2.3-alpha.1"
@@ -61,6 +69,8 @@ jobs:
           fi
 
   # Run full test suite before release
+        env:
+          WORKFLOW_VALUE_0: ${{ steps.version.outputs.version }}
   pre-release-tests:
     name: Pre-Release Tests
     needs: validate-release
@@ -71,51 +81,55 @@ jobs:
     name: Build Library Package
     needs: [validate-release, pre-release-tests]
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: release-package
 
+          workspaces: threatflux-package-security -> target
       - name: Build library
-        run: cargo build --all-features --release
+        run: |
+          cargo build --locked --all-features --release
+
 
       - name: Package library crate
-        run: cargo package --allow-dirty
+        run: |
+          cargo package --allow-dirty
+
 
       - name: Create source archive
         run: |
           mkdir -p release-package
           cp target/package/threatflux-package-security-*.crate release-package/
-          cp README.md CHANGELOG.md LICENSE* release-package/ 2>/dev/null || true
-          
-          VERSION="${{ needs.validate-release.outputs.version }}"
-          CARGO_VERSION="${VERSION#v}"
-          
-          cd release-package
-          tar -czf threatflux-package-security-${{ needs.validate-release.outputs.version }}-src.tar.gz *
-          cd ..
-          mv release-package/threatflux-package-security-${{ needs.validate-release.outputs.version }}-src.tar.gz .
+          for file in README.md CHANGELOG.md LICENSE*; do
+            if [ -f "$file" ]; then cp "$file" release-package/; fi
+          done
+          tar -czf "threatflux-package-security-${VERSION}-src.tar.gz" -C release-package .
 
+        env:
+          VERSION: ${{ needs.validate-release.outputs.version }}
       - name: Generate checksums
         run: |
-          shasum -a 256 threatflux-package-security-${{ needs.validate-release.outputs.version }}-src.tar.gz > threatflux-package-security-${{ needs.validate-release.outputs.version }}-src.tar.gz.sha256
+          shasum -a 256 "threatflux-package-security-${WORKFLOW_VALUE_0}-src.tar.gz" > "threatflux-package-security-${WORKFLOW_VALUE_0}-src.tar.gz.sha256"
 
+        env:
+          WORKFLOW_VALUE_0: ${{ needs.validate-release.outputs.version }}
       - name: Upload release package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: library-package
           path: |
-            threatflux-package-security-${{ needs.validate-release.outputs.version }}-src.tar.gz
-            threatflux-package-security-${{ needs.validate-release.outputs.version }}-src.tar.gz.sha256
-            target/package/threatflux-package-security-*.crate
+            threatflux-package-security/threatflux-package-security-${{ needs.validate-release.outputs.version }}-src.tar.gz
+            threatflux-package-security/threatflux-package-security-${{ needs.validate-release.outputs.version }}-src.tar.gz.sha256
+            threatflux-package-security/target/package/threatflux-package-security-*.crate
           retention-days: 5
 
   # Generate changelog
@@ -125,10 +139,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       changelog: ${{ steps.changelog.outputs.changelog }}
-      
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
 
@@ -136,29 +150,29 @@ jobs:
         id: changelog
         run: |
           # Get the previous tag
-          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | head -2 | tail -1 || echo "")
-          CURRENT_TAG="${{ needs.validate-release.outputs.version }}"
-          
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | awk '/^v[0-9]+\.[0-9]+\.[0-9]+/ {n++; if (n == 2) print}')
+          CURRENT_TAG="${WORKFLOW_VALUE_0}"
+
           echo "Generating changelog from $PREVIOUS_TAG to $CURRENT_TAG"
-          
+
           # Generate changelog content
           CHANGELOG="## Changes in $CURRENT_TAG\n\n"
-          
+
           if [[ -n "$PREVIOUS_TAG" ]]; then
             # Get commits since last tag
-            COMMITS=$(git log --pretty=format:"- %s" "$PREVIOUS_TAG..HEAD" | head -50)
+            COMMITS=$(git log -n 50 --pretty=format:"- %s" "$PREVIOUS_TAG..HEAD")
             if [[ -n "$COMMITS" ]]; then
               CHANGELOG+="### Commits\n$COMMITS\n\n"
             fi
-            
+
             # Get merged PRs (simplified)
-            PRS=$(git log --pretty=format:"%s" --grep="Merge pull request" "$PREVIOUS_TAG..HEAD" | sed 's/Merge pull request #\([0-9]*\) from .*/- PR #\1/' | head -20)
+            PRS=$(git log -n 20 --pretty=format:"%s" --grep="Merge pull request" "$PREVIOUS_TAG..HEAD" | sed 's/Merge pull request #\([0-9]*\) from .*/- PR #\1/')
             if [[ -n "$PRS" ]]; then
               CHANGELOG+="### Pull Requests\n$PRS\n\n"
             fi
-            
+
             # Full changeset link
-            CHANGELOG+="**Full Changeset**: https://github.com/${{ github.repository }}/compare/$PREVIOUS_TAG...$CURRENT_TAG"
+            CHANGELOG+="**Full Changeset**: https://github.com/${WORKFLOW_VALUE_1}/compare/$PREVIOUS_TAG...$CURRENT_TAG"
           else
             CHANGELOG+="Initial release of ThreatFlux Package Security Library\n\n"
             CHANGELOG+="### Features\n"
@@ -171,22 +185,26 @@ jobs:
             CHANGELOG+="- Async processing for high performance\n"
             CHANGELOG+="- Comprehensive vulnerability database with auto-updates\n"
           fi
-          
+
           # Save changelog to file and output
           echo -e "$CHANGELOG" > RELEASE_CHANGELOG.md
-          
+
           # For GitHub output, we need to handle multiline properly
           {
             echo 'changelog<<EOF'
             echo -e "$CHANGELOG"
             echo 'EOF'
-          } >> $GITHUB_OUTPUT
+          } >> "$GITHUB_OUTPUT"
 
+        env:
+          WORKFLOW_VALUE_0: ${{ needs.validate-release.outputs.version }}
+          WORKFLOW_VALUE_1: ${{ github.repository }}
       - name: Upload changelog
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: changelog
-          path: RELEASE_CHANGELOG.md
+          path: |
+            threatflux-package-security/RELEASE_CHANGELOG.md
           retention-days: 5
 
   # Create GitHub release
@@ -196,27 +214,27 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           merge-multiple: true
 
+          path: threatflux-package-security/
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
         with:
           tag_name: ${{ needs.validate-release.outputs.version }}
           name: ${{ needs.validate-release.outputs.version }}
           body: ${{ needs.generate-changelog.outputs.changelog }}
           prerelease: ${{ needs.validate-release.outputs.is_prerelease == 'true' }}
           files: |
-            threatflux-package-security-*.tar.gz
-            threatflux-package-security-*.tar.gz.sha256
-            threatflux-package-security-*.crate
+            threatflux-package-security/threatflux-package-security-*.tar.gz
+            threatflux-package-security/threatflux-package-security-*.tar.gz.sha256
+            threatflux-package-security/target/package/threatflux-package-security-*.crate
           generate_release_notes: true
           append_body: true
         env:
@@ -228,56 +246,62 @@ jobs:
     needs: [validate-release, create-release]
     runs-on: ubuntu-latest
     if: needs.validate-release.outputs.is_prerelease == 'false'
-    
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Install cargo-edit
-        run: cargo install cargo-edit
+        run: |
+          cargo install cargo-edit --locked --version 0.13.13
+
 
       - name: Update library version
         run: |
-          VERSION="${{ needs.validate-release.outputs.version }}"
+          VERSION="${WORKFLOW_VALUE_0}"
           # Remove 'v' prefix for cargo
           CARGO_VERSION="${VERSION#v}"
-          
+
           # Update package version
           cargo set-version "$CARGO_VERSION"
 
+        env:
+          WORKFLOW_VALUE_0: ${{ needs.validate-release.outputs.version }}
       - name: Commit version update
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add Cargo.toml
-          git diff --staged --quiet || git commit -m "chore: bump version to ${{ needs.validate-release.outputs.version }}"
+          git diff --staged --quiet || git commit -m "chore: bump version to ${WORKFLOW_VALUE_0}"
           git push
 
   # Publish to crates.io (optional, requires API token)
+        env:
+          WORKFLOW_VALUE_0: ${{ needs.validate-release.outputs.version }}
   publish-crates:
     name: Publish to Crates.io
     needs: [validate-release, create-release]
     runs-on: ubuntu-latest
     if: needs.validate-release.outputs.is_prerelease == 'false' && vars.PUBLISH_TO_CRATES == 'true'
-    
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Publish library to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          echo "Publishing threatflux-package-security crate..."
-          cargo publish --allow-dirty || echo "Failed to publish crate (may already exist)"
+          cargo publish --locked --allow-dirty
 
   # Notify on release completion
   notify-completion:
@@ -285,20 +309,33 @@ jobs:
     needs: [validate-release, create-release, update-version]
     runs-on: ubuntu-latest
     if: always()
-    
+
     steps:
       - name: Release Summary
         run: |
-          echo "# Release Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** ${{ needs.validate-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Prerelease:** ${{ needs.validate-release.outputs.is_prerelease }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Release Status:** ${{ needs.create-release.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Release URL:** https://github.com/${{ github.repository }}/releases/tag/${{ needs.validate-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          
-          if [[ "${{ needs.create-release.result }}" == "success" ]]; then
-            echo "✅ Release created successfully!" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "# Release Summary"
+            echo ""
+            echo "**Version:** ${WORKFLOW_VALUE_0}"
+            echo "**Prerelease:** ${WORKFLOW_VALUE_1}"
+            echo "**Release Status:** ${WORKFLOW_VALUE_2}"
+            echo ""
+            echo "**Release URL:** https://github.com/${WORKFLOW_VALUE_3}/releases/tag/${WORKFLOW_VALUE_0}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${WORKFLOW_VALUE_2}" == "success" ]]; then
+            echo "✅ Release created successfully!" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "❌ Release creation failed!" >> $GITHUB_STEP_SUMMARY
+            echo "❌ Release creation failed!" >> "$GITHUB_STEP_SUMMARY"
           fi
+        env:
+          WORKFLOW_VALUE_0: ${{ needs.validate-release.outputs.version }}
+          WORKFLOW_VALUE_1: ${{ needs.validate-release.outputs.is_prerelease }}
+          WORKFLOW_VALUE_2: ${{ needs.create-release.result }}
+          WORKFLOW_VALUE_3: ${{ github.repository }}
+    defaults:
+      run:
+        working-directory: .
+defaults:
+  run:
+    shell: bash
+    working-directory: threatflux-package-security

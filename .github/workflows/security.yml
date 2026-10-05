@@ -5,9 +5,11 @@ on:
     # Run every day at 6 AM UTC
     - cron: '0 6 * * *'
   push:
-    branches: [main, develop]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
@@ -18,18 +20,19 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+  CARGO_BUILD_JOBS: 2
 jobs:
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Cache cargo registry
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -41,35 +44,21 @@ jobs:
 
       - name: Install security tools
         run: |
-          cargo install cargo-audit --locked
-          cargo install cargo-deny --locked
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo install cargo-deny --locked --version 0.20.2
 
+      - name: Verify reviewed RSA exception conditions
+        run: python3 scripts/check-rsa-exception.py
       - name: Run cargo audit
         run: |
-          for attempt in 1 2 3; do
-            if cargo audit \
-              --ignore RUSTSEC-2026-0085 \
-              --ignore RUSTSEC-2026-0086 \
-              --ignore RUSTSEC-2026-0087 \
-              --ignore RUSTSEC-2026-0088 \
-              --ignore RUSTSEC-2026-0089 \
-              --ignore RUSTSEC-2026-0091 \
-              --ignore RUSTSEC-2026-0092 \
-              --ignore RUSTSEC-2026-0093 \
-              --ignore RUSTSEC-2026-0094 \
-              --ignore RUSTSEC-2026-0095 \
-              --ignore RUSTSEC-2026-0096 \
-              --ignore RUSTSEC-2026-0222; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            sleep $((attempt * 10))
-          done
+          cargo audit
+          cargo audit --file threatflux-package-security/Cargo.lock
 
       - name: Run cargo deny
-        run: cargo deny check
+        run: |
+          cargo deny --locked --workspace --all-features check
+          cargo deny --locked --manifest-path threatflux-package-security/Cargo.toml --config deny.toml --all-features check
+
 
   dependency-review:
     name: Dependency Review
@@ -77,15 +66,12 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v7.0.1
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Dependency Review
-        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0
         with:
           fail-on-severity: moderate
           license-check: false
-          allow-ghsas: GHSA-m9w2-8782-2946, GHSA-6wgr-89rj-399p, GHSA-jxhv-7h78-9775, GHSA-m758-wjhj-p3jq, GHSA-jhxm-h53p-jm7w, GHSA-q49f-xg75-m9xw, GHSA-f984-pcp8-v2p7, GHSA-394w-hwhg-8vgm, GHSA-qqfj-4vcm-26hv, GHSA-xx5w-cvp6-jv83, GHSA-hx6p-xpx3-jvvv
-
   codeql-analysis:
     name: CodeQL Analysis
     runs-on: ubuntu-latest
@@ -99,85 +85,118 @@ jobs:
         language: ['rust']
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7.0.1
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Verify reviewed CodeQL source conditions and guard tests
+        run: make codeql-review-check
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.6
+        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           languages: ${{ matrix.language }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libssl-dev
       - name: Build project
-        run: cargo build --release
+        run: |
+          cargo build --workspace --release --all-features --locked
+          cargo build --manifest-path threatflux-package-security/Cargo.toml --release --all-features --locked
+
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4.37.6
+        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           category: "/language:${{matrix.language}}"
+          output: ${{ runner.temp }}/codeql-raw
+          upload: failure-only
+
+      - name: Annotate exact reviewed false positives
+        run: |
+          python3 scripts/codeql-reviewed-findings.py \
+            --input "$RUNNER_TEMP/codeql-raw" --output "$RUNNER_TEMP/codeql-reviewed" \
+            --annotated "$RUNNER_TEMP/codeql-review/annotated" --report "$RUNNER_TEMP/codeql-review/report.json"
+
+      - name: Upload reviewed CodeQL analysis
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          sarif_file: ${{ runner.temp }}/codeql-reviewed
+          category: "/language:${{matrix.language}}"
+          wait-for-processing: true
+
+      - name: Preserve full CodeQL analysis and review evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: codeql-reviewed-analysis-${{ matrix.language }}
+          path: |
+            ${{ runner.temp }}/codeql-raw
+            ${{ runner.temp }}/codeql-review
+          if-no-files-found: error
 
   supply-chain-security:
     name: Supply Chain Security
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Generate SBOM
         run: |
-          cargo install cargo-cyclonedx
-          cargo cyclonedx --format json > sbom.json
+          cargo install cargo-cyclonedx --locked --version 0.5.9
+          cargo cyclonedx --all-features --format json --spec-version 1.5 --override-filename sbom
+          cargo cyclonedx --manifest-path threatflux-package-security/Cargo.toml --all-features --format json --spec-version 1.5 --override-filename sbom
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: sbom
-          path: sbom.json
+          path: '**/sbom.json'
 
+          if-no-files-found: error
       - name: Validate SBOM
         run: |
-          # Skip external validation for now - the cargo-cyclonedx tool already validates during generation
-          # The SBOM is generated successfully and uploaded as an artifact
-          echo "SBOM generated successfully by cargo-cyclonedx"
-          echo "SBOM size: $(wc -c < sbom.json) bytes"
-          echo "SBOM preview:"
-          head -20 sbom.json
-
-          # Basic JSON validation
-          if jq empty sbom.json 2>/dev/null; then
-            echo "✓ SBOM is valid JSON"
-          else
-            echo "⚠ SBOM JSON validation failed, but continuing"
-            exit 0
-          fi
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+          files = [p for p in Path('.').rglob('sbom.json') if 'target' not in p.parts and '.git' not in p.parts]
+          assert files, 'No generated SBOMs'
+          for path in files:
+              doc = json.loads(path.read_text())
+              assert doc['bomFormat'] == 'CycloneDX', path
+              assert isinstance(doc['components'], list) and doc['components'], path
+              print(f'{path}: {len(doc["components"])} components')
+          PYCODE
 
   secrets-scan:
     name: Secrets Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
 
       - name: Determine scan strategy
         id: scan-strategy
         run: |
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/${{ github.event.repository.default_branch }}" ]; then
+          if [ "${WORKFLOW_VALUE_0}" = "push" ] && [ "${WORKFLOW_VALUE_1}" = "refs/heads/${WORKFLOW_VALUE_2}" ]; then
             # For pushes to main branch, scan the last commit only
             {
               echo "strategy=single-commit"
               echo "base=$(git rev-parse HEAD~1)"
               echo "head=HEAD"
             } >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+          elif [ "${WORKFLOW_VALUE_0}" = "pull_request" ]; then
             # For PRs, scan the difference
             {
               echo "strategy=diff"
-              echo "base=${{ github.event.pull_request.base.sha }}"
-              echo "head=${{ github.event.pull_request.head.sha }}"
+              echo "base=${WORKFLOW_VALUE_3}"
+              echo "head=${WORKFLOW_VALUE_4}"
             } >> "$GITHUB_OUTPUT"
           else
             # Fallback: scan current HEAD only
@@ -188,13 +207,20 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run TruffleHog OSS secret scan
-        uses: trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11 # v3.96.0
+        env:
+          WORKFLOW_VALUE_0: ${{ github.event_name }}
+          WORKFLOW_VALUE_1: ${{ github.ref }}
+          WORKFLOW_VALUE_2: ${{ github.event.repository.default_branch }}
+          WORKFLOW_VALUE_3: ${{ github.event.pull_request.base.sha }}
+          WORKFLOW_VALUE_4: ${{ github.event.pull_request.head.sha }}
+      - name: Report informational verified TruffleHog findings
+        uses: trufflesecurity/trufflehog@4dd8831c5f12599465d4d45c3c447b4018a34c85  # v3.97.9
         with:
           path: ./
           base: ${{ steps.scan-strategy.outputs.base }}
           head: ${{ steps.scan-strategy.outputs.head }}
-          extra_args: --debug --only-verified
+          extra_args: --log-level=2 --results=verified
+          version: 3.97.9@sha256:52e67fef4d054ecff5c2ce4b4ae376626d1ef54aa0898b53cac19c25e92e14db
         continue-on-error: true
 
   semgrep-scan:
@@ -202,23 +228,29 @@ jobs:
     runs-on: ubuntu-latest
     if: github.actor != 'dependabot[bot]'
     steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Run Semgrep
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Report informational Semgrep findings
         id: semgrep
-        uses: semgrep/semgrep-action@713efdd345f3035192eaa63f56867b88e63e4e5d # v1
-        with:
-          config: >-
-            p/security-audit
-            p/secrets
-            p/owasp-top-ten
-            p/rust
-        continue-on-error: true
-
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/semgrep"
+          "${RUNNER_TEMP}/semgrep/bin/python" -m pip install "semgrep==1.179.0"
+          scan_status=0
+          "${RUNNER_TEMP}/semgrep/bin/semgrep" scan --config p/security-audit --config p/secrets --config p/owasp-top-ten --config p/rust --error --json --output semgrep-results.json . || scan_status=$?
+          if [ "$scan_status" -gt 1 ]; then exit "$scan_status"; fi
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('semgrep-results.json').read_text())
+          assert isinstance(report.get('results'), list), 'Semgrep scan returned no results array'
+          print(f"Informational Semgrep findings: {len(report['results'])}")
+          PYCODE
       - name: Upload Semgrep results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: semgrep-results
           path: semgrep-results.json
         continue-on-error: true
+defaults:
+  run:
+    shell: bash

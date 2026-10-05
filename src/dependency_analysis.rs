@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::function_analysis::SymbolTable;
+use crate::function_analysis::{ImportInfo, SymbolTable};
 use crate::strings::ExtractedStrings;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -195,6 +195,22 @@ pub struct DependencyAnalyzer {
     license_detector: LicenseDetector,
 }
 
+const SYSTEM_LIBRARIES: &[&str] = &[
+    "kernel32",
+    "user32",
+    "advapi32",
+    "ntdll",
+    "msvcrt",
+    "libc",
+    "libm",
+    "libpthread",
+    "libdl",
+    "ld-linux",
+    "libsystem",
+    "libobjc",
+    "corefoundation",
+];
+
 struct VulnerabilityDatabase {
     known_vulnerabilities: HashMap<String, Vec<KnownVulnerability>>,
 }
@@ -322,7 +338,7 @@ impl DependencyAnalyzer {
                 vulnerabilities,
                 license,
                 source: DependencySource::Import,
-                is_system_library: self.is_system_library(&import.name),
+                is_system_library: self.import_is_system_library(import),
                 imported_functions: vec![import.name.clone()],
             });
         }
@@ -465,26 +481,32 @@ impl DependencyAnalyzer {
     }
 
     fn is_system_library(&self, name: &str) -> bool {
-        let system_libs = vec![
-            "kernel32",
-            "user32",
-            "advapi32",
-            "ntdll",
-            "msvcrt", // Windows
-            "libc",
-            "libm",
-            "libpthread",
-            "libdl",
-            "ld-linux", // Linux
-            "libSystem",
-            "libobjc",
-            "CoreFoundation", // macOS
-        ];
-
         let lower_name = name.to_lowercase();
-        system_libs
-            .iter()
-            .any(|&lib| lower_name.contains(&lib.to_lowercase()))
+        SYSTEM_LIBRARIES.iter().any(|&lib| lower_name.contains(lib))
+    }
+
+    fn import_is_system_library(&self, import: &ImportInfo) -> bool {
+        import
+            .library
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .map_or_else(
+                || self.is_system_library(&import.name),
+                Self::is_system_library_file_name,
+            )
+    }
+
+    fn is_system_library_file_name(name: &str) -> bool {
+        let file_name = name
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(name)
+            .to_lowercase();
+        SYSTEM_LIBRARIES.iter().any(|library| {
+            file_name
+                .strip_prefix(library)
+                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(['.', '-']))
+        })
     }
 
     fn is_common_file(&self, name: &str) -> bool {

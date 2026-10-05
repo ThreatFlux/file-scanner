@@ -1,6 +1,7 @@
 CARGO ?= cargo
 RUST_MSRV ?= 1.97.1
-RUST_TOOLCHAIN ?= 1.97.1
+RUST_TOOLCHAIN ?= 1.99.0
+MSRV_TARGET_DIR ?= $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR)/msrv,target/msrv)
 BINARY_NAME ?= file-scanner
 BINARY_PACKAGE ?= file-scanner
 SBOM_MANIFEST_PATH ?= Cargo.toml
@@ -8,19 +9,33 @@ DOCKER_IMAGE ?= threatflux/file-scanner
 DOCKER_TAG ?= latest
 
 # Define all ThreatFlux libraries
-LIBRARIES := threatflux-hashing threatflux-string-analysis threatflux-cache threatflux-binary-analysis threatflux-threat-detection threatflux-package-security
+LIBRARIES := threatflux-threat-detection threatflux-package-security
 
 .PHONY: all help init build test test-parallel test-unit test-hash test-mcp test-analysis test-integration test-legacy install clean run-debug run-release docker-build docker-run docker-run-http lint fmt check deps update security-audit dev dev-full ci ci-full prepare-release coverage coverage-html setup-optimization libs-% parallel-% \
          fmt-check test-no-features test-mcp-features build-examples test-doc doc-check doc-links \
          deny outdated security-geiger security-supply-chain semver-check feature-test feature-test-full \
-         msrv msrv-install security-enhanced ci-local validate analyze examples release-prep docs
+         msrv msrv-install security-enhanced ci-local validate analyze examples release-prep docs \
+         hooks-install test-all test-package-security lint-package-security bench-check workflow-check codeql-review-check
 
 # Default target
 all: setup-optimization fmt lint build test security-audit
 	@echo "✅ All checks passed!"
 
 # CI simulation - matches GitHub Actions CI workflow
-ci-local: fmt-check lint build test test-mcp security-audit
+ci-local:
+	$(MAKE) fmt-check
+	$(MAKE) lint
+	$(MAKE) lint-package-security
+	$(MAKE) build
+	$(MAKE) test-all
+	$(MAKE) feature-test
+	$(MAKE) doc-check
+	$(MAKE) bench-check
+	$(MAKE) msrv
+	$(MAKE) security-audit
+	$(MAKE) codeql-review-check
+	$(MAKE) deny
+	$(MAKE) workflow-check
 	@echo "✅ CI checks passed!"
 
 # Full validation (everything)
@@ -42,8 +57,8 @@ help:
 	@echo "  clean         - Clean build artifacts"
 	@echo ""
 	@echo "TEST COMMANDS (OPTIMIZED):"
-	@echo "  test          - Run fast unit tests (~2s, 70% faster)"
-	@echo "  test-parallel - Run comprehensive parallel tests (~60s)"
+	@echo "  test          - Run fast unit tests"
+	@echo "  test-parallel - Run comprehensive workspace tests"
 	@echo "  test-unit     - Run unit tests only"
 	@echo "  test-hash     - Run hash tests"
 	@echo "  test-mcp      - Run MCP tests"
@@ -98,7 +113,8 @@ init:
 	@echo "Initializing project..."
 	rustup toolchain install $(RUST_TOOLCHAIN)
 	rustup component add --toolchain $(RUST_TOOLCHAIN) clippy rustfmt llvm-tools-preview
-	$(CARGO) +$(RUST_TOOLCHAIN) fetch
+	$(CARGO) +$(RUST_TOOLCHAIN) fetch --locked
+	$(CARGO) +$(RUST_TOOLCHAIN) fetch --locked --manifest-path threatflux-package-security/Cargo.toml
 	@echo "Project initialized successfully!"
 
 # Build debug version
@@ -107,7 +123,7 @@ build:
 	@if command -v sccache >/dev/null 2>&1; then \
 		export RUSTC_WRAPPER=sccache; \
 	fi; \
-	cargo build
+	$(CARGO) build --locked --workspace --all-features
 
 # Build release version
 release:
@@ -115,7 +131,7 @@ release:
 	@if command -v sccache >/dev/null 2>&1; then \
 		export RUSTC_WRAPPER=sccache; \
 	fi; \
-	cargo build --release
+	$(CARGO) build --locked --release --workspace --all-features
 
 # Run tests (fast unit tests)
 test:
@@ -151,25 +167,56 @@ test-integration:
 # Legacy test command for compatibility
 test-legacy:
 	@echo "Running legacy test command..."
-	cargo test --all-features
+	$(CARGO) test --locked --workspace --all-features
 
 # Test without features
 test-no-features:
 	@echo "🧪 Running tests without features..."
-	@cargo test --no-default-features
+	@$(CARGO) test --locked --workspace --no-default-features
 	@echo "✅ Tests without features passed"
 
-# Test with MCP features
-test-mcp-features:
-	@echo "🧪 Testing MCP features..."
-	@cargo test --features "mcp"
-	@echo "✅ MCP feature tests passed"
+# MCP is built into the root package; retain the old target as an alias.
+test-mcp-features: test-mcp
+	@echo "✅ MCP tests passed"
+
+# Full suites include the separately excluded package-security workspace.
+test-all:
+	$(CARGO) test --locked --workspace --all-features
+	$(MAKE) test-package-security
+
+test-package-security:
+	$(CARGO) test --locked --manifest-path threatflux-package-security/Cargo.toml --all-features
+
+feature-test:
+	$(CARGO) check --locked -p threatflux-threat-detection --lib --no-default-features
+	$(CARGO) check --locked -p threatflux-threat-detection --lib --no-default-features --features yara-engine
+	$(CARGO) check --locked -p threatflux-threat-detection --lib --no-default-features --features pattern-matching
+	$(CARGO) test --locked -p threatflux-threat-detection --no-default-features
+	$(CARGO) test --locked -p threatflux-threat-detection --no-default-features --features yara-engine
+	$(CARGO) test --locked -p threatflux-threat-detection --no-default-features --features pattern-matching
+	$(CARGO) test --locked --manifest-path threatflux-package-security/Cargo.toml --no-default-features
+
+feature-test-full: test-all feature-test
+
+hooks-install:
+	./scripts/install-hooks.sh
+
+bench-check:
+	$(CARGO) check --locked --workspace --all-features --benches
+	$(CARGO) check --locked --manifest-path threatflux-package-security/Cargo.toml --all-features --benches
+
+workflow-check:
+	./scripts/check-workflows.sh
+
+codeql-review-check:
+	python3 scripts/codeql-reviewed-findings.py --check-sources
+	python3 -m unittest discover -s scripts -p 'test_codeql_*.py'
 
 # Build examples
 build-examples:
 	@echo "🔨 Building examples..."
 	@if [ -d "examples" ]; then \
-		cargo build --examples --all-features; \
+		$(CARGO) build --locked --workspace --examples --all-features; \
 	else \
 		echo "No examples directory found"; \
 	fi
@@ -178,26 +225,26 @@ build-examples:
 # Install binary
 install: release
 	@echo "Installing file-scanner..."
-	cargo install --path .
+	$(CARGO) install --locked --path .
 	@echo "Installed to ~/.cargo/bin/file-scanner"
 
 # Setup optimization tools
 setup-optimization:
 	@echo "Setting up CI/CD optimization tools..."
-	@command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --locked
-	@command -v sccache >/dev/null 2>&1 || cargo install sccache --locked
+	@command -v cargo-llvm-cov >/dev/null 2>&1 || $(CARGO) install cargo-llvm-cov --version 0.9.1 --locked
+	@command -v sccache >/dev/null 2>&1 || $(CARGO) install sccache --version 0.18.0 --locked
 	@echo "Optimization tools installed!"
 
 # Generate code coverage with llvm-cov (faster than tarpaulin)
 coverage:
 	@echo "Generating code coverage..."
-	cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+	$(CARGO) llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
 	@echo "Coverage report: lcov.info"
 
 # Generate HTML coverage report
 coverage-html:
 	@echo "Generating HTML coverage report..."
-	cargo llvm-cov --all-features --workspace --html
+	$(CARGO) llvm-cov --locked --all-features --workspace --html
 	@echo "Coverage report: open target/llvm-cov/html/index.html"
 
 # Clean build artifacts
@@ -240,15 +287,20 @@ docker-run-http:
 # Code quality
 lint:
 	@echo "Running clippy..."
-	cargo clippy -- -D warnings
+	$(CARGO) clippy --locked --workspace --all-features --all-targets -- -D warnings
+
+lint-package-security:
+	$(CARGO) clippy --locked --manifest-path threatflux-package-security/Cargo.toml --all-features --all-targets -- -D warnings
 
 fmt:
 	@echo "Formatting code..."
-	cargo fmt
+	$(CARGO) fmt --all
+	$(CARGO) fmt --manifest-path threatflux-package-security/Cargo.toml --all
 
 fmt-check:
 	@echo "🔍 Checking code format..."
-	@cargo fmt -- --check
+	@$(CARGO) fmt --all -- --check
+	@$(CARGO) fmt --manifest-path threatflux-package-security/Cargo.toml --all -- --check
 	@echo "✅ Format check passed"
 
 msrv-install:
@@ -258,13 +310,15 @@ msrv-install:
 
 msrv: msrv-install
 	@echo "Checking MSRV ($(RUST_MSRV))..."
-	@rustup run $(RUST_MSRV) cargo check --workspace --all-features
+	@CARGO_TARGET_DIR="$(MSRV_TARGET_DIR)" rustup run $(RUST_MSRV) cargo check --locked --workspace --all-features --all-targets
+	@CARGO_TARGET_DIR="$(MSRV_TARGET_DIR)" rustup run $(RUST_MSRV) cargo check --locked --manifest-path threatflux-package-security/Cargo.toml --all-features --all-targets
 	@echo "✅ MSRV check passed"
 
 
 check:
 	@echo "Running cargo check..."
-	cargo check --all-features
+	$(CARGO) check --locked --workspace --all-features --all-targets
+	$(CARGO) check --locked --manifest-path threatflux-package-security/Cargo.toml --all-features --all-targets
 
 # Dependency management
 deps:
@@ -278,13 +332,16 @@ deps-tree:
 # Security audit
 security-audit:
 	@echo "Running security audit..."
-	@command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit
-	cargo audit
+	python3 scripts/check-rsa-exception.py
+	@command -v cargo-audit >/dev/null 2>&1 || $(CARGO) install cargo-audit --version 0.22.2 --locked
+	$(CARGO) audit
+	cd threatflux-package-security && $(CARGO) audit
 
 # Additional security checks
 deny:
 	@echo "🚫 Running cargo-deny checks..."
-	@cargo deny check
+	@$(CARGO) deny --locked --workspace --all-features check
+	@$(CARGO) deny --locked --manifest-path threatflux-package-security/Cargo.toml --config deny.toml --all-features check
 	@echo "✅ Cargo deny checks passed"
 
 outdated:
@@ -308,7 +365,8 @@ security-enhanced: security-audit deny outdated
 # Dependency analysis with cargo-deny
 deny-check:
 	@echo "Running cargo-deny checks..."
-	cargo deny check
+	$(CARGO) deny --locked --workspace --all-features check
+	$(CARGO) deny --locked --manifest-path threatflux-package-security/Cargo.toml --config deny.toml --all-features check
 
 # Check for outdated dependencies
 outdated-check:
@@ -329,14 +387,9 @@ test-programs:
 	@echo "Compiling test programs..."
 	cd test_programs && bash compile_all.sh
 
-# MCP testing
-mcp-test: release
-	@echo "Testing MCP server..."
-	@echo "Testing tools/list..."
-	npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner mcp-stdio --method tools/list
-	@echo ""
-	@echo "Testing get_file_metadata..."
-	npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner mcp-stdio --method tools/call --tool-name get_file_metadata --tool-arg file_path=/bin/ls
+# Bounded, local MCP transport checks; no global npm installation is needed.
+mcp-test:
+	$(CARGO) test --locked --test mcp_transport_stdio_test --test mcp_transport_server_integration_test
 
 # Development workflow (fast)
 dev: fmt lint test
@@ -351,7 +404,7 @@ ci: fmt-check lint test
 	@echo "CI checks passed!"
 
 # CI/CD preparation (comprehensive for full validation)
-ci-full: fmt-check lint test-parallel security-audit
+ci-full: ci-local
 	@echo "Comprehensive CI checks passed!"
 
 # Release workflow
@@ -371,7 +424,8 @@ docs:
 
 doc-check:
 	@echo "📖 Checking documentation..."
-	@RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps --document-private-items
+	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked --workspace --all-features --no-deps --document-private-items
+	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked --manifest-path threatflux-package-security/Cargo.toml --all-features --no-deps --document-private-items
 	@echo "✅ Documentation check passed"
 
 doc-links:
@@ -381,7 +435,8 @@ doc-links:
 
 test-doc:
 	@echo "📚 Testing documentation examples..."
-	@cargo test --doc --all-features
+	@$(CARGO) test --locked --workspace --doc --all-features
+	@$(CARGO) test --locked --manifest-path threatflux-package-security/Cargo.toml --doc --all-features
 	@echo "✅ Doc tests passed"
 
 # Version info
@@ -394,35 +449,35 @@ libs-build:
 	@echo "🔨 Building all ThreatFlux libraries..."
 	@for lib in $(LIBRARIES); do \
 		echo "Building $$lib..."; \
-		cd $$lib && make build && cd ..; \
+		$(MAKE) -C "$$lib" build || exit $$?; \
 	done
 
 libs-test:
 	@echo "🧪 Testing all ThreatFlux libraries..."
 	@for lib in $(LIBRARIES); do \
 		echo "Testing $$lib..."; \
-		cd $$lib && make test && cd ..; \
+		$(MAKE) -C "$$lib" test || exit $$?; \
 	done
 
 libs-fmt:
 	@echo "🎨 Formatting all ThreatFlux libraries..."
 	@for lib in $(LIBRARIES); do \
 		echo "Formatting $$lib..."; \
-		cd $$lib && make fmt && cd ..; \
+		$(MAKE) -C "$$lib" fmt || exit $$?; \
 	done
 
 libs-clippy:
 	@echo "📎 Linting all ThreatFlux libraries..."
 	@for lib in $(LIBRARIES); do \
 		echo "Linting $$lib..."; \
-		cd $$lib && make clippy && cd ..; \
+		$(MAKE) -C "$$lib" clippy || exit $$?; \
 	done
 
 libs-clean:
 	@echo "🧹 Cleaning all ThreatFlux libraries..."
 	@for lib in $(LIBRARIES); do \
 		echo "Cleaning $$lib..."; \
-		cd $$lib && make clean && cd ..; \
+		$(MAKE) -C "$$lib" clean || exit $$?; \
 	done
 
 # Parallel targets for faster execution
@@ -439,18 +494,6 @@ parallel-test:
 	@echo $(LIBRARIES) | tr ' ' '\n' | xargs -I {} -P 6 sh -c 'cd {} && make test'
 
 # Individual library targets
-threatflux-hashing-%:
-	@cd threatflux-hashing && make $*
-
-threatflux-string-analysis-%:
-	@cd threatflux-string-analysis && make $*
-
-threatflux-cache-%:
-	@cd threatflux-cache && make $*
-
-threatflux-binary-analysis-%:
-	@cd threatflux-binary-analysis && make $*
-
 threatflux-threat-detection-%:
 	@cd threatflux-threat-detection && make $*
 
