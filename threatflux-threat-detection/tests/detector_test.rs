@@ -70,9 +70,9 @@ async fn test_detector_creation_with_custom_config() {
 fn test_config_defaults() {
     let config = ThreatDetectorConfig::default();
 
-    assert!(config.enable_yara);
+    assert_eq!(config.enable_yara, cfg!(feature = "yara-engine"));
     assert!(!config.enable_clamav);
-    assert!(config.enable_patterns);
+    assert_eq!(config.enable_patterns, cfg!(feature = "pattern-matching"));
     assert_eq!(config.max_file_size, 100 * 1024 * 1024);
     assert_eq!(config.scan_timeout, 300);
     assert_eq!(config.max_concurrent_scans, 4);

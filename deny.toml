@@ -8,29 +8,14 @@ targets = []
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 ignore = [
-    # Add any advisory IDs to ignore here
-    # paste crate unmaintained warning - not a security issue
-    "RUSTSEC-2024-0436",
-    # bincode is transitively pulled in by yara-x and currently only surfaces as an
-    # unmaintained warning in this workspace.
+    # Existing warning-only exception: YARA-X still uses unmaintained bincode.
+    # The local YARA-X patch resolves the previous Wasmtime advisories.
     "RUSTSEC-2025-0141",
-    # RSA timing attack - waiting for yara-x upstream fix
+    # Existing RSA exemption: RUSTSEC-2023-0071 has no patched stable release.
+    # YARA-X uses RsaPublicKey/PKCS#1 signature verification only; it never loads
+    # private keys or invokes RSA signing/decryption (vendor source crypto.rs).
+    # Reassess this exemption if upstream or scanner usage adds private operations.
     "RUSTSEC-2023-0071",
-    # Temporary accepted risk: file-scanner's default malware-analysis path depends on
-    # yara-x, which currently pins wasmtime 40.0.4. These advisories are tracked until
-    # yara-x moves to a patched Wasmtime release line.
-    "RUSTSEC-2026-0085",
-    "RUSTSEC-2026-0086",
-    "RUSTSEC-2026-0087",
-    "RUSTSEC-2026-0088",
-    "RUSTSEC-2026-0089",
-    "RUSTSEC-2026-0091",
-    "RUSTSEC-2026-0092",
-    "RUSTSEC-2026-0093",
-    "RUSTSEC-2026-0094",
-    "RUSTSEC-2026-0095",
-    "RUSTSEC-2026-0096",
-    "RUSTSEC-2026-0222",
 ]
 
 [licenses]

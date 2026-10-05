@@ -131,7 +131,11 @@ struct Args {
     #[arg(long, help = "Bytes to dump from start of file", default_value = "512")]
     hex_dump_size: usize,
 
-    #[arg(long, help = "Hex dump offset (0 for header, negative for footer)")]
+    #[arg(
+        long,
+        allow_negative_numbers = true,
+        help = "Hex dump offset (0 for header, negative for footer)"
+    )]
     hex_dump_offset: Option<i64>,
 
     #[arg(long, help = "Analyze function symbols and symbol tables")]

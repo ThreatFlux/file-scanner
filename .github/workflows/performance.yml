@@ -2,9 +2,11 @@ name: Performance Benchmarks
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
   schedule:
     # Run benchmarks weekly on Sunday at 3 AM UTC
     - cron: '0 3 * * 0'
@@ -16,6 +18,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
 
 jobs:
   benchmark:
@@ -23,18 +26,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libssl-dev jq bc
 
       - name: Cache cargo registry
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -46,123 +49,31 @@ jobs:
 
       - name: Build release binary for benchmarking
         run: |
-          cargo build --release --all-features
+          cargo build --locked --release --all-features
 
       - name: Compile benchmarks for PRs
         if: github.event_name == 'pull_request'
-        run: cargo bench --all-features --no-run
+        run: |
+          cargo bench --locked --all-features --no-run
+
 
       - name: Run benchmarks
         if: github.event_name != 'pull_request'
         run: |
-          # Run benchmarks and capture JSON output from Criterion
-          echo "Running benchmarks..."
-          if cargo bench --all-features 2>&1 | tee benchmark_output.txt; then
-            echo "Benchmarks completed successfully"
-          else
-            echo "Benchmarks failed or no benchmarks found, but continuing..."
-          fi
-
-          # Initialize empty benchmark results
-          echo '[]' > benchmark_results.json
-
-          # Extract benchmark results from criterion and create proper JSON
-          # Criterion outputs to target/criterion directory
-          if [ -d "target/criterion" ] && [ -n "$(find target/criterion -name 'estimates.json' 2>/dev/null)" ]; then
-            echo "Found criterion results, parsing..."
-
-            # Use associative array to deduplicate benchmarks
-            # Prefer 'new' results over 'base' results
-            declare -A benchmark_results
-
-            # Process all estimate files
-            for report in $(find target/criterion -name "estimates.json" -type f | sort); do
-              if [ -f "$report" ] && [ -s "$report" ]; then
-                # Extract benchmark name from path
-                benchmark_name=$(echo "$report" | sed 's|target/criterion/||' | sed 's|/base/estimates.json||' | sed 's|/new/estimates.json||')
-
-                # Skip if we already have this benchmark (prefer first found, which is 'base' due to sort)
-                if [ -z "${benchmark_results[$benchmark_name]:-}" ]; then
-                  # Safely extract mean from JSON, with fallback
-                  mean_ns=$(jq -r '.mean.point_estimate // 0.0' "$report" 2>/dev/null || echo "0.0")
-
-                  # Validate that mean_ns is a number
-                  if printf '%f' "$mean_ns" >/dev/null 2>&1; then
-                    benchmark_results[$benchmark_name]="$mean_ns"
-                  else
-                    benchmark_results[$benchmark_name]="0.0"
-                  fi
-                fi
-              fi
-            done
-
-            # Build JSON array from deduplicated results
-            {
-              echo '['
-              first=true
-              for name in "${!benchmark_results[@]}"; do
-                if [ "$first" = false ]; then
-                  echo ','
-                fi
-                echo "  {"
-                echo "    \"name\": \"$name\","
-                echo "    \"value\": ${benchmark_results[$name]},"
-                echo "    \"unit\": \"ns\""
-                echo "  }"
-                first=false
-              done
-              echo ']'
-            } > benchmark_results.json
-          elif [ -s "benchmark_output.txt" ]; then
-            # Try to parse criterion output from stdout/stderr
-            echo "No criterion directory found, trying to parse output directly..."
-
-            # Look for Criterion benchmark results in output
-            if grep -q "time:" benchmark_output.txt; then
-              {
-                echo '['
-                first=true
-
-                # Extract benchmark names and times from output
-                grep "time:" benchmark_output.txt | while read -r line; do
-                  benchmark_name=$(echo "$line" | sed 's/.*\[\([^]]*\)\].*/\1/' | tr ' ' '_')
-                  time_value=$(echo "$line" | grep -o '[0-9.]*[[:space:]]*[μnms]*s' | head -1 | sed 's/[^0-9.]//g')
-
-                  if [ -n "$benchmark_name" ] && [ -n "$time_value" ]; then
-                    if [ "$first" = false ]; then
-                      echo ','
-                    fi
-
-                    # Convert to nanoseconds if needed (simple heuristic)
-                    value_ns=$(echo "$time_value * 1000000000" | bc -l 2>/dev/null || echo "$time_value")
-
-                    echo "  {"
-                    echo "    \"name\": \"$benchmark_name\","
-                    echo "    \"value\": $value_ns,"
-                    echo "    \"unit\": \"ns\""
-                    echo "  }"
-                    first=false
-                  fi
-                done
-
-                echo ']'
-              } > benchmark_results.json
-            fi
-          fi
-
-          # Ensure we have valid JSON output
-          if ! jq empty benchmark_results.json 2>/dev/null; then
-            echo "Generated invalid JSON, creating fallback..."
-            echo '[{"name": "no_benchmarks", "value": 0, "unit": "ns"}]' > benchmark_results.json
-          fi
-
-          # Validate final output
-          if [ ! -s benchmark_results.json ]; then
-            echo '[{"name": "no_benchmarks", "value": 0, "unit": "ns"}]' > benchmark_results.json
-          fi
-
-          echo "Benchmark results JSON:"
-          cat benchmark_results.json
+          set -o pipefail
+          cargo bench --all-features --locked 2>&1 | tee benchmark_output.txt
+          python3 - <<'PYCODE'
+          import json, math
+          from pathlib import Path
+          root = Path('target/criterion')
+          results = []
+          for path in sorted(root.glob('**/new/estimates.json')):
+              mean = json.loads(path.read_text())['mean']['point_estimate']
+              assert isinstance(mean, (int, float)) and math.isfinite(mean) and mean >= 0, path
+              results.append({'name': str(path.parent.parent.relative_to(root)), 'value': mean, 'unit': 'ns'})
+          assert results, 'Criterion produced no benchmark measurements'
+          Path('benchmark_results.json').write_text(json.dumps(results, indent=2) + '\n')
+          PYCODE
 
       - name: Prepare for benchmark storage
         if: github.event_name != 'pull_request'
@@ -171,15 +82,15 @@ jobs:
           cp benchmark_results.json /tmp/benchmark_results.json
 
           # Clean any uncommitted changes that might interfere with gh-pages switch
-          git reset --hard HEAD || true
-          git clean -fd || true
+          git reset --hard HEAD
+          git clean -fd
 
           # Restore benchmark results
           cp /tmp/benchmark_results.json benchmark_results.json
 
       - name: Store benchmark result
         if: github.event_name != 'pull_request'
-        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc  # v1.22.2
         with:
           name: Rust Benchmark
           tool: 'customSmallerIsBetter'
@@ -226,16 +137,18 @@ jobs:
           echo "=== Memory usage for 10MB file ==="
           /usr/bin/time -v ./target/release/file-scanner test_10mb.bin --all 2>&1 | grep -E "Maximum resident set size|User time|System time"
 
+    permissions:
+      contents: write
   memory-profiling:
     name: Memory Profiling
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Install Valgrind
         run: |
           sudo apt-get update
@@ -243,42 +156,46 @@ jobs:
 
       - name: Build debug binary for profiling
         run: |
-          cargo build --all-features
+          cargo build --locked --all-features
 
       - name: Run memory leak check
         run: |
           echo "Test content" > test_file.txt
-          valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all \
+          valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all --error-exitcode=1 \
             --track-origins=yes --verbose --log-file=valgrind-output.txt \
-            ./target/debug/file-scanner test_file.txt --metadata --hashes || true
+            ./target/debug/file-scanner test_file.txt --format json
 
       - name: Upload Valgrind results
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: valgrind-results
           path: valgrind-output.txt
 
+        if: always()
   compile-time-benchmark:
     name: Compile Time Benchmark
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Clean build timing
         run: |
           echo "=== Clean build timing ==="
-          time cargo build --release --all-features
+          time cargo build --locked --release --all-features
 
       - name: Incremental build timing
         run: |
           echo "=== Incremental build timing ==="
           touch src/main.rs
-          time cargo build --release --all-features
+          time cargo build --locked --release --all-features
 
       - name: Test compilation timing
         run: |
           echo "=== Test compilation timing ==="
-          time cargo test --all-features --no-run
+          time cargo test --locked --all-features --no-run
+defaults:
+  run:
+    shell: bash

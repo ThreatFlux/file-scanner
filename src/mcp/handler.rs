@@ -1,5 +1,5 @@
 use rmcp::{
-    model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
+    model::{Implementation, ProtocolVersion, ServerCapabilities, ServerConfig},
     ServerHandler,
 };
 use serde_json::{json, Value};
@@ -73,8 +73,8 @@ impl McpHandler {
 }
 
 impl ServerHandler for McpHandler {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::V_2024_11_05)
             .with_server_info(Implementation::new("file-scanner", "0.1.0"))
             .with_instructions("A comprehensive file scanner with analyze_file, llm_analyze_file, yara_scan_file, analyze_java_file, analyze_npm_package, and analyze_python_package tools.")

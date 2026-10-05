@@ -1,9 +1,9 @@
 # ThreatFlux Rust Dockerfile
 # Multi-stage build for file-scanner using the standard ThreatFlux Rust template.
 
-FROM rust:1.97.1-bookworm AS rust-base
+FROM rust:1.99.0-trixie@sha256:3745c050d12adc738eff16ebfc81ed044bfb2cc27c6828850ff1666beb1c7a49 AS rust-base
 
-ARG VERSION=0.2.9
+ARG VERSION=0.3.5
 ARG BUILD_DATE=unknown
 ARG VCS_REF=unknown
 ARG BINARY_NAME=file-scanner
@@ -31,16 +31,18 @@ USER builder
 ENV CARGO_HOME=/home/builder/.cargo
 ENV PATH="/home/builder/.cargo/bin:/usr/local/cargo/bin:${PATH}"
 WORKDIR /build
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 COPY --chown=builder:builder . .
 
 RUN if [ -n "${BINARY_PACKAGE}" ]; then \
-      cargo build --release -p "${BINARY_PACKAGE}" --bin "${BINARY_NAME}" --all-features; \
+      cargo build --release -p "${BINARY_PACKAGE}" --bin "${BINARY_NAME}" --all-features --locked; \
     else \
-      cargo build --release --bin "${BINARY_NAME}" --all-features || cargo build --release --all-features; \
+      cargo build --release --bin "${BINARY_NAME}" --all-features --locked; \
     fi
 
-RUN cargo install cargo-cyclonedx --locked --version 0.5.8 && \
+RUN cargo install cargo-cyclonedx --locked --version 0.5.9 && \
     cargo cyclonedx \
       --manifest-path "${SBOM_MANIFEST_PATH}" \
       --all-features \
@@ -48,9 +50,9 @@ RUN cargo install cargo-cyclonedx --locked --version 0.5.8 && \
       --spec-version 1.5 \
       --override-filename "${BINARY_NAME}-sbom"
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS runtime
 
-ARG VERSION=0.2.9
+ARG VERSION=0.3.5
 ARG BUILD_DATE=unknown
 ARG VCS_REF=unknown
 ARG BINARY_NAME=file-scanner
@@ -72,7 +74,7 @@ LABEL org.opencontainers.image.title="${OCI_IMAGE_TITLE}" \
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libssl3 \
+    libssl3t64 \
     tini \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /usr/share/doc/file-scanner /data \

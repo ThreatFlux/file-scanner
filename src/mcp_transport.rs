@@ -612,12 +612,16 @@ impl McpTransportServer {
                                     )
                                     .await
                                     {
-                                        let _ = self.string_tracker.track_strings_from_results(
-                                            strings,
-                                            file_path,
-                                            &hashes.sha256,
-                                            "analyze_file",
-                                        );
+                                        if let Err(error) =
+                                            self.string_tracker.track_strings_from_results(
+                                                strings,
+                                                file_path,
+                                                &hashes.sha256,
+                                                "analyze_file",
+                                            )
+                                        {
+                                            eprintln!("String indexing skipped values outside tracker bounds: {error}");
+                                        }
                                     }
                                 }
 
@@ -1226,7 +1230,10 @@ async fn search_strings(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(100) as usize;
 
-    let results = state.string_tracker.search_strings(query, limit);
+    let results = state
+        .string_tracker
+        .try_search_strings(query, limit)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(AxumJson(json!({
         "results": results,
         "count": results.len()
@@ -1257,7 +1264,10 @@ async fn handle_strings_related(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(20) as usize;
 
-    let related = state.string_tracker.get_related_strings(value, limit);
+    let related = state
+        .string_tracker
+        .try_get_related_strings(value, limit)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(AxumJson(json!({
         "related": related,
         "count": related.len()
@@ -1268,7 +1278,10 @@ async fn handle_strings_filter(
     State(state): State<McpServerState>,
     AxumJson(filter): AxumJson<StringFilter>,
 ) -> Result<AxumJson<Value>, StatusCode> {
-    let stats = state.string_tracker.get_statistics(Some(&filter));
+    let stats = state
+        .string_tracker
+        .try_get_statistics(Some(&filter))
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(AxumJson(json!(stats)))
 }
 
@@ -1997,6 +2010,41 @@ mod tests {
         let parsed_result: serde_json::Value = serde_json::from_str(text).unwrap();
         assert!(parsed_result.get("metadata").is_some());
         assert!(parsed_result.get("hashes").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_analyze_file_indexes_valid_strings_after_oversized_input() {
+        let server = create_test_transport_server();
+        let test_file = tempfile::NamedTempFile::new().unwrap();
+        let mut content = vec![b'a'; 1_048_577];
+        content.extend_from_slice(b"\0malware_token\0");
+        std::fs::write(&test_file, content).unwrap();
+        let params = ToolCallParams {
+            name: "analyze_file".into(),
+            arguments: HashMap::from([
+                ("file_path".into(), json!(test_file.path())),
+                ("strings".into(), json!(true)),
+            ]),
+        };
+        let result = server.handle_tool_call(params).await;
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let analysis: Value = serde_json::from_str(text).unwrap();
+        assert!(analysis["strings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "malware_token"));
+        assert!(server
+            .string_tracker
+            .get_string_details("malware_token")
+            .is_some());
+        assert_eq!(
+            server
+                .string_tracker
+                .search_strings("malware_token", 10)
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

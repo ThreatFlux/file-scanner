@@ -35,15 +35,15 @@ help:
 # Build targets
 build:
 	@echo "🔨 Building threatflux-package-security..."
-	cargo build
+	cargo build --locked --all-features
 
 release:
 	@echo "🚀 Building threatflux-package-security in release mode..."
-	cargo build --release
+	cargo build --locked --release --all-features
 
 check:
 	@echo "✅ Checking threatflux-package-security compilation..."
-	cargo check
+	cargo check --locked --all-targets --all-features
 
 # Quality targets
 fmt:
@@ -52,11 +52,11 @@ fmt:
 
 clippy:
 	@echo "📎 Running clippy on threatflux-package-security..."
-	cargo clippy -- -D warnings
+	cargo clippy --locked --all-targets --all-features -- -D warnings
 
 test:
 	@echo "🧪 Running threatflux-package-security tests..."
-	cargo test
+	cargo test --locked --all-features
 
 bench:
 	@echo "⚡ Benchmarks not yet implemented for threatflux-package-security"
@@ -72,7 +72,7 @@ clean:
 
 install:
 	@echo "📦 Installing threatflux-package-security..."
-	cargo install --path .
+	cargo install --locked --path .
 
 examples:
 	@echo "💡 Running threatflux-package-security examples..."

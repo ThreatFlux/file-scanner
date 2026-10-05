@@ -1,9 +1,11 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^vendor/yara-x-1\.21\.0(?:/|\.patch$)
       - id: end-of-file-fixer
+        exclude: ^vendor/yara-x-1\.21\.0/
       - id: check-yaml
       - id: check-added-large-files
         args: ['--maxkb=1000']
@@ -18,7 +20,7 @@ repos:
       - id: cargo-fmt-check
         name: cargo fmt --check
         entry: cargo fmt
-        language: rust
+        language: system
         files: \.rs$
         pass_filenames: false
         args: ["--check"]
@@ -26,58 +28,59 @@ repos:
       - id: cargo-clippy-lib
         name: cargo clippy (lib)
         entry: cargo clippy
-        language: rust
+        language: system
         files: \.rs$
         pass_filenames: false
-        args: ["--lib", "--", "-D", "warnings"]
+        args: ["--locked", "--workspace", "--all-features", "--lib", "--", "-D", "warnings"]
 
       - id: cargo-clippy-bins
         name: cargo clippy (bins)
         entry: cargo clippy
-        language: rust
+        language: system
         files: \.rs$
         pass_filenames: false
-        args: ["--bins", "--", "-D", "warnings"]
+        args: ["--locked", "--workspace", "--all-features", "--bins", "--", "-D", "warnings"]
 
       - id: cargo-clippy-tests
         name: cargo clippy (tests)
         entry: cargo clippy
-        language: rust
+        language: system
         files: \.rs$
         pass_filenames: false
-        args: ["--tests", "--", "-W", "clippy::all"]
+        args: ["--locked", "--workspace", "--all-features", "--tests", "--", "-D", "warnings"]
 
       - id: cargo-check
         name: cargo check
         entry: cargo check
-        language: rust
+        language: system
         files: \.rs$
         pass_filenames: false
-        args: ["--all-features"]
+        args: ["--locked", "--workspace", "--all-features"]
 
       - id: cargo-test
         name: cargo test
         entry: cargo test
-        language: rust
+        language: system
         files: \.rs$
         pass_filenames: false
-        args: ["--lib", "--bins"]
+        args: ["--locked", "--workspace", "--all-features", "--lib", "--bins"]
 
       - id: cargo-audit
         name: cargo audit
         entry: cargo audit
-        language: rust
+        language: system
         files: Cargo\.(toml|lock)$
         pass_filenames: false
 
   - repo: https://github.com/commitizen-tools/commitizen
-    rev: v3.29.0
+    rev: v4.19.1
     hooks:
       - id: commitizen
         stages: [commit-msg]
 
   - repo: https://github.com/igorshubovych/markdownlint-cli
-    rev: v0.41.0
+    rev: v0.49.1
     hooks:
       - id: markdownlint
         args: ['--fix']
+        exclude: ^vendor/yara-x-1\.21\.0/

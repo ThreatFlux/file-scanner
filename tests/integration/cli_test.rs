@@ -2,7 +2,6 @@ use anyhow::Result;
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
-use std::path::Path;
 use tempfile::TempDir;
 
 #[test]
@@ -12,8 +11,8 @@ fn test_cli_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains("file-scanner"))
-        .stdout(predicate::str::contains("--npm-analysis"))
-        .stdout(predicate::str::contains("--python-analysis"));
+        .stdout(predicate::str::contains("analyze-npm"))
+        .stdout(predicate::str::contains("analyze-python"));
 }
 
 #[test]
@@ -132,14 +131,11 @@ fn test_cli_npm_analysis_with_package_json() -> Result<()> {
     )?;
 
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
-    cmd.arg(package_json.to_str().unwrap())
-        .arg("--npm-analysis")
-        .arg("--format")
-        .arg("json")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("npm_analysis"))
-        .stdout(predicate::str::contains("test-package"));
+    let assertion = cmd.arg("analyze-npm").arg(&package_json).assert().success();
+    let analysis: serde_json::Value = serde_json::from_slice(&assertion.get_output().stdout)?;
+    assert_eq!(analysis["package_info"]["name"], "test-package");
+    assert_eq!(analysis["package_info"]["version"], "1.0.0");
+    assert!(analysis.get("security_analysis").is_some());
 
     Ok(())
 }
@@ -158,14 +154,15 @@ fn test_cli_npm_analysis_with_directory() -> Result<()> {
     )?;
 
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
-    cmd.arg(temp_dir.path().to_str().unwrap())
-        .arg("--npm-analysis")
-        .arg("--format")
-        .arg("json")
+    let assertion = cmd
+        .arg("analyze-npm")
+        .arg(temp_dir.path())
         .assert()
-        .success()
-        .stdout(predicate::str::contains("npm_analysis"))
-        .stdout(predicate::str::contains("dir-package"));
+        .success();
+    let analysis: serde_json::Value = serde_json::from_slice(&assertion.get_output().stdout)?;
+    assert_eq!(analysis["package_info"]["name"], "dir-package");
+    assert_eq!(analysis["package_info"]["version"], "2.0.0");
+    assert_eq!(analysis["package_info"]["license"], "MIT");
 
     Ok(())
 }
@@ -189,14 +186,15 @@ setup(
     )?;
 
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
-    cmd.arg(temp_dir.path().to_str().unwrap())
-        .arg("--python-analysis")
-        .arg("--format")
-        .arg("json")
+    let assertion = cmd
+        .arg("analyze-python")
+        .arg(temp_dir.path())
         .assert()
-        .success()
-        .stdout(predicate::str::contains("python_analysis"))
-        .stdout(predicate::str::contains("test-python-package"));
+        .success();
+    let analysis: serde_json::Value = serde_json::from_slice(&assertion.get_output().stdout)?;
+    assert_eq!(analysis["package_info"]["name"], "test-python-package");
+    assert_eq!(analysis["package_info"]["version"], "1.0.0");
+    assert!(analysis.get("setup_analysis").is_some());
 
     Ok(())
 }
@@ -239,13 +237,66 @@ fn test_cli_no_arguments() {
 }
 
 #[test]
-#[ignore = "MCP server runs indefinitely, manual testing required"]
 fn test_cli_mcp_stdio_command() {
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 17,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "file-scanner-test", "version": "1.0" }
+        }
+    });
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
-    cmd.arg("mcp-stdio")
-        .timeout(std::time::Duration::from_secs(1))
+    let assertion = cmd
+        .arg("mcp-stdio")
+        .write_stdin(format!("{initialize}\n"))
+        .timeout(std::time::Duration::from_secs(5))
         .assert()
-        .interrupted(); // MCP server runs indefinitely, so we interrupt it
+        .success();
+    let response: serde_json::Value =
+        serde_json::from_slice(&assertion.get_output().stdout).unwrap();
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 17);
+    assert_eq!(response["result"]["protocolVersion"], "2024-11-05");
+    assert!(response.get("error").is_none());
+}
+
+#[test]
+fn test_cli_mcp_reports_partial_string_indexing() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let test_file = temp_dir.path().join("bounded-strings.bin");
+    let mut content = vec![b'a'; 1_048_577];
+    content.extend_from_slice(b"\0malware_token\0");
+    fs::write(&test_file, content)?;
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 23, "method": "tools/call",
+        "params": {
+            "name": "analyze_file",
+            "arguments": { "file_path": test_file, "strings": true }
+        }
+    });
+    let mut cmd = Command::cargo_bin("file-scanner").unwrap();
+    let assertion = cmd
+        .arg("mcp-stdio")
+        .write_stdin(format!("{call}\n"))
+        .timeout(std::time::Duration::from_secs(5))
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "String indexing skipped values outside tracker bounds",
+        ));
+    let response: serde_json::Value = serde_json::from_slice(&assertion.get_output().stdout)?;
+    assert_eq!(response["id"], 23);
+    let analysis: serde_json::Value =
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())?;
+    assert!(analysis["strings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value == "malware_token"));
+    Ok(())
 }
 
 #[test]
@@ -314,7 +365,8 @@ fn test_cli_hex_dump_with_offset() -> Result<()> {
         .arg("--format")
         .arg("json")
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("FOOTER"));
 
     Ok(())
 }

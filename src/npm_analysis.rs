@@ -292,8 +292,18 @@ pub fn analyze_npm_package(path: &Path) -> Result<NpmPackageAnalysis> {
         analyze_npm_tarball(path)
     } else if path.is_dir() {
         analyze_npm_directory(path)
+    } else if path.is_file()
+        && path.file_name().and_then(|name| name.to_str()) == Some("package.json")
+    {
+        let directory = path
+            .parent()
+            .filter(|directory| !directory.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        analyze_npm_directory(directory)
     } else {
-        anyhow::bail!("Path must be either a .tgz file or a directory containing package.json")
+        anyhow::bail!(
+            "Path must be a .tgz file, package.json, or a directory containing package.json"
+        )
     }
 }
 

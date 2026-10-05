@@ -2,7 +2,8 @@ name: Documentation
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
     paths:
       - 'src/**'
       - 'file-scanner-*/**'
@@ -11,7 +12,8 @@ on:
       - 'docs/**'
       - '.github/workflows/docs.yml'
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
     paths:
       - 'src/**'
       - 'file-scanner-*/**'
@@ -24,6 +26,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+  CARGO_TARGET_DIR: ${{ github.workspace }}/threatflux-package-security/target
 permissions:
   contents: read
   pages: write
@@ -39,19 +42,20 @@ jobs:
   build-rust-docs:
     name: Build Rust Documentation
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: docs
 
+          workspaces: threatflux-package-security -> target
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -59,13 +63,10 @@ jobs:
 
       - name: Build documentation
         run: |
-          cargo doc --all-features --no-deps --document-private-items
+          cargo doc --locked --all-features --no-deps --document-private-items
         env:
-          RUSTDOCFLAGS: >
-            --cfg docsrs
-            --extern-html-root-url tokio=https://docs.rs/tokio/1/
-            --extern-html-root-url serde=https://docs.rs/serde/1/
-            --extern-html-root-url anyhow=https://docs.rs/anyhow/1/
+          RUSTDOCFLAGS: >-
+            -D warnings
 
       - name: Add index page
         run: |
@@ -88,10 +89,10 @@ jobs:
               <div class="container">
                   <h1>ThreatFlux Package Security Library Documentation</h1>
                   <p>Unified package security analysis framework for multiple package managers.</p>
-                  
+
                   <h2>Main Documentation</h2>
                   <p><a href="threatflux_package_security/index.html">📖 Library Documentation</a></p>
-                  
+
                   <h2>Core Modules</h2>
                   <div class="module-grid">
                       <div class="module-card">
@@ -111,7 +112,7 @@ jobs:
                           <p>Comprehensive vulnerability database with auto-update capabilities</p>
                       </div>
                   </div>
-                  
+
                   <h2>Features</h2>
                   <ul>
                       <li>🔍 NPM package security analysis and vulnerability detection</li>
@@ -121,7 +122,7 @@ jobs:
                       <li>🔗 Supply chain security assessment</li>
                       <li>⚡ Async processing for high performance</li>
                   </ul>
-                  
+
                   <h2>Additional Resources</h2>
                   <ul>
                       <li><a href="https://github.com/ThreatFlux/threatflux-package-security">🔗 GitHub Repository</a></li>
@@ -135,48 +136,49 @@ jobs:
           EOF
 
       - name: Upload documentation
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: rust-docs
-          path: target/doc/
+          path: |
+            threatflux-package-security/target/doc/
           retention-days: 30
 
   # Build additional documentation
   build-additional-docs:
     name: Build Additional Documentation
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: '18'
+          node-version: '24.21.0'
 
       - name: Create docs directory
-        run: mkdir -p docs/generated
+        run: |
+          mkdir -p docs/generated
+
 
       - name: Generate library examples
         run: |
-          # Install Rust to build examples
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source ~/.cargo/env
-          
           # Generate library usage examples
-          echo "# Library Usage Examples" > docs/generated/examples.md
-          echo "" >> docs/generated/examples.md
-          
+          {
+            echo "# Library Usage Examples"
+            echo ""
+          } > docs/generated/examples.md
           # Check if examples exist
           if [[ -d "examples" ]]; then
             for example in examples/*.rs; do
               if [[ -f "$example" ]]; then
-                echo "## $(basename "$example" .rs)" >> docs/generated/examples.md
-                echo '```rust' >> docs/generated/examples.md
-                cat "$example" >> docs/generated/examples.md
-                echo '```' >> docs/generated/examples.md
-                echo "" >> docs/generated/examples.md
+                {
+                  echo "## $(basename "$example" .rs)"
+                  echo '```rust'
+                  cat "$example"
+                  echo '```'
+                  echo ""
+                } >> docs/generated/examples.md
               fi
             done
           else
@@ -187,24 +189,24 @@ jobs:
         run: |
           cat > docs/index.md << 'EOF'
           # ThreatFlux Package Security Library Documentation
-          
+
           Welcome to the comprehensive documentation for the ThreatFlux Package Security Library.
-          
+
           ## Quick Start
-          
+
           Add the library to your `Cargo.toml`:
-          
+
           ```toml
           [dependencies]
           threatflux-package-security = "0.1"
           ```
-          
+
           Basic usage:
-          
+
           ```rust
           use threatflux_package_security::analyzers::npm::NpmAnalyzer;
           use std::path::Path;
-          
+
           #[tokio::main]
           async fn main() -> anyhow::Result<()> {
               let analyzer = NpmAnalyzer::new();
@@ -213,16 +215,16 @@ jobs:
               Ok(())
           }
           ```
-          
+
           ## Documentation Sections
-          
+
           - [🦀 Rust API Documentation](../rust-docs/index.html) - Complete API reference
           - [📚 Library Examples](examples.html) - Code examples and usage patterns
           - [🏗️ Architecture](architecture.html) - Library design and module structure
           - [🧪 Testing](testing.html) - Test coverage and validation
-          
+
           ## Features
-          
+
           - **NPM Security**: Comprehensive NPM package vulnerability detection
           - **Python Security**: Python package analysis with setup.py risk assessment
           - **Java Security**: Java package analysis and vulnerability scanning
@@ -231,64 +233,66 @@ jobs:
           - **Vulnerability Database**: Auto-updating vulnerability database with CVE integration
           - **Performance**: Async processing for high-performance analysis
           - **Extensible**: Modular design for easy extension to new package managers
-          
+
           ## Installation
-          
+
           ### From Crates.io
-          
+
           ```bash
           cargo add threatflux-package-security
           ```
-          
+
           ### From Source
-          
+
           ```bash
           git clone https://github.com/ThreatFlux/threatflux-package-security.git
           cd threatflux-package-security
-          cargo build --release
+          cargo build --locked --release
           ```
-          
+
           ### Features
-          
+
           - `concurrent` (default): Enable concurrent analysis capabilities
           - `offline`: Disable online vulnerability database updates
-          
+
           ```toml
           [dependencies]
           threatflux-package-security = { version = "0.1", features = ["concurrent", "offline"] }
           ```
-          
+
           ## License
-          
+
           This project is dual-licensed under MIT OR Apache-2.0.
           EOF
 
       - name: Upload additional docs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: additional-docs
-          path: docs/
+          path: |
+            threatflux-package-security/docs/
           retention-days: 30
 
   # Check documentation quality
   doc-quality-check:
     name: Documentation Quality Check
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Setup Rust cache
-        uses: Swatinem/rust-cache@v2
-
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          workspaces: threatflux-package-security -> target
       - name: Check for missing docs
         run: |
-          cargo doc --all-features --document-private-items 2>&1 | tee doc_output.log
-          
+          cargo doc --locked --all-features --document-private-items 2>&1 | tee doc_output.log
+
           # Check for warnings about missing documentation
           if grep -q "warning: missing documentation" doc_output.log; then
             echo "⚠️ Found missing documentation warnings:"
@@ -306,36 +310,27 @@ jobs:
 
       - name: Generate documentation report
         run: |
-          echo "# Documentation Quality Report" > doc_report.md
-          echo "" >> doc_report.md
-          echo "Generated on: $(date)" >> doc_report.md
-          echo "" >> doc_report.md
-          
-          # Count documented items
-          DOC_COUNT=$(cargo doc --all-features --document-private-items 2>&1 | grep -c "Documenting" || echo "0")
-          echo "- Documented library: $DOC_COUNT" >> doc_report.md
-          
-          # Check for examples
-          EXAMPLE_COUNT=$(find . -name "*.rs" -exec grep -l "```" {} \; | wc -l)
-          echo "- Files with code examples: $EXAMPLE_COUNT" >> doc_report.md
-          
-          # Check README
-          if [[ -f "README.md" ]]; then
-            README_SIZE=$(wc -l < README.md)
-            echo "- README.md lines: $README_SIZE" >> doc_report.md
-          fi
-          
-          echo "" >> doc_report.md
-          echo "## Build Log" >> doc_report.md
-          echo '```' >> doc_report.md
-          cat doc_output.log >> doc_report.md
-          echo '```' >> doc_report.md
+          cargo doc --all-features --locked --document-private-items 2>&1 | tee doc_report_build.log
+          DOC_COUNT=$(awk '/Documenting/ {n++} END {print n+0}' doc_report_build.log)
+          EXAMPLE_COUNT=$(find . -name '*.rs' -exec grep -l '```' {} \; | wc -l)
+          {
+            echo '# Documentation Quality Report'
+            echo "Generated on: $(date)"
+            echo "- Documented library: $DOC_COUNT"
+            echo "- Files with code examples: $EXAMPLE_COUNT"
+            if [ -f README.md ]; then echo "- README.md lines: $(wc -l < README.md)"; fi
+            echo '## Build Log'
+            echo '```'
+            cat doc_report_build.log
+            echo '```'
+          } > doc_report.md
 
       - name: Upload quality report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: doc-quality-report
-          path: doc_report.md
+          path: |
+            threatflux-package-security/doc_report.md
           retention-days: 30
 
   # Deploy to GitHub Pages (only on main branch push)
@@ -347,22 +342,21 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    
+
     steps:
       - name: Setup Pages
-        uses: actions/configure-pages@v4
-
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
       - name: Download Rust docs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: rust-docs
-          path: docs-site/rust-docs/
+          path: threatflux-package-security/docs-site/rust-docs/
 
       - name: Download additional docs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: additional-docs
-          path: docs-site/
+          path: threatflux-package-security/docs-site/
 
       - name: Create site structure
         run: |
@@ -388,46 +382,63 @@ jobs:
           </body>
           </html>
           EOF
-          
+
           # Ensure all files are present
-          find docs-site -type f -name "*.html" | head -10
+          find docs-site -type f -name "*.html" | sed -n '1,10p'
 
       - name: Upload to GitHub Pages
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
         with:
-          path: docs-site/
+          path: threatflux-package-security/docs-site/
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
-
-  # Summary job
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1
   docs-summary:
     name: Documentation Summary
     needs: [build-rust-docs, build-additional-docs, doc-quality-check, deploy-docs]
     runs-on: ubuntu-latest
     if: always()
-    
+
     steps:
       - name: Documentation Summary
         run: |
-          echo "# Documentation Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Rust Docs:** ${{ needs.build-rust-docs.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Additional Docs:** ${{ needs.build-additional-docs.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Quality Check:** ${{ needs.doc-quality-check.result }}" >> $GITHUB_STEP_SUMMARY
-          
-          if [[ "${{ needs.deploy-docs.result }}" != "skipped" ]]; then
-            echo "**Deployment:** ${{ needs.deploy-docs.result }}" >> $GITHUB_STEP_SUMMARY
-            if [[ "${{ needs.deploy-docs.result }}" == "success" ]]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "📚 **Documentation available at:** https://${{ github.repository_owner }}.github.io/$(echo '${{ github.repository }}' | cut -d'/' -f2)/" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "# Documentation Build Summary"
+            echo ""
+            echo "**Rust Docs:** ${WORKFLOW_VALUE_0}"
+            echo "**Additional Docs:** ${WORKFLOW_VALUE_1}"
+            echo "**Quality Check:** ${WORKFLOW_VALUE_2}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${WORKFLOW_VALUE_3}" != "skipped" ]]; then
+            echo "**Deployment:** ${WORKFLOW_VALUE_3}" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "${WORKFLOW_VALUE_3}" == "success" ]]; then
+              {
+                echo ""
+                echo "📚 **Documentation available at:** https://${WORKFLOW_VALUE_4}.github.io/${WORKFLOW_VALUE_5#*/}/"
+              } >> "$GITHUB_STEP_SUMMARY"
             fi
           else
-            echo "**Deployment:** Skipped (not main branch)" >> $GITHUB_STEP_SUMMARY
+            echo "**Deployment:** Skipped (not main branch)" >> "$GITHUB_STEP_SUMMARY"
           fi
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Quick Links" >> $GITHUB_STEP_SUMMARY
-          echo "- 🦀 [Rust API Docs](https://${{ github.repository_owner }}.github.io/$(echo '${{ github.repository }}' | cut -d'/' -f2)/rust-docs/)" >> $GITHUB_STEP_SUMMARY
-          echo "- 📖 [Main Documentation](https://${{ github.repository_owner }}.github.io/$(echo '${{ github.repository }}' | cut -d'/' -f2)/)" >> $GITHUB_STEP_SUMMARY
+
+          {
+            echo ""
+            echo "### Quick Links"
+            echo "- 🦀 [Rust API Docs](https://${WORKFLOW_VALUE_4}.github.io/${WORKFLOW_VALUE_5#*/}/rust-docs/)"
+            echo "- 📖 [Main Documentation](https://${WORKFLOW_VALUE_4}.github.io/${WORKFLOW_VALUE_5#*/}/)"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          WORKFLOW_VALUE_0: ${{ needs.build-rust-docs.result }}
+          WORKFLOW_VALUE_1: ${{ needs.build-additional-docs.result }}
+          WORKFLOW_VALUE_2: ${{ needs.doc-quality-check.result }}
+          WORKFLOW_VALUE_3: ${{ needs.deploy-docs.result }}
+          WORKFLOW_VALUE_4: ${{ github.repository_owner }}
+          WORKFLOW_VALUE_5: ${{ github.repository }}
+    defaults:
+      run:
+        working-directory: .
+defaults:
+  run:
+    shell: bash
+    working-directory: threatflux-package-security

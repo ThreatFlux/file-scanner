@@ -1,0 +1,28 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -188,16 +188,6 @@
+ name = "yara_x"
+ path = "src/lib.rs"
+ 
+-[[bench]]
+-name = "dex"
+-path = "benches/dex.rs"
+-harness = false
+-
+-[[bench]]
+-name = "pe"
+-path = "benches/pe.rs"
+-harness = false
+-
+ [dependencies.annotate-snippets]
+ version = "0.12.16"
+ 
+@@ -474,7 +464,7 @@
+ optional = true
+ 
+ [target.'cfg(not(target_family = "wasm"))'.dependencies.wasmtime]
+-version = "45.0.3"
++version = "49.0.2"
+ features = [
+     "cranelift",
+     "runtime",

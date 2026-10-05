@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -13,6 +16,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
   CARGO_INCREMENTAL: 0  # Disable for CI to improve caching
   CARGO_NET_RETRY: 10
   CARGO_NET_GIT_FETCH_WITH_CLI: true
@@ -27,52 +33,37 @@ jobs:
     outputs:
       cache-key: ${{ steps.cache-key.outputs.key }}
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Free disk space at start
         run: |
-          echo "📊 Initial disk space:"
-          df -h
-          echo "📦 Removing unnecessary packages and tools..."
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/lib/node_modules
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/share/kotlinc
-          sudo rm -rf /usr/local/go
-          sudo rm -rf /usr/share/miniconda
-          sudo rm -rf /usr/share/gradle-*
-          sudo rm -rf /usr/share/apache-maven-*
-          sudo rm -rf /usr/share/sbt
-          sudo apt-get clean
-          sudo docker system prune -af
-          echo "📊 Disk space after cleanup:"
-          df -h
+          bash scripts/cleanup-ci-disk.sh
 
       - name: Generate cache key
         id: cache-key
         run: |
-          echo "key=${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}" >> "$GITHUB_OUTPUT"
+          echo "key=${WORKFLOW_VALUE_0}-rust-1.99.0-cargo-${WORKFLOW_VALUE_1}-${WORKFLOW_VALUE_2}" >> "$GITHUB_OUTPUT"
 
+        env:
+          WORKFLOW_VALUE_0: ${{ runner.os }}
+          WORKFLOW_VALUE_1: ${{ hashFiles('**/Cargo.lock') }}
+          WORKFLOW_VALUE_2: ${{ hashFiles('**/Cargo.toml') }}
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang lld pkg-config libssl-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
         with:
           components: rustfmt, clippy
 
+          toolchain: 1.99.0
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: v0.18.0
       - name: Cache cargo registry
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -83,12 +74,12 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: target
-          key: ${{ steps.cache-key.outputs.key }}-build
+          key: target-debug0-${{ steps.cache-key.outputs.key }}-build
           restore-keys: |
-            ${{ runner.os }}-cargo-build-
+            target-debug0-${{ runner.os }}-rust-1.99.0-cargo-
 
       - name: Monitor disk space during build
         run: |
@@ -97,27 +88,17 @@ jobs:
 
       - name: Pre-build dependencies
         run: |
-          # Build incrementally to manage disk space
-          cargo build --all-features
+          # Preserve dependency artifacts so later checks can reuse them.
+          cargo build --locked --all-features
           echo "📊 Disk space after debug build:"
           df -h
 
-          # Clean up debug artifacts before release build
-          rm -rf target/debug/deps/*.rlib
-          rm -rf target/debug/incremental
-          rm -rf target/debug/build
-
-          cargo build --release
+          cargo build --locked --release
           echo "📊 Disk space after release build:"
           df -h
 
           # Build test dependencies separately
-          cargo test --no-run --all-features 2>&1 | head -100
-
-          # Clean up test build artifacts not needed for caching
-          find target -name "*.d" -delete
-          find target -name "*.rmeta" -delete
-          find target -name "*.rlib" -size +50M -delete
+          cargo test --workspace --all-features --locked --no-run
 
           echo "📊 Final disk space:"
           df -h
@@ -127,23 +108,24 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-cache
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang lld pkg-config libssl-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
         with:
           components: rustfmt, clippy
 
+          toolchain: 1.99.0
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: v0.18.0
       - name: Cache cargo registry
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -154,18 +136,24 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: target
-          key: ${{ needs.build-cache.outputs.cache-key }}-build
+          key: target-debug0-${{ needs.build-cache.outputs.cache-key }}-build
           restore-keys: |
-            ${{ runner.os }}-cargo-build-
+            target-debug0-${{ runner.os }}-rust-1.99.0-cargo-
 
       - name: Check formatting
-        run: cargo fmt -- --check
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path threatflux-package-security/Cargo.toml --all -- --check
+
 
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo clippy --manifest-path threatflux-package-security/Cargo.toml --all-targets --all-features --locked -- -D warnings
+
 
   test:
     name: Test
@@ -174,22 +162,15 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
-        rust: [stable, beta]
+        rust:
+          - 1.99.0
+          - beta
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Free disk space (Ubuntu only)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          echo "📊 Initial disk space:"
-          df -h
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/.ghcup
-          sudo apt-get clean
-          echo "📊 Disk space after cleanup:"
-          df -h
+          bash scripts/cleanup-ci-disk.sh
 
       - name: Install build dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
@@ -205,15 +186,16 @@ jobs:
           echo "/opt/homebrew/opt/llvm/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # master
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
         with:
           toolchain: ${{ matrix.rust }}
 
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: v0.18.0
       - name: Cache cargo registry
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -225,76 +207,63 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: target
-          key: ${{ runner.os }}-${{ matrix.rust }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          key: target-debug0-${{ runner.os }}-${{ matrix.rust }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.rust }}-cargo-build-
-            ${{ runner.os }}-cargo-build-
+            target-debug0-${{ runner.os }}-${{ matrix.rust }}-cargo-build-
+            target-debug0-${{ runner.os }}-
 
       - name: Make scripts executable
-        run: chmod +x scripts/*.sh
+        run: |
+          chmod +x scripts/*.sh
+
 
       - name: Run fast unit tests
         run: |
           echo "📊 Disk space before tests:"
           df -h
           ./scripts/test-fast.sh
-          # Clean up test artifacts between test runs
-          rm -rf target/debug/deps/*-*
-          rm -rf target/debug/incremental
 
       - name: Run tests with all features
         run: |
-          cargo test --all-features --verbose --jobs 2
-          # Clean up after tests
-          rm -rf target/debug/deps/*-*
-          rm -rf target/debug/incremental
+          cargo test --workspace --all-features --locked --verbose --jobs 2
+          cargo test --manifest-path threatflux-package-security/Cargo.toml --all-features --locked --jobs 2
 
       - name: Run doc tests
         run: |
-          cargo test --doc --verbose
+          cargo test --workspace --all-features --locked --doc --verbose
+          cargo test --manifest-path threatflux-package-security/Cargo.toml --all-features --locked --doc
           echo "📊 Final disk space:"
           df -h
 
+      - name: Check isolated production feature configurations
+        run: |
+          cargo check -p threatflux-threat-detection --lib --no-default-features --locked
+          cargo check -p threatflux-threat-detection --lib --no-default-features --features yara-engine --locked
+          cargo check -p threatflux-threat-detection --lib --no-default-features --features pattern-matching --locked
+      - name: Test isolated feature configurations
+        run: |
+          cargo test -p threatflux-threat-detection --no-default-features --locked
+          cargo test -p threatflux-threat-detection --no-default-features --features yara-engine --locked
+          cargo test -p threatflux-threat-detection --no-default-features --features pattern-matching --locked
+          cargo test --manifest-path threatflux-package-security/Cargo.toml --no-default-features --locked
+      - name: Build strict workspace and standalone documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          cargo doc --workspace --all-features --locked --no-deps
+          cargo doc --manifest-path threatflux-package-security/Cargo.toml --all-features --locked --no-deps
   integration-test:
     name: Integration Tests
     runs-on: ubuntu-latest
     needs: build-cache
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Maximize available disk space
         run: |
-          echo "📊 Initial disk space:"
-          df -h
-          echo "🧹 Removing unnecessary software..."
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/lib/node_modules
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/share/kotlinc
-          sudo rm -rf /usr/local/go
-          sudo rm -rf /usr/share/miniconda
-          sudo rm -rf /usr/share/gradle-*
-          sudo rm -rf /usr/share/apache-maven-*
-          sudo rm -rf /usr/share/sbt
-          sudo rm -rf /opt/az
-          sudo rm -rf /usr/share/az_*
-          sudo rm -rf /opt/microsoft
-          sudo rm -rf /opt/google
-          sudo rm -rf /opt/pipx
-          sudo apt-get remove -y '^aspnetcore-.*' '^dotnet-.*' '^llvm-.*' 'php.*' '^mongodb-.*' '^mysql-.*' 'azure-cli' 'google-chrome-stable' 'firefox' 'powershell' 'mono-devel' 'libgl1-mesa-dri' '^google-cloud-.*' || true
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-          sudo docker system prune -af
-          echo "📊 Disk space after cleanup:"
-          df -h
+          bash scripts/cleanup-ci-disk.sh
 
       - name: Setup swap space
         run: |
@@ -323,13 +292,15 @@ jobs:
           sudo apt-get install -y clang lld pkg-config libssl-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: v0.18.0
       - name: Cache cargo registry
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -340,34 +311,17 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: target
-          key: ${{ needs.build-cache.outputs.cache-key }}-build
+          key: target-debug0-${{ needs.build-cache.outputs.cache-key }}-build
           restore-keys: |
-            ${{ runner.os }}-cargo-build-
+            target-debug0-${{ runner.os }}-rust-1.99.0-cargo-
 
       - name: Make scripts executable
-        run: chmod +x scripts/*.sh
-
-      - name: Clean build artifacts before tests
         run: |
-          echo "🧹 Cleaning build artifacts to save space..."
-          # Remove debug symbols and incremental compilation artifacts
-          rm -rf target/debug/deps/*.pdb
-          rm -rf target/debug/deps/*.dSYM
-          rm -rf target/debug/incremental
-          rm -rf target/release/deps/*.pdb
-          rm -rf target/release/deps/*.dSYM
-          rm -rf target/release/incremental
-          # Remove large rlib files we don't need for tests when the cache restored a target dir.
-          if [ -d target ]; then
-            find target -name "*.rlib" -size +30M -delete
-          else
-            echo "No target directory to clean"
-          fi
-          echo "📊 Disk space after artifact cleanup:"
-          df -h
+          chmod +x scripts/*.sh
+
 
       - name: Run comprehensive parallel tests
         run: |
@@ -385,28 +339,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-cache
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Maximize available disk space
         run: |
-          echo "📊 Initial disk space:"
-          df -h
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/local/lib/node_modules
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/julia*
-          sudo rm -rf /usr/share/kotlinc
-          sudo rm -rf /usr/local/go
-          sudo apt-get remove -y '^aspnetcore-.*' '^dotnet-.*' '^llvm-.*' 'php.*' '^mongodb-.*' '^mysql-.*' || true
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-          sudo docker system prune -af
-          echo "📊 Disk space after cleanup:"
-          df -h
+          bash scripts/cleanup-ci-disk.sh
 
       - name: Install build dependencies
         run: |
@@ -414,15 +350,17 @@ jobs:
           sudo apt-get install -y clang lld pkg-config libssl-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
         with:
           components: llvm-tools-preview
 
+          toolchain: 1.99.0
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: v0.18.0
       - name: Cache cargo registry
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -433,29 +371,17 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: target
-          key: ${{ needs.build-cache.outputs.cache-key }}-coverage
+          key: target-debug0-${{ needs.build-cache.outputs.cache-key }}-coverage
           restore-keys: |
-            ${{ needs.build-cache.outputs.cache-key }}-build
-            ${{ runner.os }}-cargo-build-
-
-      - name: Cache coverage tools
-        uses: actions/cache@v6.1.0
-        with:
-          path: |
-            ~/.cargo/bin/cargo-llvm-cov
-            ~/.cargo/bin/cargo-tarpaulin
-          key: ${{ runner.os }}-coverage-tools-v2
-          restore-keys: |
-            ${{ runner.os }}-coverage-tools-
+            target-debug0-${{ needs.build-cache.outputs.cache-key }}-build
+            target-debug0-${{ runner.os }}-rust-1.99.0-cargo-
 
       - name: Install cargo-llvm-cov (faster than tarpaulin)
         run: |
-          if ! command -v cargo-llvm-cov &> /dev/null; then
-            cargo install cargo-llvm-cov --locked
-          fi
+          cargo install cargo-llvm-cov --locked --version 0.9.1
 
       - name: Generate code coverage
         run: |
@@ -466,7 +392,7 @@ jobs:
           export CARGO_BUILD_JOBS=2
           # Generate coverage for main package only, not entire workspace
           # This reduces memory usage and build time significantly
-          cargo llvm-cov --all-features --lib --bins --lcov --output-path lcov.info
+          cargo llvm-cov --locked --all-features --lib --bins --lcov --output-path lcov.info
           # Clean up immediately after
           rm -rf target/llvm-cov-target
           echo "📊 Disk space after coverage:"
@@ -474,76 +400,54 @@ jobs:
         timeout-minutes: 30
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./lcov.info
           fail_ci_if_error: false  # Don't fail on coverage upload issues
 
+          version: v11.3.1
   security-audit:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Cache cargo-audit
-        uses: actions/cache@v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
         with:
-          path: ~/.cargo/bin/cargo-audit
-          key: ${{ runner.os }}-cargo-audit-v2
-          restore-keys: |
-            ${{ runner.os }}-cargo-audit-
-
+          toolchain: 1.99.0
       - name: Install cargo-audit
         run: |
-          if ! command -v cargo-audit &> /dev/null; then
-            cargo install cargo-audit --locked
-          fi
+          cargo install cargo-audit --locked --version 0.22.2
 
+      - name: Verify reviewed RSA exception conditions
+        run: python3 scripts/check-rsa-exception.py
       - name: Run security audit
         run: |
-          for attempt in 1 2 3; do
-            if cargo audit \
-              --ignore RUSTSEC-2026-0085 \
-              --ignore RUSTSEC-2026-0086 \
-              --ignore RUSTSEC-2026-0087 \
-              --ignore RUSTSEC-2026-0088 \
-              --ignore RUSTSEC-2026-0089 \
-              --ignore RUSTSEC-2026-0091 \
-              --ignore RUSTSEC-2026-0092 \
-              --ignore RUSTSEC-2026-0093 \
-              --ignore RUSTSEC-2026-0094 \
-              --ignore RUSTSEC-2026-0095 \
-              --ignore RUSTSEC-2026-0096 \
-              --ignore RUSTSEC-2026-0222; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            sleep $((attempt * 10))
-          done
+          cargo audit
+          cargo audit --file threatflux-package-security/Cargo.lock
 
   benchmark:
     name: Benchmarks
     runs-on: ubuntu-latest
     needs: build-cache
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang lld pkg-config libssl-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.99.0
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+        with:
+          version: v0.18.0
       - name: Cache cargo registry
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -554,83 +458,61 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Cache cargo build
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: target
-          key: ${{ needs.build-cache.outputs.cache-key }}-bench
+          key: target-debug0-${{ needs.build-cache.outputs.cache-key }}-bench
           restore-keys: |
-            ${{ needs.build-cache.outputs.cache-key }}-build
-            ${{ runner.os }}-cargo-build-
+            target-debug0-${{ needs.build-cache.outputs.cache-key }}-build
+            target-debug0-${{ runner.os }}-rust-1.99.0-cargo-
 
       - name: Run benchmarks
-        run: cargo bench --no-run
+        run: |
+          cargo bench --workspace --all-features --locked --no-run
+
 
   mcp-test:
-    name: MCP Inspector Tests
+    name: MCP Stdio Tests
     runs-on: ubuntu-latest
     needs: build-cache
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang lld pkg-config libssl-dev
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v7.0.0
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
         with:
-          node-version: '20'
-
-      - name: Cache npm packages
-        uses: actions/cache@v6.1.0
-        with:
-          path: ~/.npm
-          key: ${{ runner.os }}-npm-mcp-v1
-          restore-keys: |
-            ${{ runner.os }}-npm-mcp-
-            ${{ runner.os }}-npm-
-
-      - name: Install MCP Inspector
-        run: npm install -g @modelcontextprotocol/inspector
-
+          toolchain: 1.99.0
       - name: Cache cargo build
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: target
-          key: ${{ needs.build-cache.outputs.cache-key }}-build
+          key: target-debug0-${{ needs.build-cache.outputs.cache-key }}-build
           restore-keys: |
-            ${{ runner.os }}-cargo-build-
+            target-debug0-${{ runner.os }}-rust-1.99.0-cargo-
 
-      - name: Build release binary (if not cached)
+      - name: Build release binary
         run: |
-          if [ ! -f "./target/release/file-scanner" ]; then
-            cargo build --release
-          fi
+          cargo build --release --all-features --locked
 
-      - name: Test MCP tools list
+      - name: Test MCP initialize, tools and controlled analysis
         run: |
-          timeout 10s npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner mcp-stdio --method tools/list
-
-      - name: Test MCP with test file
-        run: |
-          echo "Test content" > /tmp/test.txt
-          timeout 10s npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner mcp-stdio --method tools/call --tool-name analyze_file --tool-arg file_path=/tmp/test.txt --tool-arg metadata=true
-
+          python3 scripts/mcp-smoke.py target/release/file-scanner
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+        with:
+          version: v0.37.2
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Build Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
           push: false
@@ -638,3 +520,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64
+  msrv:
+    name: Minimum Rust 1.97.1
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld pkg-config libssl-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
+        with:
+          toolchain: 1.97.1
+      - name: Check all targets at the declared MSRV
+        run: |
+          cargo check --workspace --all-targets --all-features --locked
+          cargo check --manifest-path threatflux-package-security/Cargo.toml --all-targets --all-features --locked
+defaults:
+  run:
+    shell: bash

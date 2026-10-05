@@ -29,7 +29,7 @@ echo "🔧 Installing recommended local development tools..."
 # Check if cargo-llvm-cov is installed
 if ! command -v cargo-llvm-cov &> /dev/null; then
     echo "📦 Installing cargo-llvm-cov for faster coverage..."
-    cargo install cargo-llvm-cov --locked
+    cargo install cargo-llvm-cov --locked --version 0.9.1
 else
     echo "✅ cargo-llvm-cov already installed"
 fi
@@ -37,7 +37,7 @@ fi
 # Check if sccache is installed
 if ! command -v sccache &> /dev/null; then
     echo "📦 Installing sccache for faster builds..."
-    cargo install sccache --locked
+    cargo install sccache --locked --version 0.18.0
 else
     echo "✅ sccache already installed"
 fi

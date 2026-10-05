@@ -81,8 +81,8 @@ Look for issues labeled:
 
 ```bash
 # Required
-rustc 1.96.0+
-cargo 1.96.0+
+rustc 1.97.1+
+cargo 1.97.1+
 
 # Recommended
 git 2.0+
@@ -130,49 +130,31 @@ pub fn calc_h(p: &Path) -> Result<String> {
 }
 ```
 
-### Pre-commit Hooks (Recommended)
+### Repository Hooks and Local Checks
 
-This project uses pre-commit hooks to automatically ensure code quality. The hooks run:
-
-- **Format checking** (`cargo fmt --check`)
-- **Linting** (`cargo clippy` with strict settings)
-- **Tests** (`cargo test --lib --bins`)
-- **Security audit** (`cargo audit`)
-- **File validation** (YAML, TOML, JSON, etc.)
-
-#### Setup Pre-commit Hooks
+Development uses the pinned Rust 1.99.0 toolchain; the supported consumer MSRV
+remains 1.97.1. Install the repository hooks before committing:
 
 ```bash
-# Install uv (if not already installed)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Install pre-commit
-uv tool install pre-commit
-
-# Install hooks for this repository
-pre-commit install
-pre-commit install --hook-type commit-msg
-
-# (Optional) Test hooks on all files
-pre-commit run --all-files
+make hooks-install
+make ci-local
 ```
 
-#### What the Hooks Do
+The hooks resolve the current worktree and check formatting, staged whitespace,
+and conventional commit subjects. Existing custom hooks are preserved. The full
+local gate checks both workspace crates and the separately excluded
+`threatflux-package-security` crate: formatting, strict linting, build, unit and
+integration tests, doctests, feature configurations, strict documentation,
+benchmark compilation, MSRV, audit, dependency policy, and all 15 workflow files.
+Tests and timeouts propagate failure; no integration failures are suppressed.
 
-**Before each commit:**
+Install actionlint 1.7.12 and yamllint 1.38.0 before the workflow gate. Tool paths
+can be supplied through `ACTIONLINT_BIN` and `YAMLLINT_BIN`. Cargo audit 0.22.2
+and cargo-deny 0.20.2 are the pinned security tools used by CI.
 
-- `cargo fmt --check` - Ensures consistent formatting
-- `cargo clippy --lib --bins -- -D warnings` - Strict linting for main code
-- `cargo clippy --tests -- -W clippy::all` - Standard linting for tests
-- `cargo check --all-features` - Fast compilation check
-- `cargo test --lib --bins` - Runs core tests
-- `cargo audit` - Security vulnerability scan
-- File format validation and basic hygiene checks
-
-**For commit messages:**
-
-- Enforces conventional commit format
-- Ensures clear, descriptive commit messages
+The optional `.pre-commit-config.yaml` adds file validation and extra Rust checks
+with the pre-commit framework. Install it with `uv tool install pre-commit`, then
+run `pre-commit run --all-files`. Its local Rust hooks use the existing toolchain.
 
 #### Manual Code Quality Checks
 
@@ -454,7 +436,7 @@ Contributors are recognized in:
 cargo watch -x test
 
 # Check before committing
-./scripts/pre-commit.sh
+make ci-local
 
 # Generate docs
 cargo doc --open

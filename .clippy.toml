@@ -48,3 +48,6 @@ single-char-binding-names-threshold = 4
 
 # Allow certain clippy lints that are common in security/analysis tools
 allow-mixed-uninlined-format-args = true
+
+# Consumer MSRV remains distinct from the development toolchain.
+msrv = "1.97.1"
