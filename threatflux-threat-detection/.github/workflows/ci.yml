@@ -34,6 +34,8 @@ jobs:
             rust: beta
           - os: macos-latest
             rust: beta
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
 
     steps:
       - name: Checkout code
@@ -43,6 +45,11 @@ jobs:
         with:
           toolchain: ${{ matrix.rust }}
           components: rustfmt, clippy
+
+      - name: Verify selected Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
@@ -215,6 +222,8 @@ jobs:
   msrv:
     name: Minimum Supported Rust Version
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -222,6 +231,10 @@ jobs:
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
         with:
           toolchain: 1.97.1
+      - name: Verify minimum Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:

@@ -70,6 +70,8 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental == true }}
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
 
     steps:
       - name: Checkout code
@@ -78,6 +80,11 @@ jobs:
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # master
         with:
           toolchain: ${{ matrix.rust }}
+
+      - name: Verify selected Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
 
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2

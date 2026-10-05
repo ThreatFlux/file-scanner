@@ -111,7 +111,11 @@ run them with `cargo test --locked --test hash_test -- --ignored`.
 
 The root workflow validator discovers YAML in all three workflow directories.
 It uses actionlint 1.7.12 and yamllint 1.38.0; install those versions and put them
-on PATH or set `ACTIONLINT_BIN` / `YAMLLINT_BIN`. GitHub Actions and reusable
+on PATH or set `ACTIONLINT_BIN` / `YAMLLINT_BIN`. Its file discovery also requires
+ripgrep, and actionlint uses ShellCheck for embedded shell scripts. The hosted
+validator installs both tools explicitly. Rust matrix and MSRV jobs explicitly
+select `RUSTUP_TOOLCHAIN` and log compiler versions so the repository pin cannot
+override the requested compiler. GitHub Actions and reusable
 workflows are pinned to verified immutable upstream commits with version
 comments. Cargo security, SBOM, coverage, and cache tools use stable version pins.
 The existing auto-release workflow remains the root release owner.
