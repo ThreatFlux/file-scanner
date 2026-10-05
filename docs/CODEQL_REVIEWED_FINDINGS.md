@@ -5,10 +5,18 @@ CodeQL 2.27.1 reported nine results in the checksum-pinned, unmodified YARA-X
 below. Changing these public algorithm parameters or legacy forensic identifiers
 would change scanner output rather than fix a security vulnerability.
 
-| Rule | Reviewed locations | Why these results are false positives |
-| --- | --- | --- |
-| `rust/hard-coded-cryptographic-value` | TLSH Pearson permutation in `src/modules/elf/tlsh/helper.rs`, and seven fixed parameters in `src/modules/elf/tlsh/mod.rs` | Public parameters of a deterministic similarity hash, used only to compute ELF `telfhash` from symbol names. These values match the official TLSH algorithm; they are not cryptographic secrets or password salts. |
-| `rust/weak-sensitive-data-hashing` | Certificate thumbprint in `src/modules/utils/asn1.rs` | SHA-1 identifies a public certificate in PE forensic metadata. The thumbprint is copied into output; it does not decide certificate validity, signature verification, or trust. Authenticode digest, signature, and embedded-chain verification use separate paths. Embedded-chain verification is not a claim of operating-system root trust. |
+The eight `rust/hard-coded-cryptographic-value` results concern the TLSH Pearson
+permutation in `src/modules/elf/tlsh/helper.rs` and seven fixed parameters in
+`src/modules/elf/tlsh/mod.rs`. These are public parameters of a deterministic
+similarity hash, used only to compute ELF `telfhash` from symbol names. They match
+the official TLSH algorithm; they are not cryptographic secrets or password salts.
+
+The `rust/weak-sensitive-data-hashing` result concerns the certificate thumbprint
+in `src/modules/utils/asn1.rs`. SHA-1 identifies a public certificate in PE forensic
+metadata. The thumbprint is copied into output; it does not decide certificate
+validity, signature verification, or trust. Authenticode digest, signature, and
+embedded-chain verification use separate paths. Embedded-chain verification is
+not a claim of operating-system root trust.
 
 The affected paths are relative to `vendor/yara-x-1.21.0`. The ELF path is
 `elf::telfhash` → `TlshBuilder::update` → `pearson_hash`. The certificate path is
