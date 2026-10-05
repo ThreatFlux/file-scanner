@@ -15,7 +15,7 @@ LIBRARIES := threatflux-threat-detection threatflux-package-security
          fmt-check test-no-features test-mcp-features build-examples test-doc doc-check doc-links \
          deny outdated security-geiger security-supply-chain semver-check feature-test feature-test-full \
          msrv msrv-install security-enhanced ci-local validate analyze examples release-prep docs \
-         hooks-install test-all test-package-security lint-package-security bench-check workflow-check
+         hooks-install test-all test-package-security lint-package-security bench-check workflow-check codeql-review-check
 
 # Default target
 all: setup-optimization fmt lint build test security-audit
@@ -33,6 +33,7 @@ ci-local:
 	$(MAKE) bench-check
 	$(MAKE) msrv
 	$(MAKE) security-audit
+	$(MAKE) codeql-review-check
 	$(MAKE) deny
 	$(MAKE) workflow-check
 	@echo "✅ CI checks passed!"
@@ -206,6 +207,10 @@ bench-check:
 
 workflow-check:
 	./scripts/check-workflows.sh
+
+codeql-review-check:
+	python3 scripts/codeql-reviewed-findings.py --check-sources
+	python3 -m unittest discover -s scripts -p 'test_codeql_*.py'
 
 # Build examples
 build-examples:

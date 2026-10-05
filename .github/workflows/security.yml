@@ -86,6 +86,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Verify reviewed CodeQL source conditions and guard tests
+        run: make codeql-review-check
       - name: Initialize CodeQL
         uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
@@ -109,6 +111,31 @@ jobs:
         uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
         with:
           category: "/language:${{matrix.language}}"
+          output: ${{ runner.temp }}/codeql-raw
+          upload: failure-only
+
+      - name: Annotate exact reviewed false positives
+        run: |
+          python3 scripts/codeql-reviewed-findings.py \
+            --input "$RUNNER_TEMP/codeql-raw" --output "$RUNNER_TEMP/codeql-reviewed" \
+            --annotated "$RUNNER_TEMP/codeql-review/annotated" --report "$RUNNER_TEMP/codeql-review/report.json"
+
+      - name: Upload reviewed CodeQL analysis
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        with:
+          sarif_file: ${{ runner.temp }}/codeql-reviewed
+          category: "/language:${{matrix.language}}"
+          wait-for-processing: true
+
+      - name: Preserve full CodeQL analysis and review evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: codeql-reviewed-analysis-${{ matrix.language }}
+          path: |
+            ${{ runner.temp }}/codeql-raw
+            ${{ runner.temp }}/codeql-review
+          if-no-files-found: error
 
   supply-chain-security:
     name: Supply Chain Security

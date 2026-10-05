@@ -106,6 +106,8 @@ existing custom hooks. `make ci-local` checks formatting, strict all-target
 Clippy, builds, full workspace and standalone package-security tests (including
 doctests), feature configurations, strict Rustdoc, benchmark targets, MSRV,
 cargo audit, cargo-deny, and every workflow file. It exits on any failed check.
+It also verifies the source conditions and negative tests for the narrow CodeQL
+false-positive review described in [CODEQL_REVIEWED_FINDINGS.md](CODEQL_REVIEWED_FINDINGS.md).
 The two timing-sensitive hashing performance tests remain explicitly opt-in;
 run them with `cargo test --locked --test hash_test -- --ignored`.
 
