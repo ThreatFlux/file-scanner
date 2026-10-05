@@ -38,6 +38,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install workflow validation tools
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ripgrep shellcheck
           python3 -m venv "${RUNNER_TEMP}/workflow-tools"
           "${RUNNER_TEMP}/workflow-tools/bin/python" -m pip install --upgrade pip
           "${RUNNER_TEMP}/workflow-tools/bin/python" -m pip install "yamllint==${YAMLLINT_VERSION}"
