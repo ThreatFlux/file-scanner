@@ -94,6 +94,16 @@ def check_sources(root, policy):
     check_dependency_graph(root, policy)
 
 
+def normalized_region(region):
+    if not isinstance(region, dict):
+        return region
+    start = region.get("startLine")
+    # SARIF 2.1.0 section 3.30.7 defaults an omitted endLine to startLine.
+    if "endLine" not in region and type(start) is int and start > 0:
+        return {**region, "endLine": start}
+    return region
+
+
 def result_key(result):
     locations = result.get("locations", [])
     if len(locations) != 1:
@@ -102,7 +112,7 @@ def result_key(result):
     return canonical_digest({
         "rule_id": result.get("ruleId"),
         "path": physical.get("artifactLocation", {}).get("uri"),
-        "region": physical.get("region"),
+        "region": normalized_region(physical.get("region")),
         "message": result.get("message", {}).get("text"),
     })
 

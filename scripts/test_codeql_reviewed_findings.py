@@ -1,16 +1,19 @@
-"""Regression tests use the original native Rust SARIF from PR236 analysis1891303529."""
+"""Regressions pin PR236 API analysis1891303529 and raw CLI run37274884642 SARIF."""
 
 import argparse
 import contextlib
 import copy
+import gzip
 import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 
 REPOSITORY = Path(__file__).resolve().parent.parent
@@ -20,6 +23,7 @@ SPEC = importlib.util.spec_from_file_location(
 REVIEW = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REVIEW)
 FIXTURE = REPOSITORY / "scripts/codeql-reviewed-findings-fixture.sarif"
+RAW_FIXTURE = REPOSITORY / "scripts/codeql-reviewed-findings-raw-25c41d9.sarif.gz"
 
 
 class ReviewedFindingsTests(unittest.TestCase):
@@ -27,6 +31,10 @@ class ReviewedFindingsTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
+        self.summary = self.base / "summary.md"
+        summary_environment = mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(self.summary)})
+        summary_environment.start()
+        self.addCleanup(summary_environment.stop)
         self.root = self.base / "repository"
         self.policy = REVIEW.load_policy(REPOSITORY)
         paths = set(self.policy["token_source_inventory"])
@@ -73,6 +81,7 @@ class ReviewedFindingsTests(unittest.TestCase):
         self.assertEqual(report["omitted_count"], 9)
         self.assertEqual(report["retained_count"], 0)
         self.assertIn("false positives omitted from upload: 9", self.stdout.getvalue())
+        self.assertIn("false positives omitted from upload: 9", self.summary.read_text())
         self.assertEqual(self.stderr.getvalue(), "")
         self.assertEqual(upload["runs"][0]["tool"], self.sarif["runs"][0]["tool"])
         self.assertIn("extensions", upload["runs"][0]["tool"])
@@ -82,6 +91,66 @@ class ReviewedFindingsTests(unittest.TestCase):
             self.assertEqual(suppression["kind"], "external")
             self.assertEqual(suppression["status"], "accepted")
             self.assertIn("Reviewed false positive:", suppression["justification"])
+
+    def test_hosted_raw_sarif_matches_without_changing_raw_regions(self):
+        raw = gzip.decompress(RAW_FIXTURE.read_bytes())
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),
+                         "156d98c8a2431b19151976ffb50e17a5f3ac6bb9bd0ac1983837beb8d9adc033")
+        self.sarif = json.loads(raw)
+        (self.args.input / "rust.sarif").write_bytes(raw)
+        status, report, upload, annotated = self.run_review()
+        self.assertEqual(status, 0)
+        self.assertEqual((report["raw_count"], report["omitted_count"], report["retained_count"]), (9, 9, 0))
+        self.assertEqual((self.args.input / "rust.sarif").read_bytes(), raw)
+        self.assertEqual(upload["runs"][0]["results"], [])
+        for original, reviewed in zip(self.sarif["runs"][0]["results"], annotated["runs"][0]["results"]):
+            self.assertEqual(reviewed["locations"], original["locations"])
+            self.assertEqual(reviewed["suppressions"][-1]["status"], "accepted")
+
+    def assert_unmatched_region(self, region):
+        finding = copy.deepcopy(self.sarif["runs"][0]["results"][0])
+        finding["locations"][0]["physicalLocation"]["region"] = region
+        documents = {"rust.sarif": {"runs": [{"results": [finding]}]}}
+        annotated, accepted, keys = REVIEW.annotate_documents(documents, self.policy)
+        self.assertEqual(accepted, [])
+        self.assertEqual(annotated, documents)
+        self.assertEqual(REVIEW.filter_documents(documents, keys), documents)
+
+    def test_explicit_end_line_is_never_defaulted(self):
+        region = self.sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]
+        for value in [None, "305", 306, 0, True, 305.0]:
+            with self.subTest(endLine=value):
+                changed = {**region, "endLine": value}
+                self.assertEqual(REVIEW.normalized_region(changed), changed)
+                self.assert_unmatched_region(changed)
+
+    def test_missing_end_line_requires_positive_integer_start_line(self):
+        region = self.sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]
+        for value in [None, True, "305", 0, -1, 305.0]:
+            with self.subTest(startLine=value):
+                changed = {key: item for key, item in region.items() if key != "endLine"}
+                changed["startLine"] = value
+                self.assertEqual(REVIEW.normalized_region(changed), changed)
+                self.assert_unmatched_region(changed)
+        missing = {key: item for key, item in region.items() if key not in ["startLine", "endLine"]}
+        self.assertEqual(REVIEW.normalized_region(missing), missing)
+        self.assert_unmatched_region(missing)
+
+    def test_defaulted_region_preserves_every_other_field(self):
+        region = self.sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["region"]
+        raw = {key: value for key, value in region.items() if key != "endLine"}
+        self.assertEqual(REVIEW.normalized_region(raw), region)
+        self.assertNotIn("endLine", raw)
+        for changed in [{**raw, "endColumn": 23}, {**raw, "byteOffset": 0},
+                        {key: value for key, value in raw.items() if key != "startColumn"}, None]:
+            with self.subTest(region=changed):
+                self.assert_unmatched_region(changed)
+
+    def test_raw_and_canonical_duplicates_block_every_omission(self):
+        raw = json.loads(gzip.decompress(RAW_FIXTURE.read_bytes()))
+        self.sarif["runs"][0]["results"].append(raw["runs"][0]["results"][0])
+        self.save_input(self.sarif)
+        self.assert_blocked_without_omissions()
 
     def test_new_sensitive_hash_finding_survives_unchanged(self):
         new = copy.deepcopy(self.sarif["runs"][0]["results"][-1])

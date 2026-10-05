@@ -87,6 +87,14 @@ default configuration enables only compiled engines. Tests retain Tokio as a
 development dependency without making it a required production dependency.
 Production library checks and tests cover all three isolated configurations.
 
+The hosted macOS matrix exposed missing Mach-O import library attribution.
+Two-level namespace imports now retain their library install names using checked
+symbol ordinals; self, executable, unresolved dynamic lookup and out-of-range
+ordinals remain unattributed. System-library classification uses available
+library metadata, including path and `@rpath` install names, and falls back to
+the existing symbol-name behavior when that metadata is absent. Dependency
+names, version inference and public fields retain their existing behavior.
+
 The security override applies to builds from this checkout and its Docker images.
 Cargo normalizes published manifests and does not propagate a root `[patch]` to
 library consumers. `cargo package --list` also omits the nested vendored crate
@@ -138,3 +146,8 @@ longer be reported as successful checks. Existing optional Semgrep, TruffleHog,
 Trivy, and OSV finding policies remain informational; this refresh does not turn
 them into new blocking policies. Scan completion/output checks are enforced where
 the tools distinguish findings from execution errors.
+Coverage generation remains mandatory and its LCOV report is retained as a CI
+artifact before the existing optional Codecov upload. Real-file performance
+checks retain all four full scanner invocations and timings, capture verbose
+reports in a runner temporary file, require nonempty output and remove the file
+after each successful scan to keep console logs bounded.

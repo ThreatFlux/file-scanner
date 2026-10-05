@@ -47,6 +47,7 @@ use file_scanner::dependency_analysis::*;
 use file_scanner::function_analysis::{analyze_symbols, ImportInfo, SymbolCounts, SymbolTable};
 use file_scanner::strings::ExtractedStrings;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 
 #[test]
@@ -310,42 +311,225 @@ fn test_dependency_info_creation() {
 
 #[test]
 fn test_analyze_dependencies_with_real_binary() {
-    // Try with the test binary if it exists
-    let test_binary = Path::new("./target/debug/file-scanner");
+    let test_binary = Path::new(env!("CARGO_BIN_EXE_file-scanner"));
+    let symbol_table = analyze_symbols(test_binary).expect("analyze the built scanner's symbols");
+    let analysis = analyze_dependencies(test_binary, &symbol_table, None)
+        .expect("analyze the built scanner's dependencies");
+    assert!(
+        analysis.dependencies.iter().any(|d| d.is_system_library),
+        "Should find at least one system library"
+    );
+}
 
-    if test_binary.exists() {
-        // Get function analysis first
-        match analyze_symbols(test_binary) {
-            Ok(symbol_table) => {
-                // Create empty strings for testing
-                let strings = ExtractedStrings {
-                    total_count: 0,
-                    unique_count: 0,
-                    ascii_strings: vec![],
-                    unicode_strings: vec![],
-                    interesting_strings: vec![],
-                };
+fn append_words(bytes: &mut Vec<u8>, words: &[u32]) {
+    bytes.extend(words.iter().flat_map(|word| word.to_le_bytes()));
+}
 
-                match analyze_dependencies(test_binary, &symbol_table, Some(&strings)) {
-                    Ok(dep_analysis) => {
-                        println!("Found {} dependencies", dep_analysis.dependencies.len());
-
-                        // Should find at least some system libraries
-                        let system_libs = dep_analysis
-                            .dependencies
-                            .iter()
-                            .filter(|d| d.is_system_library)
-                            .count();
-                        assert!(system_libs > 0, "Should find at least one system library");
-                    }
-                    Err(e) => {
-                        eprintln!("Dependency analysis failed (may be expected): {e}");
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Function analysis failed: {e}");
-            }
-        }
+fn macho_dylib_commands(libraries: &[&str]) -> Vec<u8> {
+    let mut commands = Vec::new();
+    for library in libraries {
+        let size = (24 + library.len() + 1).next_multiple_of(8);
+        let end = commands.len() + size;
+        append_words(
+            &mut commands,
+            &[0xc, u32::try_from(size).unwrap(), 24, 0, 0, 0],
+        );
+        commands.extend_from_slice(library.as_bytes());
+        commands.resize(end, 0);
     }
+    commands
+}
+
+fn macho_symbol_entries(symbols: &[(&str, u16, u64)]) -> (Vec<u8>, Vec<u8>) {
+    let mut strings = vec![0];
+    let mut entries = Vec::new();
+    for &(name, descriptor, value) in symbols {
+        entries.extend_from_slice(&u32::try_from(strings.len()).unwrap().to_le_bytes());
+        entries.extend_from_slice(&[goblin::mach::symbols::N_EXT, 0]);
+        entries.extend_from_slice(&descriptor.to_le_bytes());
+        entries.extend_from_slice(&value.to_le_bytes());
+        strings.extend_from_slice(name.as_bytes());
+        strings.push(0);
+    }
+    (entries, strings)
+}
+
+fn macho_import_fixture(
+    libraries: &[&str],
+    symbols: &[(&str, u16, u64)],
+    two_level: bool,
+) -> Vec<u8> {
+    let mut commands = macho_dylib_commands(libraries);
+    let (entries, strings) = macho_symbol_entries(symbols);
+    let symbol_offset = 32 + commands.len() + 24;
+    append_words(
+        &mut commands,
+        &[
+            2,
+            24,
+            u32::try_from(symbol_offset).unwrap(),
+            u32::try_from(symbols.len()).unwrap(),
+            u32::try_from(symbol_offset + entries.len()).unwrap(),
+            u32::try_from(strings.len()).unwrap(),
+        ],
+    );
+    let mut bytes = Vec::new();
+    let flags = if two_level {
+        goblin::mach::header::MH_TWOLEVEL
+    } else {
+        0
+    };
+    append_words(
+        &mut bytes,
+        &[
+            0xfeedfacf,
+            0x0100000c,
+            0,
+            2,
+            u32::try_from(libraries.len() + 1).unwrap(),
+            u32::try_from(commands.len()).unwrap(),
+            flags,
+            0,
+        ],
+    );
+    bytes.extend(commands);
+    bytes.extend(entries);
+    bytes.extend(strings);
+    bytes
+}
+
+fn analyze_macho_fixture(
+    libraries: &[&str],
+    symbols: &[(&str, u16, u64)],
+    two_level: bool,
+) -> SymbolTable {
+    let bytes = macho_import_fixture(libraries, symbols, two_level);
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(&bytes).unwrap();
+    analyze_symbols(file.path()).expect("parse the real Mach-O header/load commands/symbol table")
+}
+
+#[test]
+fn test_macho_import_library_attribution_and_special_ordinals() {
+    let libraries = ["/usr/lib/libSystem.B.dylib", "@rpath/libcustom.dylib"];
+    let symbols = [
+        ("_malloc", 0x0101, 0),
+        ("_custom", 0x0201, 0),
+        ("_self", 0, 0),
+        ("_executable", 0xff00, 0),
+        ("_dynamic", 0xfe00, 0),
+        ("_invalid", 0x0300, 0),
+        ("_common", 0x0100, 16),
+    ];
+    let table = analyze_macho_fixture(&libraries, &symbols, true);
+    assert_eq!(table.imports.len(), symbols.len());
+    let actual: Vec<_> = table
+        .imports
+        .iter()
+        .map(|import| import.library.as_deref())
+        .collect();
+    assert_eq!(
+        actual,
+        [
+            Some(libraries[0]),
+            Some(libraries[1]),
+            None,
+            None,
+            None,
+            None,
+            None
+        ]
+    );
+    let analysis = analyze_dependencies(Path::new("fixture"), &table, None).unwrap();
+    assert!(analysis.dependencies[0].is_system_library);
+    assert!(!analysis.dependencies[1].is_system_library);
+    assert_eq!(analysis.dependencies[0].imported_functions, ["_malloc"]);
+    assert_eq!(analysis.dependencies[1].imported_functions, ["_custom"]);
+}
+
+#[test]
+fn test_macho_flat_namespace_keeps_library_unresolved() {
+    let table = analyze_macho_fixture(
+        &["/usr/lib/libSystem.B.dylib"],
+        &[("_malloc", 0x0100, 0)],
+        false,
+    );
+    assert_eq!(table.imports.len(), 1);
+    assert!(table.imports[0].library.is_none());
+}
+
+#[test]
+fn test_macho_legacy_library_ordinal_254() {
+    let mut libraries = vec!["@rpath/libcustom.dylib"; 254];
+    libraries[253] = "/usr/lib/libSystem.B.dylib";
+    let table = analyze_macho_fixture(&libraries, &[("_malloc", 0xfe00, 0)], true);
+    assert_eq!(table.imports[0].library.as_deref(), Some(libraries[253]));
+    let analysis = analyze_dependencies(Path::new("fixture"), &table, None).unwrap();
+    assert!(analysis.dependencies[0].is_system_library);
+    libraries.push("/usr/lib/libSystem.B.dylib");
+    let invalid = analyze_macho_fixture(&libraries, &[("_executable", 0xff00, 0)], true);
+    assert!(invalid.imports[0].library.is_none());
+}
+
+#[test]
+fn test_system_library_classification_prefers_nonempty_import_metadata() {
+    let cases = [
+        ("_malloc", Some("/usr/lib/libSystem.B.dylib"), true),
+        (
+            "_libc_looking_function",
+            Some("@rpath/libcustom.dylib"),
+            false,
+        ),
+        ("GetCurrentProcess", Some("kernel32.dll"), true),
+        ("puts", Some("libc.so.6"), true),
+        ("malloc@GLIBC_2.2.5", None, true),
+        ("malloc@GLIBC_2.2.5", Some(""), true),
+        ("custom_function", None, false),
+        ("_objc", Some("/usr/lib/libobjc.A.dylib"), true),
+        (
+            "_framework",
+            Some("/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"),
+            true,
+        ),
+        (
+            "_windows",
+            Some("C:\\Windows\\System32\\KERNEL32.DLL"),
+            true,
+        ),
+        ("_loader", Some("/lib64/ld-linux-x86-64.so.2"), true),
+        ("_crypto", Some("@rpath/libcrypto.so.3"), false),
+        ("_curl", Some("libcurl.so.4"), false),
+        ("_custom", Some("libmalware.so"), false),
+    ];
+    let table = SymbolTable {
+        functions: vec![],
+        global_variables: vec![],
+        cross_references: vec![],
+        exports: vec![],
+        imports: cases
+            .iter()
+            .map(|(name, library, _)| ImportInfo {
+                name: (*name).to_owned(),
+                library: library.map(str::to_owned),
+                address: None,
+                ordinal: None,
+                is_delayed: false,
+            })
+            .collect(),
+        symbol_count: SymbolCounts {
+            total_functions: 0,
+            local_functions: 0,
+            imported_functions: cases.len(),
+            exported_functions: 0,
+            global_variables: 0,
+            cross_references: 0,
+        },
+    };
+    let analysis = analyze_dependencies(Path::new("fixture"), &table, None).unwrap();
+    assert_eq!(analysis.dependencies.len(), cases.len());
+    for (dependency, (name, _, expected)) in analysis.dependencies.iter().zip(cases) {
+        assert_eq!(dependency.is_system_library, expected, "{name}");
+        assert_eq!(dependency.imported_functions, [name]);
+    }
+    assert_eq!(analysis.dependencies[4].name, "glibc");
 }

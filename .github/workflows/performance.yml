@@ -110,18 +110,14 @@ jobs:
           dd if=/dev/zero of=test_1mb.bin bs=1048576 count=1
           dd if=/dev/zero of=test_10mb.bin bs=1048576 count=10
 
-          # Test performance with different file sizes
-          echo "=== 1KB file ==="
-          time ./target/release/file-scanner test_1kb.bin --all
-
-          echo "=== 1MB file ==="
-          time ./target/release/file-scanner test_1mb.bin --all
-
-          echo "=== 10MB file ==="
-          time ./target/release/file-scanner test_10mb.bin --all
-
-          echo "=== System binary analysis ==="
-          time ./target/release/file-scanner /bin/ls --all
+          # Full disassembly reports can produce hundreds of MB of console logs.
+          scan_report="$RUNNER_TEMP/file-scanner-performance-report.txt"
+          for scan_input in test_1kb.bin test_1mb.bin test_10mb.bin /bin/ls; do
+            printf 'Performance scan: %s\n' "$scan_input"
+            time ./target/release/file-scanner "$scan_input" --all > "$scan_report"
+            test -s "$scan_report"
+            rm "$scan_report"
+          done
 
       - name: Memory usage test
         run: |

@@ -400,11 +400,19 @@ jobs:
           # Generate coverage for main package only, not entire workspace
           # This reduces memory usage and build time significantly
           cargo llvm-cov --locked --all-features --lib --bins --lcov --output-path lcov.info
+          test -s lcov.info
           # Clean up immediately after
           rm -rf target/llvm-cov-target
           echo "📊 Disk space after coverage:"
           df -h
         timeout-minutes: 30
+
+      - name: Preserve generated coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: file-scanner-lcov
+          path: lcov.info
+          if-no-files-found: error
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1

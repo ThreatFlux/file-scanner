@@ -33,6 +33,11 @@ and the [pinned upstream source][upstream].
 
 The checked-in `.github/codeql-reviewed-findings.json` records exact rule IDs,
 paths, complete source regions, messages, and explanations for these nine results.
+For matching only, a missing `endLine` defaults to the positive integer `startLine`,
+as required by [SARIF 2.1.0, section 3.30.7][region-default]. Raw CodeQL omits this
+redundant value for single-line findings; GitHub's API adds it. Explicit values
+and every other region component remain unchanged. This normalization preserves
+the same nine source ranges and leaves the raw evidence untouched.
 `scripts/codeql-reviewed-findings.py` verifies the pinned YARA-X version and source
 hashes, including related call paths and an inventory of relevant symbol uses.
 It fails if the reviewed source, version, or caller inventory changes. Regression
@@ -57,3 +62,4 @@ recognize these non-security uses; re-review it when the vendor is updated.
 [upstream]: https://github.com/VirusTotal/yara-x/tree/7b2637d4655155fdfaf68177edadb9a39406ece0/lib
 [sarif]: https://docs.github.com/en/code-security/reference/code-scanning/sarif-files/sarif-support
 [action]: https://github.com/github/codeql-action/blob/2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2/analyze/action.yml
+[region-default]: https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/sarif-v2.1.0-os.html
