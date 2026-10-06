@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Threat-detection tests no longer require a nonzero duration from an engine-less
+  scan, which can finish within one clock tick on macOS
 - Critical concurrency bugs causing memory leaks and resource exhaustion
 - MCP server JSON-RPC protocol compliance
 - Windows build errors with cross-platform metadata handling
