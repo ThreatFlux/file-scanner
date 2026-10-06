@@ -33,11 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enhanced caching strategy for better performance
 - Explicitly excluded `threatflux-package-security` from the root workspace so it can be updated and validated independently
 - Added Dependabot coverage for the standalone `threatflux-package-security` crate
-- Added `release.yml`: release binaries for Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows with checksums and a CycloneDX SBOM, a `dry_run` mode, and crates.io trusted publishing (OIDC) gated by the `CRATES_IO_PUBLISH` repository variable
-- Auto-release now cuts releases as the `threatflux-automation` GitHub App and supports `dry_run`
-- Moved the container runtime to distroless Debian 13 (`gcr.io/distroless/cc-debian13:nonroot`) running as uid 65532 under `tini`
-- Hardened workflows: read-only default permissions, no persisted checkout credentials, Codecov uploads via OIDC instead of a token, and a zizmor audit in workflow validation
-- Marked the local `threatflux-threat-detection` and `threatflux-package-security` crates `publish = false` and removed their inert workflow copies, which referenced retired registry credentials
+- Added `release.yml`: release binaries for Linux (x86_64, arm64), macOS (arm64,
+  x86_64) and Windows with checksums and a CycloneDX SBOM, a `dry_run` mode, and
+  crates.io trusted publishing (OIDC) gated by the `CRATES_IO_PUBLISH` variable
+- Auto-release cuts releases as the `threatflux-automation` GitHub App, whose tag
+  push starts `release.yml` and `docker.yml`, and supports `dry_run`
+- Moved the container runtime to distroless Debian 13
+  (`gcr.io/distroless/cc-debian13:nonroot`) running as uid 65532 under `tini`
+- Hardened workflows: read-only default permissions, no persisted checkout
+  credentials, Codecov uploads via OIDC instead of a token, and a zizmor audit in
+  workflow validation
+- Marked the local `threatflux-threat-detection` and `threatflux-package-security`
+  crates `publish = false` and removed their inert workflow copies, which
+  referenced retired registry credentials
 
 ### Fixed
 

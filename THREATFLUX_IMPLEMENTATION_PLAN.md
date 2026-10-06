@@ -1280,6 +1280,9 @@ criterion_main!(benches);
 
 ### Docker Image
 
+This planning sketch uses Debian slim and does not set a nonroot user; the
+repository `Dockerfile` ships a distroless Debian 13 runtime that runs as uid 65532.
+
 ```dockerfile
 FROM rust:1.99.0-trixie AS builder
 

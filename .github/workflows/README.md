@@ -9,15 +9,20 @@ finding.
 
 ## Workflows
 
-| Workflow | Trigger | Purpose |
-|----------|---------|---------|
-| `ci.yml` | push / pull request to `main` | Formatting, Clippy, tests on Linux and macOS (stable and beta), MSRV, coverage, benchmarks compile, MCP stdio smoke test, Docker build |
-| `security.yml` | push / pull request to `main`, daily | cargo-audit, cargo-deny, CodeQL, dependency review, SBOM, TruffleHog, Semgrep |
-| `docker.yml` | source changes, `v*` tags, weekly | Builds the distroless image, smoke-tests it, scans it with Trivy, signs and pushes it to GHCR |
-| `performance.yml` | push / pull request to `main`, weekly | Criterion benchmarks; `main` results are published to GitHub Pages |
-| `validate.yml` | workflow changes | yamllint, actionlint and zizmor |
-| `auto-release.yml` | successful CI and Security Audit on `main`, manual | Cuts the next release with the reusable ThreatFlux auto-release workflow |
-| `release.yml` | `v*.*.*` tags, manual | Builds release binaries and the SBOM, uploads them to the GitHub Release, and handles crates.io |
+- `ci.yml` (push and pull request to `main`): formatting, Clippy, tests on Linux
+  and macOS (stable and beta), MSRV, coverage, benchmark compilation, the MCP stdio
+  smoke test and a Docker build.
+- `security.yml` (push and pull request to `main`, daily): cargo-audit, cargo-deny,
+  CodeQL, dependency review, SBOM, TruffleHog and Semgrep.
+- `docker.yml` (source changes, `v*` tags, weekly): builds the distroless image,
+  smoke-tests it, scans it with Trivy, and signs and pushes it to GHCR.
+- `performance.yml` (push and pull request to `main`, weekly): Criterion
+  benchmarks; results from `main` are published to GitHub Pages.
+- `validate.yml` (workflow changes): yamllint, actionlint and zizmor.
+- `auto-release.yml` (successful CI and Security Audit on `main`, manual): cuts the
+  next release with the reusable ThreatFlux auto-release workflow.
+- `release.yml` (`v*.*.*` tags, manual): builds the release binaries and the SBOM,
+  uploads them to the GitHub Release, and handles crates.io.
 
 ## Releasing
 
@@ -40,14 +45,15 @@ gh workflow run auto-release.yml -f dry_run=true
 gh workflow run release.yml --ref main -f version=0.3.5 -f dry_run=true
 ```
 
-A `release.yml` dry run builds every target, generates the SBOM, verifies the
-crates.io package step and builds and smoke-tests the container image; it
-creates no tag, release, asset, crate or image.
+A `release.yml` dry run builds every target, generates the SBOM, runs the
+crates.io package check, and builds and smoke-tests the container image locally
+on the runner. It creates no tag, release or asset, publishes no crate, and
+pushes no image.
 
 ### Release assets
 
 | Platform | Architecture | Asset |
-|----------|-------------|-------|
+| --- | --- | --- |
 | Linux | x86_64 | `file-scanner-vX.Y.Z-linux-amd64.tar.gz` |
 | Linux | arm64 | `file-scanner-vX.Y.Z-linux-arm64.tar.gz` |
 | macOS | Apple Silicon | `file-scanner-vX.Y.Z-macos-arm64.tar.gz` |

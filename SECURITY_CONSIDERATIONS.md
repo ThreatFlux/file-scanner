@@ -930,6 +930,10 @@ pub fn derive_key(password: &str, salt: &[u8], iterations: u32) -> Result<Vec<u8
 
 ### Container Security
 
+This Debian slim example runs as a nonroot user but is not the published runtime;
+the repository `Dockerfile` ships a distroless Debian 13 image that runs as uid
+65532 with no shell or package manager.
+
 ```dockerfile
 # Use minimal base image
 FROM debian:trixie-slim

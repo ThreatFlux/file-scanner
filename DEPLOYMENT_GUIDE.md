@@ -234,6 +234,11 @@ sudo systemctl status threatflux
 
 ### Option 2: Container Deployment
 
+The published image (`ghcr.io/threatflux/file-scanner`, built from the repository
+`Dockerfile`) runs on distroless Debian 13 as a nonroot user with no shell. The
+Debian slim Dockerfile below is an alternative for deployments that need a shell
+and an HTTP health check; it is not the published runtime.
+
 #### Dockerfile
 
 ```dockerfile

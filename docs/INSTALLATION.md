@@ -86,6 +86,9 @@ make clean
 
 ```bash
 docker pull ghcr.io/threatflux/file-scanner:latest
+
+# Scan a file from a read-only mount
+docker run --rm -v /path/to/files:/data:ro ghcr.io/threatflux/file-scanner:latest /data/file.bin --format json
 ```
 
 ### Building Docker Image
