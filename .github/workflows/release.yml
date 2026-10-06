@@ -53,6 +53,9 @@ jobs:
     permissions:
       # Manual (non-dry-run) dispatches create the release tag through the API.
       contents: write
+      # A tag created with GITHUB_TOKEN starts no workflows, so this job
+      # dispatches docker.yml for a tag it created itself.
+      actions: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -100,6 +103,7 @@ jobs:
           fi
 
       - name: Ensure release tag
+        id: tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
@@ -134,7 +138,8 @@ jobs:
               --jq '.sha')"
             if gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
               -f ref="refs/tags/${TAG}" -f sha="${TAG_OBJECT_SHA}" --silent; then
-              echo "Created ${TAG} at ${TARGET_SHA}; dispatch docker.yml for it separately"
+              echo "Created ${TAG} at ${TARGET_SHA}"
+              echo "created=true" >> "$GITHUB_OUTPUT"
             else
               # Another run may have created the tag after checkout; accept it only
               # when it resolves to the commit being released.
@@ -151,6 +156,19 @@ jobs:
             echo "::error::Missing expected release tag ${TAG}"
             exit 1
           fi
+
+      # The tag above was created with GITHUB_TOKEN, so its push started no
+      # workflow; explicit dispatches are the exception, so start the image
+      # build, scan, signing and push for the new tag here. Tags pushed by the
+      # automation App or a maintainer start docker.yml themselves.
+      - name: Build the release image for the new tag
+        if: steps.tag.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh workflow run docker.yml --repo "${GITHUB_REPOSITORY}" --ref "v${VERSION}"
+          echo "Dispatched docker.yml for v${VERSION}"
 
   build:
     name: Build (${{ matrix.target }})
