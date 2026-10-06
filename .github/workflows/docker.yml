@@ -39,6 +39,10 @@ on:
     - cron: "0 4 * * 1"
   workflow_dispatch:
 
+# Read-only by default; jobs request any additional scopes they need.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -67,6 +71,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: Lowercase image name
         id: lowercase
         run: |
@@ -96,6 +102,9 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
         with:
           version: v0.37.2
+          # Download the pinned buildx release on every run instead of restoring
+          # it from the Actions cache, which other refs can write to.
+          cache-binary: false
           driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'

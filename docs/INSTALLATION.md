@@ -82,7 +82,7 @@ make clean
 
 ## Docker Installation
 
-### Using Pre-built Image (Coming Soon)
+### Using Pre-built Image
 
 ```bash
 docker pull ghcr.io/threatflux/file-scanner:latest
@@ -97,8 +97,8 @@ docker build -t file-scanner .
 # Run with volume mount
 docker run -v /path/to/files:/data file-scanner /data/file.bin
 
-# Interactive mode
-docker run -it -v /path/to/files:/data file-scanner bash
+# The distroless runtime has no shell; pass scanner arguments directly
+docker run --rm -v /path/to/files:/data:ro file-scanner /data/file.bin --all --format json
 ```
 
 ### Docker Compose

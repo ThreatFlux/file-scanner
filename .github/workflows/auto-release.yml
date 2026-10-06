@@ -1,11 +1,17 @@
 name: Auto Release
 
 concurrency:
-  group: auto-release-${{ github.event.workflow_run.head_branch || github.ref_name || 'main' }}
+  # Dry runs use their own group so they never cancel a real release.
+  group: auto-release-${{ github.event.workflow_run.head_branch || github.ref_name || 'main' }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: true
 
+# workflow_run only starts the reusable release on this repository's main: the
+# reusable workflow refuses runs that did not succeed or that come from another
+# repository (fork pull requests), and it releases the triggering commit only
+# after every required workflow passed for it. Nothing from the triggering run
+# (artifacts, caches or untrusted inputs) is consumed.
 on:
-  workflow_run:
+  workflow_run:  # zizmor: ignore[dangerous-triggers]
     workflows: ["CI", "Security Audit"]
     types: [completed]
     branches: [main]
@@ -21,6 +27,11 @@ on:
           - patch
           - minor
           - major
+      dry_run:
+        description: Report the next release without creating a commit, tag, or release
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -33,8 +44,13 @@ jobs:
       actions: write
       contents: write
       pull-requests: write
-    uses: ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml@7a5f08885a77520db023882c8de17d9e6580b7ae # v0.7.5
+    uses: ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml@8633e03be96acd076b36bfdf7bec2345e6614c5c # v0.7.6
     with:
       bump: ${{ github.event.inputs.version_bump || 'auto' }}
+      # Only a manual dispatch can request a dry run; workflow_run always releases.
+      dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
       required-workflows: ci.yml,security.yml
-      dispatch-workflows: docker.yml
+      # A GITHUB_TOKEN tag push starts no workflows, so the reusable workflow
+      # dispatches the release and image builds on the new tag.
+      dispatch-workflows: release.yml,docker.yml
+      dispatch-version-workflow: release.yml

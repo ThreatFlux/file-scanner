@@ -932,7 +932,7 @@ pub fn derive_key(password: &str, salt: &[u8], iterations: u32) -> Result<Vec<u8
 
 ```dockerfile
 # Use minimal base image
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Create non-root user
 RUN groupadd -r threatflux && useradd -r -g threatflux threatflux

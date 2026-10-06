@@ -238,7 +238,7 @@ sudo systemctl status threatflux
 
 ```dockerfile
 # Multi-stage build for optimization
-FROM rust:1.96.0-bookworm AS builder
+FROM rust:1.99.0-trixie AS builder
 
 WORKDIR /app
 
@@ -254,12 +254,12 @@ COPY threatflux-*/ ./threatflux-*/
 RUN cargo build --release --workspace
 
 # Runtime image
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libssl3 \
+    libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create user
