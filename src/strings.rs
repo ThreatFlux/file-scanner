@@ -219,6 +219,13 @@ mod tests {
     }
 
     #[test]
+    fn test_category_patterns_all_compile() {
+        // categorize_string skips a pattern that fails to compile, so a broken
+        // edit would silently drop a category; every pattern must compile.
+        assert_eq!(CATEGORY_PATTERNS.len(), 12);
+    }
+
+    #[test]
     fn test_categorize_string_url() {
         let url = "https://example.com/path";
         let result = categorize_string(url, 0);
