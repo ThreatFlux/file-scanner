@@ -49,6 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- String extraction compiled its twelve categorization regexes for every extracted string
+  (about 2.6 ms per string); they are now compiled once, so 1,000 strings take about
+  0.6 ms instead of 2.6 s and the `main` benchmark run finishes within its timeout
 - Threat-detection tests no longer require a nonzero duration from an engine-less
   scan, which can finish within one clock tick on macOS
 - Critical concurrency bugs causing memory leaks and resource exhaustion
