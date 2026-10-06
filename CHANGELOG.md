@@ -49,6 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Docker workflow no longer prunes untagged GHCR versions on `main`: they include the
+  per-platform images of every multi-arch tag, so released tags such as `0.3.5` lost their
+  `linux/amd64` and `linux/arm64` images and could no longer be pulled
 - String extraction compiled its twelve categorization regexes for every extracted string
   (about 2.6 ms per string); they are now compiled once, so 1,000 strings take about
   0.6 ms instead of 2.6 s and the `main` benchmark run finishes within its timeout

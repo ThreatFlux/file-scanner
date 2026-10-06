@@ -59,6 +59,12 @@ env:
   OCI_IMAGE_SOURCE: https://github.com/ThreatFlux/file-scanner
 
 jobs:
+  # There is deliberately no image cleanup job. GHCR lists the per-platform
+  # images and attestation manifests of a multi-arch index as untagged package
+  # versions, so pruning untagged versions (actions/delete-package-versions with
+  # delete-only-untagged-versions) deleted the linux/amd64 and linux/arm64
+  # images behind released tags: 0.3.4 and 0.3.5 still resolve to an index whose
+  # children are gone, so they cannot be pulled. Public GHCR storage is free.
   build:
     name: Build Docker Image
     runs-on: ${{ vars.RUST_TEMPLATE_RUNNER_UBUNTU || 'ubuntu-latest' }}
@@ -354,21 +360,6 @@ jobs:
           WORKFLOW_VALUE_0: ${{ env.REGISTRY }}
           WORKFLOW_VALUE_1: ${{ needs.build.outputs.image_name }}
           WORKFLOW_VALUE_2: ${{ needs.build.outputs.digest }}
-  cleanup:
-    name: Cleanup Old Images
-    needs: build
-    runs-on: ${{ vars.RUST_TEMPLATE_RUNNER_UBUNTU || 'ubuntu-latest' }}
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    permissions:
-      packages: write
-    steps:
-      - name: Delete old container images
-        uses: actions/delete-package-versions@e5bc658cc4c965c472efe991f8beea3981499c55  # v5.0.0
-        with:
-          package-name: file-scanner
-          package-type: container
-          min-versions-to-keep: 10
-          delete-only-untagged-versions: true
 defaults:
   run:
     shell: bash
