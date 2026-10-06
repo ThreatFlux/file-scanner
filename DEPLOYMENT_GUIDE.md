@@ -234,11 +234,16 @@ sudo systemctl status threatflux
 
 ### Option 2: Container Deployment
 
+The published image (`ghcr.io/threatflux/file-scanner`, built from the repository
+`Dockerfile`) runs on distroless Debian 13 as a nonroot user with no shell. The
+Debian slim Dockerfile below is an alternative for deployments that need a shell
+and an HTTP health check; it is not the published runtime.
+
 #### Dockerfile
 
 ```dockerfile
 # Multi-stage build for optimization
-FROM rust:1.96.0-bookworm AS builder
+FROM rust:1.99.0-trixie AS builder
 
 WORKDIR /app
 
@@ -254,12 +259,12 @@ COPY threatflux-*/ ./threatflux-*/
 RUN cargo build --release --workspace
 
 # Runtime image
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libssl3 \
+    libssl3t64 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create user

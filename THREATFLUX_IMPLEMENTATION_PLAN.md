@@ -1280,8 +1280,11 @@ criterion_main!(benches);
 
 ### Docker Image
 
+This planning sketch uses Debian slim and does not set a nonroot user; the
+repository `Dockerfile` ships a distroless Debian 13 runtime that runs as uid 65532.
+
 ```dockerfile
-FROM rust:1.96.0-bookworm AS builder
+FROM rust:1.99.0-trixie AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -1289,7 +1292,7 @@ COPY src ./src
 
 RUN cargo build --release
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \

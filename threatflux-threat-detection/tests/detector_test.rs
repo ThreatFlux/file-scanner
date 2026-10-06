@@ -390,10 +390,12 @@ async fn test_analysis_result_structure() {
     let detector = ThreatDetector::with_config(config).await.unwrap();
 
     let test_data = b"Analysis structure test data";
+    let started = std::time::Instant::now();
     let result = detector
         .scan_data(test_data, Some("test.bin"))
         .await
         .unwrap();
+    let elapsed = started.elapsed();
 
     // Verify analysis structure is complete
     assert_eq!(result.matches.len(), 0);
@@ -404,8 +406,10 @@ async fn test_analysis_result_structure() {
         .recommendations
         .contains(&"No immediate threats detected".to_string()));
 
-    // Verify scan statistics
-    assert!(result.scan_stats.scan_duration.as_nanos() > 0);
+    // Verify scan statistics. An engine-less scan can finish within one clock
+    // tick (notably on macOS), so a zero duration is valid; only the upper
+    // bound is meaningful.
+    assert!(result.scan_stats.scan_duration <= elapsed);
     assert_eq!(result.scan_stats.file_size_scanned, test_data.len() as u64);
 
     // With no engines, should be clean

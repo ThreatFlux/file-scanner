@@ -10,6 +10,9 @@ repository = "https://github.com/ThreatFlux/threatflux-threat-detection"
 keywords = ["threat", "detection", "yara", "malware", "security"]
 categories = ["cryptography", "network-programming", "development-tools"]
 readme = "README.md"
+# Local copy used only by file-scanner; never published from this repository
+# (the crates.io release comes from ThreatFlux/threatflux-threat-detection).
+publish = false
 
 [features]
 default = ["yara-engine", "builtin-rules"]

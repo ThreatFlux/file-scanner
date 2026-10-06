@@ -57,6 +57,14 @@ cargo build --release --locked
 cargo install --path . --locked
 ```
 
+[GitHub Releases](https://github.com/ThreatFlux/file-scanner/releases) carry
+prebuilt binaries with SHA-256 checksums; releases cut by the release workflow
+cover Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64) and
+attach a CycloneDX SBOM. Container images are published to
+`ghcr.io/threatflux/file-scanner`.
+File Scanner is not published on crates.io: the `file-scanner` name belongs to an
+unrelated crate, so `cargo install file-scanner` does not install this project.
+
 ### Basic Usage
 
 ```bash
@@ -282,15 +290,18 @@ Benchmark results are continuously tracked at: https://threatflux.github.io/file
 ## 🐳 Docker Support
 
 ```bash
-# Build Docker image
-docker build -t threatflux/file-scanner .
+# Pull the published image (or build it locally with: docker build -t ghcr.io/threatflux/file-scanner .)
+docker pull ghcr.io/threatflux/file-scanner:latest
 
 # Run container
-docker run --rm -v /path/to/files:/data threatflux/file-scanner /data/file
+docker run --rm -v /path/to/files:/data:ro ghcr.io/threatflux/file-scanner /data/file
 
 # MCP server mode
-docker run --rm -p 3000:3000 threatflux/file-scanner mcp-http --port 3000
+docker run --rm -p 3000:3000 ghcr.io/threatflux/file-scanner mcp-http --port 3000
 ```
+
+The runtime image is distroless Debian 13 (`gcr.io/distroless/cc-debian13:nonroot`):
+it runs as an unprivileged user and contains no shell or package manager.
 
 ## 📄 License
 

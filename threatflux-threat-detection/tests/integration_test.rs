@@ -93,13 +93,17 @@ async fn test_complete_threat_detection_pipeline() {
     for (filename, content) in test_cases {
         let file_path = create_temp_file(&temp_dir, filename, content);
 
+        let started = std::time::Instant::now();
         let result = detector.scan_file(&file_path).await;
+        let elapsed = started.elapsed();
         assert!(result.is_ok(), "Scan should succeed for {filename}");
 
         let analysis = result.unwrap();
 
-        // Verify analysis structure
-        assert!(analysis.scan_stats.scan_duration.as_nanos() > 0);
+        // Verify analysis structure. An engine-less scan can finish within one
+        // clock tick (notably on macOS), so a zero duration is valid; only the
+        // upper bound is meaningful.
+        assert!(analysis.scan_stats.scan_duration <= elapsed);
         assert!(analysis.scan_stats.file_size_scanned > 0);
 
         // With no engines enabled, should be clean
@@ -357,8 +361,9 @@ async fn test_scan_statistics_accuracy() {
 
     // Verify statistics accuracy
     assert_eq!(result.scan_stats.file_size_scanned, 2048);
+    // An engine-less scan can finish within one clock tick (notably on macOS),
+    // so a zero duration is valid; only the upper bound is meaningful.
     assert!(result.scan_stats.scan_duration <= actual_duration);
-    assert!(result.scan_stats.scan_duration.as_nanos() > 0);
 
     // With no engines, these should be 0
     assert_eq!(result.scan_stats.rules_evaluated, 0);

@@ -145,7 +145,7 @@ and conventional commit subjects. Existing custom hooks are preserved. The full
 local gate checks both workspace crates and the separately excluded
 `threatflux-package-security` crate: formatting, strict linting, build, unit and
 integration tests, doctests, feature configurations, strict documentation,
-benchmark compilation, MSRV, audit, dependency policy, and all 15 workflow files.
+benchmark compilation, MSRV, audit, dependency policy, and every workflow file.
 Tests and timeouts propagate failure; no integration failures are suppressed.
 
 Install actionlint 1.7.12 and yamllint 1.38.0 before the workflow gate. Tool paths

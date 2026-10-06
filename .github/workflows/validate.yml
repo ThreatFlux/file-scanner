@@ -4,15 +4,11 @@ on:
   pull_request:
     paths:
       - .github/workflows/**
-      - threatflux-package-security/.github/workflows/**
-      - threatflux-threat-detection/.github/workflows/**
       - .yamllint.yml
       - scripts/check-workflows.sh
   push:
     paths:
       - .github/workflows/**
-      - threatflux-package-security/.github/workflows/**
-      - threatflux-threat-detection/.github/workflows/**
       - .yamllint.yml
       - scripts/check-workflows.sh
   workflow_dispatch:
@@ -27,6 +23,7 @@ concurrency:
 env:
   ACTIONLINT_VERSION: v1.7.12
   YAMLLINT_VERSION: 1.38.0
+  ZIZMOR_VERSION: 1.30.1
 
 jobs:
   validate-workflows:
@@ -36,13 +33,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install workflow validation tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ripgrep shellcheck
           python3 -m venv "${RUNNER_TEMP}/workflow-tools"
           "${RUNNER_TEMP}/workflow-tools/bin/python" -m pip install --upgrade pip
-          "${RUNNER_TEMP}/workflow-tools/bin/python" -m pip install "yamllint==${YAMLLINT_VERSION}"
+          "${RUNNER_TEMP}/workflow-tools/bin/python" -m pip install "yamllint==${YAMLLINT_VERSION}" "zizmor==${ZIZMOR_VERSION}"
           echo "${RUNNER_TEMP}/workflow-tools/bin" >> "$GITHUB_PATH"
           actionlint_archive="actionlint_${ACTIONLINT_VERSION#v}_linux_amd64.tar.gz"
           curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/${actionlint_archive}"
@@ -52,20 +51,26 @@ jobs:
           sudo install -m 0755 actionlint /usr/local/bin/actionlint
           actionlint -version
           "${RUNNER_TEMP}/workflow-tools/bin/yamllint" --version
+          "${RUNNER_TEMP}/workflow-tools/bin/zizmor" --version
 
       - name: Validate YAML syntax
         run: |
-          yamllint .github/workflows/ threatflux-package-security/.github/workflows/ threatflux-threat-detection/.github/workflows/
+          yamllint -c .yamllint.yml .github/workflows/
 
       - name: Validate GitHub Actions syntax
         run: |
           bash scripts/check-workflows.sh
 
+      # Fails on any medium or high finding: excessive permissions, persisted
+      # checkout credentials, template injection, cache poisoning, unpinned uses.
+      - name: Audit workflow security with zizmor
+        run: |
+          zizmor --offline --min-severity medium .github/workflows/
 
       - name: Check for required workflow files
         run: |
           echo "Checking for required workflow files..."
-          for workflow in auto-release.yml ci.yml docker.yml security.yml validate.yml; do
+          for workflow in auto-release.yml ci.yml docker.yml performance.yml release.yml security.yml validate.yml; do
             test -f ".github/workflows/${workflow}"
             echo "${workflow} found"
           done
@@ -78,10 +83,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
         with:
           version: v0.37.2
+          # Download the pinned buildx release on every run instead of restoring
+          # it from the Actions cache, which other refs can write to.
+          cache-binary: false
           driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
       - name: Test Docker build (no push)
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0

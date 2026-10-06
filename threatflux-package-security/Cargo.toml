@@ -9,6 +9,9 @@ license = "MIT"
 repository = "https://github.com/ThreatFlux/threatflux-package-security"
 keywords = ["security", "vulnerability", "npm", "python", "java"]
 categories = ["development-tools", "security"]
+# Local copy used only by file-scanner; never published from this repository
+# (the crates.io release comes from ThreatFlux/threatflux-package-security).
+publish = false
 
 [workspace]
 

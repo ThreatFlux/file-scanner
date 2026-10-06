@@ -324,7 +324,7 @@ mount -o noatime,nodiratime /dev/sda1 /mnt/analysis
 
 #### Docker Configuration
 ```dockerfile
-FROM rust:1.96.0-bookworm
+FROM rust:1.99.0-trixie
 
 # Optimize for analysis workloads
 ENV RUST_LOG=warn
