@@ -411,25 +411,36 @@ jobs:
             echo "::error::No release artifacts were downloaded"
             exit 1
           fi
-          # Publish only checksum files that hold exactly the one LF-terminated
-          # "<sha256>  <archive>" line shasum writes, next to their archive:
-          # GNU sha256sum tolerates a CRLF ending, but macOS sha256sum and
-          # shasum cannot read the file name then, so check the format first.
+          # Every archive must ship with a checksum file holding exactly the one
+          # LF-terminated "<sha256>  <archive>" line shasum writes. GNU sha256sum
+          # tolerates a CRLF ending, but macOS sha256sum and shasum then cannot
+          # read the file name, so check the format before the hash.
+          archives=0
           checksums=0
           for file in "${files[@]}"; do
-            if [[ "${file}" == *.sha256 ]]; then
-              archive="$(basename "${file}" .sha256)"
-              if [[ "$(wc -l < "${file}")" -ne 1 ]] ||
-                ! grep -qxE "[0-9a-f]{64}  ${archive//./\\.}" "${file}"; then
-                echo "::error::${file} must be one '<sha256>  ${archive}' line ending in LF"
-                exit 1
-              fi
-              (cd "$(dirname "${file}")" && sha256sum --check --strict "${archive}.sha256")
-              checksums=$((checksums + 1))
+            case "${file}" in
+              *.tar.gz | *.zip) ;;
+              *.sha256)
+                checksums=$((checksums + 1))
+                continue
+                ;;
+              *) continue ;;
+            esac
+            archive="$(basename "${file}")"
+            if [[ ! -f "${file}.sha256" ]]; then
+              echo "::error::${file} has no ${archive}.sha256 checksum file"
+              exit 1
             fi
+            if [[ "$(wc -l < "${file}.sha256")" -ne 1 ]] ||
+              ! grep -qxE "[0-9a-f]{64}  ${archive//./\\.}" "${file}.sha256"; then
+              echo "::error::${file}.sha256 must be one '<sha256>  ${archive}' line ending in LF"
+              exit 1
+            fi
+            (cd "$(dirname "${file}")" && sha256sum --check --strict "${archive}.sha256")
+            archives=$((archives + 1))
           done
-          if [[ "${checksums}" -eq 0 ]]; then
-            echo "::error::No .sha256 checksum files were downloaded"
+          if [[ "${archives}" -eq 0 || "${checksums}" -ne "${archives}" ]]; then
+            echo "::error::Expected one .sha256 file per archive; found ${archives} archives and ${checksums} checksum files"
             exit 1
           fi
           gh release upload "v${VERSION}" "${files[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
