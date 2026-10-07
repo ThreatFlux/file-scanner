@@ -3,13 +3,13 @@ RUST_MSRV ?= 1.97.1
 RUST_TOOLCHAIN ?= 1.99.0
 MSRV_TARGET_DIR ?= $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR)/msrv,target/msrv)
 BINARY_NAME ?= file-scanner
-BINARY_PACKAGE ?= file-scanner
+BINARY_PACKAGE ?= threatflux-file-scanner
 SBOM_MANIFEST_PATH ?= Cargo.toml
 DOCKER_IMAGE ?= threatflux/file-scanner
 DOCKER_TAG ?= latest
 
 # Define all ThreatFlux libraries
-LIBRARIES := threatflux-threat-detection threatflux-package-security
+LIBRARIES := threatflux-package-security
 
 .PHONY: all help init build test test-parallel test-unit test-hash test-mcp test-analysis test-integration test-legacy install clean run-debug run-release docker-build docker-run docker-run-http lint fmt check deps update security-audit dev dev-full ci ci-full prepare-release coverage coverage-html setup-optimization libs-% parallel-% \
          fmt-check test-no-features test-mcp-features build-examples test-doc doc-check doc-links \
@@ -188,12 +188,6 @@ test-package-security:
 	$(CARGO) test --locked --manifest-path threatflux-package-security/Cargo.toml --all-features
 
 feature-test:
-	$(CARGO) check --locked -p threatflux-threat-detection --lib --no-default-features
-	$(CARGO) check --locked -p threatflux-threat-detection --lib --no-default-features --features yara-engine
-	$(CARGO) check --locked -p threatflux-threat-detection --lib --no-default-features --features pattern-matching
-	$(CARGO) test --locked -p threatflux-threat-detection --no-default-features
-	$(CARGO) test --locked -p threatflux-threat-detection --no-default-features --features yara-engine
-	$(CARGO) test --locked -p threatflux-threat-detection --no-default-features --features pattern-matching
 	$(CARGO) test --locked --manifest-path threatflux-package-security/Cargo.toml --no-default-features
 
 feature-test-full: test-all feature-test
@@ -494,8 +488,5 @@ parallel-test:
 	@echo $(LIBRARIES) | tr ' ' '\n' | xargs -I {} -P 6 sh -c 'cd {} && make test'
 
 # Individual library targets
-threatflux-threat-detection-%:
-	@cd threatflux-threat-detection && make $*
-
 threatflux-package-security-%:
 	@cd threatflux-package-security && make $*

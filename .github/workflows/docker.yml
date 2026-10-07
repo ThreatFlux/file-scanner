@@ -17,7 +17,6 @@ on:
       - "Makefile"
       - "src/**"
       - "benches/**"
-      - "threatflux-threat-detection/**"
       - vendor/**
   pull_request:
     branches:
@@ -33,7 +32,6 @@ on:
       - "Makefile"
       - "src/**"
       - "benches/**"
-      - "threatflux-threat-detection/**"
       - vendor/**
   schedule:
     - cron: "0 4 * * 1"
@@ -51,7 +49,7 @@ env:
   REGISTRY: ghcr.io
   DOCKER_BUILDKIT: 1
   BINARY_NAME: file-scanner
-  BINARY_PACKAGE: file-scanner
+  BINARY_PACKAGE: threatflux-file-scanner
   SBOM_MANIFEST_PATH: Cargo.toml
   OCI_IMAGE_TITLE: File Scanner
   OCI_IMAGE_DESCRIPTION: Comprehensive native file scanner with MCP server support

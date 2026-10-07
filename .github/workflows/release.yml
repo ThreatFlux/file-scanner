@@ -32,13 +32,16 @@ env:
   RUST_BACKTRACE: 1
   RUST_VERSION: 1.99.0
   RUSTUP_TOOLCHAIN: 1.99.0
+  # The crate is threatflux-file-scanner (crates.io treats - and _ alike, so the
+  # unrelated file_scanner crate owns the file-scanner name); the binary, the
+  # release asset names and the image keep the file-scanner name.
   BINARY_NAME: file-scanner
-  BINARY_PACKAGE: file-scanner
+  BINARY_PACKAGE: threatflux-file-scanner
   SBOM_MANIFEST_PATH: Cargo.toml
-  # Crates this repository may publish, in publish order. The local
-  # threatflux-threat-detection and threatflux-package-security crates and the
-  # vendored yara-x source are never published from here.
-  PUBLISH_PACKAGES: file-scanner
+  # Crates this repository may publish, in publish order. The standalone
+  # threatflux-package-security crate and the vendored yara-x source are never
+  # published from here.
+  PUBLISH_PACKAGES: threatflux-file-scanner
   # Only workflow_dispatch can set this; tag pushes always perform a real release.
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}
 
@@ -483,17 +486,13 @@ jobs:
               ;;
           esac
 
-          if [[ "${DRY_RUN}" == "true" && "${enabled}" == "true" ]]; then
+          if [[ "${DRY_RUN}" == "true" ]]; then
             mode=dry-run
-          elif [[ "${DRY_RUN}" == "true" ]]; then
-            # The file-scanner name belongs to an unrelated crate (crates.io treats
-            # - and _ alike), and the local threatflux-threat-detection 0.1.0 path
-            # dependency is not on crates.io, so `cargo package` cannot resolve
-            # the crate until publishing is enabled with a new name.
-            mode=dry-run-disabled
-            message="CRATES_IO_PUBLISH is 'false': a real run skips crates.io; the dry run checks the package file list only"
-            echo "::notice title=crates.io publish disabled::${message}"
-            echo "${message}" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "${enabled}" == "false" ]]; then
+              message="CRATES_IO_PUBLISH is 'false': a real run would skip crates.io; the dry run still verifies the package"
+              echo "::notice title=crates.io publish disabled::${message}"
+              echo "${message}" >> "$GITHUB_STEP_SUMMARY"
+            fi
           elif [[ "${enabled}" == "true" ]]; then
             mode=publish
           else
@@ -579,20 +578,6 @@ jobs:
             package_args+=(-p "${spec%@*}")
           done
           cargo publish --locked --all-features --dry-run "${package_args[@]}"
-
-      - name: Check package file list (publishing disabled)
-        if: steps.gate.outputs.mode == 'dry-run-disabled'
-        env:
-          CRATES: ${{ steps.packages.outputs.crates }}
-        run: |
-          set -euo pipefail
-          read -r -a specs <<< "${CRATES}"
-          for spec in "${specs[@]}"; do
-            cargo package --locked --list -p "${spec%@*}" > "${RUNNER_TEMP}/package-files.txt"
-            grep -qx 'Cargo.toml' "${RUNNER_TEMP}/package-files.txt"
-            grep -qx 'src/main.rs' "${RUNNER_TEMP}/package-files.txt"
-            echo "${spec}: $(wc -l < "${RUNNER_TEMP}/package-files.txt") packaged files"
-          done
 
       - name: Authenticate with crates.io
         id: crates-io-auth

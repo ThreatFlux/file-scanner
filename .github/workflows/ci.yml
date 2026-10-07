@@ -255,16 +255,8 @@ jobs:
           echo "📊 Final disk space:"
           df -h
 
-      - name: Check isolated production feature configurations
-        run: |
-          cargo check -p threatflux-threat-detection --lib --no-default-features --locked
-          cargo check -p threatflux-threat-detection --lib --no-default-features --features yara-engine --locked
-          cargo check -p threatflux-threat-detection --lib --no-default-features --features pattern-matching --locked
       - name: Test isolated feature configurations
         run: |
-          cargo test -p threatflux-threat-detection --no-default-features --locked
-          cargo test -p threatflux-threat-detection --no-default-features --features yara-engine --locked
-          cargo test -p threatflux-threat-detection --no-default-features --features pattern-matching --locked
           cargo test --manifest-path threatflux-package-security/Cargo.toml --no-default-features --locked
       - name: Build strict workspace and standalone documentation
         env:
