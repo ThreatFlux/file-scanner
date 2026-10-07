@@ -49,6 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Windows release checksum (`*-windows-amd64.zip.sha256`) ended in CRLF, which macOS
+  `shasum -a 256 -c` and `sha256sum -c` cannot read; it now ends in LF like the other
+  checksums, and the release job refuses to publish a checksum file in any other format
 - The Docker workflow no longer prunes untagged GHCR versions on `main`: they include the
   per-platform images of every multi-arch tag, so released tags such as `0.3.5` lost their
   `linux/amd64` and `linux/arm64` images and could no longer be pulled
