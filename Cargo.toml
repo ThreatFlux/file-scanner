@@ -134,7 +134,7 @@ pre-release-replacements = [
 # the library stays `file_scanner`.
 [package]
 name = "threatflux-file-scanner"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2021"
 rust-version = "1.97.1"
 authors = ["File Scanner Project <dev@threatflux.com>"]
