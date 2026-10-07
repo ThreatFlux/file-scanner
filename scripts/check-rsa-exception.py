@@ -13,6 +13,7 @@ def require(condition, message):
 
 
 def main():
+    """Verify the RSA dependency graph, the reviewed source and that no new code uses RSA."""
     root = Path(__file__).resolve().parent.parent
     packages = tomllib.loads((root / "Cargo.lock").read_text())["package"]
     rsa = [package for package in packages if package["name"] == "rsa"]
