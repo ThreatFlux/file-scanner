@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791358845426,
+  "lastUpdate": 1791368722087,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -8818,6 +8818,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
             "value": 407215.7616525703,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b1f58fc42cbe1edc092e37ac6acc3033d8e09bc1",
+          "message": "build: publish the crate as threatflux-file-scanner (#243)\n\ncrates.io treats - and _ alike, so the unrelated file_scanner crate owns\nthe file-scanner name. The package is now threatflux-file-scanner; the\nbinary stays file-scanner and the library stays file_scanner, so release\nasset names, the GHCR image and `use file_scanner::...` are unchanged.\nDockerfile, docker.yml, release.yml and the Makefile build the renamed\npackage.\n\nThe local threatflux-threat-detection 0.1.0 path dependency was never on\ncrates.io, so the package could not resolve outside this workspace. Use\nthe published 0.2.3 with its YARA engine instead (the local copy's YARA\nengine was a placeholder) and remove the local copy, its CI feature\nchecks and its Makefile targets.\n\nAn include list ships only src/, Cargo.toml, Cargo.lock, README,\nCHANGELOG and LICENSE. The vendored YARA-X patch is not in the package:\nthe crates.io build uses upstream YARA-X 1.21.0 with Wasmtime 45.0.3,\nand vendor/README.md records why none of the four Wasmtime advisories is\nreachable from it. Release binaries and images keep Wasmtime 49.0.2.\n\nRelease dry runs now run cargo publish --dry-run while\nCRATES_IO_PUBLISH=false (which stays false). README, INSTALLATION and the\nworkflow README document cargo install threatflux-file-scanner, the\none-time manual first publish and the switch to trusted publishing.\nCHANGELOG records 0.3.7.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-10-07T05:51:31-04:00",
+          "tree_id": "41353838676132213d77949a9910cde012e58eac",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/b1f58fc42cbe1edc092e37ac6acc3033d8e09bc1"
+        },
+        "date": 1791368721550,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 4975.048937873292,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_large_binary",
+            "value": 63220.687285390675,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_pe",
+            "value": 5722.813161225665,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 1925202.29630477,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 2698504.714736842,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 266662.4147504617,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2278044.5534782615,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 63498.820849187774,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 33257.38447101161,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 207318.2312574969,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 1904025.980726554,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 42885.62328586564,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 25598.208407025424,
+            "unit": "ns"
+          },
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2261023.668695653,
+            "unit": "ns"
+          },
+          {
+            "name": "string_categorization/extract_with_categorization",
+            "value": 787738.5371022039,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/10000_strings",
+            "value": 9005754.139999999,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/1000_strings",
+            "value": 1015082.3266098003,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/100_strings",
+            "value": 192359.75350763247,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_16",
+            "value": 8741230.585000003,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_4",
+            "value": 8952680.479999999,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_8",
+            "value": 9019014.506666666,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_16",
+            "value": 940642.7944139945,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_4",
+            "value": 1010025.9590115246,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_8",
+            "value": 1109199.1743707983,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_16",
+            "value": 157518.29857113084,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_4",
+            "value": 192399.77839278066,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
+            "value": 298629.5195887151,
             "unit": "ns"
           }
         ]
