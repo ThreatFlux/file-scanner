@@ -128,9 +128,12 @@ pre-release-replacements = [
     { file = "CHANGELOG.md", search = "ReleaseDate", replace = "{{date}}" },
 ]
 
-# Main file-scanner package configuration
+# Main package. crates.io treats - and _ alike, so the unrelated `file_scanner`
+# crate owns the `file-scanner` name there: the package is published as
+# threatflux-file-scanner, while the installed binary stays `file-scanner` and
+# the library stays `file_scanner`.
 [package]
-name = "file-scanner"
+name = "threatflux-file-scanner"
 version = "0.3.6"
 edition = "2021"
 rust-version = "1.97.1"
@@ -138,11 +141,30 @@ authors = ["File Scanner Project <dev@threatflux.com>"]
 description = "A comprehensive file analysis framework for security research, malware detection, and forensic investigation"
 homepage = "https://github.com/ThreatFlux/file-scanner"
 repository = "https://github.com/ThreatFlux/file-scanner"
+documentation = "https://docs.rs/threatflux-file-scanner"
 license = "MIT"
 readme = "README.md"
-keywords = ["security", "malware", "forensics", "analysis", "file-scanner"]
-categories = ["command-line-utilities", "development-tools", "security", "analysis"]
+keywords = ["security", "malware", "forensics", "yara", "mcp"]
+categories = ["command-line-utilities", "development-tools", "security", "parser-implementations"]
+# Ship only what builds the library and binary. Tests, benchmarks, test
+# corpora, scripts, workflows, the vendored YARA-X source and the local
+# package-security crate stay in the repository.
+include = [
+    "/src/**/*.rs",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+]
 
+[lib]
+name = "file_scanner"
+path = "src/lib.rs"
+
+[[bin]]
+name = "file-scanner"
+path = "src/main.rs"
 
 [dependencies]
 # ThreatFlux libraries - migrated to crates.io
@@ -150,8 +172,8 @@ threatflux-hashing = { version = "1.7.0", features = ["serde"] }
 threatflux-string-analysis = { version = "0.2.2" }
 threatflux-cache = { version = "0.2.0" } # TODO: Update library to use utoipa 5.4.0 for openapi feature
 threatflux-binary-analysis = { version = "0.3.0", features = ["serde-support"] }
-# Enhanced threat detection with YARA integration and malware analysis (local workspace)
-threatflux-threat-detection = { version = "0.1.0", path = "threatflux-threat-detection", features = ["builtin-rules", "pattern-matching", "serde", "async-scanning"] }
+# Enhanced threat detection with YARA integration and malware analysis
+threatflux-threat-detection = { version = "0.2.3", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
 # threatflux-package-security = { version = "0.1.0" } # Not used in actual source code
 
 # Core dependencies (using workspace versions)

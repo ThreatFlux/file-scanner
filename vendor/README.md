@@ -43,10 +43,29 @@ Primary advisory references: [record lifting](https://rustsec.org/advisories/RUS
 
 ## Distribution scope
 
-This override protects native builds from this repository and its Docker images.
-Cargo does not propagate a root `[patch.crates-io]` into consumers of a published
-library. The root `cargo package --list` also excludes the nested vendor crate
-source, so published crate artifacts do not carry this runtime override. Such
-consumers must provide their own complete top-level patch or wait for a published
-YARA-X release that resolves a patched Wasmtime runtime. Use the source checkout
-or its Docker image to obtain this repository's patched native runtime.
+This override protects native builds from this repository: the release binaries
+and the Docker images. Cargo does not propagate a root `[patch.crates-io]` into
+a published crate, and the crate's `include` list leaves out this directory, so
+the `threatflux-file-scanner` package on crates.io builds against the upstream
+YARA-X 1.21.0 release and its Wasmtime 45.0.3 requirement. `cargo audit` on that
+package's lockfile reports the four advisories above. None of them is reachable
+from that build:
+
+- RUSTSEC-2026-0316 (dynamic record lifting) and RUSTSEC-2026-0327 (async-lifted
+  callback result count) are in Wasmtime's component model. YARA-X enables only
+  the `cranelift` and `runtime` features with default features off, so the
+  component model is not compiled.
+- RUSTSEC-2026-0269 (filesystem sandbox escape) is in `wasmtime-wasi`, which is
+  not in the dependency graph.
+- RUSTSEC-2026-0222 (type indices mixed between engines) needs an embedder that
+  creates two Wasmtime `Engine`s and passes objects between them. YARA-X keeps a
+  single process-wide `Engine` and exposes no Wasmtime objects, and this crate
+  does not use Wasmtime directly.
+
+So the patch is a security-audit fix, not a behaviour change: the vendored source
+differs from the published release only in the Wasmtime requirement (and the
+omitted benchmark targets). A library consumer that wants the patched runtime
+must add its own complete top-level `[patch.crates-io]` entry or wait for a
+published YARA-X release that requires a patched Wasmtime. Use the release
+binaries, the Docker image or a source checkout to get this repository's patched
+native runtime.

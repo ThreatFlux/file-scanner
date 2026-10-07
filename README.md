@@ -62,8 +62,26 @@ prebuilt binaries with SHA-256 checksums; releases cut by the release workflow
 cover Linux (x86_64, arm64), macOS (arm64, x86_64) and Windows (x86_64) and
 attach a CycloneDX SBOM. Container images are published to
 `ghcr.io/threatflux/file-scanner`.
-File Scanner is not published on crates.io: the `file-scanner` name belongs to an
-unrelated crate, so `cargo install file-scanner` does not install this project.
+
+#### From crates.io
+
+On crates.io the crate is named `threatflux-file-scanner`, because the
+`file-scanner` name belongs to an unrelated crate (`cargo install file-scanner`
+does not install this project). It installs the same `file-scanner` binary:
+
+```bash
+cargo install threatflux-file-scanner --locked
+```
+
+Until [crates.io](https://crates.io/crates/threatflux-file-scanner) lists a
+release, install from source or GitHub Releases instead. As a library, add
+`threatflux-file-scanner` to `Cargo.toml` and import it as `file_scanner`.
+
+The crates.io build resolves the upstream YARA-X 1.21.0 release, which pins
+Wasmtime 45. Release binaries and container images build from this repository
+with the vendored YARA-X security patch (Wasmtime 49.0.2); see
+[vendor/README.md](vendor/README.md) for why the crates.io build is not exposed
+to the Wasmtime advisories that patch addresses.
 
 ### Basic Usage
 

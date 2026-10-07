@@ -61,7 +61,9 @@ pushes no image.
 | Windows | x86_64 | `file-scanner-vX.Y.Z-windows-amd64.zip` |
 | SBOM | - | `file-scanner-vX.Y.Z.cdx.json` (CycloneDX 1.5) |
 
-Each archive has a `.sha256` checksum beside it. Container images are published
+Each archive has a `.sha256` checksum beside it. Asset names follow the
+`file-scanner` binary, not the `threatflux-file-scanner` crate name, so download
+URLs stay the same across releases. Container images are published
 to `ghcr.io/threatflux/file-scanner` by `docker.yml` with semver, `latest` and
 commit tags, and are signed with cosign (keyless).
 
@@ -73,14 +75,50 @@ in the `crates-io` environment and exchanges its OIDC token
 `rust-lang/crates-io-auth-action`; no registry secret is stored. Versions that
 are already on crates.io are skipped, and a publish failure fails the run.
 
-Publishing is currently disabled with the repository variable
-`CRATES_IO_PUBLISH=false`: the `file-scanner` crate name belongs to an
-unrelated crate, and the local `threatflux-threat-detection` 0.1.0 path
-dependency is not on crates.io. While it is disabled, real releases skip
-crates.io and dry runs only check the packaged file list. The local
-`threatflux-threat-detection` and `threatflux-package-security` crates and the
-vendored YARA-X source set `publish = false` or are not workspace members, and
-are never published from this repository.
+The crate is published as `threatflux-file-scanner`: crates.io treats `-` and
+`_` alike, so the unrelated `file_scanner` crate owns the `file-scanner` name.
+The binary stays `file-scanner` and the library stays `file_scanner`. The
+package `include` list ships only `src/`, the manifest, `Cargo.lock`, the README,
+the changelog and the license. The standalone `threatflux-package-security`
+crate and the vendored YARA-X source are never published from this repository,
+and the published crate builds against the upstream YARA-X release (see
+[vendor/README.md](../../vendor/README.md#distribution-scope)).
+
+Publishing from the workflow is disabled with the repository variable
+`CRATES_IO_PUBLISH=false` until the first version is on crates.io: trusted
+publishing cannot create a new crate. While it is disabled, real releases skip
+crates.io; dry runs still run `cargo publish --dry-run` on the package.
+
+#### First publish (one time)
+
+A maintainer publishes the first version by hand from a release tag, with a
+short-lived API token:
+
+1. On crates.io, create an API token under Account Settings > API Tokens with
+   the `publish-new` scope, restricted to the `threatflux-file-scanner` crate
+   name, with the shortest expiry available.
+2. Publish from a clean checkout of the release tag:
+
+   ```bash
+   git clone --depth 1 --branch vX.Y.Z https://github.com/ThreatFlux/file-scanner /tmp/threatflux-file-scanner-publish
+   cd /tmp/threatflux-file-scanner-publish
+   cargo login            # paste the token when prompted
+   cargo publish --locked -p threatflux-file-scanner
+   cargo logout
+   ```
+
+3. Revoke the token on crates.io.
+
+Then switch the repository to trusted publishing:
+
+1. On the crate's crates.io Settings > Trusted Publishing page, add a GitHub
+   publisher: owner `ThreatFlux`, repository `file-scanner`, workflow
+   `release.yml`, environment `crates-io`.
+2. Delete the `CRATES_IO_PUBLISH` repository variable
+   (`gh variable delete CRATES_IO_PUBLISH -R ThreatFlux/file-scanner`), so the
+   next release publishes through `release.yml`.
+3. On the same crates.io settings page, turn on "Require trusted publishing"
+   so API tokens can no longer publish the crate.
 
 ## Container image
 

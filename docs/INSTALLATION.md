@@ -5,6 +5,7 @@ This guide covers installing File Scanner on various platforms.
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
+- [Installing from crates.io](#installing-from-cratesio)
 - [Building from Source](#building-from-source)
 - [Docker Installation](#docker-installation)
 - [Platform-Specific Instructions](#platform-specific-instructions)
@@ -35,6 +36,22 @@ This guide covers installing File Scanner on various platforms.
 - **Git**: For cloning the repository
 - **Make**: For using the Makefile (optional)
 - **pkg-config**: For linking system libraries
+
+## Installing from crates.io
+
+The crate is published as `threatflux-file-scanner` (the `file-scanner` name on
+crates.io belongs to an unrelated crate) and installs the `file-scanner` binary:
+
+```bash
+cargo install threatflux-file-scanner --locked
+```
+
+Until [crates.io](https://crates.io/crates/threatflux-file-scanner) lists a
+release, build from source or download a binary from
+[GitHub Releases](https://github.com/ThreatFlux/file-scanner/releases). The
+crates.io build uses the upstream YARA-X release; release binaries and container
+images carry the vendored YARA-X security patch described in
+[vendor/README.md](../vendor/README.md).
 
 ## Building from Source
 
