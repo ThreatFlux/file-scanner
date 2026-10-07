@@ -263,8 +263,12 @@ jobs:
           New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item "target/${env:TARGET}/release/${env:BINARY_NAME}.exe", LICENSE, README.md -Destination dist/
           Compress-Archive -Path dist/* -DestinationPath $env:ARCHIVE
-          $hash = (Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLower()
-          "$hash  $env:ARCHIVE" | Out-File -Encoding ascii "$env:ARCHIVE.sha256"
+          $hash = (Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLowerInvariant()
+          # The "<hash>  <file>" line shasum writes, with an LF ending, so
+          # `shasum -a 256 -c` and `sha256sum -c` verify it on any platform
+          # (Out-File would end it with CRLF, which they cannot read).
+          [System.IO.File]::WriteAllText((Join-Path $PWD "$env:ARCHIVE.sha256"), "$hash  $env:ARCHIVE`n")
+          Get-Content "$env:ARCHIVE.sha256"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -405,6 +409,27 @@ jobs:
           done
           if [[ "${#files[@]}" -eq 0 ]]; then
             echo "::error::No release artifacts were downloaded"
+            exit 1
+          fi
+          # Publish only checksum files that hold exactly the one LF-terminated
+          # "<sha256>  <archive>" line shasum writes, next to their archive:
+          # GNU sha256sum tolerates a CRLF ending, but macOS sha256sum and
+          # shasum cannot read the file name then, so check the format first.
+          checksums=0
+          for file in "${files[@]}"; do
+            if [[ "${file}" == *.sha256 ]]; then
+              archive="$(basename "${file}" .sha256)"
+              if [[ "$(wc -l < "${file}")" -ne 1 ]] ||
+                ! grep -qxE "[0-9a-f]{64}  ${archive//./\\.}" "${file}"; then
+                echo "::error::${file} must be one '<sha256>  ${archive}' line ending in LF"
+                exit 1
+              fi
+              (cd "$(dirname "${file}")" && sha256sum --check --strict "${archive}.sha256")
+              checksums=$((checksums + 1))
+            fi
+          done
+          if [[ "${checksums}" -eq 0 ]]; then
+            echo "::error::No .sha256 checksum files were downloaded"
             exit 1
           fi
           gh release upload "v${VERSION}" "${files[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
