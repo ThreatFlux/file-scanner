@@ -34,7 +34,7 @@ async-trait = "0.1.92"
 thiserror = "2.0.21"
 
 # Package-specific dependencies
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }  # For Java archives
+zip = { version = "9.0.0", default-features = false, features = ["deflate"] }  # For Java archives
 tar = "0.4.46"  # For Python packages
 flate2 = "1.1.10"  # For compressed archives
 toml = "1.1.6"  # For parsing pyproject.toml
