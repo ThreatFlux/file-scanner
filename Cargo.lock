@@ -4291,9 +4291,9 @@ dependencies = [
 
 [[package]]
 name = "threatflux-string-analysis"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce3abb23a80de11db86c08b71bc35ed52ae920b82c587c1b3e297052486c2f19"
+checksum = "7ecdcda064395f504834a0f5d863d7d894ecd751b5a5857aa8ebe35dfb5b3a9d"
 dependencies = [
  "chrono",
  "regex",
