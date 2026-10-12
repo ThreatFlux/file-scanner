@@ -87,7 +87,7 @@ edit-distance = "2.2.2"
 
 # Archive handling
 cfb = "0.15.0"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
 flate2 = "1.1.10"
 tar = "0.4.46"
 
