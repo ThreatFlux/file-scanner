@@ -4188,9 +4188,9 @@ dependencies = [
 
 [[package]]
 name = "threatflux-cache"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5d91b8621389781d77f8ce9c5efa9b3680490caf6f49fa9677ff47aced99ecb"
+checksum = "b2f47bd9c10df37c7dae559edd38cacfb5a159ee3627db9ffced36a16b5c60b6"
 dependencies = [
  "async-trait",
  "chrono",
