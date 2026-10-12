@@ -139,7 +139,7 @@ jobs:
 
       - name: Preserve full CodeQL analysis and review evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: codeql-reviewed-analysis-${{ matrix.language }}
           path: |
@@ -165,7 +165,7 @@ jobs:
           cargo cyclonedx --manifest-path threatflux-package-security/Cargo.toml --all-features --format json --spec-version 1.5 --override-filename sbom
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sbom
           path: '**/sbom.json'
@@ -261,7 +261,7 @@ jobs:
           PYCODE
       - name: Upload Semgrep results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: semgrep-results
           path: semgrep-results.json
