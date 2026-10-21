@@ -1,0 +1,326 @@
+[
+  {
+    "id": "CGA-2r3h-47g9-hgx9",
+    "cves": [
+      "CVE-2026-19542"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-2r3h-47g9-hgx9.json",
+    "sha256": "7ce365ab1321609a42d418d5dff86572e1e5659334d3a5ddb4c58ee49428896d",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=x86_64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r1"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-32c9-fmx5-865m",
+    "cves": [
+      "CVE-2026-80489"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-32c9-fmx5-865m.json",
+    "sha256": "9d8dc1c6afcf8a48efdeb7a6ceffee839a843f82a9f8bcb4d7c7f6a662241921",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=aarch64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r4"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-3qmp-39qm-cjf8",
+    "cves": [
+      "CVE-2026-18374"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-3qmp-39qm-cjf8.json",
+    "sha256": "d5aaab5c6df586cfc30363dfe894cbea5779ad39bb01cae8efcacc341babcca8",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=x86_64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r6"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-63j2-v7q6-8x84",
+    "cves": [
+      "CVE-2026-18374"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-63j2-v7q6-8x84.json",
+    "sha256": "acc18629feca80b2e84b57cb69ff71e2874a52cdaf05caa91b94b98dbb55d05e",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=aarch64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r6"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-6mw4-h5gw-xj38",
+    "cves": [
+      "CVE-2026-19542"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-6mw4-h5gw-xj38.json",
+    "sha256": "c8a51dd3db22fd1bd09b6ae957d2fb8d71cf8e2290633369d07b94da1ed92ac7",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=aarch64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r1"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-fjmw-f657-w678",
+    "cves": [
+      "CVE-2026-8674"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-fjmw-f657-w678.json",
+    "sha256": "7648fe9ccc7965250c7f5ba3ff677dfd86050c51b2eb56906aa5c469a8aa8714",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=x86_64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r8"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-gvr8-r35v-jwr6",
+    "cves": [
+      "CVE-2026-77117"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-gvr8-r35v-jwr6.json",
+    "sha256": "58cf3f744ffc4f7e4046ba33351d10c4585286a36f5713176867e721da32b64a",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=aarch64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r4"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-h37p-vg43-83x9",
+    "cves": [
+      "CVE-2026-80489"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-h37p-vg43-83x9.json",
+    "sha256": "db5f25aa80e0291c60556d1d984ac85a7754ebd8a32c72974633260627ad3ca9",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=x86_64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r4"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-h9gc-g4cr-r6c4",
+    "cves": [
+      "CVE-2026-77117"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-h9gc-g4cr-r6c4.json",
+    "sha256": "aad89a8921361b45d88365455039b0a3d0648af51fa7f8c0fee737d9ee2c0cf7",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=x86_64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r4"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-jm93-f4m9-rgvp",
+    "cves": [
+      "CVE-2026-8674"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-jm93-f4m9-rgvp.json",
+    "sha256": "e0f9db71d254ec604ba0e3ab5176a35c15b0744b1c4518303491d1d3e9df326a",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=aarch64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r8"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-mmr3-52h6-3hmm",
+    "cves": [
+      "CVE-2026-19499"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-mmr3-52h6-3hmm.json",
+    "sha256": "e31db49405e7c57809c8c6718d99866d34dbefa5a529df88a3b098f67fa7901d",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=x86_64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r4"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "CGA-vgh2-x6cw-pjxr",
+    "cves": [
+      "CVE-2026-19499"
+    ],
+    "source": "https://advisories.cgr.dev/chainguard/v3/osv/CGA-vgh2-x6cw-pjxr.json",
+    "sha256": "8427830291c8cca42dba2ae216cac740b7412dd69e723dfce7cdd4028577b279",
+    "wolfi": [
+      {
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=aarch64",
+        "ranges": [
+          {
+            "type": "ECOSYSTEM",
+            "events": [
+              {
+                "introduced": "0"
+              },
+              {
+                "fixed": "2.44-r4"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

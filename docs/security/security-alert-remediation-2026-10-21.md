@@ -50,6 +50,26 @@ Both actual package inventories contain glibc/loader 2.44-r8, libgcc/libstdc++
 stays Debian 13 on Rust 1.99.1; the runtime migration preserves existing GNU
 behavior rather than changing the application to musl.
 
+## Independent glibc source and advisory verification
+
+A clean result after changing distributions was cross-checked against the
+[exact Wolfi source revision](glibc-source-fix-verification-2026-10-21.md),
+not inferred from an absent finding. All ten glibc fixes are present: six
+complete official patches reverse-apply exactly without fuzz or offsets; four
+additional fixed implementations and registered upstream regression tests
+were inspected. The full glibc test suite was not built or run during review.
+The [DNS-specific proof](glibc-dns-fix-proof-2026-10-21.md) also corrects
+reachability: CVE-2026-5435/6238 concern deprecated DNS printing/debugging
+functions, so ordinary DNS resolution alone does not prove their execution.
+Their source fixes are included regardless.
+
+[Primary Chainguard advisory snapshots](evidence/glibc/summary.json) separately
+map both architectures to fixed package versions for six findings:
+CVE-2026-19542 at 2.44-r1; CVE-2026-77117/80489/19499 at 2.44-r4;
+CVE-2026-18374 at 2.44-r6; CVE-2026-8674 at 2.44-r8. All are satisfied by
+the pinned 2.44-r8 runtime. Verbatim upstream patches, advisory source URLs
+and checksums are retained under `evidence/glibc/`.
+
 ## Native zlib fix beyond package scan coverage
 
 Independent review caught that bundled zlib 1.3.2 fixes the CRC issue but also
