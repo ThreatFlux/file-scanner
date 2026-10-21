@@ -1,71 +1,173 @@
-# Temporary YARA-X security patch
+# Temporary stable YARA-X dependency patch
 
-The root Cargo patch uses the exact published stable YARA-X 1.21.0 source with
-stable Wasmtime 49.0.2. Published YARA-X 1.21.0 requires Wasmtime 45.0.3; that
-release line has no patch for RUSTSEC-2026-0316 and RUSTSEC-2026-0327, and remains
-affected by RUSTSEC-2026-0222 and RUSTSEC-2026-0269. Wasmtime 49.0.2 fixes all
-four. No new advisory exemptions are introduced.
+The root Cargo patch uses the published stable YARA-X 1.22.0 source with stable
+Wasmtime 49.0.4 and RSA 0.9.10. Upstream 1.22.0 requires Wasmtime 48.0.6 and the
+prerelease RSA 0.10.0-rc.19. This patch keeps the repository on stable dependencies
+while refreshing YARA-X and the native runtime. The existing public-key-only
+RSA advisory exception remains guarded by `scripts/check-rsa-exception.py`;
+this update adds no advisory exemptions.
 
 ## Provenance
 
-- Artifact: [crates.io YARA-X 1.21.0](https://crates.io/api/v1/crates/yara-x/1.21.0/download)
-- Artifact SHA-256: `01380fac6a879db2b11b5a3586075ec220988805c98a21497f6895fb35c9d373`
-- SHA-256 verified against the crates.io version metadata on 2026-10-05.
-- Upstream commit: [`7b2637d4655155fdfaf68177edadb9a39406ece0`](https://github.com/VirusTotal/yara-x/tree/7b2637d4655155fdfaf68177edadb9a39406ece0/lib)
-- License: BSD-3-Clause; [LICENSE](yara-x-1.21.0/LICENSE) is copied from that commit.
-- Runtime patch: [exact manifest diff](yara-x-1.21.0.patch).
+- Artifact: [crates.io YARA-X 1.22.0](https://static.crates.io/crates/yara-x/yara-x-1.22.0.crate).
+- Artifact SHA-256: `219e5694590ea59d31c880b4bb88f78cf82f69b58c590d710577ee277aacfb2d`.
+- Verified against the 1.22.0 entry in the official [crates.io sparse index](https://index.crates.io/ya/ra/yara-x) on 2026-10-21.
+- Upstream commit from the crate's `.cargo_vcs_info.json`: [`e27597f2c05e13fe1c2bb459781aef8899afc485`](https://github.com/VirusTotal/yara-x/tree/e27597f2c05e13fe1c2bb459781aef8899afc485/lib).
+- License: BSD-3-Clause; [LICENSE](yara-x-1.22.0/LICENSE) is verified byte-for-byte against that upstream commit.
+- Local manifest and source changes: [exact diff](yara-x-1.22.0.patch).
 
-All upstream source, generated module assets, build script and README are
-preserved. Upstream Cargo.lock, original workspace Cargo.toml and standalone
-benchmark targets/files are omitted because this crate is a dependency of the
-root workspace. The normalized manifest changes only the Wasmtime version and
-removes the omitted benchmark targets. Existing runtime features remain
-`cranelift` and `runtime` with default features disabled. No component model or
-WASI support is enabled by this patch. Git whitespace attributes and optional
-formatting hooks exempt only the upstream vendor subtree and exact diff context
-so checked source bytes and fixture whitespace remain unchanged; application
-formatting, compilation, lint, and security gates still apply.
+Upstream source, generated module assets, build script and README are preserved
+except for the documented crypto API bridge. Upstream Cargo.lock, original
+workspace Cargo.toml, standalone benchmark targets/files and package VCS metadata
+are omitted because this crate is a dependency of the root workspace. Existing
+runtime features remain `cranelift` and `runtime`, with default features disabled;
+this patch enables no component-model or WASI features. Git whitespace attributes
+and formatting hooks exempt the upstream subtree and exact diff context, while
+application compilation, lint and security gates still apply.
 
-The wrapper compiles against the current native Wasmtime API without runtime
-source changes. The application and threat-detection tests exercise real YARA
-rule compilation and scanning using this patched dependency. Wasmtime's
-minimum supported Rust version is 1.96.0, below this repository's 1.97.1 MSRV.
+## Stable RSA compatibility
 
-Remove the root `[patch.crates-io]` entry and this directory when a published
-stable YARA-X release resolves a Wasmtime version patched for these advisories.
-Regenerate Cargo.lock and rerun the vulnerability audit (including a no-ignore report for the retained RSA exception) and YARA
-compile/scan regressions before removing it.
+YARA-X 1.22.0 uses current stable RustCrypto digest 0.11, DSA 0.7 and ECDSA 0.17.
+Stable RSA 0.9.10 still consumes digest 0.10 and PKCS8 0.10, whereas upstream's
+prerelease RSA shares the newer crypto traits. The local bridge retains the
+current stable crypto dependencies and uses four explicit compatibility aliases
+for RSA's own PKCS#1 v1.5 padding constructors: md2 0.10.2, md-5 0.10.6,
+sha1 0.10.7 and sha2 0.10.9. These older stable series coexist with the latest
+stable digest implementations. Actual message hashing uses the current stable
+algorithms. An OID selects the corresponding RSA padding constructor; the
+upstream unprefixed-signature fallback is preserved. ECDSA imports its own newer
+public-key decode trait and error type, separately from RSA's older PKCS8 type.
+No private-key operations are introduced.
 
-Primary advisory references: [record lifting](https://rustsec.org/advisories/RUSTSEC-2026-0316.html),
-[engine type indices](https://rustsec.org/advisories/RUSTSEC-2026-0222.html),
-[WASI path escape](https://rustsec.org/advisories/RUSTSEC-2026-0269.html),
-[component callback result count](https://rustsec.org/advisories/RUSTSEC-2026-0327.html).
+The added `stable_rsa_tests::stable_rsa_verifies_openssl_sha256_signatures`
+regression checks independent OpenSSL-generated SHA256 signatures with both
+standard DigestInfo padding and the upstream unprefixed fallback, rejects a
+modified message and rejects a corrupted signature. Only the public key and
+signatures are stored under `src/modules/utils/testdata/`; no private key is
+retained. The vectors were generated with:
 
-## Distribution scope
+```sh
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out key.pem
+printf 'YARA-X stable RSA compatibility regression\n' > message
+openssl pkey -in key.pem -pubout -outform DER -out stable-rsa-public.der
+openssl dgst -sha256 -sign key.pem -out stable-rsa-prefixed.sig message
+openssl dgst -sha256 -binary -out digest message
+openssl pkeyutl -sign -inkey key.pem -in digest -out stable-rsa-unprefixed.sig
+```
 
-This override protects native builds from this repository: the release binaries
-and the Docker images. Cargo does not propagate a root `[patch.crates-io]` into
-a published crate, and the crate's `include` list leaves out this directory, so
-the `threatflux-file-scanner` package on crates.io builds against the upstream
-YARA-X 1.21.0 release and its Wasmtime 45.0.3 requirement. `cargo audit` on that
-package's lockfile reports the four advisories above. None of them is reachable
-from that build:
+The targeted regression was compiled and passed in an isolated Cargo harness
+using the actual vendored crypto and ASN.1 modules. Root CI additionally exercises
+real YARA rule compilation and scanning. The exception guard verifies the exact
+reviewed crypto source, the sole RSA caller and version, and absence of RSA in
+the standalone package-security crate.
 
-- RUSTSEC-2026-0316 (dynamic record lifting) and RUSTSEC-2026-0327 (async-lifted
-  callback result count) are in Wasmtime's component model. YARA-X enables only
-  the `cranelift` and `runtime` features with default features off, so the
-  component model is not compiled.
-- RUSTSEC-2026-0269 (filesystem sandbox escape) is in `wasmtime-wasi`, which is
-  not in the dependency graph.
-- RUSTSEC-2026-0222 (type indices mixed between engines) needs an embedder that
-  creates two Wasmtime `Engine`s and passes objects between them. YARA-X keeps a
-  single process-wide `Engine` and exposes no Wasmtime objects, and this crate
-  does not use Wasmtime directly.
+## Distribution scope and removal
 
-So the patch is a security-audit fix, not a behaviour change: the vendored source
-differs from the published release only in the Wasmtime requirement (and the
-omitted benchmark targets). A library consumer that wants the patched runtime
-must add its own complete top-level `[patch.crates-io]` entry or wait for a
-published YARA-X release that requires a patched Wasmtime. Use the release
-binaries, the Docker image or a source checkout to get this repository's patched
-native runtime.
+This override applies to native binaries and Docker images built from this
+repository. Cargo does not propagate root `[patch.crates-io]` overrides into a
+published library, and the package `include` allowlist excludes the vendor tree.
+The `threatflux-file-scanner` package on crates.io therefore resolves upstream
+YARA-X 1.22.0 with its original Wasmtime requirement and prerelease RSA dependency.
+A library consumer requiring this exact stable graph must add a complete
+root-level patch or use this repository's binaries, container or source checkout.
+This scope limitation must remain visible in release documentation.
+
+Remove the root patch and vendor tree when a published stable YARA-X release
+uses stable RSA and an acceptable stable Wasmtime runtime. Regenerate Cargo.lock,
+run vulnerability audit/deny (including a no-ignore report for the retained RSA
+exception), verify no prerelease packages remain, rerun the RSA regression and
+YARA compile/scan tests, and rereview the CodeQL source-hash guard before removal.
+
+# Temporary binary-analysis ZIP security patch
+
+The latest published `threatflux-binary-analysis` 0.3.1 requires ZIP 8.6.0,
+which is reported by RustSec advisories RUSTSEC-2026-0367, RUSTSEC-2026-0368 and
+RUSTSEC-2026-0369. The root patch uses the exact published crate with ZIP 9.0.5
+and the small necessary API migration. No additional advisory exceptions are
+introduced. Its only ZIP caller is the Java/JAR metadata parser; it reads entry
+names and sizes and never extracts files or writes archive paths to disk. This
+patch removes the affected package version from the graph even though the
+extraction-specific paths are not called here.
+
+## Binary-analysis provenance and changes
+
+- Artifact: [crates.io threatflux-binary-analysis 0.3.1](https://static.crates.io/crates/threatflux-binary-analysis/threatflux-binary-analysis-0.3.1.crate).
+- SHA-256: `ac8769597acfe127518ffacbc8819c4f3ff8094241dd7ae7211502e008d79eb0`.
+- Verified against the [official crates.io index](https://index.crates.io/th/re/threatflux-binary-analysis) on 2026-10-21.
+- Upstream VCS commit: [`64856368e7007d1292ad7b2603b8cd5ccd3dd7df`](https://github.com/ThreatFlux/threatflux-binary-analysis/tree/64856368e7007d1292ad7b2603b8cd5ccd3dd7df).
+- MIT [LICENSE](threatflux-binary-analysis-0.3.1/LICENSE), source, tests, examples and shipped documentation are retained from the archive.
+- Exact changes: [manifest and Java parser diff](threatflux-binary-analysis-0.3.1.patch).
+
+The normalized Cargo manifest bumps normal and development ZIP dependencies
+from 8.6.0 to 9.0.5. Java parsing propagates invalid entry-name errors; Java
+format detection treats invalid names as nonmatching. ZIP 9 returns a fallible
+`Cow<str>` name, so the parser borrows the decoded name when copying it into the
+bounded output. No extraction or filesystem behavior is added. The package's
+Cargo.lock, original manifest and VCS metadata are omitted from the vendor copy.
+
+All six existing Java parser unit regressions passed against this ZIP 9.0.5
+patch in an isolated copy: ordinary JAR identification, generic ZIP rejection,
+truncated or invalid Java headers, forged archive entry counts and two EOCD
+comment-signature cases. The root compilation and archive integration tests
+provide additional coverage with the full application feature set.
+
+As with YARA-X, the root patch affects repository-built binaries/containers and
+is not inherited by crates.io library consumers. Remove this override once a
+published stable binary-analysis release requires a fixed stable ZIP version;
+refresh the lockfile, audit/deny and rerun Java/archive regressions. The public
+crate can resolve the unpatched upstream ZIP dependency until that happens.
+
+# Stable libz-sys / zlib security backport
+
+The root `libz-sys` patch preserves the latest stable wrapper 1.1.30 and its
+bundled stable zlib 1.3.2, with the exact upstream fix for CVE-2026-85091.
+`LIBZ_SYS_STATIC=1` in the production build selects this bundled implementation;
+using an unaffected runtime base alone would not repair vulnerable statically
+linked C code. This patch changes the actual source compiled into the binary.
+
+## libz-sys provenance
+
+- Artifact: [official libz-sys 1.1.30 crate](https://static.crates.io/crates/libz-sys/libz-sys-1.1.30.crate).
+- Archive SHA-256: `f710a23e6dbf193214fd46ca56a9d6864e550abe86202184532ae7275e46de19`.
+- Checksum verified against the 1.1.30 entry in the [official crates.io index](https://index.crates.io/li/bz/libz-sys) on 2026-10-21.
+- Crate VCS commit: [`3c9a7453068352513d69a2010a8ef217ed2915fa`](https://github.com/rust-lang/libz-sys/tree/3c9a7453068352513d69a2010a8ef217ed2915fa), from its packaged VCS metadata.
+- The original MIT/Apache licenses and embedded zlib license notice in `src/zlib/zlib.h` are preserved.
+- Original source, build script, normalized manifest and included zlib/zlib-ng trees are preserved. Package Cargo.lock, original Cargo.toml and VCS metadata are omitted.
+- Exact upstream-source diff: [libz-sys-1.1.30.patch](libz-sys-1.1.30.patch).
+
+The patch is a direct backport of Mark Adler's official zlib commit
+[`df84af25dc1942490e1d1c899a07619152a46148`](https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148),
+"Fix buffer overflow bug in non-blocking gzwrite", dated 2026-09-16. The complete
+commit identity and patch were verified using GitHub's authenticated commit API
+and the official commit patch. Upstream explicitly identifies CVE-2026-85091.
+
+When a direct large-buffer gzip write stalls, `gz_write` must clear remaining
+input and reset its input pointer to its owned buffer before returning. Without
+that reset, a subsequent small write can derive an out-of-bounds destination
+from the previous caller's input pointer. The backport is exactly upstream's
+four added lines and one removed line in `src/zlib/gzwrite.c`; it neither changes
+version identifiers nor assumes the affected code is unreachable. No advisory
+ignore or prerelease dependency is introduced.
+
+## Native regression
+
+Run from the repository root with a POSIX C compiler supporting AddressSanitizer:
+
+```sh
+vendor/libz-sys-1.1.30/tests/check-gzwrite-backport.sh
+```
+
+The test compiles the actual vendored stock zlib C sources with AddressSanitizer.
+It fills a nonblocking pipe, stalls a large direct `gzwrite`, asserts that the
+stream points to its owned buffer with no pending input, and checks that the
+next smaller write can safely buffer its input. The patched source passes.
+As a negative control, the same test compiled against the pristine official
+1.1.30 crate fails the input-state assertion. This proves the regression detects
+the absent security fix, independently of scanner/package version heuristics.
+Only source and the test runner are retained; test executables are temporary.
+
+As with the other root patches, downstream crates.io consumers must supply their
+own top-level patch to receive this backport. Remove it only after a published
+stable libz-sys includes the upstream fix (or a newer fixed stable zlib), then
+refresh the lockfile, rerun the native regression and final container scans, and
+inspect actual bundled native sources as well as Cargo package versions.

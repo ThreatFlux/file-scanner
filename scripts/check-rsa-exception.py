@@ -23,18 +23,18 @@ def main():
         if any(dependency.split()[0] == "rsa" for dependency in package.get("dependencies", []))
     ]
     require(
-        len(users) == 1 and users[0]["name"] == "yara-x" and users[0]["version"] == "1.21.0",
+        len(users) == 1 and users[0]["name"] == "yara-x" and users[0]["version"] == "1.22.0",
         "RSA has a new caller or YARA-X version",
     )
     require("source" not in users[0], "YARA-X no longer uses the reviewed local source")
     standalone = tomllib.loads((root / "threatflux-package-security/Cargo.lock").read_text())["package"]
     require(not any(package["name"] == "rsa" for package in standalone), "standalone crate now uses RSA")
 
-    vendor = root / "vendor/yara-x-1.21.0"
+    vendor = root / "vendor/yara-x-1.22.0"
     crypto = vendor / "src/modules/utils/crypto.rs"
     require(
         hashlib.sha256(crypto.read_bytes()).hexdigest()
-        == "d808abf045cd30d27e4666f3ab15ba9b5b5e20d44dcc1c66de8f893a958cc648",
+        == "39dca4b54fba399f2b6773d0b4d1a142f212aaf17c5dd39daf97677e138ff3a4",
         "reviewed public-key verification source changed",
     )
     rsa_use = re.compile(r"\brsa\s*::|\b(?:use|extern\s+crate)\s+rsa\b|\bRsaPrivateKey\b")

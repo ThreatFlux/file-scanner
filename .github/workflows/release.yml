@@ -30,8 +30,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUST_VERSION: 1.99.0
-  RUSTUP_TOOLCHAIN: 1.99.0
+  RUST_VERSION: 1.99.1
+  RUSTUP_TOOLCHAIN: 1.99.1
   # The crate is threatflux-file-scanner (crates.io treats - and _ alike, so the
   # unrelated file_scanner crate owns the file-scanner name); the binary, the
   # release asset names and the image keep the file-scanner name.
@@ -274,7 +274,7 @@ jobs:
           Get-Content "$env:ARCHIVE.sha256"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: release-${{ matrix.artifact }}
           path: |
@@ -300,7 +300,7 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@183e4297cca2404691e9380e1307288dced5c82a  # v2.87.25
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283  # v2.87.29
         with:
           tool: cargo-cyclonedx@0.5.9
 
@@ -329,7 +329,7 @@ jobs:
           PY
 
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: release-sbom
           path: sbom/*.json
@@ -392,7 +392,7 @@ jobs:
             --title "File Scanner ${TAG}" --notes-file release_notes.md "${prerelease_args[@]}"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           path: artifacts
           pattern: release-*
@@ -632,9 +632,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
         with:
-          version: v0.37.2
+          version: v0.38.1
           cache-binary: false
-          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+          driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
 
       - name: Build runtime image without pushing
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0

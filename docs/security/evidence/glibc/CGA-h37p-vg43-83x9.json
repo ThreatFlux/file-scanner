@@ -1,0 +1,112 @@
+{
+  "published": "2026-09-25T12:27:59Z",
+  "modified": "2026-10-01T07:53:11Z",
+  "schema_version": "1.7.5",
+  "id": "CGA-h37p-vg43-83x9",
+  "severity": [
+    {
+      "type": "CVSS_V3",
+      "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H"
+    }
+  ],
+  "upstream": [
+    "CVE-2026-80489",
+    "GHSA-w45w-pf39-v4pp"
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://github.com/CVEProject/cvelistV5/tree/main/cves/2026/80xxx/CVE-2026-80489.json"
+    },
+    {
+      "type": "ADVISORY",
+      "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-80489"
+    },
+    {
+      "type": "ADVISORY",
+      "url": "https://sourceware.org/git/?p=glibc.git;a=blob_plain;f=advisories/GLIBC-SA-2026-0020"
+    },
+    {
+      "type": "REPORT",
+      "url": "https://sourceware.org/bugzilla/show_bug.cgi?id=34568"
+    }
+  ],
+  "affected": [
+    {
+      "package": {
+        "ecosystem": "Chainguard",
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/chainguard/glibc-2.44?arch=x86_64"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "2.44-r4"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "chainguard": {
+          "applies_to_subpackages": false
+        }
+      },
+      "ecosystem_specific": {
+        "components": [
+          {
+            "component_name": "glibc-2.44",
+            "component_version": "2.44-r6",
+            "component_type": "apk",
+            "component_location": "/.PKGINFO",
+            "component_purl": "pkg:apk/glibc-2.44@2.44-r6",
+            "latest_event_status": "fixed",
+            "latest_event_timestamp": "2026-10-01T00:14:46Z"
+          }
+        ]
+      }
+    },
+    {
+      "package": {
+        "ecosystem": "Wolfi",
+        "name": "glibc-2.44",
+        "purl": "pkg:apk/wolfi/glibc-2.44?arch=x86_64"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "0"
+            },
+            {
+              "fixed": "2.44-r4"
+            }
+          ]
+        }
+      ],
+      "database_specific": {
+        "chainguard": {
+          "applies_to_subpackages": false
+        }
+      },
+      "ecosystem_specific": {
+        "components": [
+          {
+            "component_name": "glibc-2.44",
+            "component_version": "2.44-r6",
+            "component_type": "apk",
+            "component_location": "/.PKGINFO",
+            "component_purl": "pkg:apk/glibc-2.44@2.44-r6",
+            "latest_event_status": "fixed",
+            "latest_event_timestamp": "2026-10-01T00:14:46Z"
+          }
+        ]
+      }
+    }
+  ]
+}

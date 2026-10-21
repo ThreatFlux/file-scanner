@@ -36,7 +36,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
       - name: Cache cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
@@ -55,6 +55,8 @@ jobs:
 
       - name: Verify reviewed RSA exception conditions
         run: python3 scripts/check-rsa-exception.py
+      - name: Verify native security backport and complete container scan guards
+        run: make native-zlib-check container-review-check
       - name: Run cargo audit
         run: |
           cargo audit
@@ -99,14 +101,14 @@ jobs:
       - name: Verify reviewed CodeQL source conditions and guard tests
         run: make codeql-review-check
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v4.39.0
         with:
           languages: ${{ matrix.language }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -118,7 +120,7 @@ jobs:
 
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v4.39.0
         with:
           category: "/language:${{matrix.language}}"
           output: ${{ runner.temp }}/codeql-raw
@@ -131,7 +133,7 @@ jobs:
             --annotated "$RUNNER_TEMP/codeql-review/annotated" --report "$RUNNER_TEMP/codeql-review/report.json"
 
       - name: Upload reviewed CodeQL analysis
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4.38.2
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v4.39.0
         with:
           sarif_file: ${{ runner.temp }}/codeql-reviewed
           category: "/language:${{matrix.language}}"
@@ -139,7 +141,7 @@ jobs:
 
       - name: Preserve full CodeQL analysis and review evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: codeql-reviewed-analysis-${{ matrix.language }}
           path: |
@@ -157,7 +159,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
       - name: Generate SBOM
         run: |
           cargo install cargo-cyclonedx --locked --version 0.5.9
@@ -165,7 +167,7 @@ jobs:
           cargo cyclonedx --manifest-path threatflux-package-security/Cargo.toml --all-features --format json --spec-version 1.5 --override-filename sbom
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sbom
           path: '**/sbom.json'
@@ -227,13 +229,13 @@ jobs:
           WORKFLOW_VALUE_3: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_VALUE_4: ${{ github.event.pull_request.head.sha }}
       - name: Report informational verified TruffleHog findings
-        uses: trufflesecurity/trufflehog@4dd8831c5f12599465d4d45c3c447b4018a34c85  # v3.97.9
+        uses: trufflesecurity/trufflehog@e63326d6545de8f425d93ce24078c6e68d83f70e  # v3.99.3
         with:
           path: ./
           base: ${{ steps.scan-strategy.outputs.base }}
           head: ${{ steps.scan-strategy.outputs.head }}
           extra_args: --log-level=2 --results=verified
-          version: 3.97.9@sha256:52e67fef4d054ecff5c2ce4b4ae376626d1ef54aa0898b53cac19c25e92e14db
+          version: 3.99.3@sha256:63b6120f410beb64aea4e421f1ed277248e14b2942d124df289422b623f610d8
         continue-on-error: true
 
   semgrep-scan:
@@ -248,7 +250,7 @@ jobs:
         id: semgrep
         run: |
           python3 -m venv "${RUNNER_TEMP}/semgrep"
-          "${RUNNER_TEMP}/semgrep/bin/python" -m pip install "semgrep==1.179.0"
+          "${RUNNER_TEMP}/semgrep/bin/python" -m pip install "semgrep==1.182.0"
           scan_status=0
           "${RUNNER_TEMP}/semgrep/bin/semgrep" scan --config p/security-audit --config p/secrets --config p/owasp-top-ten --config p/rust --error --json --output semgrep-results.json . || scan_status=$?
           if [ "$scan_status" -gt 1 ]; then exit "$scan_status"; fi
@@ -261,7 +263,7 @@ jobs:
           PYCODE
       - name: Upload Semgrep results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: semgrep-results
           path: semgrep-results.json

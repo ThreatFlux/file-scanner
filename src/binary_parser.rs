@@ -476,7 +476,9 @@ fn is_java_archive(path: &Path) -> bool {
         if let Ok(mut archive) = zip::ZipArchive::new(file) {
             for i in 0..archive.len() {
                 if let Ok(file) = archive.by_index(i) {
-                    let name = file.name();
+                    let Ok(name) = file.name() else {
+                        continue;
+                    };
                     // Look for Java-specific indicators
                     if name == "META-INF/MANIFEST.MF"
                         || name.ends_with(".class")

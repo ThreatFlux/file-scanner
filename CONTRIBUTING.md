@@ -132,7 +132,7 @@ pub fn calc_h(p: &Path) -> Result<String> {
 
 ### Repository Hooks and Local Checks
 
-Development uses the pinned Rust 1.99.0 toolchain; the supported consumer MSRV
+Development uses the pinned Rust 1.99.1 toolchain; the supported consumer MSRV
 remains 1.97.1. Install the repository hooks before committing:
 
 ```bash

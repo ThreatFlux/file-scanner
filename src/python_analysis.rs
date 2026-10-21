@@ -293,7 +293,7 @@ fn analyze_wheel_package(wheel_path: &Path) -> Result<PythonPackageAnalysis> {
     // Extract metadata and collect files
     for i in 0..zip.len() {
         let mut file = zip.by_index(i)?;
-        let name = file.name().to_string();
+        let name = file.name()?.into_owned();
 
         if name.ends_with("/METADATA") {
             let mut content = String::new();
@@ -380,7 +380,7 @@ fn analyze_zip_package(zip_path: &Path) -> Result<PythonPackageAnalysis> {
 
     for i in 0..zip.len() {
         let mut file = zip.by_index(i)?;
-        let name = file.name().to_string();
+        let name = file.name()?.into_owned();
 
         if name.ends_with("setup.py") {
             let mut content = String::new();

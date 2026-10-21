@@ -245,7 +245,7 @@ fn analyze_zip_entry<R: std::io::Read>(
     entry: &mut zip::read::ZipFile<'_, R>,
     indicators: &mut SuspiciousArchiveIndicators,
 ) -> Result<ArchiveEntry> {
-    let path = entry.name().to_string();
+    let path = entry.name()?.into_owned();
     let file_name = Path::new(&path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())

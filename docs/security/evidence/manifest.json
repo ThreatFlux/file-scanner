@@ -1,0 +1,40 @@
+{
+  "wolfi-amd64-base-trivy.json.gz": {
+    "uncompressed_sha256": "cda8fdc0111b4baa1dfd79314e82b559cc1e786a04f3618e583411bb9dc89ada"
+  },
+  "wolfi-arm64-base-trivy.json.gz": {
+    "uncompressed_sha256": "0a738ec018aff71367be950bb4c6ac09d7277d18d1d7a3676805c34087d9381f"
+  },
+  "wolfi-arm64-final-trivy.json.gz": {
+    "uncompressed_sha256": "db7ebfe991cd819baefa164b20ea3b980a29e968353a9751a08757913940ea70"
+  },
+  "wolfi-arm64-final-sbom.json.gz": {
+    "uncompressed_sha256": "b9c2ab0ed46247f2a9a1a612c4d20cca4f1436289192acf87d8763d32bc66807"
+  },
+  "arm64-runtime-smoke.txt": {
+    "sha256": "9d87b212359fe551cb14bf124592774e1e50bd4b9844ce3b05ea1a1dbf737ade"
+  },
+  "arm64-elf-dependencies.txt": {
+    "sha256": "4c67443e6604d6e886a7e43e144346d2e0a07d4b06f4b3d2815e2cc1af69e788"
+  },
+  "arm64-application-dns-tls.txt": {
+    "sha256": "7ca3fb2e0dc37a57d30ec975aad029f7223ebd7f12a787f49973079ff60f8ccd"
+  },
+  "trivy-db-metadata.json": {
+    "sha256": "6c0f0282201ed89fceee41b13d0b2a5d5f5a8d272956376e2b6c07d44f9fbdb4"
+  },
+  "source": {
+    "rust_commit": "5866a87f6ea45815a58d769a0868cfb3de5ae9c5",
+    "runtime_dockerfile_sha256": "93337ef4ca2da71f2d4347a873fda9016e8fb82a7208ee2e2441cd0e753ccd6b",
+    "cargo_lock_sha256": "e74b2df554f57f4dc18167a3b0fdd4e06150c44f58e82fa67545f969cab9a3b6",
+    "note": "This candidate adds the reviewed runtime/native patch to the Rust source commit; production metadata will use the final merged commit."
+  },
+  "arm64_candidate": {
+    "docker_config_id": "sha256:fc46778ea9793502d895b44ec6fc7f4453884e5088fd946fcbd372002d3019e5",
+    "scanner_sha256": "a3136e3b10d70861e1cb7aadf4fdfb0074dbc50bbb38a07502273ae6edeaf393",
+    "platform": "linux/arm64",
+    "os_packages": 7,
+    "cargo_packages": 451,
+    "vulnerabilities": 0
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "purpose": "Exact upstream patches and primary Chainguard glibc-2.44 advisory evidence; full source provenance and verification in ../../glibc-source-fix-verification-2026-10-21.md",
+  "files": [
+    {
+      "path": "CGA-2r3h-47g9-hgx9.json",
+      "sha256": "7ce365ab1321609a42d418d5dff86572e1e5659334d3a5ddb4c58ee49428896d"
+    },
+    {
+      "path": "CGA-32c9-fmx5-865m.json",
+      "sha256": "9d8dc1c6afcf8a48efdeb7a6ceffee839a843f82a9f8bcb4d7c7f6a662241921"
+    },
+    {
+      "path": "CGA-3qmp-39qm-cjf8.json",
+      "sha256": "d5aaab5c6df586cfc30363dfe894cbea5779ad39bb01cae8efcacc341babcca8"
+    },
+    {
+      "path": "CGA-63j2-v7q6-8x84.json",
+      "sha256": "acc18629feca80b2e84b57cb69ff71e2874a52cdaf05caa91b94b98dbb55d05e"
+    },
+    {
+      "path": "CGA-6mw4-h5gw-xj38.json",
+      "sha256": "c8a51dd3db22fd1bd09b6ae957d2fb8d71cf8e2290633369d07b94da1ed92ac7"
+    },
+    {
+      "path": "CGA-fjmw-f657-w678.json",
+      "sha256": "7648fe9ccc7965250c7f5ba3ff677dfd86050c51b2eb56906aa5c469a8aa8714"
+    },
+    {
+      "path": "CGA-gvr8-r35v-jwr6.json",
+      "sha256": "58cf3f744ffc4f7e4046ba33351d10c4585286a36f5713176867e721da32b64a"
+    },
+    {
+      "path": "CGA-h37p-vg43-83x9.json",
+      "sha256": "db5f25aa80e0291c60556d1d984ac85a7754ebd8a32c72974633260627ad3ca9"
+    },
+    {
+      "path": "CGA-h9gc-g4cr-r6c4.json",
+      "sha256": "aad89a8921361b45d88365455039b0a3d0648af51fa7f8c0fee737d9ee2c0cf7"
+    },
+    {
+      "path": "CGA-jm93-f4m9-rgvp.json",
+      "sha256": "e0f9db71d254ec604ba0e3ab5176a35c15b0744b1c4518303491d1d3e9df326a"
+    },
+    {
+      "path": "CGA-mmr3-52h6-3hmm.json",
+      "sha256": "e31db49405e7c57809c8c6718d99866d34dbefa5a529df88a3b098f67fa7901d"
+    },
+    {
+      "path": "CGA-vgh2-x6cw-pjxr.json",
+      "sha256": "8427830291c8cca42dba2ae216cac740b7412dd69e723dfce7cdd4028577b279"
+    },
+    {
+      "path": "file-scanner-glibc-19542.patch.gz",
+      "sha256": "2c5dfa51ce356721328580c2de41e4a5596b67bdb6e483fb1392fd846798ffee"
+    },
+    {
+      "path": "file-scanner-glibc-5435.patch.gz",
+      "sha256": "15cf2ce8d8f276fd73c99bf951e7ebb66cce51a7ca5b262761a029153ba948f3"
+    },
+    {
+      "path": "file-scanner-glibc-6238.patch.gz",
+      "sha256": "6bcc9850da41014fdf2b44bf27a5831c88d163f7f51959543c4e0e18e1eff3e1"
+    },
+    {
+      "path": "file-scanner-glibc-77117.patch.gz",
+      "sha256": "2cffe2d1d2e471a23e1390a0c55e75043681d247456a1a97dba433fa0b7a87f2"
+    },
+    {
+      "path": "file-scanner-glibc-80489.patch.gz",
+      "sha256": "1dcbb4282c09dcce2d5a20d40190befb150cc9c6579db6500eca7c455d72c588"
+    },
+    {
+      "path": "file-scanner-glibc-8674.patch.gz",
+      "sha256": "16585d1a9d0f5716e9604f17d30246cc764867ea18c7c7d5942fb4bdea0b8c5a"
+    },
+    {
+      "path": "summary.json",
+      "sha256": "a95f80123437fadd18c5caaec7047c96541135cd29de1a9f196ffa6f124dec2f"
+    }
+  ]
+}

@@ -338,7 +338,7 @@ fn detect_archive_type(
     let mut file_names = Vec::new();
     for i in 0..archive.len() {
         let file = archive.by_index(i)?;
-        file_names.push(file.name().to_string());
+        file_names.push(file.name()?.into_owned());
     }
 
     // Check archive contents for more specific detection
@@ -387,7 +387,7 @@ fn parse_archive_contents(
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        let name = file.name().to_string();
+        let name = file.name()?.into_owned();
 
         total_size += file.size();
         compressed_size += file.compressed_size();

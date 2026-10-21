@@ -1,0 +1,146 @@
+[
+  {
+    "number": 257,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/257",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/version: Exact Debian zlib 1.3.1 gzwrite.c lacks gz_vacate/nonblocking again-state; Debian patch series empty. Vulnerable feature introduced upstream 81cc0beb in 1.3.1.2; fix df84af25 concerns that later branch. Both main inventories confirm 1.3.1.",
+    "dismissed_at": "2026-10-21T04:45:41Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 258,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/258",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/component: CVE-2026-89092 affects nscd service. Neither immutable main amd64/arm64 rootfs contains nscd; entrypoint is tini plus scanner. Ordinary getaddrinfo is not this defect. Re-review if an nscd service/socket is introduced.",
+    "dismissed_at": "2026-10-21T04:45:43Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 269,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/269",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/runtime: CVE-2026-86805 requires a privileged AT_SECURE ORIGIN traversal binary. Both immutable main rootfs inventories have no setuid/setgid files; Dockerfile adds no capabilities and runs uid 65532. Re-review if privileged binaries/capabilities are added.",
+    "dismissed_at": "2026-10-21T04:45:44Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 270,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/270",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/runtime: CVE-2026-95818 requires a privileged AT_SECURE target with susceptible ORIGIN rpath. Neither immutable main amd64/arm64 rootfs has setuid/setgid files; Dockerfile runs uid 65532 with no added capabilities. Re-review privileged deployment changes.",
+    "dismissed_at": "2026-10-21T04:45:45Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 276,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/276",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/component: gcc-14-base common support/docs contain no pbds erase_if template header affected by CVE-2026-102010. GCC fix aaa8351f modifies a C++ header absent from both immutable main runtime images.",
+    "dismissed_at": "2026-10-21T04:45:46Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 277,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/277",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/component: gcc-14-base common support/docs contain no libstdc++ aligned-new code. CVE-2026-95619 source-package attribution is overbroad. Both main platforms inspected; actual libstdc++ POSIX path reviewed separately in 317.",
+    "dismissed_at": "2026-10-21T04:45:48Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 278,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/278",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/architecture: CVE-2026-97399 affects Power8 strncasecmp only. Published main index e0065c supports amd64/arm64, independently inspected, with no PowerPC implementation. Re-review if a PowerPC target is added.",
+    "dismissed_at": "2026-10-21T04:45:49Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 280,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/280",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/component: libgcc-s1 unwind/support library does not contain the pbds erase_if template affected by CVE-2026-102010. GCC fix aaa8351f changes a C++ header absent from both immutable main runtimes.",
+    "dismissed_at": "2026-10-21T04:45:50Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 281,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/281",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/component: libgcc-s1 unwind/compiler support is not libstdc++ aligned-new code affected by CVE-2026-95619. gcc-14 source-package matching incorrectly fans out to this binary package. Both published main platforms inspected.",
+    "dismissed_at": "2026-10-21T04:45:51Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 289,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/289",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/component: libgomp1 OpenMP runtime contains no pbds erase_if C++ template header affected by CVE-2026-102010. GCC fix aaa8351f modifies that header. Both immutable main runtime images contain no C++ headers.",
+    "dismissed_at": "2026-10-21T04:45:52Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 290,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/290",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/component: libgomp1 is OpenMP runtime, not libstdc++ aligned-new code. CVE-2026-95619 is propagated from gcc-14 source provenance to an unaffected binary package. Both main image inventories checked; actual libstdc++ applicability reviewed in 317.",
+    "dismissed_at": "2026-10-21T04:45:54Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 316,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/316",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP/component: GCC fix aaa8351f affects the pbds erase_if C++ template header, not libstdc++.so runtime code. Both immutable main images e0a792/e4e4a5 contain no C++ headers; scanner links no libstdc++. Future compiled C++ consumers need separate review.",
+    "dismissed_at": "2026-10-21T04:45:55Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 317,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/code-scanning/317",
+    "state": "dismissed",
+    "dismissed_reason": "false positive",
+    "dismissed_comment": "FP: Both main amd64/arm64 libstdc++ aligned-new disassemblies call posix_memalign, which GCC fix 200183d4 explicitly excludes from the vulnerable rounding paths. Inspected immutable images e0a792/e4e4a5; scanner also links no libstdc++.",
+    "dismissed_at": "2026-10-21T04:45:56Z",
+    "kind": "code-scanning"
+  },
+  {
+    "number": 65,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/dependabot/65",
+    "state": "dismissed",
+    "dismissed_reason": "not_used",
+    "dismissed_comment": "Morgan CR/LF logging is not used: 1.10.0 is metadata in test_npm_packages/package/package.json, an upstream Express fixture. Scanner parses JSON only; no npm/Morgan execution. Fixture excluded from crates.io/Docker. Re-review if executable use is added.",
+    "dismissed_at": "2026-10-21T04:42:24Z",
+    "kind": "dependabot"
+  },
+  {
+    "number": 67,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/dependabot/67",
+    "state": "dismissed",
+    "dismissed_reason": "not_used",
+    "dismissed_comment": "Morgan Unicode log forging is unreachable: 1.10.0 is metadata in test_npm_packages/package/package.json, an Express fixture. Scanner parses JSON; no npm/Morgan execution. Fixture excluded from crates.io/Docker. Re-review if executable use is added.",
+    "dismissed_at": "2026-10-21T04:42:25Z",
+    "kind": "dependabot"
+  },
+  {
+    "number": 68,
+    "html_url": "https://github.com/ThreatFlux/file-scanner/security/dependabot/68",
+    "state": "dismissed",
+    "dismissed_reason": "not_used",
+    "dismissed_comment": "Morgan quoted-field log forging is unreachable: 1.10.0 is metadata in test_npm_packages/package/package.json, an Express fixture. Scanner parses JSON; no npm/Morgan execution. Excluded from crates.io/Docker. Re-review if executable use is added.",
+    "dismissed_at": "2026-10-21T04:42:26Z",
+    "kind": "dependabot"
+  }
+]

@@ -1,0 +1,322 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -66,6 +66,10 @@
+     "dep:p256",
+     "dep:p384",
+     "dep:rsa",
++    "dep:md2-rsa-compat",
++    "dep:md5-rsa-compat",
++    "dep:sha1-rsa-compat",
++    "dep:sha2-rsa-compat",
+     "dep:sha1",
+     "dep:sha2",
+     "dep:x509-parser",
+@@ -185,16 +189,6 @@
+ [lib]
+ name = "yara_x"
+ path = "src/lib.rs"
+-
+-[[bench]]
+-name = "dex"
+-path = "benches/dex.rs"
+-harness = false
+-
+-[[bench]]
+-name = "pe"
+-path = "benches/pe.rs"
+-harness = false
+ 
+ [dependencies.annotate-snippets]
+ version = "0.12.17"
+@@ -355,9 +349,35 @@
+ optional = true
+ 
+ [dependencies.rsa]
+-version = "0.10.0-rc.19"
++version = "0.9.10"
++optional = true
++
++# RSA 0.9 uses digest 0.10. Keep its padding constructors on that API
++# while YARA-X uses the current stable digest generation elsewhere.
++[dependencies.md2-rsa-compat]
++package = "md2"
++version = "0.10.2"
++features = ["oid"]
+ optional = true
+ 
++[dependencies.md5-rsa-compat]
++package = "md-5"
++version = "0.10.6"
++features = ["oid"]
++optional = true
++
++[dependencies.sha1-rsa-compat]
++package = "sha1"
++version = "0.10.7"
++features = ["oid"]
++optional = true
++
++[dependencies.sha2-rsa-compat]
++package = "sha2"
++version = "0.10.9"
++features = ["oid"]
++optional = true
++
+ [dependencies.rustc-hash]
+ version = "2.1.3"
+ 
+@@ -472,7 +492,7 @@
+ optional = true
+ 
+ [target.'cfg(not(target_family = "wasm"))'.dependencies.wasmtime]
+-version = "48.0.6"
++version = "49.0.4"
+ features = [
+     "cranelift",
+     "runtime",
+--- a/src/modules/utils/crypto.rs
++++ b/src/modules/utils/crypto.rs
+@@ -7,6 +7,7 @@
+ use ecdsa::signature::hazmat::PrehashVerifier;
+ use md2::Md2;
+ use md5::Md5;
++use p256::pkcs8::DecodePublicKey as _;
+ use rsa::Pkcs1v15Sign;
+ use rsa::pkcs8::DecodePublicKey;
+ use rsa::traits::SignatureScheme;
+@@ -36,6 +37,9 @@
+     #[error("PKCS8 error")]
+     Pkcs8(#[from] rsa::pkcs8::spki::Error),
+ 
++    #[error("ECDSA public key error")]
++    EcdsaPublicKey(#[from] p256::pkcs8::spki::Error),
++
+     #[error("DER parsing error")]
+     Der(#[from] der_parser::error::BerError),
+ 
+@@ -79,17 +83,17 @@
+ 
+                 use der_parser::ber::parse_ber_integer;
+ 
+-                let (_, y) = parse_ber_integer(key_bytes)
+-                    .map_err(|err| PublicKeyError::Der(err.into()))?;
++                let (_, y) =
++                    parse_ber_integer(key_bytes).map_err(|err| PublicKeyError::Der(err.into()))?;
+ 
+                 let (rem, p) = parse_ber_integer(parameters.data)
+                     .map_err(|err| PublicKeyError::Der(err.into()))?;
+ 
+-                let (rem, q) = parse_ber_integer(rem)
+-                    .map_err(|err| PublicKeyError::Der(err.into()))?;
++                let (rem, q) =
++                    parse_ber_integer(rem).map_err(|err| PublicKeyError::Der(err.into()))?;
+ 
+-                let (_, g) = parse_ber_integer(rem)
+-                    .map_err(|err| PublicKeyError::Der(err.into()))?;
++                let (_, g) =
++                    parse_ber_integer(rem).map_err(|err| PublicKeyError::Der(err.into()))?;
+ 
+                 let mut p_bytes = p.content.as_slice()?;
+                 let mut q_bytes = q.content.as_slice()?;
+@@ -109,29 +113,17 @@
+                     y_bytes = rest;
+                 }
+ 
+-                let p = dsa::BoxedUint::from_be_slice(
+-                    p_bytes,
+-                    (p_bytes.len() * 8) as u32,
+-                )
+-                .map_err(|_| PublicKeyError::InvalidAlgorithm)?;
++                let p = dsa::BoxedUint::from_be_slice(p_bytes, (p_bytes.len() * 8) as u32)
++                    .map_err(|_| PublicKeyError::InvalidAlgorithm)?;
+ 
+-                let q = dsa::BoxedUint::from_be_slice(
+-                    q_bytes,
+-                    (q_bytes.len() * 8) as u32,
+-                )
+-                .map_err(|_| PublicKeyError::InvalidAlgorithm)?;
++                let q = dsa::BoxedUint::from_be_slice(q_bytes, (q_bytes.len() * 8) as u32)
++                    .map_err(|_| PublicKeyError::InvalidAlgorithm)?;
+ 
+-                let g = dsa::BoxedUint::from_be_slice(
+-                    g_bytes,
+-                    (g_bytes.len() * 8) as u32,
+-                )
+-                .map_err(|_| PublicKeyError::InvalidAlgorithm)?;
++                let g = dsa::BoxedUint::from_be_slice(g_bytes, (g_bytes.len() * 8) as u32)
++                    .map_err(|_| PublicKeyError::InvalidAlgorithm)?;
+ 
+-                let y = dsa::BoxedUint::from_be_slice(
+-                    y_bytes,
+-                    (y_bytes.len() * 8) as u32,
+-                )
+-                .map_err(|_| PublicKeyError::InvalidAlgorithm)?;
++                let y = dsa::BoxedUint::from_be_slice(y_bytes, (y_bytes.len() * 8) as u32)
++                    .map_err(|_| PublicKeyError::InvalidAlgorithm)?;
+ 
+                 let components = Components::from_components(p, q, g)?;
+                 let key = dsa::VerifyingKey::from_components(components, y)?;
+@@ -151,14 +143,10 @@
+ 
+                 match oid {
+                     rfc5912::SECP_256_R_1 => Ok(Self::EcdsaP256(
+-                        ecdsa::VerifyingKey::from_sec1_bytes(
+-                            spki.subject_public_key.as_ref(),
+-                        )?,
++                        ecdsa::VerifyingKey::from_sec1_bytes(spki.subject_public_key.as_ref())?,
+                     )),
+                     rfc5912::SECP_384_R_1 => Ok(Self::EcdsaP384(
+-                        ecdsa::VerifyingKey::from_sec1_bytes(
+-                            spki.subject_public_key.as_ref(),
+-                        )?,
++                        ecdsa::VerifyingKey::from_sec1_bytes(spki.subject_public_key.as_ref())?,
+                     )),
+                     oid => Err(Self::Error::UnknownEcdsaCurve(oid)),
+                 }
+@@ -169,17 +157,14 @@
+ }
+ 
+ impl PublicKey {
+-    pub fn from_der(
+-        algorithm: ObjectIdentifier,
+-        der: &[u8],
+-    ) -> Result<Self, PublicKeyError> {
++    pub fn from_der(algorithm: ObjectIdentifier, der: &[u8]) -> Result<Self, PublicKeyError> {
+         match algorithm {
+-            rfc5912::SHA_1_WITH_RSA_ENCRYPTION => Ok(PublicKey::Rsa(
+-                rsa::RsaPublicKey::from_public_key_der(der)?,
+-            )),
+-            rfc5912::SHA_256_WITH_RSA_ENCRYPTION => Ok(PublicKey::Rsa(
+-                rsa::RsaPublicKey::from_public_key_der(der)?,
+-            )),
++            rfc5912::SHA_1_WITH_RSA_ENCRYPTION => {
++                Ok(PublicKey::Rsa(rsa::RsaPublicKey::from_public_key_der(der)?))
++            }
++            rfc5912::SHA_256_WITH_RSA_ENCRYPTION => {
++                Ok(PublicKey::Rsa(rsa::RsaPublicKey::from_public_key_der(der)?))
++            }
+             rfc5912::ECDSA_WITH_SHA_256 => Ok(PublicKey::EcdsaP256(
+                 ecdsa::VerifyingKey::from_public_key_der(der)?,
+             )),
+@@ -213,35 +198,22 @@
+             rfc5912::ID_SHA_256
+             | rfc5912::SHA_256_WITH_RSA_ENCRYPTION
+             | rfc5912::DSA_WITH_SHA_256
+-            | rfc5912::ECDSA_WITH_SHA_256 => {
+-                self.verify_impl::<Sha256>(message, signature)
+-            }
++            | rfc5912::ECDSA_WITH_SHA_256 => self.verify_impl::<Sha256>(message, signature),
+             rfc5912::ID_SHA_384
+             | rfc5912::SHA_384_WITH_RSA_ENCRYPTION
+-            | rfc5912::ECDSA_WITH_SHA_384 => {
+-                self.verify_impl::<Sha384>(message, signature)
+-            }
++            | rfc5912::ECDSA_WITH_SHA_384 => self.verify_impl::<Sha384>(message, signature),
+             rfc5912::ID_SHA_512
+             | rfc5912::SHA_512_WITH_RSA_ENCRYPTION
+-            | rfc5912::ECDSA_WITH_SHA_512 => {
+-                self.verify_impl::<Sha512>(message, signature)
+-            }
++            | rfc5912::ECDSA_WITH_SHA_512 => self.verify_impl::<Sha512>(message, signature),
+             _ => {
+                 #[cfg(feature = "logging")]
+-                error!(
+-                    "unknown digest algorithm: {:?}",
+-                    digest_algorithm.oid()
+-                );
++                error!("unknown digest algorithm: {:?}", digest_algorithm.oid());
+                 false
+             }
+         }
+     }
+ 
+-    fn verify_impl<D: Digest + AssociatedOid>(
+-        &self,
+-        message: &[u8],
+-        signature: &[u8],
+-    ) -> bool {
++    fn verify_impl<D: Digest + AssociatedOid>(&self, message: &[u8], signature: &[u8]) -> bool {
+         let digest = D::digest(message);
+         self.verify_digest::<D>(digest, signature)
+     }
+@@ -253,10 +225,18 @@
+     ) -> bool {
+         match self {
+             Self::Rsa(key) => {
+-                if Pkcs1v15Sign::new::<D>()
+-                    .verify(key, hash.as_slice(), signature)
+-                    .is_ok()
+-                {
++                // Use RSA's own padding constructors with its digest generation.
++                // The actual message hashes above use the current stable digests.
++                let padding = match D::OID {
++                    rfc5912::ID_MD_2 => Pkcs1v15Sign::new::<md2_rsa_compat::Md2>(),
++                    rfc5912::ID_MD_5 => Pkcs1v15Sign::new::<md5_rsa_compat::Md5>(),
++                    rfc5912::ID_SHA_1 => Pkcs1v15Sign::new::<sha1_rsa_compat::Sha1>(),
++                    rfc5912::ID_SHA_256 => Pkcs1v15Sign::new::<sha2_rsa_compat::Sha256>(),
++                    rfc5912::ID_SHA_384 => Pkcs1v15Sign::new::<sha2_rsa_compat::Sha384>(),
++                    rfc5912::ID_SHA_512 => Pkcs1v15Sign::new::<sha2_rsa_compat::Sha512>(),
++                    _ => return false,
++                };
++                if padding.verify(key, hash.as_slice(), signature).is_ok() {
+                     return true;
+                 }
+                 Pkcs1v15Sign::new_unprefixed()
+@@ -266,18 +246,48 @@
+             Self::Dsa(key) => {
+                 use dsa::pkcs8::der::Decode;
+                 use dsa::signature::hazmat::PrehashVerifier;
+-                dsa::Signature::from_der(signature).is_ok_and(|s| {
+-                    key.verify_prehash(hash.as_slice(), &s).is_ok()
+-                })
++                dsa::Signature::from_der(signature)
++                    .is_ok_and(|s| key.verify_prehash(hash.as_slice(), &s).is_ok())
+             }
+             Self::EcdsaP256(key) => ecdsa::Signature::from_der(signature)
+-                .is_ok_and(|s| {
+-                    key.verify_prehash(hash.as_slice(), &s).is_ok()
+-                }),
++                .is_ok_and(|s| key.verify_prehash(hash.as_slice(), &s).is_ok()),
+             Self::EcdsaP384(key) => ecdsa::Signature::from_der(signature)
+-                .is_ok_and(|s| {
+-                    key.verify_prehash(hash.as_slice(), &s).is_ok()
+-                }),
++                .is_ok_and(|s| key.verify_prehash(hash.as_slice(), &s).is_ok()),
+         }
+     }
+ }
++
++#[cfg(test)]
++mod stable_rsa_tests {
++    use super::*;
++
++    #[test]
++    fn stable_rsa_verifies_openssl_sha256_signatures() {
++        // Generated with OpenSSL, independent of either Rust digest API.
++        let key = PublicKey::Rsa(
++            rsa::RsaPublicKey::from_public_key_der(include_bytes!(
++                "testdata/stable-rsa-public.der"
++            ))
++            .unwrap(),
++        );
++        let digest = Sha256::digest(b"YARA-X stable RSA compatibility regression\n");
++        assert!(
++            key.verify_digest::<Sha256>(digest, include_bytes!("testdata/stable-rsa-prefixed.sig"))
++        );
++        // Preserve upstream compatibility with old, unprefixed signatures.
++        assert!(
++            key.verify_digest::<Sha256>(
++                digest,
++                include_bytes!("testdata/stable-rsa-unprefixed.sig")
++            )
++        );
++        let wrong_digest = Sha256::digest(b"modified message");
++        assert!(!key.verify_digest::<Sha256>(
++            wrong_digest,
++            include_bytes!("testdata/stable-rsa-prefixed.sig")
++        ));
++        let mut corrupt = *include_bytes!("testdata/stable-rsa-prefixed.sig");
++        corrupt[0] ^= 1;
++        assert!(!key.verify_digest::<Sha256>(digest, &corrupt));
++    }
++}
