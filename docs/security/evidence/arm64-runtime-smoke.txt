@@ -1,0 +1,8 @@
+CLI metadata+SHA256 sample-1.0.0-py3-none-any.whl PASS
+CLI metadata+SHA256 sample.jar PASS
+CLI metadata+SHA256 sample.tgz PASS
+CLI metadata+SHA256 sample.txt PASS
+ARCHIVE analyze-java PASS
+ARCHIVE analyze-python PASS
+ARCHIVE analyze-npm PASS
+MCP initialize, tools/list, analyze_file PASS

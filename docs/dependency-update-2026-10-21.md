@@ -1,5 +1,7 @@
 # Stable dependency rollup — 2026-10-21
 
+Security follow-up: the [implemented runtime remediation and completed FP dispositions](security/security-alert-remediation-2026-10-21.md) supersede the initial runtime pin and pending-action statements below. The dependency rollup now also includes the stable libz-sys native security backport.
+
 Base: `a34604292e7060f45d3c6f10b392c326afe2ead1` (`main`). Rust build toolchain: **1.99.1**. MSRV is a separate compatibility floor, not the build toolchain.
 
 Latest non-yanked stable direct crate releases were verified against the [crates.io sparse index](https://index.crates.io/config.json); prerelease suffixes are excluded, build metadata is preserved in the inventory below. Both independently locked Cargo projects are updated. Transitive versions follow upstream compatibility constraints rather than forcing incompatible major versions. The YARA-X vendor patch keeps stable Wasmtime and RSA; its own dependency versions follow that upstream release plus the documented security patch.

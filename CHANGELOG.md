@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add complete open security-alert assessments and per-TP remediation plans in
   `docs/security`, including deployment and evidence limits.
 
+### Fixed
+
+- Remediate the eleven confirmed runtime findings with a pinned Wolfi glibc 2.44
+  runtime and patched static zlib 1.3.2. Backport upstream's nonblocking gzip
+  security fix into stable libz-sys; verify it with AddressSanitizer and a source
+  guard rather than relying only on package-version scans.
+- Dismiss sixteen verified false positives with both-platform/source evidence.
+  Preserve complete all-severity container reports, verify exact image identity
+  and application inventories, scan both published architectures, and fail the
+  security gate on any reported vulnerability.
+
 ## [0.3.7] - 2026-10-07
 
 ### Changed

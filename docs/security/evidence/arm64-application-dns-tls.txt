@@ -1,0 +1,2 @@
+application RepositoryIntegrityChecker DNS/TLS is-number: 15 versions PASS
+application RepositoryIntegrityChecker DNS/TLS requests: 163 versions PASS

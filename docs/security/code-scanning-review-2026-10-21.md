@@ -1,5 +1,7 @@
 # Code-scanning review — ThreatFlux/file-scanner
 
+Follow-up: [completed dispositions and implemented remediation](security-alert-remediation-2026-10-21.md) supersede this initial review's pending actions.
+
 Reviewed 2026-10-21. Scope: all **24 open alerts (18 CVEs)** retrieved with paginated GitHub API calls. No alerts dismissed, no source changes made. Latest main is `a34604292e7060f45d3c6f10b392c326afe2ead1`.
 
 ## Evidence and interpretation

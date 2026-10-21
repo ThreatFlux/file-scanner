@@ -450,6 +450,8 @@ jobs:
 
       - name: Verify reviewed RSA exception conditions
         run: python3 scripts/check-rsa-exception.py
+      - name: Verify native security backport and complete container scan guards
+        run: make native-zlib-check container-review-check
       - name: Verify reviewed CodeQL source conditions and guard tests
         run: make codeql-review-check
       - name: Run security audit

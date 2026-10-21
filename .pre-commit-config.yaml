@@ -3,9 +3,9 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: ^vendor/(?:yara-x-1\.22\.0|threatflux-binary-analysis-0\.3\.1)(?:/|\.patch$)
+        exclude: ^vendor/(?:yara-x-1\.22\.0|threatflux-binary-analysis-0\.3\.1|libz-sys-1\.1\.30)(?:/|\.patch$)
       - id: end-of-file-fixer
-        exclude: ^vendor/(?:yara-x-1\.22\.0|threatflux-binary-analysis-0\.3\.1)/
+        exclude: ^vendor/(?:yara-x-1\.22\.0|threatflux-binary-analysis-0\.3\.1|libz-sys-1\.1\.30)/
       - id: check-yaml
       - id: check-added-large-files
         args: ['--maxkb=1000']
@@ -83,4 +83,4 @@ repos:
     hooks:
       - id: markdownlint
         args: ['--fix']
-        exclude: ^vendor/(?:yara-x-1\.22\.0|threatflux-binary-analysis-0\.3\.1)/
+        exclude: ^vendor/(?:yara-x-1\.22\.0|threatflux-binary-analysis-0\.3\.1|libz-sys-1\.1\.30)/

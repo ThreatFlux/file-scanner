@@ -55,6 +55,8 @@ jobs:
 
       - name: Verify reviewed RSA exception conditions
         run: python3 scripts/check-rsa-exception.py
+      - name: Verify native security backport and complete container scan guards
+        run: make native-zlib-check container-review-check
       - name: Run cargo audit
         run: |
           cargo audit

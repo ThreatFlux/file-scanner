@@ -15,7 +15,7 @@ LIBRARIES := threatflux-package-security
          fmt-check test-no-features test-mcp-features build-examples test-doc doc-check doc-links \
          deny outdated security-geiger security-supply-chain semver-check feature-test feature-test-full \
          msrv msrv-install security-enhanced ci-local validate analyze examples release-prep docs \
-         hooks-install test-all test-package-security lint-package-security bench-check workflow-check codeql-review-check
+         hooks-install test-all test-package-security lint-package-security bench-check workflow-check codeql-review-check container-review-check native-zlib-check
 
 # Default target
 all: setup-optimization fmt lint build test security-audit
@@ -34,6 +34,7 @@ ci-local:
 	$(MAKE) msrv
 	$(MAKE) security-audit
 	$(MAKE) codeql-review-check
+	$(MAKE) container-review-check
 	$(MAKE) deny
 	$(MAKE) workflow-check
 	@echo "✅ CI checks passed!"
@@ -202,6 +203,13 @@ bench-check:
 workflow-check:
 	./scripts/check-workflows.sh
 
+native-zlib-check:
+	python3 scripts/check-native-zlib.py
+	vendor/libz-sys-1.1.30/tests/check-gzwrite-backport.sh
+
+container-review-check:
+	python3 -m unittest discover -s scripts -p 'test_container_*.py'
+
 codeql-review-check:
 	python3 scripts/codeql-reviewed-findings.py --check-sources
 	python3 -m unittest discover -s scripts -p 'test_codeql_*.py'
@@ -327,6 +335,7 @@ deps-tree:
 security-audit:
 	@echo "Running security audit..."
 	python3 scripts/check-rsa-exception.py
+	$(MAKE) native-zlib-check
 	@command -v cargo-audit >/dev/null 2>&1 || $(CARGO) install cargo-audit --version 0.22.2 --locked
 	$(CARGO) audit
 	cd threatflux-package-security && $(CARGO) audit

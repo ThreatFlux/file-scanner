@@ -1,5 +1,7 @@
 # Dependabot security alert review — ThreatFlux/file-scanner
 
+Follow-up: [completed dispositions and implemented remediation](security-alert-remediation-2026-10-21.md) supersede this initial review's pending actions.
+
 Reviewed 2026-10-21 against default-branch commit `a34604292e7060f45d3c6f10b392c326afe2ead1` and the update checkout before its ongoing edits. Source: authenticated GitHub REST endpoint `GET /repos/ThreatFlux/file-scanner/dependabot/alerts?state=open` with pagination. The response contains **3 open alerts**, all medium severity. No alert was dismissed or modified. No Jira tickets were created.
 
 ## Classification and scope

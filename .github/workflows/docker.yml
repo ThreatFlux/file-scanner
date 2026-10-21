@@ -15,6 +15,9 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "Makefile"
+      - "scripts/check-container-scan.py"
+      - "scripts/check-native-zlib.py"
+      - "scripts/test_container_scan.py"
       - "src/**"
       - "benches/**"
       - vendor/**
@@ -30,6 +33,9 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "Makefile"
+      - "scripts/check-container-scan.py"
+      - "scripts/check-native-zlib.py"
+      - "scripts/test_container_scan.py"
       - "src/**"
       - "benches/**"
       - vendor/**
@@ -265,6 +271,10 @@ jobs:
       contents: read
       security-events: write
     steps:
+      - name: Checkout scan validation
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - name: Download image (PRs)
         if: github.event_name == 'pull_request'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
@@ -278,12 +288,6 @@ jobs:
           docker load -i /tmp/image.tar
 
 
-      - name: Get short SHA
-        id: sha
-        run: |
-          echo "short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-
-
       - name: Log in to registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
@@ -292,41 +296,100 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull image
-        if: github.event_name != 'pull_request'
-        run: |
-          docker pull "${WORKFLOW_VALUE_0}/${WORKFLOW_VALUE_1}:${WORKFLOW_VALUE_2}"
-
-
+      - name: Record exact image identity
+        id: expected_image
         env:
-          WORKFLOW_VALUE_0: ${{ env.REGISTRY }}
-          WORKFLOW_VALUE_1: ${{ needs.build.outputs.image_name }}
-          WORKFLOW_VALUE_2: ${{ steps.sha.outputs.short }}
-      - name: Report informational Trivy findings
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
-        with:
-          image-ref: ${{ github.event_name == 'pull_request' && format('{0}:scan', needs.build.outputs.image_name) || format('{0}/{1}:{2}', env.REGISTRY, needs.build.outputs.image_name, steps.sha.outputs.short) }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: CRITICAL,HIGH
-          vuln-type: os,library
-          version: v0.76.0
-          exit-code: '0'
-      - name: Verify completed Trivy SARIF report
-        if: always()
+          IS_PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
+          IMAGE_REF: ${{ github.event_name == 'pull_request' && format('{0}:scan', needs.build.outputs.image_name) || format('{0}/{1}@{2}', env.REGISTRY, needs.build.outputs.image_name, needs.build.outputs.digest) }}
         run: |
-          test -s trivy-results.sarif
-          python3 - <<'PYCODE'
-          import json
-          from pathlib import Path
-          report = json.loads(Path('trivy-results.sarif').read_text())
-          assert report.get('version') == '2.1.0' and isinstance(report.get('runs'), list)
-          PYCODE
-      - name: Upload Trivy results
+          printf 'reference=%s\n' "${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          if [ "${IS_PULL_REQUEST}" = true ]; then
+            image_id="$(docker image inspect "${IMAGE_REF}" --format '{{.Id}}')"
+            printf 'image_id=%s\n' "${image_id}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Scan every vulnerability severity on amd64
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+          TRIVY_IMAGE_SRC: ${{ github.event_name == 'pull_request' && 'docker' || 'remote' }}
+          TRIVY_IGNOREFILE: /dev/null
+        with:
+          image-ref: ${{ steps.expected_image.outputs.reference }}
+          format: json
+          output: trivy-results.json
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          scanners: vuln
+          vuln-type: os,library
+          list-all-pkgs: 'true'
+          ignore-unfixed: 'false'
+          version: v0.76.0
+          cache-dir: .cache/trivy
+          # Preserve/upload the full report before the explicit gate below.
+          exit-code: '0'
+      - name: Validate amd64 scan and convert complete SARIF
+        if: always()
+        env:
+          EXPECTED_IMAGE_ID: ${{ steps.expected_image.outputs.image_id }}
+          IMAGE_REF: ${{ steps.expected_image.outputs.reference }}
+        run: |
+          identity=(--reference "${IMAGE_REF}")
+          if [ -n "${EXPECTED_IMAGE_ID}" ]; then
+            identity=(--image-id "${EXPECTED_IMAGE_ID}")
+          fi
+          python3 scripts/check-container-scan.py --architecture amd64 "${identity[@]}" --validate-only trivy-results.json
+          trivy convert --format sarif --output trivy-results.sarif trivy-results.json
+          cp .cache/trivy/db/metadata.json trivy-db-metadata.json
+          trivy --version > trivy-version.txt
+      - name: Upload amd64 Trivy results
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v4.39.0
         with:
           sarif_file: trivy-results.sarif
+          # Preserve the existing main analysis identity so resolved alerts close.
+          category: .github/workflows/docker.yml:scan
         if: always() && hashFiles('trivy-results.sarif') != ''
+      - name: Scan published arm64 image at every severity
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_REF: ${{ format('{0}/{1}@{2}', env.REGISTRY, needs.build.outputs.image_name, needs.build.outputs.digest) }}
+          TRIVY_CACHE_DIR: .cache/trivy
+        run: |
+          trivy image --image-src remote --platform linux/arm64 --scanners vuln \
+            --pkg-types os,library --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --ignorefile /dev/null --list-all-pkgs --format json \
+            --output trivy-results-arm64.json "${IMAGE_REF}"
+          python3 scripts/check-container-scan.py --architecture arm64 --reference "${IMAGE_REF}" --validate-only trivy-results-arm64.json
+          trivy convert --format sarif --output trivy-results-arm64.sarif trivy-results-arm64.json
+      - name: Upload arm64 Trivy results
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v4.39.0
+        with:
+          sarif_file: trivy-results-arm64.sarif
+          category: .github/workflows/docker.yml:scan-arm64
+        if: always() && hashFiles('trivy-results-arm64.sarif') != ''
+      - name: Preserve complete scan evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: container-security-evidence
+          path: |
+            trivy-results*.json
+            trivy-results*.sarif
+            trivy-db-metadata.json
+            trivy-version.txt
+          if-no-files-found: error
+      - name: Require zero container vulnerabilities at every severity
+        env:
+          REQUIRE_ARM64: ${{ github.event_name != 'pull_request' }}
+          EXPECTED_IMAGE_ID: ${{ steps.expected_image.outputs.image_id }}
+          IMAGE_REF: ${{ steps.expected_image.outputs.reference }}
+        run: |
+          identity=(--reference "${IMAGE_REF}")
+          if [ -n "${EXPECTED_IMAGE_ID}" ]; then
+            identity=(--image-id "${EXPECTED_IMAGE_ID}")
+          fi
+          python3 scripts/check-container-scan.py --architecture amd64 "${identity[@]}" trivy-results.json
+          if [ "${REQUIRE_ARM64}" = true ]; then
+            python3 scripts/check-container-scan.py --architecture arm64 --reference "${IMAGE_REF}" trivy-results-arm64.json
+          fi
 
   sign:
     name: Sign Container
