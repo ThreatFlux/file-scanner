@@ -1,0 +1,56 @@
+import "test_proto2"
+
+rule test_1 {
+    condition:
+        test_proto2.string_foo matches /foobar/
+}
+
+rule test_2 {
+    condition:
+        test_proto2.string_foo matches /foobar/i
+}
+
+rule test_3 {
+    condition:
+        test_proto2.int64_zero == 0 or
+        test_proto2.string_foo matches /foo.bar/i or
+        test_proto2.string_foo matches /bar.baz/
+}
+
+rule test_4 {
+    condition:
+        test_proto2.string_foo matches /foo.bar/ or
+        test_proto2.string_foo matches /bar.baz/
+}
+
+rule test_5 {
+    condition:
+        test_proto2.string_foo matches /foo.bar/ or
+        test_proto2.string_bar matches /bar.baz/
+}
+
+rule test_6 {
+    condition:
+        test_proto2.string_foo == "foo" or
+        test_proto2.string_foo == "bar"
+}
+
+rule test_7 {
+    condition:
+        test_proto2.string_foo == "foo" or
+        "bar" == test_proto2.string_foo or
+        test_proto2.string_foo iequals "baz" or
+        "qux" iequals test_proto2.string_foo or
+        test_proto2.string_foo contains "quux" or
+        test_proto2.string_foo contains "corge" or
+        test_proto2.string_foo icontains "grault" or
+        test_proto2.string_foo icontains "garply" or
+        test_proto2.string_foo startswith "waldo" or
+        test_proto2.string_foo startswith "fred" or
+        test_proto2.string_foo istartswith "plugh" or
+        test_proto2.string_foo istartswith "xyzzy" or
+        test_proto2.string_foo endswith "thud" or
+        test_proto2.string_foo endswith "wibble" or
+        test_proto2.string_foo iendswith "wobble" or
+        test_proto2.string_foo iendswith "wubble"
+}

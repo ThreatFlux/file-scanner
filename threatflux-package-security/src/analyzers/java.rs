@@ -188,7 +188,7 @@ impl JavaAnalyzer {
         // Check if signed
         for i in 0..archive.len() {
             let file = archive.by_index(i)?;
-            let name = file.name();
+            let name = file.name()?;
             if name.starts_with("META-INF/")
                 && (name.ends_with(".RSA") || name.ends_with(".DSA") || name.ends_with(".EC"))
             {
@@ -326,7 +326,7 @@ impl JavaAnalyzer {
         // Check for native libraries
         for i in 0..archive.len() {
             let file = archive.by_index(i)?;
-            let name = file.name();
+            let name = file.name()?;
 
             if name.ends_with(".so") || name.ends_with(".dll") || name.ends_with(".dylib") {
                 analysis.has_native_libraries = true;

@@ -1284,7 +1284,7 @@ This planning sketch uses Debian slim and does not set a nonroot user; the
 repository `Dockerfile` ships a distroless Debian 13 runtime that runs as uid 65532.
 
 ```dockerfile
-FROM rust:1.99.0-trixie AS builder
+FROM rust:1.99.1-trixie AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./

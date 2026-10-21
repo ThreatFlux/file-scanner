@@ -18,13 +18,14 @@ publish = false
 [dependencies]
 anyhow = "1.0.104"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-serde_yaml = "0.9.34"
-tokio = { version = "1.53.2", features = ["full"] }
+serde_json = "1.0.154"
+# Retain the source API alias while replacing unmaintained serde_yaml/libyaml.
+serde_yaml = { package = "serde-saphyr", version = "2.0.0" }
+tokio = { version = "1.54.0", features = ["full"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 regex = "1.13.1"
 once_cell = "1.21.4"
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 hex = "0.4.3"
 # Use the platform verifier to avoid bundling static webpki roots here.
 reqwest = { version = "0.13.5", features = ["json", "rustls"], default-features = false }
@@ -34,10 +35,10 @@ async-trait = "0.1.92"
 thiserror = "2.0.21"
 
 # Package-specific dependencies
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }  # For Java archives
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }  # For Java archives
 tar = "0.4.46"  # For Python packages
 flate2 = "1.1.10"  # For compressed archives
-toml = "1.1.6"  # For parsing pyproject.toml
+toml = "1.1.8"  # For parsing pyproject.toml
 dirs = "7.0.0"  # For finding cache directories
 
 # Optional features

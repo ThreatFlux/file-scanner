@@ -122,7 +122,7 @@ Then switch the repository to trusted publishing:
 
 ## Container image
 
-The `Dockerfile` builds on `rust:1.99.0-trixie` and runs on
+The `Dockerfile` builds on `rust:1.99.1-trixie` and runs on
 `gcr.io/distroless/cc-debian13:nonroot` (both pinned by digest) as uid 65532
 under `tini`. The runtime has no shell or package manager, so pass scanner
 arguments straight to the container:

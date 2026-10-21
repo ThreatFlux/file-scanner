@@ -1,6 +1,6 @@
 CARGO ?= cargo
 RUST_MSRV ?= 1.97.1
-RUST_TOOLCHAIN ?= 1.99.0
+RUST_TOOLCHAIN ?= 1.99.1
 MSRV_TARGET_DIR ?= $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR)/msrv,target/msrv)
 BINARY_NAME ?= file-scanner
 BINARY_PACKAGE ?= threatflux-file-scanner

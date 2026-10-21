@@ -36,7 +36,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -152,7 +152,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
       - name: Install Valgrind
         run: |
           sudo apt-get update
@@ -170,7 +170,7 @@ jobs:
             ./target/debug/file-scanner test_file.txt --format json
 
       - name: Upload Valgrind results
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: valgrind-results
           path: valgrind-output.txt
@@ -186,7 +186,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067  # v1
         with:
-          toolchain: 1.99.0
+          toolchain: 1.99.1
       - name: Clean build timing
         run: |
           echo "=== Clean build timing ==="

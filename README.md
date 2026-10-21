@@ -239,7 +239,7 @@ The project uses comprehensive GitHub Actions workflows:
 
 ## 🤝 Contributing
 
-Development uses Rust **1.99.0**; the consumer MSRV remains **1.97.1**.
+Development uses Rust **1.99.1**; the consumer MSRV remains **1.97.1**.
 The root workspace and the separate `threatflux-package-security` crate are both
 checked by `make ci-local`. Workflow validation uses actionlint 1.7.12 and
 yamllint 1.38.0; set `ACTIONLINT_BIN` and `YAMLLINT_BIN` for tools outside `PATH`.

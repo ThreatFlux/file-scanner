@@ -3,9 +3,9 @@
 #
 # Follows ThreatFlux/rust-cicd-template's canonical Dockerfile: a Debian 13
 # (trixie) Rust builder and a distroless Debian 13 runtime with no shell,
-# package manager or coreutils. file-scanner links only glibc, libgcc and zlib
-# dynamically (TLS uses rustls), and distroless/cc supplies all three plus the
-# CA certificates.
+# package manager or coreutils. TLS uses rustls; distroless/cc supplies the
+# native runtime libraries and CA certificates. Published amd64 main imports
+# glibc and libgcc; verify the exact native dependency closure after each build.
 #
 # Base images are pinned by multi-arch index digest for reproducibility.
 # Refresh with:
@@ -13,8 +13,8 @@
 # Dependabot refreshes the Rust builder; refresh the runtime digest with the
 # command above when it is updated.
 
-# rust 1.99.0 on Debian 13 (trixie); multi-arch index digest
-FROM rust:1.99.0-trixie@sha256:15ad267e7a4cb2dce5905c90c76765adb6714945c5ea6d7c82673897a5e4067b AS rust-base
+# rust 1.99.1 on Debian 13 (trixie); multi-arch index digest
+FROM rust:1.99.1-trixie@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a AS rust-base
 
 ARG VERSION=0.3.5
 ARG BUILD_DATE=unknown
@@ -77,7 +77,7 @@ RUN mkdir -p /home/builder/out/bin /home/builder/out/doc /home/builder/runtime-s
     cp "/build/${BINARY_NAME}-sbom.json" /home/builder/out/doc/sbom.cdx.json
 
 # distroless cc on Debian 13, nonroot tag (uid/gid 65532); multi-arch index digest
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2 AS runtime
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:b7e81cb1af38d9345680e68bcf564d388f96304e25222030fc8c051faf8565b3 AS runtime
 
 ARG VERSION=0.3.5
 ARG BUILD_DATE=unknown

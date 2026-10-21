@@ -243,7 +243,7 @@ and an HTTP health check; it is not the published runtime.
 
 ```dockerfile
 # Multi-stage build for optimization
-FROM rust:1.99.0-trixie AS builder
+FROM rust:1.99.1-trixie AS builder
 
 WORKDIR /app
 

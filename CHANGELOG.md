@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Consolidate dependency updates on Rust 1.99.1, refresh stable crate/tool/container
+  pins and migrate archive readers to ZIP 9's fallible filename API.
+- Replace deprecated `serde_yaml`/unmaintained `unsafe-libyaml` with maintained
+  `serde-saphyr` 2.0.0 under the existing source alias. YAML data remains compatible;
+  emitted formatting may differ.
+- Refresh the documented stable YARA-X runtime/crypto patch and patch the latest
+  binary-analysis release to remove its vulnerable ZIP 8 dependency. Repository
+  overrides do not propagate to downstream crates.io library consumers.
+- Add complete open security-alert assessments and per-TP remediation plans in
+  `docs/security`, including deployment and evidence limits.
+
 ## [0.3.7] - 2026-10-07
 
 ### Changed
