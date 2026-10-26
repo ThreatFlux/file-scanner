@@ -54,7 +54,7 @@ object = "0.40.0"
 ring = "0.17.14"
 
 # MCP SDK
-rmcp = { version = "=3.6.0", features = ["transport-io"] }
+rmcp = { version = "=3.7.0", features = ["transport-io"] }
 schemars = "1.2.3"
 
 # HTTP server
