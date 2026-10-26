@@ -77,7 +77,7 @@ RUN mkdir -p /home/builder/out/bin /home/builder/out/doc /home/builder/runtime-s
     cp "/build/${BINARY_NAME}-sbom.json" /home/builder/out/doc/sbom.cdx.json
 
 # Wolfi glibc 2.44, nonroot uid/gid 65532; amd64/arm64 multi-arch index digest
-FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:3f1283dc2a6a48c25cd2e1c7730a871b19b721975240e108e0d6a73b555a3a20 AS runtime
+FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:2827063c9efb4ba971d8621eb75f4e61b8d19850a6293a797df37358cc6f687b AS runtime
 
 ARG VERSION=0.3.5
 ARG BUILD_DATE=unknown
