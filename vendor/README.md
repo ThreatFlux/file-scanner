@@ -1,7 +1,7 @@
 # Temporary stable YARA-X dependency patch
 
 The root Cargo patch uses the published stable YARA-X 1.22.0 source with stable
-Wasmtime 49.0.4 and RSA 0.9.10. Upstream 1.22.0 requires Wasmtime 48.0.6 and the
+Wasmtime 49.0.5 and RSA 0.9.10. Upstream 1.22.0 requires Wasmtime 48.0.6 and the
 prerelease RSA 0.10.0-rc.19. This patch keeps the repository on stable dependencies
 while refreshing YARA-X and the native runtime. The existing public-key-only
 RSA advisory exception remains guarded by `scripts/check-rsa-exception.py`;
