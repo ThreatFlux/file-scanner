@@ -119,21 +119,23 @@ crate can resolve the unpatched upstream ZIP dependency until that happens.
 
 # Stable libz-sys / zlib security backport
 
-The root `libz-sys` patch preserves the latest stable wrapper 1.1.30 and its
+The root `libz-sys` patch preserves the stable wrapper 1.1.31 and its
 bundled stable zlib 1.3.2, with the exact upstream fix for CVE-2026-85091.
+`libz-sys` 1.1.31 also removes the build-script probe logging that caused
+RUSTSEC-2026-0418.
 `LIBZ_SYS_STATIC=1` in the production build selects this bundled implementation;
 using an unaffected runtime base alone would not repair vulnerable statically
 linked C code. This patch changes the actual source compiled into the binary.
 
 ## libz-sys provenance
 
-- Artifact: [official libz-sys 1.1.30 crate](https://static.crates.io/crates/libz-sys/libz-sys-1.1.30.crate).
-- Archive SHA-256: `f710a23e6dbf193214fd46ca56a9d6864e550abe86202184532ae7275e46de19`.
-- Checksum verified against the 1.1.30 entry in the [official crates.io index](https://index.crates.io/li/bz/libz-sys) on 2026-10-21.
-- Crate VCS commit: [`3c9a7453068352513d69a2010a8ef217ed2915fa`](https://github.com/rust-lang/libz-sys/tree/3c9a7453068352513d69a2010a8ef217ed2915fa), from its packaged VCS metadata.
+- Artifact: [official libz-sys 1.1.31 crate](https://static.crates.io/crates/libz-sys/libz-sys-1.1.31.crate).
+- Archive SHA-256: `ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2`.
+- Checksum verified against the 1.1.31 entry in the [official crates.io registry](https://crates.io/api/v1/crates/libz-sys/1.1.31) on 2026-10-31.
+- Crate VCS commit: [`595fbb7995b2c5e15371963103d33192fd066857`](https://github.com/rust-lang/libz-sys/tree/595fbb7995b2c5e15371963103d33192fd066857), from its packaged VCS metadata.
 - The original MIT/Apache licenses and embedded zlib license notice in `src/zlib/zlib.h` are preserved.
 - Original source, build script, normalized manifest and included zlib/zlib-ng trees are preserved. Package Cargo.lock, original Cargo.toml and VCS metadata are omitted.
-- Exact upstream-source diff: [libz-sys-1.1.30.patch](libz-sys-1.1.30.patch).
+- Exact upstream-source diff: [libz-sys-1.1.31.patch](libz-sys-1.1.31.patch).
 
 The patch is a direct backport of Mark Adler's official zlib commit
 [`df84af25dc1942490e1d1c899a07619152a46148`](https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148),
@@ -154,7 +156,7 @@ ignore or prerelease dependency is introduced.
 Run from the repository root with a POSIX C compiler supporting AddressSanitizer:
 
 ```sh
-vendor/libz-sys-1.1.30/tests/check-gzwrite-backport.sh
+vendor/libz-sys-1.1.31/tests/check-gzwrite-backport.sh
 ```
 
 The test compiles the actual vendored stock zlib C sources with AddressSanitizer.
@@ -162,8 +164,10 @@ It fills a nonblocking pipe, stalls a large direct `gzwrite`, asserts that the
 stream points to its owned buffer with no pending input, and checks that the
 next smaller write can safely buffer its input. The patched source passes.
 As a negative control, the same test compiled against the pristine official
-1.1.30 crate fails the input-state assertion. This proves the regression detects
-the absent security fix, independently of scanner/package version heuristics.
+1.1.30 crate fails the input-state assertion. The official 1.1.31 crate retains
+the same unpatched `gzwrite.c`, so this backport remains necessary. The negative
+control proves the regression detects the absent security fix independently of
+scanner/package version heuristics.
 Only source and the test runner are retained; test executables are temporary.
 
 As with the other root patches, downstream crates.io consumers must supply their
