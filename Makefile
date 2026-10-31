@@ -205,7 +205,7 @@ workflow-check:
 
 native-zlib-check:
 	python3 scripts/check-native-zlib.py
-	vendor/libz-sys-1.1.30/tests/check-gzwrite-backport.sh
+	vendor/libz-sys-1.1.31/tests/check-gzwrite-backport.sh
 
 container-review-check:
 	python3 -m unittest discover -s scripts -p 'test_container_*.py'
