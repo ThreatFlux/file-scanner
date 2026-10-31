@@ -59,8 +59,13 @@ analyzers. The generated thumbprint accessors retain their reporting/serializati
 role. The added binary-analysis vendor contributes two inventoried files: its PE
 parser marks `signed` from certificate-table presence and its type documents that
 reporting field; neither consumes a YARA-X certificate or thumbprint. Every changed inventoried file is pinned, as are the updated vendor manifest,
-Wasmtime 49.0.4 resolution and crypto verification implementation. The nine
+Wasmtime 49.0.5 resolution and crypto verification implementation. The nine
 justifications therefore remain valid under the narrower, exact 1.22.0 tuples.
+
+The 2026-10-31 Wasmtime security update changes the vendored manifest's minimum
+from 49.0.4 to 49.0.5 and the reviewed dependency version. The inventoried
+YARA-X algorithm, certificate, and crypto caller sources are unchanged; their
+source hashes and the nine exact reviewed result tuples remain the same.
 
 The historical API fixture `scripts/codeql-reviewed-findings-fixture.sarif` and
 compressed CLI evidence `scripts/codeql-reviewed-findings-raw-25c41d9.sarif.gz`

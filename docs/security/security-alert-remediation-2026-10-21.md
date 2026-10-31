@@ -34,7 +34,7 @@ blanket vulnerability ignore was added.
 | Alerts | Affected component | Implemented fix |
 |---|---|---|
 | [22](https://github.com/ThreatFlux/file-scanner/security/code-scanning/22), [25](https://github.com/ThreatFlux/file-scanner/security/code-scanning/25), [187](https://github.com/ThreatFlux/file-scanner/security/code-scanning/187), [189](https://github.com/ThreatFlux/file-scanner/security/code-scanning/189), [194](https://github.com/ThreatFlux/file-scanner/security/code-scanning/194), [204](https://github.com/ThreatFlux/file-scanner/security/code-scanning/204), [205](https://github.com/ThreatFlux/file-scanner/security/code-scanning/205), [206](https://github.com/ThreatFlux/file-scanner/security/code-scanning/206), [207](https://github.com/ThreatFlux/file-scanner/security/code-scanning/207), [266](https://github.com/ThreatFlux/file-scanner/security/code-scanning/266) | Debian glibc 2.41, including the evidenced `getaddrinfo` path | Replace the vulnerable runtime with pinned Wolfi glibc **2.44-r8**. Preserve the GNU ABI, nonroot user, CA roots, tini and application features. |
-| [124](https://github.com/ThreatFlux/file-scanner/security/code-scanning/124) | Old runtime zlib 1.3.1 CRC implementation | Remove the unused runtime zlib package. Explicitly build the patched bundled zlib **1.3.2** through locked `libz-sys` 1.1.30, so the builder's older system zlib cannot be linked accidentally. |
+| [124](https://github.com/ThreatFlux/file-scanner/security/code-scanning/124) | Old runtime zlib 1.3.1 CRC implementation | Remove the unused runtime zlib package. Explicitly build the patched bundled zlib **1.3.2** through locked `libz-sys` 1.1.31 (updated 2026-10-31), so the builder's older system zlib cannot be linked accidentally. |
 
 The [official minimal glibc runtime](https://images.chainguard.dev/directory/image/glibc-dynamic/overview)
 is pinned by multi-architecture index:
@@ -77,7 +77,7 @@ contains the later vulnerable nonblocking gzip implementation involved in
 CVE-2026-85091. The old runtime's 1.3.1 finding was a version-range FP; introducing
 1.3.2 without a source fix would be a different exposure.
 
-The [vendored libz-sys patch](../../vendor/libz-sys-1.1.30.patch) applies the exact
+The [vendored libz-sys patch](../../vendor/libz-sys-1.1.31.patch) applies the exact
 [upstream fix](https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148).
 It restores owned-buffer/input state when a large nonblocking gzip write stalls.
 The stable wrapper and zlib version identifiers are preserved; the actual C

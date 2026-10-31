@@ -70,7 +70,7 @@
  
  [target.'cfg(not(target_family = "wasm"))'.dependencies.wasmtime]
 -version = "48.0.6"
-+version = "49.0.4"
++version = "49.0.5"
  features = [
      "cranelift",
      "runtime",
