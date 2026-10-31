@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792900258776,
+  "lastUpdate": 1793432538588,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -9925,6 +9925,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
             "value": 287614.11005087936,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "e4af0ecad3531c48fc175ad1fe6baa24ee13671c",
+          "message": "fix(deps): resolve Tokio and transitive security advisories (#280)\n\n* fix(deps): upgrade Tokio in both Cargo projects\n\n* fix(deps): clear remaining crypto advisories\n\n* fix(deps): update Wasmtime to patched 49.0.5\n\n* fix(deps): update reviewed Wasmtime floor and guard\n\n* fix(ci): acknowledge reviewed dependency policy digest\n\n* fix(deps): update vendored libz-sys security wrapper\n\n* fix(ci): preserve executable native regression script\n\n* docs: align container source note with libz-sys upgrade",
+          "timestamp": "2026-10-31T03:04:10-04:00",
+          "tree_id": "a6611085959cc32c8c8d4699382db834a5038f2e",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/e4af0ecad3531c48fc175ad1fe6baa24ee13671c"
+        },
+        "date": 1793432537933,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 5330.263718641251,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_large_binary",
+            "value": 71350.47817015383,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_pe",
+            "value": 6050.678627348357,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2253967.9490476195,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3179952.941875,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 317875.1385287308,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2713815.122631579,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 76479.31022743341,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 45896.089649440284,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 239151.9546380779,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2232136.6739130425,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 47845.4081497184,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 28113.435344152083,
+            "unit": "ns"
+          },
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2722498.399473684,
+            "unit": "ns"
+          },
+          {
+            "name": "string_categorization/extract_with_categorization",
+            "value": 975475.4246526421,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/10000_strings",
+            "value": 10851088.138,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/1000_strings",
+            "value": 1244452.0780071253,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/100_strings",
+            "value": 243581.1314820625,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_16",
+            "value": 10449542.282,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_4",
+            "value": 10859648.254,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_8",
+            "value": 10818307.901999999,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_16",
+            "value": 1142862.765179936,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_4",
+            "value": 1242073.7244146103,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_8",
+            "value": 1347083.4764567963,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_16",
+            "value": 198244.88275131813,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_4",
+            "value": 242618.80201098372,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
+            "value": 372482.1191156006,
             "unit": "ns"
           }
         ]
