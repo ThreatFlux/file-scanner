@@ -15,7 +15,7 @@ exclude = ["threatflux-package-security"]
 # Workspace-wide dependency specifications for consistency
 [workspace.dependencies]
 # Core Rust async and runtime
-tokio = { version = "1.54.0", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 async-trait = "0.1.92"
 
 # Error handling
