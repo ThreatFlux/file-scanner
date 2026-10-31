@@ -46,7 +46,7 @@ ENV PATH="/home/builder/.cargo/bin:/usr/local/cargo/bin:${PATH}"
 WORKDIR /build
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
-# Compile the patched zlib 1.3.2 bundled by locked libz-sys 1.1.30, rather than
+# Compile the patched zlib 1.3.2 bundled by locked libz-sys 1.1.31, rather than
 # accidentally linking the builder distribution's older system libz.
 ENV LIBZ_SYS_STATIC=1
 
