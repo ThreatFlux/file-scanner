@@ -4411,7 +4411,7 @@ dependencies = [
 
 [[package]]
 name = "threatflux-file-scanner"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "addr2line 0.27.1",
  "anyhow",
