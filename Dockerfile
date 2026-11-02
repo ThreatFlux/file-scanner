@@ -11,7 +11,7 @@
 # Dependabot tracks both image references. See docs/security for fix evidence.
 
 # rust 1.99.1 on Debian 13 (trixie); multi-arch index digest
-FROM rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS rust-base
+FROM rust:1.99.1-trixie@sha256:09027f873d45b8ecd1dc86f1fa13b7a62b875c961f017a0e331267b350430137 AS rust-base
 
 ARG VERSION=0.3.5
 ARG BUILD_DATE=unknown
