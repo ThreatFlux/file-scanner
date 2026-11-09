@@ -341,7 +341,7 @@ jobs:
           cp .cache/trivy/db/metadata.json trivy-db-metadata.json
           trivy --version > trivy-version.txt
       - name: Upload amd64 Trivy results
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
         with:
           sarif_file: trivy-results.sarif
           # Preserve the existing main analysis identity so resolved alerts close.
@@ -360,7 +360,7 @@ jobs:
           python3 scripts/check-container-scan.py --architecture arm64 --reference "${IMAGE_REF}" --validate-only trivy-results-arm64.json
           trivy convert --format sarif --output trivy-results-arm64.sarif trivy-results-arm64.json
       - name: Upload arm64 Trivy results
-        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
         with:
           sarif_file: trivy-results-arm64.sarif
           category: .github/workflows/docker.yml:scan-arm64
