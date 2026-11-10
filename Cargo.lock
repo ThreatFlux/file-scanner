@@ -4485,9 +4485,9 @@ dependencies = [
 
 [[package]]
 name = "threatflux-hashing"
-version = "1.7.1"
+version = "1.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "464239a7bf7e93b172b6573aee5eb96b0d387b0862897e29758a6e79254a60f1"
+checksum = "059250c5905947079fed94bf67f157fccc98755cc6d19ecea04c1e913d9c55ac"
 dependencies = [
  "blake3",
  "futures",
