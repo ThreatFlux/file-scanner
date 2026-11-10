@@ -50,6 +50,10 @@ updates:
       - "ci/cd"
       - "github-actions"
     open-pull-requests-limit: 5
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action/*"
 
   # Enable version updates for Docker
   - package-ecosystem: "docker"
