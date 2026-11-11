@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794348025564,
+  "lastUpdate": 1794355410350,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -11352,6 +11352,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
             "value": 375305.89652455354,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ca11ad3bd4d867409b72135971069e84e61c7cdc",
+          "message": "ci(deps): bump github/codeql-action init, analyze and upload-sarif to 4.39.3 (#304)\n\nMoves all five codeql-action refs together (security.yml init/analyze/\nupload-sarif, docker.yml upload-sarif x2) so the CodeQL steps share one\nversion, and adds a Dependabot group so they stay in lockstep.\nSupersedes #292 and #295.\n\nCo-authored-by: Claude Sonnet 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-10T18:30:21-05:00",
+          "tree_id": "7629526f4294f11020ccf1fdf936f21bf3b0ea14",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/ca11ad3bd4d867409b72135971069e84e61c7cdc"
+        },
+        "date": 1794355409376,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 4939.925933630962,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_large_binary",
+            "value": 63641.58931539523,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_pe",
+            "value": 5771.189750347058,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 1890864.3019205052,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 2647205.4875000003,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 261161.535736028,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2286718.576363636,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 58099.669243977194,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 32892.6297410514,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 203725.6052461072,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 1895875.675382215,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 38438.71085225216,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 21489.1804228271,
+            "unit": "ns"
+          },
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2266872.792173914,
+            "unit": "ns"
+          },
+          {
+            "name": "string_categorization/extract_with_categorization",
+            "value": 752822.148887984,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/10000_strings",
+            "value": 8847592.084999999,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/1000_strings",
+            "value": 995642.3876058416,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/100_strings",
+            "value": 184658.64402749788,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_16",
+            "value": 8653908.281666664,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_4",
+            "value": 8902341.584999999,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_8",
+            "value": 8938534.726666667,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_16",
+            "value": 932788.5025245004,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_4",
+            "value": 997147.7704637672,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_8",
+            "value": 1098460.2870171408,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_16",
+            "value": 146723.5452558647,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_4",
+            "value": 183962.34813318384,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
+            "value": 290175.6992084009,
             "unit": "ns"
           }
         ]
