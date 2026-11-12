@@ -7,127 +7,184 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The MCP server was rebuilt. It now runs on the rmcp SDK, has 17 tools that give an overview first and paged detail
+on request, and is safe by default over HTTP. Read "Changed" before you upgrade a deployment: the HTTP server binds
+to loopback, the tool output shapes changed, and some arguments and routes are gone.
+
 ### Added
 
-- MCP: `analyze_file` caches each section of a result on its own (by file SHA-256 and the options
-  that change it), so a full run answers later single-section calls, and a repeated identical call
-  is answered from the rendered answer. The cache holds deflate-compressed JSON text (default
-  256 MiB of compressed bytes, `FILE_SCANNER_SECTION_CACHE_MB`) with a small bounded map of
-  parsed values in front, so paging through one section does not parse it again. When it is
-  full, other files' sections go first; a section too big to keep, and any section of the same
-  file dropped to make room, is named in `cache_note`. `cache` is `hit`, `partial` or `miss`;
-  a call that names no analysis returns a `hint` instead. Analysis cache entries over 4 MiB keep the trimmed answer.
-  At most `max(4, CPUs)` analyses run at once across all transports.
-- MCP: the server is now served by the rmcp SDK runtime on stdio and HTTP. Every protocol
-  revision the SDK knows (2024-11-05 through 2026-07-28) is negotiated; `ping`,
-  `notifications/*` and `server/discover` behave per the specification, and the server
-  reports its real name, version, title and usage instructions.
-- MCP: tools carry titles and read-only annotations, input schemas are generated from the
-  request types and reject unknown arguments, and every tool accepts `max_output_bytes`.
-- MCP: results are compact JSON with unset fields omitted and a hard byte budget (default
-  80,000, ceiling 400,000); anything cut is listed under `truncated`.
-- MCP: `FILE_SCANNER_ALLOWED_ROOTS` (`:`-separated) confines every tool path to the listed
-  directories; `~/` is expanded, and FIFOs, sockets and devices are rejected with a message
-  that names the fix. A directory argument is vetted too: with roots set, a symlink inside it
-  that points outside them is refused (`yara_scan_file`, `analyze_npm_package`,
-  `analyze_python_package`), and a FIFO, socket or device inside it is always refused. Without
-  a root, a missing path no longer says whether it exists outside the roots.
-- MCP: a repeated identical `analyze_file` call on an unchanged file is answered from a
-  bounded in-memory section cache (`cache: "hit"`).
-- MCP: `mcp-http` serves the SDK's Streamable HTTP transport at `/mcp` next to the REST
-  helper routes. Sessions (`Mcp-Session-Id`) serve clients older than revision 2026-07-28;
-  2026-07-28 requests are served statelessly.
-- MCP: `mcp-http` and `mcp-sse` take `--host` (default `127.0.0.1`), `--port`,
-  `--allowed-host`, `--allowed-origin` (both repeatable) and `--auth-token` (also
-  `FILE_SCANNER_AUTH_TOKEN`). With a token, every route except `/health` needs
-  `Authorization: Bearer <token>` (401 and `WWW-Authenticate` otherwise).
-- MCP: `--allow-root <dir>` (repeatable, also `FILE_SCANNER_ALLOWED_ROOTS`) on `mcp-stdio`,
-  `mcp-http` and `mcp-sse`; the flag wins over the variable.
-- MCP: the startup banner on stderr states the real bind address and which protections are
-  active; binding a non-loopback `--host` without a token prints a warning.
-- MCP: the HTTP server stops on SIGINT and SIGTERM (open streams are ended, exit code 0);
-  REST routes have a request timeout (120 s, 504) and a concurrency limit (16); a REST call
-  still running at shutdown is answered `503 {"error":"shutting down"}` so the server stops
-  at once. Each refused request (401, 403) is logged on stderr (method, path, reason, never
-  the token).
-- MCP: the cache directory is created with mode 0700 and its files 0600 on Unix.
-- MCP: `mcp_server::output::page` and `PageArgs` (offset, limit, `total`, `returned`,
-  `next_offset`) are the shared paging helper for tools that return lists.
+- MCP server on the rmcp SDK over stdio and Streamable HTTP (`/mcp`). Protocol revisions 2024-11-05 through
+  2026-07-28 are negotiated. The server reports its name, version, title and usage instructions, tools carry titles
+  and read-only annotations, and input schemas are generated from the request types and reject unknown arguments.
+- Overview-first analysis. `analyze_file` with only a path returns a small overview (type, hashes, headline facts,
+  the most telling strings) and `next_steps` that name the next call. A directory path returns a paged triage table
+  (`recursive`, `max_files`, `offset`, `limit`). Sections, flags and `all: true` return per-section summaries; each
+  full section is cached by SHA-256 for later drill-down. New sections `call_graph` and `taint`, and an `arch`
+  argument to pick a slice of a universal Mach-O.
+- 11 new tools (the server had six: `analyze_file`, `llm_analyze_file`, `yara_scan_file`, `analyze_java_file`,
+  `analyze_npm_package` and `analyze_python_package`):
+  - `query_analysis` pages and filters the lists of any section (strings by text, regex, category or encoding;
+    symbols, imports, functions, findings, call-graph edges, taint flows, and more).
+  - `disassemble` lists one function or address range of an ELF or thin Mach-O binary; `read_hex` reads raw bytes at
+    any offset (negative counts from the end); `compare_files` compares two files.
+  - `search_strings` and `string_details` search strings in one file or across every file indexed in the session.
+  - `analyze_document` (PDF structure, JavaScript, launch actions, embedded files; Office macros, auto-exec entry
+    points, keywords), `analyze_script` (shell, PowerShell, JavaScript, Python, batch, VBScript), `inspect_archive`
+    (zip and zip-based formats, tar, tar.gz, RAR 4 and 5, 7z, with risk flags) cover file kinds that had no tool.
+  - `cache_status` and `cache_clear` show and empty the caches on every transport.
+- `analyze_java_file`, `analyze_npm_package` and `analyze_python_package` are rebuilt. The Java tool parses class
+  files and archives and has views for classes, findings, resources, manifest, Android and nested archives. The package
+  tools are offline: source scan with file and line evidence, install scripts, dependency advisories, typosquatting;
+  they accept tarballs, wheels, zips, directories and lock or requirements files, and page `findings`, `files`,
+  `dependencies` and `scripts`.
+- Output control on every tool: `max_output_bytes` (default 80,000, ceiling 400,000) caps each result, anything cut
+  is listed under `truncated`, and lists page with `offset`, `limit`, `total`, `returned` and `next_offset`. Answers
+  say `cache: hit` or `miss`. Failures are tool errors (`isError: true`) whose message says what to fix.
+- `yara_scan_file` takes rules as text, as `rule_path` (a file or a directory of `.yar`/`.yara` files) or as
+  `builtin`, and has limits (`max_matches_per_rule`, `max_rules_per_file`, `max_files`, `timeout_seconds`, paging).
+  Results include tags, metadata, matched strings with offsets and per-rule hit counts; whatever was cut is named
+  under `limits_reached`. The command-line `yara-scan` gains `--max-files` and `--timeout`, and `--rule` accepts a
+  directory.
+- HTTP safety options: `--host` (default `127.0.0.1`), `--allowed-host` and `--allowed-origin` (repeatable), and
+  `--auth-token` (also `FILE_SCANNER_AUTH_TOKEN`), which requires `Authorization: Bearer <token>` on every route
+  except `/health`. The startup banner on stderr states the bind address and which protections are active, and
+  warns when a non-loopback host is used without a token. The server stops cleanly on SIGINT and SIGTERM.
+- `--allow-root <dir>` (repeatable; also `FILE_SCANNER_ALLOWED_ROOTS`, `:`-separated) on `mcp-stdio`, `mcp-http` and
+  `mcp-sse` confines every tool path to the listed directories. Symlinks and `..` are resolved before the check, and
+  a symlink inside a scanned directory that points outside the roots is refused. FIFOs, sockets and devices are
+  always refused. A leading `~/` is expanded.
+- `--cache-dir <dir>` (also `FILE_SCANNER_CACHE_DIR`) and `--no-cache` on the MCP commands;
+  `FILE_SCANNER_CACHE_DISK_MB` and `FILE_SCANNER_SECTION_CACHE_MB` set cache budgets. Section results are also
+  cached on disk, so drill-down survives a server restart. At most `max(4, CPUs)` analyses run at once.
+- Analysis coverage: universal (fat) Mach-O files are analyzed on one slice and list all slices; Authenticode
+  tables, ad-hoc Mach-O signatures and detached `.sig`/`.asc` files are recognized; dependencies are grouped by
+  library; entropy analysis measures bytes that no section covers; disassembly, control flow, vulnerability and
+  call-graph analysis cover ELF, PE and Mach-O with reported coverage; a tail call to an unsafe function is reported
+  like a call; ARM64 branch targets are decoded.
 - `file-scanner --version` prints the package version.
 
 ### Changed
 
-- MCP: HTTP security defaults. The server binds `127.0.0.1` instead of all interfaces; the
-  `Host` header must be a loopback name or an `--allowed-host`; a present `Origin` header
-  must be a loopback origin or an `--allowed-origin` (403 otherwise) on every route, REST
-  routes included. The wildcard `Access-Control-Allow-Origin: *` is gone: CORS preflights are
-  answered for allowed origins only and `Mcp-Session-Id` is exposed. Deployments that
-  publish the port (containers, systemd) must pass `--host 0.0.0.0`, an `--allowed-host`
-  for the name clients use, and should set `--auth-token`.
-- MCP: `hex_dump_size` above 1 MiB and a YARA `max_file_size` above 100 MiB are tool errors
-  that name the limit instead of reading the whole file into memory.
-- MCP: `/api/info` lists exactly the routes that exist (no `/docs` or `/redoc`), reports a
-  real uptime (`uptime`, `uptime_seconds`) and the package version, and `/health` reports
-  `transports: ["streamable-http"]`. The OpenAPI document describes every REST route.
-- MCP: `POST /tools/call` answers success, tool failure and unknown tool with the same body
-  shape (`resultType`, `content`, `isError`); the OpenAPI document says so.
-- MCP: `make docker-run-http` passes `--host 0.0.0.0` so the published port reaches the server.
-- MCP: REST routes answer failures as `{"error": ...}` JSON (400 for a rejected string
-  query or filter) instead of an empty body.
-- MCP: tool failures (missing file, bad or unknown argument, failing YARA rule, unsupported
-  package) are tool errors (`isError: true`) whose text includes the underlying cause,
-  such as the YARA compiler's message. An unknown tool is a JSON-RPC `-32602` error.
-- MCP: a panic inside an analyzer becomes a tool error naming the section instead of ending
-  the server; the release profile no longer uses `panic = "abort"`.
-- MCP: `mcp-stdio` exits 0 when stdin closes before or after a session and writes only
-  JSON-RPC to stdout; requests before `initialize` need the 2026-07-28 request metadata.
-- MCP: `mcp-sse` is a deprecated alias that starts the Streamable HTTP server. The `/sse`
-  route and the SSE event types are removed.
-- MCP: `/health`, `/api/info` and the OpenAPI document report the package version.
-- MCP: a failing cache directory no longer stops the server from starting; the analysis
-  cache degrades to memory-only with one line on stderr.
-- `estimate_technical_debt` uses saturating arithmetic, so extreme metrics no longer
-  overflow and panic.
-- Consolidate dependency updates on Rust 1.99.1, refresh stable crate/tool/container
-  pins and migrate archive readers to ZIP 9's fallible filename API.
-- Replace deprecated `serde_yaml`/unmaintained `unsafe-libyaml` with maintained
-  `serde-saphyr` 2.0.0 under the existing source alias. YAML data remains compatible;
-  emitted formatting may differ.
-- Refresh the documented stable YARA-X runtime/crypto patch and patch the latest
-  binary-analysis release to remove its vulnerable ZIP 8 dependency. Repository
-  overrides do not propagate to downstream crates.io library consumers.
-- Add complete open security-alert assessments and per-TP remediation plans in
-  `docs/security`, including deployment and evidence limits.
+- HTTP security defaults. The server binds `127.0.0.1` instead of all interfaces. The `Host` header must be a
+  loopback name or an `--allowed-host`, and a present `Origin` header must be a loopback origin or an
+  `--allowed-origin` (403 otherwise) on every route. The wildcard `Access-Control-Allow-Origin: *` is gone.
+  What to change: a deployment that publishes the port (a container, systemd, a cluster) must pass `--host 0.0.0.0`,
+  an `--allowed-host` for the name clients use, and should set `--auth-token` and `--allow-root`.
+- Tool results changed shape. `analyze_file` no longer returns full sections: it returns an overview, or summaries
+  with the full data in the cache for `query_analysis`. With `all: true` it no longer returns hundreds of kilobytes.
+  The string list is now a summary (`total_count`, `unique_count`, `categories`, `top`); read the strings with
+  `query_analysis`. Sections that fail or do not apply are listed under `errors` or `notes`, not `null`.
+  What to change: clients that read `analyze_file` fields directly should call `query_analysis` for lists.
+- `analyze_file` arguments: `hex_dump_size` is at most 4,096 (use `read_hex` for more) and needs `hex_dump: true`;
+  `hex_dump_offset` accepts a negative value; `min_string_length` is at most 4,096; unknown arguments are rejected.
+  `llm_analyze_file` returns sha256, file type, architecture and a packed flag; `token_limit` is an enforced budget
+  in characters; `hex_pattern_size` must be 1 to 1,024.
+- Threat results are calmer. `threats` reports the YARA matches the engine computes (tags, metadata, matched
+  strings and offsets) instead of a three-rule substring check; `enhanced_threats` keeps the engine's generic
+  findings under `enhanced_analysis`, so ordinary programs and documents are no longer rated Suspicious or
+  Malicious because of them. Behavioral analysis searches all strings, not the first 1,000, and no longer rates
+  ordinary URLs as command and control. Weak vulnerability rules are counted in `pattern_counts` instead of listed,
+  and use-after-free, double-free and format-string call rules report Low severity.
+- Entropy and signatures are less alarmist and more honest: ordinary binaries are no longer called likely encrypted,
+  a verified compression header is needed to exempt a debug section, a missing signature verifier reports "Not
+  checked", and PE files with a certificate table report "Present, not verified".
+- The cache is now a real cache. Section results are stored by SHA-256 and served on later calls; one private file
+  per hash (directory mode 0700, files 0600), bounded in bytes and entries with least-recently-used eviction, written
+  atomically. The default location moved from the shared temp directory to the user's cache directory
+  (`~/.cache/file-scanner`, `~/Library/Caches/file-scanner`, or `$XDG_CACHE_HOME`). An unusable cache directory no
+  longer stops the server: it reports once on stderr and caches in memory.
+- Errors. Failed tool calls are tool errors with the cause in the text (a YARA compile error carries the compiler's
+  message, line and column); an unknown tool is JSON-RPC `-32602`. A panic in one analyzer fails only that section;
+  the release profile no longer uses `panic = "abort"`.
+- `mcp-stdio` writes only JSON-RPC to stdout, exits 0 when stdin closes, and expects one JSON object per line.
+  Requests before `initialize` need the 2026-07-28 request metadata.
+- `mcp-sse` is a deprecated alias of `mcp-http` and prints a notice. The SSE transport and the `/sse` route are
+  gone. What to change: point SSE clients at `http://host:port/mcp`.
+- REST helper routes: `/api/info` lists exactly the routes that exist and a real uptime; `/health` reports
+  `transports: ["streamable-http"]` and the package version; `POST /tools/call` answers success, tool failure and
+  unknown tool with one body shape (`resultType`, `content`, `isError`); failures are `{"error": ...}` JSON.
+  `POST /cache/search` filters on `file_path_pattern`, not `file_path`.
+- Package tools. Registry names (`express`, `requests==2.5.0`) are rejected with an offline message; pass a local
+  file. Mainstream packages are no longer flagged as typosquats of themselves or labelled malicious. Known-malicious
+  names are Critical on their own; compromised releases of legitimate packages are matched by name and version.
+  Every result states its advisory data (a small offline table: 6 npm packages, 7 PyPI packages) and that an empty
+  list is not a clean bill of health. Packages that were not read in full are never rated Safe.
+- Archive and Java results: archive risk is `unknown` instead of `low` when the listing is unavailable or capped;
+  signing is reported as "signature files present, not verified"; `classes.dex` is reported as not parsed; the
+  archive kind is decided from content, not the file name.
+- Bounded analysis. Parsers for hostile input carry byte, count and time budgets: strings and disassembly are kept
+  in bounded form (counts stay exact), archives, packages, PDFs, Office files, Java archives and YARA directory
+  scans stop at documented limits and say so. Directory YARA scans share one compiled rule set across a bounded
+  worker pool.
+- `estimate_technical_debt` uses saturating arithmetic, so extreme metrics no longer overflow and panic.
+- Consolidate dependency updates on Rust 1.99.1, refresh stable crate/tool/container pins and migrate archive
+  readers to ZIP 9's fallible filename API.
+- Replace deprecated `serde_yaml`/unmaintained `unsafe-libyaml` with maintained `serde-saphyr` 2.0.0 under the
+  existing source alias. YAML data remains compatible; emitted formatting may differ.
+- Refresh the documented stable YARA-X runtime/crypto patch and patch the latest binary-analysis release to remove
+  its vulnerable ZIP 8 dependency. Repository overrides do not propagate to downstream crates.io library consumers.
+- Add complete open security-alert assessments and per-TP remediation plans in `docs/security`, including
+  deployment and evidence limits.
 
 ### Fixed
 
-- MCP: a panic in an analyzer (for example the technical-debt overflow in debug builds)
-  no longer ends the server or leaves a request unanswered.
-- `analyze_file` with `code_quality` or `all: true` completes on binaries with extreme
-  metrics (the Go samples): every debt calculation saturates instead of overflowing.
-- `POST /cache/clear` also empties the in-memory section cache.
-- The non-recursive directory scan of `yara_scan_file` no longer follows symlinks to files
-  outside the directory.
-- Remediate the eleven confirmed runtime findings with a pinned Wolfi glibc 2.44
-  runtime and patched static zlib 1.3.2. Backport upstream's nonblocking gzip
-  security fix into stable libz-sys; verify it with AddressSanitizer and a source
-  guard rather than relying only on package-version scans.
-- Dismiss sixteen verified false positives with both-platform/source evidence.
-  Preserve complete all-severity container reports, verify exact image identity
-  and application inventories, scan both published architectures, and fail the
-  security gate on any reported vulnerability.
+- Strings: UTF-16 extraction returns printable strings only and reports the right endianness; strings carry
+  offsets, encodings and categories; counts are exact even when the list is bounded.
+- Mach-O and ELF: universal binaries are no longer reported as Java classes; thin arm64 reports its architecture;
+  chained-fixup imports are listed; malformed headers and crafted symbol, bind-opcode and version tables no longer
+  panic, overflow the stack or stall for minutes.
+- Disassembly no longer stops at the first undecodable byte and no longer uses gigabytes of memory on crafted
+  inputs; control-flow and call-graph analysis choose the right decoder for the architecture and report why a graph
+  is empty.
+- `llm_analyze_file` no longer crashes on `hex_pattern_size: 0`; its suggested YARA rule compiles and is checked
+  before it is returned.
+- `yara_scan_file` reports compile errors with position, lists skipped and unreadable files instead of dropping them,
+  and applies `max_files` and `timeout_seconds` to the directory walk. The non-recursive directory scan no longer
+  follows symlinks outside the directory.
+- PDF and Office: the PDF analyzer reports what the file contains instead of constants; macros are found in any VBA
+  storage and in OOXML packages; `has_macros` is no longer true for every OLE2 file.
+- Package tools: install scripts that download and run code are rated High or Critical; payloads in `.d.ts` files,
+  after block comments or in template literals are no longer missed; Python metadata is read from PEP 621, Poetry,
+  `setup.py` and `PKG-INFO`; a tarball with a hidden or oversized header is refused.
+- Java: analysis of tiny crafted class files, manifests and archives no longer exhausts memory; a JAR with leading
+  bytes opens; a class file followed by a JAR is no longer reported clean.
+- `analyze_file` with `code_quality` or `all: true` completes on binaries with extreme metrics (the Go samples).
+- `POST /cache/clear` also empties the in-memory section cache. The cache is no longer truncated when a stdio
+  session ends, and symlinks planted in the cache directory are not followed.
+- Remediate the eleven confirmed runtime findings with a pinned Wolfi glibc 2.44 runtime and patched static zlib
+  1.3.2. Backport upstream's nonblocking gzip security fix into stable libz-sys; verify it with AddressSanitizer and
+  a source guard rather than relying only on package-version scans.
+- Dismiss sixteen verified false positives with both-platform/source evidence. Preserve complete all-severity
+  container reports, verify exact image identity and application inventories, scan both published architectures, and
+  fail the security gate on any reported vulnerability.
 
 ### Removed
 
-- MCP: the permissive CORS middleware and the `/docs` and `/redoc` entries of `/api/info`.
+- The old MCP transport code: the hand-written JSON-RPC dispatcher and its types, the SSE transport and `/sse`
+  route, the permissive CORS middleware, and the `/docs` and `/redoc` entries of `/api/info`.
+- Environment variables that were documented but never read (`RUST_LOG`, `FILE_SCANNER_DB_PATH`,
+  `FILE_SCANNER_CACHE_SIZE`, `FILE_SCANNER_CACHE_TTL`, `THREATFLUX_*` and others). The variables that exist are
+  `FILE_SCANNER_ALLOWED_ROOTS`, `FILE_SCANNER_AUTH_TOKEN`, `FILE_SCANNER_CACHE_DIR`, `FILE_SCANNER_CACHE_DISK_MB`
+  and `FILE_SCANNER_SECTION_CACHE_MB`.
+- Names of legitimate packages from the known-malicious lists (sklearn, pytorch, beautifulsoup, crypto, acquisition,
+  yarnpkg, and official companions such as jest-cli and puppeteer-core).
+- Archive risk scores derived from the archive's own file name or size, and the constant tar compression ratio.
 - The uncompiled `src/mcp/` tree, `src/hash_wrapper.rs`, `MCP_REFACTORING_GUIDE.md` and
-  `MCP_REFACTORING_SUMMARY.md`, and the dependencies that only they or the hand-written
-  JSON-RPC transport used (`async-trait`, `tokio-stream`, `futures-util`,
-  `threatflux-hashing`), plus `utoipa-redoc` and `utoipa-swagger-ui`, which nothing used
-  after the `/docs` and `/redoc` routes went. `tower` is now a dev-dependency (tests);
-  `tower-http` stays, for the CORS layer.
-- The hand-written JSON-RPC dispatcher and its types (`JsonRpcRequest`, `JsonRpcResponse`,
-  `JsonRpcError`, `ToolCallParams` dispatch, `McpServerState`, `SseEvent`, `SseQuery`).
+  `MCP_REFACTORING_SUMMARY.md`; the unused `typosquatting_detection` and `repository_integrity` modules; and the
+  dependencies only they or the old transport used (`async-trait`, `tokio-stream`, `futures-util`,
+  `threatflux-hashing`, `utoipa-redoc`, `utoipa-swagger-ui`). `tower` is now a dev-dependency.
+
+### Security
+
+- The HTTP server is no longer an open file-reading service by default: loopback bind, `Host` and `Origin` checks, no
+  CORS wildcard, an optional bearer token (compared in constant time, never logged) and `--allow-root` path scope.
+  Refused requests (401, 403) are logged on stderr without the token.
+- Cached results, which can hold extracted strings and hex samples, live in a per-user directory with owner-only
+  permissions instead of a shared temp path, and are not followed through symlinks.
+- Hostile-file hardening: bounded memory, work and time in the binary, document, archive, package, Java and YARA
+  analyzers (crafted files that used gigabytes of memory or minutes of CPU now stop at a budget). This is
+  best-effort; run the server under OS or container limits when scanning untrusted files.
+- Package analysis never contacts the network, and credentials in requirement URLs are not echoed.
 
 ## [0.3.7] - 2026-10-07
 

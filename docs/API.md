@@ -1,597 +1,194 @@
-# API Documentation
+# Rust and HTTP API
 
-File Scanner can be used as a Rust library for programmatic file analysis.
+This page covers two programmatic interfaces: the Rust library, and the REST helper routes served next to
+the MCP endpoint. For the MCP tools themselves, see [MCP.md](MCP.md).
 
-## Table of Contents
+## Rust library
 
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Core API](#core-api)
-- [Analysis Modules](#analysis-modules)
-- [Data Types](#data-types)
-- [Error Handling](#error-handling)
-- [Async Operations](#async-operations)
-- [Examples](#examples)
+The package is `threatflux-file-scanner`. The library is imported as `file_scanner`, and the installed
+binary is `file-scanner`. The unrelated `file-scanner` crate on crates.io is not this project.
 
-## Installation
-
-Add to your `Cargo.toml`:
+The examples below use items added after 0.3.9 (`scan_strings`, `scan_bytes`, `calculate_sha256_only`,
+the `rule_path`, `max_files` and `timeout_seconds` fields of `YaraScanRequest`, `files_matched`,
+`StateConfig`, `with_config` and `HttpConfig`). The `"0.3"` requirement resolves to 0.3.9 and does not
+have them, so until the next release is published, depend on the repository:
 
 ```toml
 [dependencies]
-file-scanner = "0.1.0"
-
-# Optional features
-[dependencies.file-scanner]
-version = "0.1.0"
-features = ["mcp", "advanced-analysis"]
+threatflux-file-scanner = { git = "https://github.com/ThreatFlux/file-scanner" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+anyhow = "1"
 ```
 
-## Quick Start
+The crate has no Cargo features. The documentation of every public item is on
+[docs.rs](https://docs.rs/threatflux-file-scanner). The library is the code the binary is built from, so
+its surface is large and has changed between releases: pin the version you test against.
+
+### Modules
+
+All modules are public. The ones most programs need:
+
+| Module | What it has |
+|--------|-------------|
+| `metadata` | `FileMetadata`: size, timestamps, permissions, hashes and the optional analysis sections. |
+| `hash` | `calculate_all_hashes`, `calculate_sha256_only`, `calculate_md5`; `Hashes`. |
+| `strings` | `extract_strings`, `scan_strings`, `scan_bytes`; `ExtractedStrings`, `StringScan`. |
+| `signature` | `verify_signature`; `SignatureInfo`. |
+| `binary_parser`, `entropy_analysis`, `threat_detection`, `behavioral_analysis` | The analyses behind the CLI flags. |
+| `npm_analysis` | `analyze_npm_package(&Path)`. |
+| `python_analysis` | `analyze_python_package`. |
+| `java_analysis` | Java archive and class file analysis. |
+| `mcp_server` | `FileScannerMcp` (the handler), tool request and result types, `analyze_file_llm`, `yara_scan_files`. |
+| `mcp_transport` | `McpTransportServer`, with `run_stdio` and `run_http`; `HttpConfig`. |
+
+### Scan a file
 
 ```rust
-use file_scanner::{Scanner, ScanOptions};
 use std::path::Path;
 
+use file_scanner::metadata::FileMetadata;
+use file_scanner::strings::extract_strings;
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create scanner with default options
-    let scanner = Scanner::new();
+async fn main() -> anyhow::Result<()> {
+    let path = Path::new("/bin/ls");
 
-    // Analyze a file
-    let result = scanner.analyze_file(Path::new("/path/to/file")).await?;
+    let mut meta = FileMetadata::new(path)?;
+    meta.extract_basic_info()?;
+    meta.calculate_hashes().await?;
+    println!("{} bytes, sha256 {}", meta.file_size, meta.hashes.as_ref().unwrap().sha256);
 
-    // Print results
-    println!("File: {}", result.file_name);
-    println!("Size: {} bytes", result.file_size);
-    println!("MD5: {}", result.hashes.md5);
-
+    let strings = extract_strings(path, 6)?;
+    println!("{} strings, {} unique", strings.total_count, strings.unique_count);
     Ok(())
 }
 ```
 
-## Core API
+Output on a macOS `/bin/ls`:
 
-### Scanner
-
-The main entry point for file analysis.
-
-```rust
-pub struct Scanner {
-    options: ScanOptions,
-    cache: Option<AnalysisCache>,
-}
-
-impl Scanner {
-    /// Create a new scanner with default options
-    pub fn new() -> Self;
-
-    /// Create a scanner with custom options
-    pub fn with_options(options: ScanOptions) -> Self;
-
-    /// Analyze a single file
-    pub async fn analyze_file(&self, path: &Path) -> Result<AnalysisResult>;
-
-    /// Analyze multiple files in parallel
-    pub async fn analyze_files(&self, paths: &[PathBuf]) -> Result<Vec<AnalysisResult>>;
-}
+```text
+252512 bytes, sha256 a7a0dcb6...
+972 strings, 310 unique
 ```
 
-### ScanOptions
+`extract_strings` keeps at most 1000 strings per kind, which is what the command line prints. Use
+`scan_strings` for exact counts.
 
-Configuration for the scanner.
-
-```rust
-pub struct ScanOptions {
-    /// Enable metadata extraction
-    pub metadata: bool,
-
-    /// Enable hash calculation
-    pub hashes: bool,
-
-    /// Enable string extraction
-    pub strings: bool,
-
-    /// String extraction options
-    pub string_options: StringOptions,
-
-    /// Enable hex dump
-    pub hex_dump: bool,
-
-    /// Hex dump options
-    pub hex_dump_options: HexDumpOptions,
-
-    /// Enable binary analysis
-    pub binary_info: bool,
-
-    /// Enable signature verification
-    pub signatures: bool,
-
-    /// Enable advanced analysis
-    pub advanced: AdvancedOptions,
-}
-
-impl Default for ScanOptions {
-    fn default() -> Self {
-        Self {
-            metadata: true,
-            hashes: true,
-            strings: false,
-            string_options: StringOptions::default(),
-            hex_dump: false,
-            hex_dump_options: HexDumpOptions::default(),
-            binary_info: true,
-            signatures: false,
-            advanced: AdvancedOptions::default(),
-        }
-    }
-}
-```
-
-### AnalysisResult
-
-The complete result of file analysis.
+### The digest and YARA scan used by the tools
 
 ```rust
-pub struct AnalysisResult {
-    /// File metadata
-    pub metadata: FileMetadata,
-
-    /// Hash results (if enabled)
-    pub hashes: Option<HashResult>,
-
-    /// Extracted strings (if enabled)
-    pub strings: Option<Vec<ExtractedString>>,
-
-    /// Hex dump (if enabled)
-    pub hex_dump: Option<String>,
-
-    /// Binary information (if enabled)
-    pub binary_info: Option<BinaryInfo>,
-
-    /// Digital signatures (if enabled)
-    pub signatures: Option<SignatureInfo>,
-
-    /// Advanced analysis results
-    pub advanced: Option<AdvancedAnalysis>,
-}
-```
-
-## Analysis Modules
-
-### Metadata Extraction
-
-```rust
-use file_scanner::metadata::{extract_metadata, FileMetadata};
-
-let metadata = extract_metadata(Path::new("/path/to/file"))?;
-println!("File size: {} bytes", metadata.file_size);
-println!("MIME type: {}", metadata.mime_type);
-```
-
-### Hash Calculation
-
-```rust
-use file_scanner::hash::{calculate_hashes, HashResult};
-
-let hashes = calculate_hashes(Path::new("/path/to/file")).await?;
-println!("MD5: {}", hashes.md5);
-println!("SHA256: {}", hashes.sha256);
-println!("SHA512: {}", hashes.sha512);
-println!("BLAKE3: {}", hashes.blake3);
-```
-
-### String Extraction
-
-```rust
-use file_scanner::strings::{extract_strings, StringOptions};
-
-let options = StringOptions {
-    min_length: 6,
-    max_strings: 1000,
-    encoding: vec![StringEncoding::Ascii, StringEncoding::Utf16Le],
+use file_scanner::mcp_server::{
+    analyze_file_llm, yara_scan_files, LlmFileAnalysisRequest, YaraScanRequest,
 };
 
-let strings = extract_strings(Path::new("/path/to/file"), &options)?;
-for s in strings {
-    println!("{}: {} (category: {:?})", s.offset, s.value, s.category);
+async fn digest_and_scan() -> anyhow::Result<()> {
+    let digest = analyze_file_llm(LlmFileAnalysisRequest {
+        file_path: "/bin/ls".into(),
+        token_limit: None,
+        min_string_length: None,
+        max_strings: Some(20),
+        max_imports: None,
+        max_opcodes: None,
+        hex_pattern_size: None,
+        suggest_yara_rule: Some(true),
+    })
+    .await?;
+    println!("{} key strings", digest.key_strings.len());
+
+    let scan = yara_scan_files(YaraScanRequest {
+        path: "/usr/bin".into(),
+        yara_rule: r#"rule has_usage { strings: $a = "usage" nocase condition: $a }"#.into(),
+        rule_path: None,
+        recursive: Some(false),
+        max_file_size: None,
+        detailed_matches: Some(false),
+        max_files: Some(200),
+        timeout_seconds: Some(30),
+    })
+    .await?;
+    println!("{} of {} files matched", scan.files_matched, scan.total_files_scanned);
+    Ok(())
 }
 ```
 
-### Binary Analysis
+Output:
 
-```rust
-use file_scanner::binary_parser::{parse_binary, BinaryInfo};
-
-let binary_info = parse_binary(Path::new("/path/to/binary"))?;
-match binary_info {
-    Some(info) => {
-        println!("Format: {:?}", info.format);
-        println!("Architecture: {}", info.architecture);
-        println!("Entry point: 0x{:x}", info.entry_point);
-    }
-    None => println!("Not a recognized binary format"),
-}
+```text
+20 key strings
+147 of 200 files matched
 ```
 
-### Signature Verification
+These two functions use a fresh handler with default state: no path scope, no shared cache.
+
+### Package analysis
 
 ```rust
-use file_scanner::signature::{verify_signatures, SignatureInfo};
-
-let signatures = verify_signatures(Path::new("/path/to/signed/file"))?;
-if signatures.valid {
-    println!("Valid signature from: {}", signatures.signer.unwrap_or_default());
-} else {
-    println!("Invalid or no signature");
-}
-```
-
-## Data Types
-
-### FileMetadata
-
-```rust
-pub struct FileMetadata {
-    pub file_path: PathBuf,
-    pub file_name: String,
-    pub file_size: u64,
-    pub created: Option<SystemTime>,
-    pub modified: Option<SystemTime>,
-    pub accessed: Option<SystemTime>,
-    pub permissions: String,
-    pub is_executable: bool,
-    pub is_hidden: bool,
-    pub mime_type: String,
-}
-```
-
-### HashResult
-
-```rust
-pub struct HashResult {
-    pub md5: String,
-    pub sha256: String,
-    pub sha512: String,
-    pub blake3: String,
-}
-```
-
-### ExtractedString
-
-```rust
-pub struct ExtractedString {
-    pub value: String,
-    pub offset: u64,
-    pub length: usize,
-    pub encoding: StringEncoding,
-    pub category: StringCategory,
-    pub entropy: f64,
-}
-
-pub enum StringEncoding {
-    Ascii,
-    Utf16Le,
-    Utf16Be,
-}
-
-pub enum StringCategory {
-    Url,
-    Path,
-    Email,
-    IpAddress,
-    Import,
-    Registry,
-    Command,
-    Suspicious,
-    Generic,
-}
-```
-
-### BinaryInfo
-
-```rust
-pub struct BinaryInfo {
-    pub format: BinaryFormat,
-    pub architecture: String,
-    pub bits: u8,
-    pub endianness: Endianness,
-    pub compiler: String,
-    pub entry_point: u64,
-    pub is_stripped: bool,
-    pub has_debug_info: bool,
-    pub sections: Vec<Section>,
-    pub imports: Vec<Import>,
-    pub exports: Vec<Export>,
-}
-
-pub enum BinaryFormat {
-    PE,
-    ELF,
-    MachO,
-    Unknown,
-}
-
-pub struct Section {
-    pub name: String,
-    pub virtual_address: u64,
-    pub virtual_size: u64,
-    pub raw_size: u64,
-    pub entropy: f64,
-    pub flags: Vec<SectionFlag>,
-}
-```
-
-## Error Handling
-
-File Scanner uses a unified error type:
-
-```rust
-use file_scanner::Error;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("Parse error: {0}")]
-    Parse(String),
-
-    #[error("Analysis error: {0}")]
-    Analysis(String),
-
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
-
-    #[error("Timeout")]
-    Timeout,
-}
-
-// Result type alias
-pub type Result<T> = std::result::Result<T, Error>;
-```
-
-### Error Handling Example
-
-```rust
-use file_scanner::{Scanner, Error};
-
-match scanner.analyze_file(path).await {
-    Ok(result) => {
-        // Process result
-    }
-    Err(Error::Io(e)) => {
-        eprintln!("Failed to read file: {}", e);
-    }
-    Err(Error::Parse(msg)) => {
-        eprintln!("Failed to parse file: {}", msg);
-    }
-    Err(e) => {
-        eprintln!("Analysis failed: {}", e);
-    }
-}
-```
-
-## Async Operations
-
-Most I/O operations are async for better performance:
-
-```rust
-use file_scanner::{Scanner, ScanOptions};
-use futures::stream::{self, StreamExt};
-
-// Analyze files concurrently
-async fn analyze_directory(dir: &Path) -> Result<Vec<AnalysisResult>> {
-    let scanner = Scanner::new();
-    let files: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .collect();
-
-    // Process in parallel with concurrency limit
-    let results = stream::iter(files)
-        .map(|path| {
-            let scanner = scanner.clone();
-            async move { scanner.analyze_file(&path).await }
-        })
-        .buffer_unordered(4)  // Process 4 files concurrently
-        .collect::<Vec<_>>()
-        .await;
-
-    results.into_iter().collect()
-}
-```
-
-## Examples
-
-### Complete Analysis Example
-
-```rust
-use file_scanner::{Scanner, ScanOptions, StringOptions, HexDumpOptions};
 use std::path::Path;
+use file_scanner::npm_analysis::analyze_npm_package;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let options = ScanOptions {
-        metadata: true,
-        hashes: true,
-        strings: true,
-        string_options: StringOptions {
-            min_length: 8,
-            max_strings: 5000,
-            ..Default::default()
-        },
-        hex_dump: true,
-        hex_dump_options: HexDumpOptions {
-            size: 512,
-            offset: 0,
-        },
-        binary_info: true,
-        signatures: true,
-        ..Default::default()
+fn check() -> anyhow::Result<()> {
+    // A package directory, a package.json, a package-lock.json or an npm tarball.
+    let report = analyze_npm_package(Path::new("./some-package"))?;
+    println!("{}", report.package_info.name);
+    Ok(())
+}
+```
+
+A path that is none of those returns an error that says what to pass.
+
+### Serve MCP from your own program
+
+```rust
+use file_scanner::mcp_server::state::StateConfig;
+use file_scanner::mcp_transport::McpTransportServer;
+
+async fn serve() -> anyhow::Result<()> {
+    let config = StateConfig {
+        allow_roots: vec!["/srv/samples".into()],
+        ..StateConfig::from_env()
     };
-
-    let scanner = Scanner::with_options(options);
-    let result = scanner.analyze_file(Path::new("/path/to/file")).await?;
-
-    // Process results
-    if let Some(strings) = &result.strings {
-        println!("Found {} strings", strings.len());
-        for s in strings.iter().filter(|s| s.category == StringCategory::Suspicious) {
-            println!("Suspicious string: {}", s.value);
-        }
-    }
-
-    Ok(())
+    McpTransportServer::with_config(config).run_stdio().await
 }
 ```
 
-### Custom Analysis Pipeline
+`run_stdio` writes only JSON-RPC to stdout and prints its banner on stderr. `run_http(HttpConfig { .. })`
+serves Streamable HTTP and the REST routes below; `HttpConfig::default()` binds `127.0.0.1:3000` with no
+token.
 
-```rust
-use file_scanner::*;
-use std::path::Path;
+The examples above were compiled and run against the library at this revision (not against 0.3.9).
 
-pub struct CustomAnalyzer {
-    scanner: Scanner,
-}
+## REST helper routes
 
-impl CustomAnalyzer {
-    pub fn new() -> Self {
-        Self {
-            scanner: Scanner::new(),
-        }
-    }
+`mcp-http` serves a few plain HTTP routes on the same address as `/mcp`. They exist for scripts and for
+looking at the caches. They are protected by the same Host and Origin checks, and by the bearer token when
+one is set. Only `/health` is open without the token.
 
-    pub async fn analyze_malware(&self, path: &Path) -> Result<MalwareReport> {
-        // Get basic analysis
-        let result = self.scanner.analyze_file(path).await?;
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/health` | GET | `{"status":"ok","service":"file-scanner-mcp","version":"...","transports":["streamable-http"]}` |
+| `/api/info` | GET | Route list, version and uptime. |
+| `/api-docs/openapi.json` | GET | OpenAPI 3.1 description of these routes. |
+| `/initialize` | POST | The bare `initialize` result (version, server info, instructions); opens no session. |
+| `/tools/list` | POST | The tool list in an envelope: `{"jsonrpc", "result": {"tools": [...]}}`. |
+| `/tools/call` | POST | Call one tool; returns the bare result. Body: `{"name": "...", "arguments": {...}}`. |
+| `/cache/stats`, `/cache/list` | GET | What the analysis cache holds. |
+| `/cache/search`, `/cache/clear` | POST | Search the cache; empty it. |
+| `/strings/stats` | GET | Statistics of the tracked strings. |
+| `/strings/search`, `/strings/details`, `/strings/related`, `/strings/filter` | POST | Query the string index. |
 
-        // Build custom report
-        let report = MalwareReport {
-            file_name: result.metadata.file_name.clone(),
-            risk_score: self.calculate_risk_score(&result),
-            indicators: self.extract_indicators(&result),
-            recommendations: self.generate_recommendations(&result),
-        };
+Example, with a token and a path scope set:
 
-        Ok(report)
-    }
-
-    fn calculate_risk_score(&self, result: &AnalysisResult) -> u8 {
-        let mut score = 0;
-
-        // Check for suspicious strings
-        if let Some(strings) = &result.strings {
-            score += strings.iter()
-                .filter(|s| s.category == StringCategory::Suspicious)
-                .count() as u8 * 10;
-        }
-
-        // Check for packing
-        if let Some(binary) = &result.binary_info {
-            if binary.sections.iter().any(|s| s.entropy > 7.0) {
-                score += 20;
-            }
-        }
-
-        score.min(100)
-    }
-}
+```bash
+curl -s -X POST http://127.0.0.1:3000/tools/call \
+  -H "Authorization: Bearer $FILE_SCANNER_AUTH_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"read_hex","arguments":{"file_path":"/srv/samples/note.txt","length":8}}'
 ```
 
-### Integration with External Systems
-
-```rust
-use file_scanner::{Scanner, AnalysisResult};
-use serde_json;
-
-async fn scan_and_report(path: &Path) -> Result<()> {
-    let scanner = Scanner::new();
-    let result = scanner.analyze_file(path).await?;
-
-    // Convert to JSON
-    let json = serde_json::to_string_pretty(&result)?;
-
-    // Send to external API
-    let client = reqwest::Client::new();
-    client.post("https://api.example.com/scan-results")
-        .json(&result)
-        .send()
-        .await?;
-
-    // Save to database
-    save_to_database(&result).await?;
-
-    Ok(())
-}
+```json
+{"resultType":"complete","content":[{"type":"text","text":"{\"file_path\":\"/srv/samples/note.txt\",\"offset\":0,
+...\"total_bytes\":35,\"lines\":[\"00000000  68 65 6c 6c 6f 20 73 63  |hello sc|\"],\"next_offset\":8}"}],
+ "isError":false}
 ```
 
-## Advanced Usage
-
-### Custom String Patterns
-
-```rust
-use file_scanner::strings::{StringMatcher, Pattern};
-
-let custom_matcher = StringMatcher::builder()
-    .add_pattern(Pattern::regex(r"MALWARE_\w+"))
-    .add_pattern(Pattern::exact("evil.exe"))
-    .add_category_rule(|s| {
-        if s.contains("ransomware") {
-            Some(StringCategory::Suspicious)
-        } else {
-            None
-        }
-    })
-    .build();
-```
-
-### Performance Tuning
-
-```rust
-use file_scanner::{Scanner, ScanOptions};
-
-let options = ScanOptions {
-    // Use memory mapping for large files
-    use_mmap: true,
-
-    // Limit resource usage
-    max_file_size: 100 * 1024 * 1024,  // 100MB
-    timeout: Duration::from_secs(30),
-
-    // Parallel processing
-    thread_count: num_cpus::get(),
-
-    ..Default::default()
-};
-```
-
-## Thread Safety
-
-All public types are thread-safe:
-
-```rust
-use std::sync::Arc;
-use tokio::task;
-
-let scanner = Arc::new(Scanner::new());
-
-let handles: Vec<_> = paths.into_iter()
-    .map(|path| {
-        let scanner = scanner.clone();
-        task::spawn(async move {
-            scanner.analyze_file(&path).await
-        })
-    })
-    .collect();
-
-let results = futures::future::join_all(handles).await;
-```
-
-## Next Steps
-
-- See [Architecture](ARCHITECTURE.md) for internal design
-- Check [Examples](https://github.com/ThreatFlux/file-scanner/tree/main/examples) directory
-- Read [Performance Guide](PERFORMANCE.md) for optimization
-- Join our [Discord](https://discord.gg/threatflux) for help
+REST calls run at most 16 at a time and time out after 120 seconds. The `--allow-root` scope applies to
+them as it does to MCP calls. For anything that needs a session or streaming, use `/mcp`.
