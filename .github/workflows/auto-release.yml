@@ -1,9 +1,10 @@
 name: Auto Release
 
 concurrency:
-  # Dry runs use their own group so they never cancel a real release.
-  group: auto-release-${{ github.event.workflow_run.head_branch || github.ref_name || 'main' }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '-dry-run' || '' }}
-  cancel-in-progress: true
+  # A publishing release must finish its commit, tag and downstream dispatch.
+  # Dry runs and other repositories never share the real release queue.
+  group: auto-release-${{ github.event.workflow_run.head_repository.full_name || github.repository }}-${{ github.event.workflow_run.head_branch || github.ref_name || 'main' }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '-dry-run' || '' }}
+  cancel-in-progress: false
 
 # workflow_run only starts the reusable release on this repository's main: the
 # reusable workflow refuses runs that did not succeed or that come from another
@@ -40,11 +41,16 @@ permissions:
 
 jobs:
   release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
     permissions:
       actions: write
       contents: write
       pull-requests: write
-    uses: ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml@ad88f2f0cc91e6a4f2737040af917e732a53e7cc # v0.7.8
+    uses: ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml@e0e9e823a404f6d0ae22797e8b19514c63c4ceaf # v0.7.9
     with:
       bump: ${{ github.event.inputs.version_bump || 'auto' }}
       # Only a manual dispatch can request a dry run; workflow_run always releases.

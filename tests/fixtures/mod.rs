@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -50,7 +50,7 @@ impl TestFixture {
 
         let path = self.create_binary_file(name, content)?;
         let permissions = std::fs::Permissions::from_mode(mode);
-        fs::set_permissions(&path, permissions)?;
+        std::fs::set_permissions(&path, permissions)?;
         Ok(path)
     }
 
