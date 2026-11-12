@@ -1,0 +1,115 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -186,21 +186,6 @@
+ name = "yara_x"
+ path = "src/lib.rs"
+ 
+-[[bench]]
+-name = "dex"
+-path = "benches/dex.rs"
+-harness = false
+-
+-[[bench]]
+-name = "pe"
+-path = "benches/pe.rs"
+-harness = false
+-
+-[[bench]]
+-name = "scanner"
+-path = "benches/scanner.rs"
+-harness = false
+-
+ [dependencies.annotate-snippets]
+ version = "0.12.17"
+ 
+@@ -360,7 +345,8 @@
+ optional = true
+ 
+ [dependencies.rsa]
+-version = "0.10.0-rc.19"
++version = "0.10.0"
++features = ["pkcs1v15"]
+ optional = true
+ 
+ [dependencies.rustc-hash]
+@@ -477,7 +463,7 @@
+ optional = true
+ 
+ [target.'cfg(not(target_family = "wasm"))'.dependencies.wasmtime]
+-version = "48.0.8"
++version = "50.0.1"
+ features = [
+     "cranelift",
+     "runtime",
+--- a/src/modules/utils/crypto.rs
++++ b/src/modules/utils/crypto.rs
+@@ -22,7 +22,7 @@
+ 
+ /// Represents a public key.
+ pub enum PublicKey {
+-    Rsa(rsa::RsaPublicKey),
++    Rsa(rsa::PublicKey),
+     Dsa(dsa::VerifyingKey),
+     EcdsaP256(p256::ecdsa::VerifyingKey),
+     EcdsaP384(p384::ecdsa::VerifyingKey),
+@@ -64,7 +64,7 @@
+         {
+             rfc5912::RSA_ENCRYPTION => {
+                 use rsa::pkcs1::DecodeRsaPublicKey;
+-                Ok(Self::Rsa(rsa::RsaPublicKey::from_pkcs1_der(
++                Ok(Self::Rsa(rsa::PublicKey::from_pkcs1_der(
+                     spki.subject_public_key.as_ref(),
+                 )?))
+             }
+@@ -175,10 +175,10 @@
+     ) -> Result<Self, PublicKeyError> {
+         match algorithm {
+             rfc5912::SHA_1_WITH_RSA_ENCRYPTION => Ok(PublicKey::Rsa(
+-                rsa::RsaPublicKey::from_public_key_der(der)?,
++                rsa::PublicKey::from_public_key_der(der)?,
+             )),
+             rfc5912::SHA_256_WITH_RSA_ENCRYPTION => Ok(PublicKey::Rsa(
+-                rsa::RsaPublicKey::from_public_key_der(der)?,
++                rsa::PublicKey::from_public_key_der(der)?,
+             )),
+             rfc5912::ECDSA_WITH_SHA_256 => Ok(PublicKey::EcdsaP256(
+                 ecdsa::VerifyingKey::from_public_key_der(der)?,
+@@ -281,3 +281,38 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod stable_rsa_tests {
++    use super::*;
++
++    #[test]
++    fn stable_rsa_verifies_openssl_sha256_signatures() {
++        // Generated with OpenSSL, independent of either Rust digest API.
++        let key = PublicKey::Rsa(
++            rsa::PublicKey::from_public_key_der(include_bytes!(
++                "testdata/stable-rsa-public.der"
++            ))
++            .unwrap(),
++        );
++        let digest = Sha256::digest(b"YARA-X stable RSA compatibility regression\n");
++        assert!(
++            key.verify_digest::<Sha256>(digest, include_bytes!("testdata/stable-rsa-prefixed.sig"))
++        );
++        // Preserve upstream compatibility with old, unprefixed signatures.
++        assert!(
++            key.verify_digest::<Sha256>(
++                digest,
++                include_bytes!("testdata/stable-rsa-unprefixed.sig")
++            )
++        );
++        let wrong_digest = Sha256::digest(b"modified message");
++        assert!(!key.verify_digest::<Sha256>(
++            wrong_digest,
++            include_bytes!("testdata/stable-rsa-prefixed.sig")
++        ));
++        let mut corrupt = *include_bytes!("testdata/stable-rsa-prefixed.sig");
++        corrupt[0] ^= 1;
++        assert!(!key.verify_digest::<Sha256>(digest, &corrupt));
++    }
++}

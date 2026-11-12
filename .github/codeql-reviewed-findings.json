@@ -1,27 +1,27 @@
 {
-  "analysis_provenance": "reviewed_native_analysis_id and reviewed_merge_commit identify the historical YARA-X 1.21.0 review. The 1.22.0 tuples were re-reviewed against current source; the renamed regression fixture is simulated, not a new native CodeQL run.",
+  "analysis_provenance": "Historical native analysis IDs and raw fixtures are retained. The 1.23.0 source/call paths were diff-reviewed on 2026-11-12; the new simulated path fixture is not a fresh native CodeQL run. Hosted native output must be reviewed before merge.",
   "call_path_sha256": {
-    "vendor/yara-x-1.22.0/Cargo.toml": "0da114dca98c5397989feb46538cabec6a6fc625e457cd3a92c0fe75ea8fa56b",
-    "vendor/yara-x-1.22.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
-    "vendor/yara-x-1.22.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
-    "vendor/yara-x-1.22.0/src/modules/elf/tlsh/mod.rs": "5a8804fc660f5db558324ab6f99181059200eb6a4569e534c4b51fdef518c30e",
-    "vendor/yara-x-1.22.0/src/modules/pe/mod.rs": "6eb7b2f0c9fa10706d966c0f9bf1af64900ad9b6d4276b60d11ed01de8ba27a3",
-    "vendor/yara-x-1.22.0/src/modules/utils/asn1.rs": "7252226e48ef2ae72c9ded24ee888a23df48fe4a20f940386b2a5c5feee0801c",
-    "vendor/yara-x-1.22.0/src/modules/utils/authenticode.rs": "4ee557e61db02cfe2f07c9c4238a9e172386167e9d939e8f432fbad4c2d0de29",
-    "vendor/yara-x-1.22.0/src/modules/utils/crypto.rs": "39dca4b54fba399f2b6773d0b4d1a142f212aaf17c5dd39daf97677e138ff3a4"
+    "vendor/yara-x-1.23.0/Cargo.toml": "964e59098b41ec356300e677e476c43657edaf172f9078fc6e91ac50a389873f",
+    "vendor/yara-x-1.23.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
+    "vendor/yara-x-1.23.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
+    "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs": "5a8804fc660f5db558324ab6f99181059200eb6a4569e534c4b51fdef518c30e",
+    "vendor/yara-x-1.23.0/src/modules/pe/mod.rs": "6ced8194e0bb3a331dcfb6443ac8ce2653f313e83ab0bf9e41dd3273609f7d63",
+    "vendor/yara-x-1.23.0/src/modules/utils/asn1.rs": "7252226e48ef2ae72c9ded24ee888a23df48fe4a20f940386b2a5c5feee0801c",
+    "vendor/yara-x-1.23.0/src/modules/utils/authenticode.rs": "4ee557e61db02cfe2f07c9c4238a9e172386167e9d939e8f432fbad4c2d0de29",
+    "vendor/yara-x-1.23.0/src/modules/utils/crypto.rs": "19792550f440fd66573cf438e4e0bf717e704df35d476b7b872e5630bc8e099a"
   },
   "dependency_versions": {
-    "wasmtime": "49.0.5",
-    "yara-x": "1.22.0"
+    "wasmtime": "50.0.1",
+    "yara-x": "1.23.0"
   },
   "policy": "Only the nine exact reviewed rule/path/full-region/raw-message tuples may be annotated. Every other result remains uploaded. Raw SARIF is preserved; annotated evidence includes accepted external false-positive justifications. Source, caller inventory, dependency, duplicate, or manifest guard failures retain unfiltered raw output and fail the job.",
   "reviewed_findings": [
     {
-      "id": "yara-x-1.22-hard-coded-cryptographic-value-305",
+      "id": "yara-x-1.23-hard-coded-cryptographic-value-305",
       "justification": "Reviewed false positive: this public constant is a deterministic TLSH/Pearson bucket selector or permutation, used solely to compute ELF symbol-similarity telfhash. The identical table and selectors are specified in Trend Micro TLSH; they are not cryptographic keys, password salts or secret material. Randomizing them would invalidate compatible similarity hashes.",
       "match": {
         "message": "This hard-coded value is used as [a salt](1).",
-        "path": "vendor/yara-x-1.22.0/src/modules/elf/tlsh/mod.rs",
+        "path": "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs",
         "region": {
           "endColumn": 22,
           "endLine": 305,
@@ -32,11 +32,11 @@
       }
     },
     {
-      "id": "yara-x-1.22-hard-coded-cryptographic-value-330",
+      "id": "yara-x-1.23-hard-coded-cryptographic-value-330",
       "justification": "Reviewed false positive: this public constant is a deterministic TLSH/Pearson bucket selector or permutation, used solely to compute ELF symbol-similarity telfhash. The identical table and selectors are specified in Trend Micro TLSH; they are not cryptographic keys, password salts or secret material. Randomizing them would invalidate compatible similarity hashes.",
       "match": {
         "message": "This hard-coded value is used as [a salt](1).",
-        "path": "vendor/yara-x-1.22.0/src/modules/elf/tlsh/mod.rs",
+        "path": "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs",
         "region": {
           "endColumn": 22,
           "endLine": 330,
@@ -47,11 +47,11 @@
       }
     },
     {
-      "id": "yara-x-1.22-hard-coded-cryptographic-value-338",
+      "id": "yara-x-1.23-hard-coded-cryptographic-value-338",
       "justification": "Reviewed false positive: this public constant is a deterministic TLSH/Pearson bucket selector or permutation, used solely to compute ELF symbol-similarity telfhash. The identical table and selectors are specified in Trend Micro TLSH; they are not cryptographic keys, password salts or secret material. Randomizing them would invalidate compatible similarity hashes.",
       "match": {
         "message": "This hard-coded value is used as [a salt](1).",
-        "path": "vendor/yara-x-1.22.0/src/modules/elf/tlsh/mod.rs",
+        "path": "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs",
         "region": {
           "endColumn": 22,
           "endLine": 338,
@@ -62,11 +62,11 @@
       }
     },
     {
-      "id": "yara-x-1.22-hard-coded-cryptographic-value-346",
+      "id": "yara-x-1.23-hard-coded-cryptographic-value-346",
       "justification": "Reviewed false positive: this public constant is a deterministic TLSH/Pearson bucket selector or permutation, used solely to compute ELF symbol-similarity telfhash. The identical table and selectors are specified in Trend Micro TLSH; they are not cryptographic keys, password salts or secret material. Randomizing them would invalidate compatible similarity hashes.",
       "match": {
         "message": "This hard-coded value is used as [a salt](1).",
-        "path": "vendor/yara-x-1.22.0/src/modules/elf/tlsh/mod.rs",
+        "path": "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs",
         "region": {
           "endColumn": 22,
           "endLine": 346,
@@ -77,11 +77,11 @@
       }
     },
     {
-      "id": "yara-x-1.22-hard-coded-cryptographic-value-354",
+      "id": "yara-x-1.23-hard-coded-cryptographic-value-354",
       "justification": "Reviewed false positive: this public constant is a deterministic TLSH/Pearson bucket selector or permutation, used solely to compute ELF symbol-similarity telfhash. The identical table and selectors are specified in Trend Micro TLSH; they are not cryptographic keys, password salts or secret material. Randomizing them would invalidate compatible similarity hashes.",
       "match": {
         "message": "This hard-coded value is used as [a salt](1).",
-        "path": "vendor/yara-x-1.22.0/src/modules/elf/tlsh/mod.rs",
+        "path": "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs",
         "region": {
           "endColumn": 22,
           "endLine": 354,
@@ -92,11 +92,11 @@
       }
     },
     {
-      "id": "yara-x-1.22-hard-coded-cryptographic-value-362",
+      "id": "yara-x-1.23-hard-coded-cryptographic-value-362",
       "justification": "Reviewed false positive: this public constant is a deterministic TLSH/Pearson bucket selector or permutation, used solely to compute ELF symbol-similarity telfhash. The identical table and selectors are specified in Trend Micro TLSH; they are not cryptographic keys, password salts or secret material. Randomizing them would invalidate compatible similarity hashes.",
       "match": {
         "message": "This hard-coded value is used as [a salt](1).",
-        "path": "vendor/yara-x-1.22.0/src/modules/elf/tlsh/mod.rs",
+        "path": "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs",
         "region": {
           "endColumn": 23,
           "endLine": 362,
@@ -107,11 +107,11 @@
       }
     },
     {
-      "id": "yara-x-1.22-hard-coded-cryptographic-value-370",
+      "id": "yara-x-1.23-hard-coded-cryptographic-value-370",
       "justification": "Reviewed false positive: this public constant is a deterministic TLSH/Pearson bucket selector or permutation, used solely to compute ELF symbol-similarity telfhash. The identical table and selectors are specified in Trend Micro TLSH; they are not cryptographic keys, password salts or secret material. Randomizing them would invalidate compatible similarity hashes.",
       "match": {
         "message": "This hard-coded value is used as [a salt](1).",
-        "path": "vendor/yara-x-1.22.0/src/modules/elf/tlsh/mod.rs",
+        "path": "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs",
         "region": {
           "endColumn": 23,
           "endLine": 370,
@@ -122,11 +122,11 @@
       }
     },
     {
-      "id": "yara-x-1.22-hard-coded-cryptographic-value-9",
+      "id": "yara-x-1.23-hard-coded-cryptographic-value-9",
       "justification": "Reviewed false positive: this public constant is a deterministic TLSH/Pearson bucket selector or permutation, used solely to compute ELF symbol-similarity telfhash. The identical table and selectors are specified in Trend Micro TLSH; they are not cryptographic keys, password salts or secret material. Randomizing them would invalidate compatible similarity hashes.",
       "match": {
         "message": "This hard-coded value is used as [a salt](1).",
-        "path": "vendor/yara-x-1.22.0/src/modules/elf/tlsh/helper.rs",
+        "path": "vendor/yara-x-1.23.0/src/modules/elf/tlsh/helper.rs",
         "region": {
           "endColumn": 2,
           "endLine": 26,
@@ -137,11 +137,11 @@
       }
     },
     {
-      "id": "yara-x-1.22-weak-sensitive-data-hashing-244",
+      "id": "yara-x-1.23-weak-sensitive-data-hashing-244",
       "justification": "Reviewed false positive: SHA1 represents a public PE certificate thumbprint for forensic reporting and YARA compatibility. The field is copied only to reported protobuf metadata; embedded-chain/content/message verification uses separate raw certificate, public-key and digest paths and never compares this thumbprint. It protects no password or secret and does not establish OS-root trust.",
       "match": {
         "message": "[Sensitive data (certificate)](1) is used in a hashing algorithm (SHA1) that is insecure.",
-        "path": "vendor/yara-x-1.22.0/src/modules/utils/asn1.rs",
+        "path": "vendor/yara-x-1.23.0/src/modules/utils/asn1.rs",
         "region": {
           "endColumn": 72,
           "endLine": 244,
@@ -171,7 +171,7 @@
     "AuthenticodeSignature",
     "X509CertificateParser"
   ],
-  "source_review_date": "2026-10-21",
+  "source_review_date": "2026-11-12",
   "token_source_inventory": {
     "src/java_analysis.rs": "bd9273b8443c118acfa8eb68ed2d33ac4ffad5de9f7e5941163cb5a8d281ad44",
     "src/mcp_server.rs": "171ad91fed8c35e1420cad68f0da2f14df636ed13ea7796eb627a865e651bafc",
@@ -183,19 +183,19 @@
     "threatflux-package-security/src/analyzers/java.rs": "fa8a8c65e7f864d40ecd57ce757c8d8d79acea0745295adc01d77d6004fb03e9",
     "vendor/threatflux-binary-analysis-0.3.1/src/formats/pe.rs": "5a14e6d0ddc08aa7992f6f51a76423d9e68f194e90b0878d095d58f3e105e92b",
     "vendor/threatflux-binary-analysis-0.3.1/src/types.rs": "c0aae54abd85fbbe01b61302f90c0ec84c34bb5e635e00cb4fda036997a35955",
-    "vendor/yara-x-1.22.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
-    "vendor/yara-x-1.22.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
-    "vendor/yara-x-1.22.0/src/modules/elf/tlsh/mod.rs": "5a8804fc660f5db558324ab6f99181059200eb6a4569e534c4b51fdef518c30e",
-    "vendor/yara-x-1.22.0/src/modules/elf/tlsh/tests.rs": "9f6c4f88fef0b1c9a09a973cc595bbb41daadf05e564c47e2c6d01f040f91acc",
-    "vendor/yara-x-1.22.0/src/modules/field_docs.rs": "e49cc9498e6de4a4384c23484a4756242265331c19ba657e57fdd8898bc321af",
-    "vendor/yara-x-1.22.0/src/modules/macho/parser.rs": "fb41e2e2f727c00ebb14ddf43154dbc27f18d80ad57251f8a2f67d5629647b4e",
-    "vendor/yara-x-1.22.0/src/modules/pe/parser.rs": "8ea3dba0390dcdfd26f90239d7c4209589360e41c53ed5174ec3e71ed03e7b88",
-    "vendor/yara-x-1.22.0/src/modules/protos/generated/macho.rs": "193c995226a2bb4fc81efb3acb2b7946530a035368698581562caf90e18ec6e1",
-    "vendor/yara-x-1.22.0/src/modules/protos/generated/pe.rs": "a3f9fc4f10be465b00e3cb2b7e8fd67e798384cd1369b9e5774b71b1e5fdbeaf",
-    "vendor/yara-x-1.22.0/src/modules/protos/generated/sandbox.rs": "9490cc0e6628510855303b45f38afd2f9297bf55d1b2b105acc0881dda1dad3a",
-    "vendor/yara-x-1.22.0/src/modules/protos/generated/vtnet.rs": "65af91c98b6c527015814525e072dea9367351933188c85d9a2cf428185f202e",
-    "vendor/yara-x-1.22.0/src/modules/utils/asn1.rs": "7252226e48ef2ae72c9ded24ee888a23df48fe4a20f940386b2a5c5feee0801c",
-    "vendor/yara-x-1.22.0/src/modules/utils/authenticode.rs": "4ee557e61db02cfe2f07c9c4238a9e172386167e9d939e8f432fbad4c2d0de29"
+    "vendor/yara-x-1.23.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
+    "vendor/yara-x-1.23.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
+    "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs": "5a8804fc660f5db558324ab6f99181059200eb6a4569e534c4b51fdef518c30e",
+    "vendor/yara-x-1.23.0/src/modules/elf/tlsh/tests.rs": "9f6c4f88fef0b1c9a09a973cc595bbb41daadf05e564c47e2c6d01f040f91acc",
+    "vendor/yara-x-1.23.0/src/modules/field_docs.rs": "e49cc9498e6de4a4384c23484a4756242265331c19ba657e57fdd8898bc321af",
+    "vendor/yara-x-1.23.0/src/modules/macho/parser.rs": "e654e8a8c83304d356184f243993bf674e796f70c3e1b6415916cab81d74e8d5",
+    "vendor/yara-x-1.23.0/src/modules/pe/parser.rs": "8ea3dba0390dcdfd26f90239d7c4209589360e41c53ed5174ec3e71ed03e7b88",
+    "vendor/yara-x-1.23.0/src/modules/protos/generated/macho.rs": "193c995226a2bb4fc81efb3acb2b7946530a035368698581562caf90e18ec6e1",
+    "vendor/yara-x-1.23.0/src/modules/protos/generated/pe.rs": "a3f9fc4f10be465b00e3cb2b7e8fd67e798384cd1369b9e5774b71b1e5fdbeaf",
+    "vendor/yara-x-1.23.0/src/modules/protos/generated/sandbox.rs": "9490cc0e6628510855303b45f38afd2f9297bf55d1b2b105acc0881dda1dad3a",
+    "vendor/yara-x-1.23.0/src/modules/protos/generated/vtnet.rs": "88f6a6ed8244b3dd2b61dbcab1c182aa1ea658373c92a1b015604f4f2ebed92b",
+    "vendor/yara-x-1.23.0/src/modules/utils/asn1.rs": "7252226e48ef2ae72c9ded24ee888a23df48fe4a20f940386b2a5c5feee0801c",
+    "vendor/yara-x-1.23.0/src/modules/utils/authenticode.rs": "4ee557e61db02cfe2f07c9c4238a9e172386167e9d939e8f432fbad4c2d0de29"
   },
   "upstream_sources": [
     "https://github.com/trendmicro/tlsh/blob/master/src/tlsh_impl.cpp",
@@ -204,9 +204,9 @@
   ],
   "vendor": {
     "name": "yara-x",
-    "path": "vendor/yara-x-1.22.0",
-    "published_crate_sha256": "219e5694590ea59d31c880b4bb88f78cf82f69b58c590d710577ee277aacfb2d",
-    "upstream_commit": "e27597f2c05e13fe1c2bb459781aef8899afc485",
-    "version": "1.22.0"
+    "path": "vendor/yara-x-1.23.0",
+    "published_crate_sha256": "e8a5ff1e1bb43734cc68f3ddc94646c9740c8c559d38fae559f0c79076f801db",
+    "upstream_commit": "afe4585b12f56c698794dc80b3d28ddb87b56c0a",
+    "version": "1.23.0"
   }
 }

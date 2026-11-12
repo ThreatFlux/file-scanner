@@ -26,21 +26,11 @@ echo "✅ Optimized CI configuration applied"
 # Install local development tools
 echo "🔧 Installing recommended local development tools..."
 
-# Check if cargo-llvm-cov is installed
-if ! command -v cargo-llvm-cov &> /dev/null; then
-    echo "📦 Installing cargo-llvm-cov for faster coverage..."
-    cargo install cargo-llvm-cov --locked --version 0.9.1
-else
-    echo "✅ cargo-llvm-cov already installed"
-fi
-
-# Check if sccache is installed
-if ! command -v sccache &> /dev/null; then
-    echo "📦 Installing sccache for faster builds..."
-    cargo install sccache --locked --version 0.18.0
-else
-    echo "✅ sccache already installed"
-fi
+# Cargo skips matching installed versions and replaces stale tool versions.
+echo "📦 Installing cargo-llvm-cov for faster coverage..."
+cargo install cargo-llvm-cov --locked --version 0.9.1
+echo "📦 Installing sccache for faster builds..."
+cargo install sccache --locked --version 0.19.0
 
 # Configure sccache for local development
 echo "⚙️  Configuring sccache..."
