@@ -45,11 +45,15 @@ constant pool, and the threat level follows from them. Nested archives (AAR clas
 WEB-INF/lib, EAR modules) are opened up to two levels deep (an EAR's WAR's libraries) within byte caps; deeper ones are reported as not read. Not done: signatures are \
 listed as 'signature files present, not verified'; classes.dex (DEX) is not parsed, so APK code \
 is not assessed. Call analyze_file first if you are unsure what the file is. Results are \
-compact JSON capped at `max_output_bytes` (default 80000, ceiling 400000); cut lists are \
-reported under `truncated`.";
+compact JSON capped at `max_output_bytes` (default 80000, ceiling 400000). When a cap cuts a \
+list, the answer says so: the overview and nested lists carry `truncated` with their `total`, \
+and a paged view (classes, resources, class, android, nested) returns the rows that fit with `next_offset` \
+and a `hint`; pass `next_offset` as `offset` for the rest. Nested archives are named by their \
+full path from the analyzed file, joined with `!` (a.war!WEB-INF/lib/util.jar); a class's \
+`container` and `filter` use the same paths.";
 
 /// Cache section for the full parse of one file (keyed by the file's SHA-256).
-const CACHE_KEY: &str = "java_analysis:v4";
+const CACHE_KEY: &str = "java_analysis:v5";
 
 /// Parsed results kept in memory, newest last, so a follow-up call on the same file neither
 /// inflates the cached text nor parses it again (each of those costs the full result in
@@ -57,6 +61,14 @@ const CACHE_KEY: &str = "java_analysis:v4";
 /// and only results whose serialized form is under [`RECENT_MAX_TEXT_BYTES`].
 type RecentResults = Vec<(Weak<ServerState>, String, Arc<JavaAnalysisResult>)>;
 static RECENT: Mutex<RecentResults> = Mutex::new(Vec::new());
+
+/// Empties the in-memory result store (cache_clear calls this so the next call recomputes).
+pub(crate) fn forget_recent() {
+    RECENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
 const RECENT_RESULTS: usize = 2;
 const RECENT_MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -138,7 +150,8 @@ impl FileScannerMcp {
         let outcome = self
             .state
             .run_blocking("analyze_java_file", move || {
-                if let Some(result) = recent_get(&state, &sha256) {
+                let use_memory = state.cache_enabled();
+                if let Some(result) = use_memory.then(|| recent_get(&state, &sha256)).flatten() {
                     return respond_view(&result, view, &request, &path, &sha256, true, budget);
                 }
                 let cache = state.section_cache();
@@ -171,7 +184,7 @@ impl FileScannerMcp {
                     }
                 }
                 let result = Arc::new(result);
-                if keep_in_memory {
+                if keep_in_memory && use_memory {
                     recent_put(&state, &sha256, Arc::clone(&result));
                 }
                 respond_view(&result, view, &request, &path, &sha256, hit, budget)
@@ -327,6 +340,7 @@ fn respond_view(
                 "view": "findings",
                 "filter": request.filter,
                 "threat_level": format!("{:?}", result.security_analysis.threat_level),
+                "threat_basis": result.security_analysis.threat_basis,
                 "findings": fit_page(&rows, offset, limit, budget / 2),
                 "hint": "view=classes with filter=<api> lists the classes that use an API.",
             })
@@ -521,7 +535,21 @@ fn class_view(
     let wanted = request.class.as_deref().unwrap_or("");
     let wanted = wanted.replace('/', ".");
     let wanted = wanted.strip_suffix(".class").unwrap_or(&wanted).to_string();
-    let matching: Vec<&ClassInfo> = result.classes.iter().filter(|c| c.name == wanted).collect();
+    // `<container>!<class>` (as findings list it) picks one copy; a bare name matches all.
+    let (want_container, wanted) = match wanted.rsplit_once('!') {
+        Some((c, n)) if !c.is_empty() && !n.is_empty() => (Some(c.to_string()), n.to_string()),
+        _ => (None, wanted),
+    };
+    let matching: Vec<&ClassInfo> = result
+        .classes
+        .iter()
+        .filter(|c| {
+            c.name == wanted
+                && want_container
+                    .as_deref()
+                    .is_none_or(|w| c.container.as_deref() == Some(w))
+        })
+        .collect();
     let Some(class) = matching.first() else {
         let lower = wanted.to_lowercase();
         let close: Vec<&str> = result
@@ -1011,43 +1039,64 @@ fn summary(result: &JavaAnalysisResult, path: &str, sha256: &str) -> Value {
         .collect();
 
     let mut next_steps: Vec<Value> = Vec::new();
-    let step = |arguments: Value| {
+    let step = |arguments: Value, gives: &str| {
         let mut args = json!({"file_path": path});
         if let (Value::Object(base), Value::Object(extra)) = (&mut args, arguments) {
             base.extend(extra);
         }
-        json!({"tool": "analyze_java_file", "arguments": args})
+        json!({"tool": "analyze_java_file", "arguments": args, "gives": gives})
     };
     if finding_total > 0 {
-        next_steps.push(step(json!({"view": "findings"})));
+        next_steps.push(step(
+            json!({"view": "findings"}),
+            "every dangerous API with class counts and example classes",
+        ));
     }
     if result.classes_total > 0 {
-        next_steps.push(step(json!({"view": "classes"})));
+        next_steps.push(step(
+            json!({"view": "classes"}),
+            "a page of the classes with their dangerous APIs (filter by name, container or API)",
+        ));
         let target = result
             .classes
             .iter()
             .find(|c| !c.dangerous_apis.is_empty())
             .or_else(|| result.classes.first());
         if let Some(class) = target {
-            next_steps.push(step(json!({"view": "class", "class": class.name})));
+            next_steps.push(step(
+                json!({"view": "class", "class": class.name}),
+                "methods, fields, referenced classes and method calls of this class",
+            ));
         }
     }
     if result.resources_total > 0 {
-        next_steps.push(step(json!({"view": "resources"})));
+        next_steps.push(step(
+            json!({"view": "resources"}),
+            "a page of the archive entries (filter on path)",
+        ));
     }
     if manifest_cut {
-        next_steps.push(step(json!({"view": "manifest"})));
+        next_steps.push(step(
+            json!({"view": "manifest"}),
+            "every MANIFEST.MF attribute, long values whole up to a third of the budget",
+        ));
     }
     if let Some(a) = &result.android_manifest {
         let component_cut = [&a.activities, &a.services, &a.receivers, &a.providers]
             .iter()
             .any(|l| l.iter().filter(|c| c.exported).count() > 10);
         if a.permissions.len() > 40 || a.uses_features.len() > 20 || component_cut {
-            next_steps.push(step(json!({"view": "android"})));
+            next_steps.push(step(
+                json!({"view": "android"}),
+                "the full permission, feature and component lists with exported flags",
+            ));
         }
     }
     if nested_total > 15 {
-        next_steps.push(step(json!({"view": "nested"})));
+        next_steps.push(step(
+            json!({"view": "nested"}),
+            "every nested archive with its full path and whether it was opened",
+        ));
     }
 
     json!({
@@ -1720,6 +1769,31 @@ mod tests {
         assert!(!text.contains("...[cut"), "{text}");
     }
 
+    /// Findings name the copy of a class that makes the call, and that name opens it.
+    #[tokio::test]
+    async fn findings_example_classes_open_the_right_copy() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let bad = ClassBuilder::new("p/S")
+            .calls("sun/misc/Unsafe", "boom", "()V")
+            .build();
+        let x = zip_bytes(&[("p/S.class", &minimal_class("p/S"))]);
+        let y = zip_bytes(&[("p/S.class", &bad)]);
+        let path = write(&dir, "v.ear", &zip_bytes(&[("x.war", &x), ("y.war", &y)]));
+        let (is_error, page, text) =
+            call(&mcp, json!({"file_path": path, "view": "findings"})).await;
+        assert!(!is_error, "{text}");
+        let example = page["findings"]["items"][0]["example_classes"][0]
+            .as_str()
+            .unwrap_or_else(|| panic!("{text}"))
+            .to_string();
+        assert_eq!(example, "y.war!p.S", "{text}");
+        let (is_error, page, text) = call(&mcp, json!({"file_path": path, "class": example})).await;
+        assert!(!is_error, "{text}");
+        assert_eq!(page["class"]["dangerous_api_count"], 1, "{text}");
+        assert_eq!(page["class"]["container"], "y.war", "{text}");
+    }
+
     /// view=nested says when the rows stop short of the real count.
     #[tokio::test]
     async fn nested_view_states_the_count_when_rows_stop() {
@@ -1735,6 +1809,71 @@ mod tests {
         let (_, page, _) = call(&mcp, json!({"file_path": path, "view": "nested"})).await;
         assert_eq!(page["nested_archives_counted"], 5);
         assert!(!page["hint"].as_str().unwrap().contains("rows stop"));
+    }
+
+    /// Under --no-cache nothing is served from memory: every call recomputes and says miss.
+    #[tokio::test]
+    async fn no_cache_never_answers_hit() {
+        let dir = TempDir::new().unwrap();
+        let cache = TempDir::new().unwrap();
+        let state = Arc::new(ServerState::new(crate::mcp_server::state::StateConfig {
+            cache_dir: cache.path().join("c"),
+            cache_enabled: false,
+            ..crate::mcp_server::state::StateConfig::default()
+        }));
+        let mcp = FileScannerMcp::with_state(state);
+        let path = write(
+            &dir,
+            "nc.jar",
+            &zip_bytes(&[("p/Nc.class", &minimal_class("p/Nc"))]),
+        );
+        for view in ["summary", "summary", "classes"] {
+            let (is_error, json, text) = call(&mcp, json!({"file_path": path, "view": view})).await;
+            assert!(!is_error, "{text}");
+            assert_eq!(json["cache"], "miss", "{view}: {text}");
+        }
+    }
+
+    /// forget_recent empties the in-memory store, so the next call is a miss again.
+    #[tokio::test]
+    async fn forget_recent_makes_the_next_call_recompute() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let path = write(
+            &dir,
+            "fr.jar",
+            &zip_bytes(&[("p/Fr.class", &minimal_class("p/Fr"))]),
+        );
+        let (_, first, _) = call(&mcp, json!({"file_path": path})).await;
+        assert_eq!(first["cache"], "miss");
+        let (_, second, _) = call(&mcp, json!({"file_path": path})).await;
+        assert_eq!(second["cache"], "hit");
+        forget_recent();
+        mcp.state.section_cache().clear();
+        let (_, third, _) = call(&mcp, json!({"file_path": path})).await;
+        assert_eq!(third["cache"], "miss");
+    }
+
+    /// An APK whose code is only DEX is not rated Low: the code was not assessed.
+    #[tokio::test]
+    async fn dex_only_apk_is_not_low() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let apk = zip_bytes(&[
+            ("AndroidManifest.xml", b"<manifest package=\"x.y\"/>"),
+            ("classes.dex", b"dex\n035\0"),
+        ]);
+        let path = write(&dir, "dexonly.apk", &apk);
+        for view in ["summary", "findings"] {
+            let (is_error, json, text) = call(&mcp, json!({"file_path": path, "view": view})).await;
+            assert!(!is_error, "{text}");
+            let level = json["security"]["threat_level"]
+                .as_str()
+                .or_else(|| json["threat_level"].as_str());
+            assert_eq!(level, Some("Medium"), "{view}: {text}");
+            assert!(text.contains("not assessed"), "{view}: {text}");
+            assert!(!text.contains("0 were not read"), "{view}: {text}");
+        }
     }
 
     /// Twenty cached calls neither inflate nor parse again, and the server's memory does

@@ -878,17 +878,23 @@ impl Scanner {
         {
             self.facts.api_rows_cut += 1;
         }
+        // Where the class lives: `<container>!<class>` inside a nested archive, so two
+        // copies of one class name can be told apart.
+        let example = match &class.container {
+            Some(c) => clip_name(&format!("{c}!{}", class.name), 300),
+            None => clip_name(&class.name, 300),
+        };
         for api in &class.dangerous_apis {
             let key = (api.category.clone(), api.api.clone());
             if let Some(entry) = self.facts.api_groups.get_mut(&key) {
                 entry.0 += 1;
                 if entry.1.len() < 5 {
-                    entry.1.push(class.name.clone());
+                    entry.1.push(example.clone());
                 }
             } else if self.facts.api_groups.len() < MAX_API_GROUPS {
                 self.facts
                     .api_groups
-                    .insert(key, (1, vec![class.name.clone()]));
+                    .insert(key, (1, vec![example.clone()]));
             } else {
                 self.facts.groups_dropped += 1;
                 self.facts.dropped_severity = self
@@ -1120,7 +1126,7 @@ impl Scanner {
                 || lower.ends_with(".ear")
                 || lower.ends_with(".aar")
             {
-                self.open_nested(&mut file, &name, size, &label, depth);
+                self.open_nested(&mut file, size, &label, depth);
             }
         }
     }
@@ -1380,14 +1386,7 @@ impl Scanner {
         None
     }
 
-    fn open_nested<R: Read>(
-        &mut self,
-        file: &mut R,
-        name: &str,
-        size: u64,
-        label: &str,
-        depth: u8,
-    ) {
+    fn open_nested<R: Read>(&mut self, file: &mut R, size: u64, label: &str, depth: u8) {
         if depth >= MAX_NEST_DEPTH {
             // Not opened is not "nothing found": it counts as unread.
             self.facts.nested_unread += 1;
@@ -1431,7 +1430,7 @@ impl Scanner {
             return;
         }
         let mut nested = NestedArchive {
-            path: name.to_string(),
+            path: label.to_string(),
             size,
             opened: false,
             entries: 0,
@@ -1466,7 +1465,7 @@ impl Scanner {
                 let before = self.class_count;
                 // The row goes in first so it precedes the rows of archives inside it.
                 let row = self.push_nested(nested.clone());
-                self.scan_archive(&mut inner, Some(name), depth + 1);
+                self.scan_archive(&mut inner, Some(label), depth + 1);
                 if let Some(at) = row {
                     self.result.nested_archives[at].classes = self.class_count - before;
                 }
@@ -3431,6 +3430,12 @@ fn perform_security_analysis(result: &mut JavaAnalysisResult, facts: &ScanFacts)
             result.unparsed_classes,
             "class file(s) were not analyzed (over the read cap, past the read budget, or \
              damaged)",
+        ));
+    }
+    if !result.dex_files.is_empty() {
+        unexamined.push(not_read(
+            result.dex_files.len(),
+            "DEX file(s) hold Dalvik code that is not parsed; the code was not assessed",
         ));
     }
     if facts.nested_unread > 0 {

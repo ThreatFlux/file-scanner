@@ -1026,6 +1026,55 @@ fn cf10_nested_archives_are_opened_one_level_deep() -> Result<()> {
     Ok(())
 }
 
+/// Second-level nested archives carry the full path from the analyzed file, so two
+/// same-named libraries in different WARs can be told apart.
+#[test]
+fn nested_paths_are_full_paths_from_the_analyzed_file() -> Result<()> {
+    let dir = TempDir::new()?;
+    let evil = zip_bytes(&[("app/Loader.class", &runtime_exec_class("app/Loader"))]);
+    let plain = zip_bytes(&[("app/Plain.class", &minimal_class("app/Plain"))]);
+    let war_a = zip_bytes(&[("WEB-INF/lib/util.jar", &evil)]);
+    let war_b = zip_bytes(&[("WEB-INF/lib/util.jar", &plain)]);
+    let ear = write_zip(
+        dir.path(),
+        "two.ear",
+        &[("a.war", &war_a), ("b.war", &war_b)],
+    );
+    let result = analyze_java_archive_full(&ear)?;
+    let rows: Vec<&str> = result
+        .nested_archives
+        .iter()
+        .map(|n| n.path.as_str())
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            "a.war",
+            "a.war!WEB-INF/lib/util.jar",
+            "b.war",
+            "b.war!WEB-INF/lib/util.jar"
+        ]
+    );
+    let containers: Vec<(&str, &str)> = result
+        .classes
+        .iter()
+        .map(|c| (c.name.as_str(), c.container.as_deref().unwrap_or("")))
+        .collect();
+    assert!(containers.contains(&("app.Loader", "a.war!WEB-INF/lib/util.jar")));
+    assert!(containers.contains(&("app.Plain", "b.war!WEB-INF/lib/util.jar")));
+    let exec = result
+        .security_analysis
+        .api_findings
+        .iter()
+        .find(|f| f.api.contains("Runtime.exec"))
+        .expect("Runtime.exec finding");
+    assert_eq!(
+        exec.example_classes,
+        vec!["a.war!WEB-INF/lib/util.jar!app.Loader".to_string()]
+    );
+    Ok(())
+}
+
 #[test]
 fn cf07_content_sniffing_ignores_extensions() -> Result<()> {
     let dir = TempDir::new()?;
