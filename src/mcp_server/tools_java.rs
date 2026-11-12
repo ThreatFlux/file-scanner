@@ -2,7 +2,7 @@
 //! drill-down into classes, dangerous-API findings, resources and single classes.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use rmcp::{
     handler::server::wrapper::Json,
@@ -24,6 +24,7 @@ use super::{
         DEFAULT_LIMIT,
     },
     paths::Expect,
+    state::ServerState,
     FileScannerMcp,
 };
 
@@ -41,14 +42,56 @@ android (paged permissions, features and components with exported flag and inten
 Class files are parsed for real; dangerous APIs (Runtime.exec, ProcessBuilder, reflection, class \
 and native loading, network, crypto, deserialization, JNDI, scripting, Unsafe) come from the \
 constant pool, and the threat level follows from them. Nested archives (AAR classes.jar, WAR \
-WEB-INF/lib, EAR modules) are opened one level deep within byte caps. Not done: signatures are \
+WEB-INF/lib, EAR modules) are opened up to two levels deep (an EAR's WAR's libraries) within byte caps; deeper ones are reported as not read. Not done: signatures are \
 listed as 'signature files present, not verified'; classes.dex (DEX) is not parsed, so APK code \
 is not assessed. Call analyze_file first if you are unsure what the file is. Results are \
 compact JSON capped at `max_output_bytes` (default 80000, ceiling 400000); cut lists are \
 reported under `truncated`.";
 
 /// Cache section for the full parse of one file (keyed by the file's SHA-256).
-const CACHE_KEY: &str = "java_analysis:v3";
+const CACHE_KEY: &str = "java_analysis:v4";
+
+/// Parsed results kept in memory, newest last, so a follow-up call on the same file neither
+/// inflates the cached text nor parses it again (each of those costs the full result in
+/// allocations). Keyed by the server state and SHA-256; at most [`RECENT_RESULTS`] of them,
+/// and only results whose serialized form is under [`RECENT_MAX_TEXT_BYTES`].
+type RecentResults = Vec<(Weak<ServerState>, String, Arc<JavaAnalysisResult>)>;
+static RECENT: Mutex<RecentResults> = Mutex::new(Vec::new());
+const RECENT_RESULTS: usize = 2;
+const RECENT_MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
+
+fn recent_get(state: &Arc<ServerState>, sha256: &str) -> Option<Arc<JavaAnalysisResult>> {
+    let mut recent = RECENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    recent.retain(|(weak, _, _)| weak.strong_count() > 0);
+    let at = recent.iter().position(|(weak, sha, _)| {
+        std::ptr::eq(weak.as_ptr(), Arc::as_ptr(state)) && sha == sha256
+    })?;
+    let entry = recent.remove(at);
+    let result = Arc::clone(&entry.2);
+    recent.push(entry);
+    Some(result)
+}
+
+fn recent_put(state: &Arc<ServerState>, sha256: &str, result: Arc<JavaAnalysisResult>) {
+    let mut recent = RECENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    recent.retain(|(weak, sha, _)| {
+        weak.strong_count() > 0
+            && !(std::ptr::eq(weak.as_ptr(), Arc::as_ptr(state)) && sha == sha256)
+    });
+    recent.push((Arc::downgrade(state), sha256.to_string(), result));
+    while recent.len() > RECENT_RESULTS {
+        recent.remove(0);
+    }
+}
+
+/// Times a result was parsed from a file in this process (tests assert that cached calls
+/// do not parse again).
+#[cfg(test)]
+static PARSE_COUNTS: Mutex<Vec<(PathBuf, usize)>> = Mutex::new(Vec::new());
 
 #[tool_router(router = java_router, vis = "pub(crate)")]
 impl FileScannerMcp {
@@ -95,6 +138,9 @@ impl FileScannerMcp {
         let outcome = self
             .state
             .run_blocking("analyze_java_file", move || {
+                if let Some(result) = recent_get(&state, &sha256) {
+                    return respond_view(&result, view, &request, &path, &sha256, true, budget);
+                }
                 let cache = state.section_cache();
                 // Text in, text out: no intermediate `Value` tree, which costs several times
                 // the size of the result.
@@ -103,12 +149,30 @@ impl FileScannerMcp {
                     .and_then(|text| serde_json::from_str::<JavaAnalysisResult>(&text).ok());
                 let (result, hit) = match cached {
                     Some(result) => (result, true),
-                    None => (parse(&path)?, false),
+                    None => {
+                        #[cfg(test)]
+                        {
+                            let mut counts = PARSE_COUNTS
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            match counts.iter_mut().find(|(p, _)| *p == path) {
+                                Some(entry) => entry.1 += 1,
+                                None => counts.push((path.clone(), 1)),
+                            }
+                        }
+                        (parse(&path)?, false)
+                    }
                 };
+                let mut keep_in_memory = hit;
                 if !hit {
                     if let Ok(text) = serde_json::to_string(&result) {
+                        keep_in_memory = text.len() <= RECENT_MAX_TEXT_BYTES;
                         cache.put_text(&sha256, CACHE_KEY, text);
                     }
+                }
+                let result = Arc::new(result);
+                if keep_in_memory {
+                    recent_put(&state, &sha256, Arc::clone(&result));
                 }
                 respond_view(&result, view, &request, &path, &sha256, hit, budget)
             })
@@ -528,40 +592,112 @@ fn class_view(
         })
         .collect();
 
+    let header = json!({
+        "name": class.name,
+        "kind": kind_of(class),
+        "entry": clip(&class.entry, 400),
+        "container": class.container.as_deref().map(|c| clip(c, 400)),
+        "java_version": class.java_version,
+        "access": modifiers(class.access_flags, &[(0x0001, "public"), (0x0010, "final"), (0x0400, "abstract")]),
+        "super": class.super_class,
+        "interface_count": class.interface_count(),
+        "method_count": class.method_count(),
+        "field_count": class.field_count(),
+        "source_file": class.source_file,
+        "dangerous_api_count": class.dangerous_apis.len(),
+        "also_in_count": also_in.len(),
+        "parse_warning": class.parse_warning,
+    });
+    let hint = "offset and limit apply to each of the eight lists (interfaces, inner_classes, \
+                methods, fields, referenced_classes, method_refs, dangerous_apis, also_in); \
+                filter narrows them. When class.parse_warning says member lists were cut or \
+                dropped, method_count and field_count are the real totals; the names \
+                themselves are not kept for that class. Extract the entry and analyze the \
+                .class file alone to see its members. A list whose page is empty with \
+                next_offset equal to its offset found no room under max_output_bytes: raise it.";
+    // One byte counter for the whole answer: what the header, the hint and the list keys
+    // take comes off first, and each list gets an equal share of what is left, so the
+    // lists together never exceed the budget and the generic cutter never has to remove
+    // rows that `returned` and `next_offset` count.
+    let fixed = serde_json::to_vec(&header).map_or(0, |v| v.len()) + hint.len() + 512;
+    let mut remaining = budget.saturating_sub(fixed);
+    let mut lists_left = 8usize;
+    let mut fit = |build: &dyn Fn(usize, usize) -> Value| -> Value {
+        let share = remaining / lists_left.max(1);
+        lists_left = lists_left.saturating_sub(1);
+        // A row larger than the share may use every byte not yet spent, keeping enough
+        // for an empty page of each list still to come.
+        let most = remaining
+            .saturating_sub(EMPTY_LIST_BYTES * lists_left)
+            .max(share);
+        let value = build(share, most);
+        remaining = remaining.saturating_sub(serde_json::to_vec(&value).map_or(0, |v| v.len()));
+        value
+    };
+    let dangerous_apis = fit(&|share, most| fit_list(&apis, offset, limit, share, most));
+    let also_in_page = fit(&|share, most| fit_list(&also_in, offset, limit, share, most));
+    let interfaces_page = fit(&|share, most| fit_list(&interfaces, offset, limit, share, most));
+    let inner_page = fit(&|share, most| fit_list(&inner, offset, limit, share, most));
+    let methods_page = fit(&|share, most| fit_list(&methods, offset, limit, share, most));
+    let fields_page = fit(&|share, most| fit_list(&fields, offset, limit, share, most));
+    let referenced_page = fit(&|share, most| fit_list(&referenced, offset, limit, share, most));
+    let calls_page = fit(&|share, most| fit_list(&calls, offset, limit, share, most));
+
     Ok(json!({
         "view": "class",
         "filter": request.filter,
-        "class": {
-            "name": class.name,
-            "kind": kind_of(class),
-            "entry": class.entry,
-            "container": class.container,
-            "java_version": class.java_version,
-            "access": modifiers(class.access_flags, &[(0x0001, "public"), (0x0010, "final"), (0x0400, "abstract")]),
-            "super": class.super_class,
-            "interface_count": class.interface_count(),
-            "method_count": class.method_count(),
-            "field_count": class.field_count(),
-            "source_file": class.source_file,
-            "dangerous_api_count": class.dangerous_apis.len(),
-            "also_in_count": also_in.len(),
-            "parse_warning": class.parse_warning,
-        },
-        "dangerous_apis": fit_page(&apis, offset, limit, budget / 8),
-        "also_in": fit_page(&also_in, offset, limit, budget / 8),
-        "interfaces": fit_page(&interfaces, offset, limit, budget / 8),
-        "inner_classes": fit_page(&inner, offset, limit, budget / 8),
-        "methods": fit_page(&methods, offset, limit, budget / 6),
-        "fields": fit_page(&fields, offset, limit, budget / 6),
-        "referenced_classes": fit_page(&referenced, offset, limit, budget / 6),
-        "method_refs": fit_page(&calls, offset, limit, budget / 6),
-        "hint": "offset and limit apply to each of the eight lists (interfaces, inner_classes, \
-                 methods, fields, referenced_classes, method_refs, dangerous_apis, also_in); \
-                 filter narrows them. When class.parse_warning says member lists were cut or \
-                 dropped, method_count and field_count are the real totals; the names \
-                 themselves are not kept for that class. Extract the entry and analyze the \
-                 .class file alone to see its members.",
+        "class": header,
+        "dangerous_apis": dangerous_apis,
+        "also_in": also_in_page,
+        "interfaces": interfaces_page,
+        "inner_classes": inner_page,
+        "methods": methods_page,
+        "fields": fields_page,
+        "referenced_classes": referenced_page,
+        "method_refs": calls_page,
+        "hint": hint,
     }))
+}
+
+/// Bytes kept back for each list still to come: an empty page with its counters.
+const EMPTY_LIST_BYTES: usize = 150;
+
+/// [`fit_page`] for one of several lists sharing a byte budget. A page is cut to `share`
+/// bytes; when even one row is larger than that, the page is cut again to `most` (every
+/// byte not yet spent). Only when the row does not fit even then does the page carry no
+/// rows (`returned` 0, `next_offset` equal to `offset`), and its hint says how many bytes
+/// that row needs instead of pointing at the next row, which would skip it.
+fn fit_list<T: Serialize>(
+    items: &[T],
+    offset: usize,
+    limit: usize,
+    share: usize,
+    most: usize,
+) -> Value {
+    let size_of = |v: &Value| serde_json::to_vec(v).map_or(0, |v| v.len());
+    let has_rows = |v: &Value| {
+        v.get("items")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| !rows.is_empty())
+    };
+    let value = fit_page(items, offset, limit, share);
+    if size_of(&value) <= share || !has_rows(&value) {
+        return value;
+    }
+    let mut value = fit_page(items, offset, limit, most);
+    if size_of(&value) <= most || !has_rows(&value) {
+        return value;
+    }
+    let row = items
+        .get(offset)
+        .map_or(0, |item| serde_json::to_vec(item).map_or(0, |v| v.len()));
+    value["items"] = json!([]);
+    value["returned"] = 0.into();
+    value["next_offset"] = offset.into();
+    value["hint"] =
+        format!("The row at offset {offset} needs about {row} bytes; raise max_output_bytes.")
+            .into();
+    value
 }
 
 /// One page of a list, cut by [`fit_rows`] to `budget` bytes (at least one row is always
@@ -1594,5 +1730,191 @@ mod tests {
         let (_, page, _) = call(&mcp, json!({"file_path": path, "view": "nested"})).await;
         assert_eq!(page["nested_archives_counted"], 5);
         assert!(!page["hint"].as_str().unwrap().contains("rows stop"));
+    }
+
+    /// Twenty cached calls neither inflate nor parse again, and the server's memory does
+    /// not grow with them.
+    #[tokio::test]
+    async fn cached_calls_do_not_parse_again() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let path = write(
+            &dir,
+            "once.jar",
+            &zip_bytes(&[("p/A.class", &minimal_class("p/A"))]),
+        );
+        for i in 0..20 {
+            let view = ["summary", "classes", "findings", "resources"][i % 4];
+            let (is_error, _, text) = call(&mcp, json!({"file_path": path, "view": view})).await;
+            assert!(!is_error, "{text}");
+        }
+        let counts = PARSE_COUNTS.lock().unwrap();
+        let parsed = counts
+            .iter()
+            .find(|(p, _)| p.to_string_lossy().ends_with("once.jar"))
+            .map_or(0, |e| e.1);
+        assert_eq!(parsed, 1);
+    }
+
+    /// With all eight lists full, the call budget is shared: no list is cut by the generic
+    /// cutter, and every `returned` counts the rows really sent.
+    #[tokio::test]
+    async fn class_view_with_eight_full_lists_stays_inside_the_budget() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let names: Vec<String> = (0..1500).map(|i| format!("p/Inner{i:04}")).collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut b = ClassBuilder::new("p/S").inner_classes(&name_refs);
+        for i in 0..1500 {
+            b = b
+                .interface(&format!("p/I{i:04}"))
+                .field(&format!("f{i:04}"), "I", 1)
+                .method(&format!("m{i:04}"), "()V", 1)
+                .refers_to(&format!("p/R{i:04}"))
+                .calls("p/Q", &format!("c{i:04}"), "()V");
+        }
+        for i in 0..100 {
+            b = b.calls("sun/misc/Unsafe", &format!("u{i:03}"), "()V");
+        }
+        let class = b.build();
+        // The same class twice, so `also_in` has a row.
+        let path = write(
+            &dir,
+            "eight.jar",
+            &zip_bytes(&[("p/S.class", &class), ("q/S.class", &class)]),
+        );
+        let lists = [
+            "dangerous_apis",
+            "also_in",
+            "interfaces",
+            "inner_classes",
+            "methods",
+            "fields",
+            "referenced_classes",
+            "method_refs",
+        ];
+        for (limit, budget) in [(500, 4_000), (500, 80_000), (50, 80_000), (500, 12_000)] {
+            let (is_error, page, text) = call(
+                &mcp,
+                json!({"file_path": path, "class": "p.S", "limit": limit,
+                       "max_output_bytes": budget}),
+            )
+            .await;
+            assert!(!is_error, "{text}");
+            assert!(text.len() <= budget + 1_000, "{} > {budget}", text.len());
+            assert!(
+                page.get("truncated").is_none(),
+                "cut at {limit}/{budget}: {text}"
+            );
+            for list in lists {
+                let rows = page[list]["items"].as_array().unwrap().len() as u64;
+                assert_eq!(
+                    page[list]["returned"].as_u64().unwrap(),
+                    rows,
+                    "{list} at {limit}/{budget}"
+                );
+                if let Some(next) = page[list]["next_offset"].as_u64() {
+                    assert_eq!(next, page[list]["offset"].as_u64().unwrap() + rows);
+                    if budget >= 12_000 {
+                        assert!(rows > 0, "{list} empty at {limit}/{budget}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every page's hint that names an offset names `next_offset`.
+    fn assert_hints_agree(page: &Value) {
+        for list in [
+            "dangerous_apis",
+            "also_in",
+            "interfaces",
+            "inner_classes",
+            "methods",
+            "fields",
+            "referenced_classes",
+            "method_refs",
+        ] {
+            let l = &page[list];
+            if let Some(hint) = l.get("hint").and_then(Value::as_str) {
+                let next = l["next_offset"].as_u64().expect("hint without next_offset");
+                assert!(hint.contains(&format!("offset {next}")), "{list}: {hint}");
+            }
+        }
+    }
+
+    /// Rows of 150 to 250 bytes walked at 4,000 bytes by the smallest next_offset: every
+    /// method is seen once and no page is empty while rows remain.
+    #[tokio::test]
+    async fn class_view_walk_at_a_small_budget_sees_every_row_once() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let mut b = ClassBuilder::new("p/W");
+        for i in 0..40 {
+            let desc = format!("({})V", "I".repeat(150 + (i * 7) % 100));
+            b = b.method(&format!("m{i:02}"), &desc, 1);
+        }
+        for i in 0..30 {
+            b = b
+                .refers_to(&format!("p/Ref{i:02}"))
+                .calls("p/Q", &format!("c{i:02}"), "()V");
+        }
+        let inner: Vec<String> = (0..10).map(|i| format!("p/W$In{i}")).collect();
+        let inner_refs: Vec<&str> = inner.iter().map(String::as_str).collect();
+        b = b.inner_classes(&inner_refs);
+        let path = write(&dir, "walk.jar", &zip_bytes(&[("p/W.class", &b.build())]));
+        let mut seen = Vec::new();
+        let mut offset = 0u64;
+        for _ in 0..200 {
+            let (is_error, page, text) = call(
+                &mcp,
+                json!({"file_path": path, "class": "p.W", "limit": 500,
+                       "max_output_bytes": 4_000, "offset": offset}),
+            )
+            .await;
+            assert!(!is_error, "{text}");
+            assert_hints_agree(&page);
+            let m = &page["methods"];
+            let rows = m["items"].as_array().unwrap();
+            for r in rows {
+                seen.push(r["name"].as_str().unwrap().to_string());
+            }
+            match m["next_offset"].as_u64() {
+                Some(next) => {
+                    assert!(next > offset, "stalled at {offset}: {text}");
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        let expected: Vec<String> = (0..40).map(|i| format!("m{i:02}")).collect();
+        assert_eq!(seen, expected);
+    }
+
+    /// One 33 KB row (a method with 64 long throws) is returned when it fits what is left
+    /// of the whole budget although it is larger than one list's share, and when it does
+    /// not fit at all the page is empty, stays put and says what the row needs.
+    #[test]
+    fn fit_list_gives_a_very_large_row_the_unspent_bytes() {
+        let rows = vec![
+            json!({"name": "big", "throws": vec!["x".repeat(500); 64]}),
+            json!({"name": "small"}),
+        ];
+        let big = serde_json::to_vec(&rows[0]).unwrap().len();
+        assert!(big > 32_000, "{big}");
+        // The default budget: share one eighth, the rest still unspent.
+        let page = fit_list(&rows, 0, 500, 9_000, 78_000);
+        assert!(page["returned"].as_u64().unwrap() >= 1, "{page}");
+        assert_eq!(page["items"][0]["name"], "big");
+        // Not enough room anywhere: no rows, no skip, honest hint.
+        let page = fit_list(&rows, 0, 500, 500, 3_000);
+        assert_eq!(page["returned"], 0);
+        assert_eq!(page["next_offset"], 0);
+        let hint = page["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("offset 0") && hint.contains("needs about"),
+            "{hint}"
+        );
+        assert!(!hint.contains("cut to"), "{hint}");
     }
 }

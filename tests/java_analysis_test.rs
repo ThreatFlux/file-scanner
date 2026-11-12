@@ -1001,7 +1001,7 @@ fn cf10_nested_archives_are_opened_one_level_deep() -> Result<()> {
         SecurityThreatLevel::High
     );
 
-    // EAR -> WAR (level 1) -> WEB-INF/lib/inner.jar (level 2): not opened.
+    // EAR -> WAR -> WEB-INF/lib/inner.jar is opened too (two levels of nesting).
     let inner = zip_bytes(&[("deep/Deep.class", &minimal_class("deep/Deep"))]);
     let war = zip_bytes(&[
         (
@@ -1020,10 +1020,9 @@ fn cf10_nested_archives_are_opened_one_level_deep() -> Result<()> {
     );
     let result = analyze_java_archive_full(&ear)?;
     let names: Vec<&str> = result.classes.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, vec!["w.Servlet"]);
+    assert_eq!(names, vec!["w.Servlet", "deep.Deep"]);
     assert_eq!(result.nested_archives.len(), 2);
-    let deep = result.nested_archives.iter().find(|n| !n.opened).unwrap();
-    assert!(deep.path.ends_with("inner.jar"));
+    assert!(result.nested_archives.iter().all(|n| n.opened));
     Ok(())
 }
 
@@ -1718,5 +1717,316 @@ fn unread_content_is_never_rated_low() -> Result<()> {
     let result = analyze_java_path(&path)?;
     assert_eq!(result.nested_opened_total, 500);
     not_low(&result);
+    Ok(())
+}
+
+/// Sets the ZIP "encrypted" flag (general-purpose bit 0) on the entry called `name`, in
+/// both its local and its central header, leaving the data as it was.
+fn set_encryption_flag(zip: &mut [u8], name: &str) {
+    let needle = name.as_bytes();
+    let mut at = 0;
+    while at + 46 < zip.len() {
+        let is_local = zip[at..].starts_with(b"PK\x03\x04");
+        let is_central = zip[at..].starts_with(b"PK\x01\x02");
+        if is_local || is_central {
+            let (flag_at, name_at, len_at) = if is_local {
+                (at + 6, at + 30, at + 26)
+            } else {
+                (at + 8, at + 46, at + 28)
+            };
+            let len = usize::from(u16::from_le_bytes([zip[len_at], zip[len_at + 1]]));
+            if &zip[name_at..name_at + len] == needle {
+                zip[flag_at] |= 1;
+            }
+        }
+        at += 1;
+    }
+}
+
+/// A 10-byte class that declares 65,534 constant-pool slots and holds none.
+fn stub_pool_class() -> Vec<u8> {
+    let mut stub = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61];
+    stub.extend(0xFFFFu16.to_be_bytes());
+    stub
+}
+
+/// A constant pool is never allocated from its declared size, and classes that fail to
+/// parse are charged to the work budget: 300,000 stubs in a nested JAR stay cheap.
+#[test]
+fn stub_classes_declaring_huge_pools_are_cheap_and_counted() -> Result<()> {
+    let dir = TempDir::new()?;
+    assert!(parse_class_bytes_fails(&stub_pool_class()));
+    let stub = stub_pool_class();
+    let names: Vec<String> = (0..300_000).map(|i| format!("p/S{i}.class")).collect();
+    let entries: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|n| (n.as_str(), stub.as_slice()))
+        .collect();
+    let inner = zip_bytes(&entries);
+    let path = write_zip(dir.path(), "stubs.jar", &[("lib/inner.jar", &inner)]);
+    let started = std::time::Instant::now();
+    let result = analyze_java_path(&path)?;
+    let took = started.elapsed();
+    // Before the fix this cost about 40 s: 130 microseconds of allocation per stub.
+    assert!(took.as_secs() < 30, "took {took:?}");
+    assert_eq!(result.unparsed_classes, 300_000);
+    assert!(result.security_analysis.threat_level >= SecurityThreatLevel::Medium);
+    Ok(())
+}
+
+fn parse_class_bytes_fails(bytes: &[u8]) -> bool {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("stub.class");
+    std::fs::write(&path, bytes).unwrap();
+    analyze_class_file(&path).is_err()
+}
+
+/// ZIP entry names are shortened once; 65,000-byte names cannot build a huge result.
+#[test]
+fn long_entry_names_are_clipped_once() -> Result<()> {
+    let dir = TempDir::new()?;
+    let class = minimal_class("p/A");
+    let long: Vec<String> = (0..40)
+        .map(|i| format!("{}{i}.class", "d/".repeat(32_000)))
+        .collect();
+    let long_jar: Vec<String> = (0..10)
+        .map(|i| format!("{}{i}.jar", "e/".repeat(32_000)))
+        .collect();
+    let inner = zip_bytes(&[("p/B.class", &class)]);
+    let mut entries: Vec<(&str, &[u8])> = long
+        .iter()
+        .map(|n| (n.as_str(), class.as_slice()))
+        .collect();
+    entries.extend(long_jar.iter().map(|n| (n.as_str(), inner.as_slice())));
+    let path = write_zip(dir.path(), "names.jar", &entries);
+    let (size, result) = serialized_size(&path)?;
+    assert!(size < 400_000, "{size}");
+    assert_eq!(result.classes_total, 50);
+    for class in &result.classes {
+        assert!(class.entry.len() < 1_100, "{}", class.entry.len());
+        assert!(
+            class.entry.ends_with(".class")
+                || class.entry.ends_with(".jar")
+                || !class.entry.is_empty()
+        );
+    }
+    for row in &result.nested_archives {
+        assert!(row.path.len() < 1_100);
+    }
+    assert!(result.nested_opened_total == 10);
+    assert!(result.warnings.iter().any(|w| w.contains("shortened")));
+    for resource in &result.resources {
+        assert!(resource.path.len() < 1_100);
+    }
+    Ok(())
+}
+
+/// An EAR holding a WAR holding the dropper's JAR is read to the bottom.
+#[test]
+fn ear_war_jar_is_read_in_full() -> Result<()> {
+    let dir = TempDir::new()?;
+    let evil = zip_bytes(&[("com/acme/Evil.class", &runtime_exec_class("com/acme/Evil"))]);
+    let war = zip_bytes(&[("WEB-INF/lib/evil.jar", &evil)]);
+    let path = write_zip(
+        dir.path(),
+        "app.ear",
+        &[
+            ("META-INF/application.xml", b"<application/>"),
+            ("app.war", &war),
+        ],
+    );
+    let result = analyze_java_path(&path)?;
+    assert!(result.classes.iter().any(|c| c.name == "com.acme.Evil"));
+    assert!(result
+        .security_analysis
+        .api_findings
+        .iter()
+        .any(|f| f.category == "process_exec"));
+    assert!(result.security_analysis.threat_level >= SecurityThreatLevel::High);
+    assert_eq!(result.nested_opened_total, 2);
+    Ok(())
+}
+
+/// Archives nested deeper than the limit are unread: Medium, a warning, an anomaly, and the
+/// summary does not say nothing was found.
+#[test]
+fn archives_nested_too_deep_are_unread_not_clean() -> Result<()> {
+    let dir = TempDir::new()?;
+    let evil = zip_bytes(&[("com/acme/Evil.class", &runtime_exec_class("com/acme/Evil"))]);
+    let l3 = zip_bytes(&[("lib/evil.jar", &evil)]);
+    let l2 = zip_bytes(&[("lib/l3.jar", &l3)]);
+    let l1 = zip_bytes(&[("lib/l2.jar", &l2)]);
+    let path = write_zip(dir.path(), "deep.jar", &[("lib/l1.jar", &l1)]);
+    let result = analyze_java_path(&path)?;
+    let basis = result.security_analysis.threat_basis.join("; ");
+    assert!(
+        result.security_analysis.threat_level >= SecurityThreatLevel::Medium,
+        "{basis}"
+    );
+    assert!(!basis.contains("no dangerous API references"), "{basis}");
+    assert!(basis.contains("not opened"), "{basis}");
+    assert!(result.warnings.iter().any(|w| w.contains("nested deeper")));
+    assert!(!result.security_analysis.archive_anomalies.is_empty());
+    Ok(())
+}
+
+/// An entry the ZIP reader refuses (here: the encryption flag) is never "nothing found".
+#[test]
+fn entries_the_zip_reader_refuses_are_unread_not_clean() -> Result<()> {
+    let dir = TempDir::new()?;
+    let evil_class = runtime_exec_class("com/acme/Evil");
+    let evil_jar = zip_bytes(&[("com/acme/Evil.class", &evil_class)]);
+    let manifest = axml(&[
+        Some(("manifest", vec![("package", Av::Str("x.y"))])),
+        Some((
+            "uses-permission",
+            vec![("name", Av::Str("android.permission.SEND_SMS"))],
+        )),
+        None,
+        None,
+    ]);
+    type Case<'a> = (&'a str, Vec<(&'a str, Vec<u8>)>, &'a str);
+    let cases: Vec<Case> = vec![
+        (
+            "flag_class.jar",
+            vec![("com/acme/Evil.class", evil_class.clone())],
+            "com/acme/Evil.class",
+        ),
+        (
+            "flag_nested.war",
+            vec![("WEB-INF/lib/evil.jar", evil_jar.clone())],
+            "WEB-INF/lib/evil.jar",
+        ),
+        (
+            "flag_manifest.apk",
+            vec![("AndroidManifest.xml", manifest)],
+            "AndroidManifest.xml",
+        ),
+    ];
+    for (file, entries, flagged) in cases {
+        let refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+        let mut bytes = zip_bytes(&refs);
+        set_encryption_flag(&mut bytes, flagged);
+        let path = dir.path().join(file);
+        std::fs::write(&path, &bytes)?;
+        let result = analyze_java_path(&path)?;
+        let basis = result.security_analysis.threat_basis.join("; ");
+        assert!(
+            result.security_analysis.threat_level >= SecurityThreatLevel::Medium,
+            "{file}: {basis}"
+        );
+        assert!(
+            !basis.contains("no dangerous API references"),
+            "{file}: {basis}"
+        );
+        assert!(
+            result.warnings.iter().any(|w| w.contains(flagged)),
+            "{file}: {:?}",
+            result.warnings
+        );
+        assert!(
+            result
+                .security_analysis
+                .archive_anomalies
+                .iter()
+                .any(|a| a.contains(flagged)),
+            "{file}"
+        );
+    }
+    // The same archive without the flag is read, and an ordinary clean one says how much.
+    let clean = write_zip(
+        dir.path(),
+        "clean.jar",
+        &[("p/A.class", &minimal_class("p/A"))],
+    );
+    let result = analyze_java_path(&clean)?;
+    assert_eq!(
+        result.security_analysis.threat_level,
+        SecurityThreatLevel::Low
+    );
+    assert!(result
+        .security_analysis
+        .threat_basis
+        .iter()
+        .any(|b| b.contains("in the 1 entries read; 0 were not read")));
+    Ok(())
+}
+
+/// Many references of a mild kind cannot push a severe API out of a class's rows.
+#[test]
+fn network_references_cannot_hide_runtime_exec() -> Result<()> {
+    let dir = TempDir::new()?;
+    let mut b = ClassBuilder::new("p/Many");
+    let owners = [
+        "java/net/Socket",
+        "java/net/ServerSocket",
+        "java/net/DatagramSocket",
+        "java/net/MulticastSocket",
+        "java/nio/channels/SocketChannel",
+        "java/nio/channels/ServerSocketChannel",
+        "java/nio/channels/DatagramChannel",
+        "java/net/URLConnection",
+        "java/net/HttpURLConnection",
+        "javax/net/ssl/HttpsURLConnection",
+        "java/net/http/HttpClient",
+    ];
+    let methods = [
+        "<init>",
+        "connect",
+        "bind",
+        "accept",
+        "open",
+        "getInputStream",
+        "getOutputStream",
+        "send",
+        "sendAsync",
+        "getResponseCode",
+    ];
+    let mut network = 0;
+    for owner in owners {
+        for method in methods {
+            assert_eq!(classify_api(owner, method), Some("network"));
+            b = b.calls(owner, method, "()V");
+            network += 1;
+        }
+    }
+    assert!(network > 100);
+    let class = b
+        .calls(
+            "java/lang/Runtime",
+            "exec",
+            "(Ljava/lang/String;)Ljava/lang/Process;",
+        )
+        .build();
+    let path = write_zip(dir.path(), "many.jar", &[("p/Many.class", &class)]);
+    let result = analyze_java_path(&path)?;
+    assert!(result
+        .security_analysis
+        .api_findings
+        .iter()
+        .any(|f| f.category == "process_exec"));
+    assert!(result.security_analysis.threat_level >= SecurityThreatLevel::High);
+    let class = &result.classes[0];
+    assert!(class.dangerous_apis.len() <= 112);
+    assert!(class
+        .dangerous_apis
+        .iter()
+        .any(|a| a.category == "process_exec"));
+    assert!(class
+        .parse_warning
+        .as_deref()
+        .is_some_and(|w| w.contains("dangerous-API rows cut")));
+    // The ordinary side: a class with few references is not marked.
+    let plain = ClassBuilder::new("p/Plain")
+        .calls("java/net/URL", "openConnection", "()V")
+        .build();
+    let path = write_zip(dir.path(), "plain.jar", &[("p/Plain.class", &plain)]);
+    let result = analyze_java_path(&path)?;
+    assert!(result.classes[0].parse_warning.is_none());
+    assert!(!result
+        .security_analysis
+        .threat_basis
+        .iter()
+        .any(|b| b.contains("rows cut")));
     Ok(())
 }

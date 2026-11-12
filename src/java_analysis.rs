@@ -12,7 +12,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 use zip::ZipArchive;
@@ -666,10 +666,40 @@ fn entry_names<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Vec<String> {
     names
 }
 
+/// Archives inside archives are opened this many levels down (an EAR holding a WAR holding
+/// a JAR is read in full); anything nested deeper is counted as unread.
+const MAX_NEST_DEPTH: u8 = 2;
+
+/// Longest entry name kept (a ZIP name may be 65,535 bytes; thousands of those are
+/// the memory of the result, so the name is clipped once, where it is read).
+const MAX_ENTRY_NAME_BYTES: usize = 1024;
+
+/// `s` cut to about `max` bytes: its start, `...`, its end. The end is kept because it
+/// carries the extension and the file name. Cut on character boundaries.
+fn clip_name(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let head = max * 7 / 10;
+    let tail = max - head;
+    let mut a = head;
+    while !s.is_char_boundary(a) {
+        a -= 1;
+    }
+    let mut b = s.len() - tail;
+    while !s.is_char_boundary(b) {
+        b += 1;
+    }
+    format!("{}...{}", &s[..a], &s[b..])
+}
+
 fn entry_name<R: Read>(file: &zip::read::ZipFile<'_, R>) -> String {
     match file.name() {
-        Ok(name) => name.into_owned(),
-        Err(_) => String::from_utf8_lossy(file.name_raw()).into_owned(),
+        Ok(name) => clip_name(&name, MAX_ENTRY_NAME_BYTES),
+        Err(_) => clip_name(
+            &String::from_utf8_lossy(file.name_raw()),
+            MAX_ENTRY_NAME_BYTES,
+        ),
     }
 }
 
@@ -709,6 +739,10 @@ struct Scanner {
     result: JavaAnalysisResult,
     remaining: u64,
     class_count: usize,
+    /// Classes attempted, whether or not they parsed (see [`MAX_CLASSES`]).
+    class_attempts: usize,
+    names_clipped_warned: bool,
+    deep_warned: bool,
     nested_opened: usize,
     total_size: u64,
     compressed_size: u64,
@@ -746,6 +780,8 @@ struct ScanFacts {
     nested_unread: usize,
     /// `AndroidManifest.xml` was present but not read or not understood.
     manifest_unread: bool,
+    /// Classes whose dangerous-API rows were cut per category.
+    api_rows_cut: usize,
 }
 
 impl Scanner {
@@ -798,6 +834,9 @@ impl Scanner {
             },
             remaining: MAX_TOTAL_READ_BYTES,
             class_count: 0,
+            class_attempts: 0,
+            names_clipped_warned: false,
+            deep_warned: false,
             nested_opened: 0,
             total_size: 0,
             compressed_size: 0,
@@ -824,6 +863,7 @@ impl Scanner {
                 dropper: None,
                 nested_unread: 0,
                 manifest_unread: false,
+                api_rows_cut: 0,
             },
         }
     }
@@ -831,6 +871,13 @@ impl Scanner {
     /// Adds a class's dangerous APIs to the aggregated findings (every class, whether or
     /// not its own list is kept) and checks the dropper shape.
     fn fold_apis(&mut self, class: &ClassInfo) {
+        if class
+            .parse_warning
+            .as_deref()
+            .is_some_and(|w| w.contains(API_CUT_NOTE))
+        {
+            self.facts.api_rows_cut += 1;
+        }
         for api in &class.dangerous_apis {
             let key = (api.category.clone(), api.api.clone());
             if let Some(entry) = self.facts.api_groups.get_mut(&key) {
@@ -931,19 +978,25 @@ impl Scanner {
         depth: u8,
     ) {
         for i in 0..archive.len() {
-            let raw_name = archive
-                .by_index_raw(i)
-                .map_or_else(|_| format!("#{i}"), |f| entry_name(&f));
-            let mut file = match archive.by_index(i) {
-                Ok(file) => file,
-                Err(error) => {
-                    self.warn(format!(
-                        "Entry {raw_name} could not be opened ({error}); skipped"
-                    ));
-                    continue;
-                }
+            // One unit per entry visited: millions of tiny entries are bounded by the
+            // same work counter as everything else.
+            self.work += 1;
+            // Opening twice is cheap (no data is read) and keeps the archive free for the
+            // refused-entry path.
+            if let Some(error) = archive.by_index(i).err() {
+                self.refuse_entry(archive, i, &error.to_string(), container, depth);
+                continue;
+            }
+            let Ok(mut file) = archive.by_index(i) else {
+                continue;
             };
             let name = entry_name(&file);
+            if file.name_raw().len() > MAX_ENTRY_NAME_BYTES && !self.names_clipped_warned {
+                self.names_clipped_warned = true;
+                self.warn(format!(
+                    "Entry names longer than {MAX_ENTRY_NAME_BYTES} bytes are shortened                      (start and end kept)"
+                ));
+            }
             let size = file.size();
             let packed = file.compressed_size();
             let label = container.map_or_else(|| name.clone(), |c| format!("{c}!{name}"));
@@ -952,21 +1005,28 @@ impl Scanner {
                 self.total_size = self.total_size.saturating_add(size);
                 self.compressed_size = self.compressed_size.saturating_add(packed);
                 self.entry_sizes.push((name.clone(), size));
+                if self.entry_sizes.len() >= 256 {
+                    self.entry_sizes
+                        .sort_by_key(|item| std::cmp::Reverse(item.1));
+                    self.entry_sizes.truncate(10);
+                }
                 let extension = if name.ends_with('/') {
                     "dir".to_string()
                 } else {
                     Path::new(&name)
                         .extension()
                         .and_then(|ext| ext.to_str())
+                        .filter(|ext| ext.len() <= 16)
                         .unwrap_or("unknown")
                         .to_lowercase()
                 };
-                *self
-                    .result
-                    .metadata
-                    .entry_count_by_type
-                    .entry(extension)
-                    .or_insert(0) += 1;
+                let types = &mut self.result.metadata.entry_count_by_type;
+                let extension = if types.len() >= 512 && !types.contains_key(&extension) {
+                    "other".to_string()
+                } else {
+                    extension
+                };
+                *types.entry(extension).or_insert(0) += 1;
             }
             if size > ANOMALY_ENTRY_BYTES || (size > 1024 * 1024 && size / packed.max(1) > 1000) {
                 self.anomaly(format!(
@@ -1055,14 +1115,64 @@ impl Scanner {
 
             if lower.ends_with(".class") {
                 self.scan_class(&mut file, &name, size, container, &label);
-            } else if depth <= 1
-                && (lower.ends_with(".jar")
-                    || lower.ends_with(".war")
-                    || lower.ends_with(".ear")
-                    || lower.ends_with(".aar"))
+            } else if lower.ends_with(".jar")
+                || lower.ends_with(".war")
+                || lower.ends_with(".ear")
+                || lower.ends_with(".aar")
             {
                 self.open_nested(&mut file, &name, size, &label, depth);
             }
+        }
+    }
+
+    /// An entry the ZIP reader refuses to open (encrypted flag, unsupported method, damage).
+    /// Its content was not read, so it is a warning, an archive anomaly and, for a class, a
+    /// nested archive or the Android manifest, counted as unread.
+    fn refuse_entry<R: Read + Seek>(
+        &mut self,
+        archive: &mut ZipArchive<R>,
+        index: usize,
+        error: &str,
+        container: Option<&str>,
+        depth: u8,
+    ) {
+        let (name, size, encrypted) = archive.by_index_raw(index).map_or_else(
+            |_| (format!("#{index}"), 0, false),
+            |f| (entry_name(&f), f.size(), f.encrypted()),
+        );
+        let label = container.map_or_else(|| name.clone(), |c| format!("{c}!{name}"));
+        let lower = name.to_ascii_lowercase();
+        let what = if encrypted {
+            "has the encryption flag set"
+        } else {
+            "could not be opened"
+        };
+        let message = format!("Entry {label} {what} ({error}); its content was not read");
+        self.warn(message.clone());
+        self.anomaly(message);
+        if lower.ends_with(".class") {
+            self.result.unparsed_classes += 1;
+        } else if lower.ends_with(".jar")
+            || lower.ends_with(".war")
+            || lower.ends_with(".ear")
+            || lower.ends_with(".aar")
+        {
+            self.facts.nested_unread += 1;
+            self.push_nested(NestedArchive {
+                path: label,
+                size,
+                opened: false,
+                entries: 0,
+                classes: 0,
+                note: Some(format!("not opened: {what} ({error})")),
+            });
+        } else if depth == 0 && name == "AndroidManifest.xml" {
+            self.facts.manifest_unread = true;
+            self.result.limitations.push(
+                "AndroidManifest.xml could not be opened; package, permissions and components \
+                 are unknown"
+                    .to_string(),
+            );
         }
     }
 
@@ -1074,7 +1184,7 @@ impl Scanner {
         container: Option<&str>,
         label: &str,
     ) {
-        if self.class_count >= MAX_CLASSES {
+        if self.class_attempts >= MAX_CLASSES {
             if !self.class_cap_warned {
                 self.class_cap_warned = true;
                 self.warn(format!(
@@ -1084,7 +1194,9 @@ impl Scanner {
             self.result.unparsed_classes += 1;
             return;
         }
+        self.class_attempts += 1;
         let Some(bytes) = self.read_entry(file, size, MAX_CLASS_BYTES, label, true) else {
+            self.work += 1;
             self.result.unparsed_classes += 1;
             return;
         };
@@ -1121,6 +1233,8 @@ impl Scanner {
                 self.result.classes.push(class);
             }
             Err(error) => {
+                // A class that fails to parse is charged like one that parses.
+                self.work += class_pool_entries(&bytes) + 1;
                 self.result.unparsed_classes += 1;
                 self.warn(format!("{label}: not a readable class file ({error})"));
             }
@@ -1170,6 +1284,8 @@ impl Scanner {
             + class.java_version.len()
             + 4 * STRING_OVERHEAD;
         if self.fixed_bytes + fixed_len > MAX_FIXED_BYTES_TOTAL {
+            class.entry = clip_name(&class.entry, 160);
+            class.container = class.container.as_deref().map(|c| clip_name(c, 80));
             class.package.clear();
             class.super_class = None;
             class.source_file = None;
@@ -1238,8 +1354,15 @@ impl Scanner {
 
     /// Adds a nested-archive row, up to [`MAX_NESTED_ROWS`] (then it only warns, once).
     /// Returns the row's index when it was kept. The totals count every row.
-    fn push_nested(&mut self, row: NestedArchive) -> Option<usize> {
+    fn push_nested(&mut self, mut row: NestedArchive) -> Option<usize> {
         self.result.nested_total += 1;
+        // Paths are charged to the same budget as class names; past it they are shortened.
+        let path_len = row.path.len() + STRING_OVERHEAD;
+        if self.fixed_bytes + path_len > MAX_FIXED_BYTES_TOTAL {
+            row.path = clip_name(&row.path, 160);
+        } else if self.result.nested_archives.len() < MAX_NESTED_ROWS {
+            self.fixed_bytes += path_len;
+        }
         if row.opened {
             self.result.nested_opened_total += 1;
         }
@@ -1265,14 +1388,27 @@ impl Scanner {
         label: &str,
         depth: u8,
     ) {
-        if depth >= 1 {
+        if depth >= MAX_NEST_DEPTH {
+            // Not opened is not "nothing found": it counts as unread.
+            self.facts.nested_unread += 1;
+            let note = format!("{label}: nested deeper than {MAX_NEST_DEPTH} levels; not opened");
+            self.anomaly(note.clone());
+            if !self.deep_warned {
+                self.deep_warned = true;
+                self.warn(format!(
+                    "Archives nested deeper than {MAX_NEST_DEPTH} levels are not opened \
+                     (first: {label})"
+                ));
+            }
             self.push_nested(NestedArchive {
                 path: label.to_string(),
                 size,
                 opened: false,
                 entries: 0,
                 classes: 0,
-                note: Some("nested two levels deep; not opened".to_string()),
+                note: Some(format!(
+                    "nested deeper than {MAX_NEST_DEPTH} levels; not opened"
+                )),
             });
             return;
         }
@@ -1330,7 +1466,7 @@ impl Scanner {
                 let before = self.class_count;
                 // The row goes in first so it precedes the rows of archives inside it.
                 let row = self.push_nested(nested.clone());
-                self.scan_archive(&mut inner, Some(name), 1);
+                self.scan_archive(&mut inner, Some(name), depth + 1);
                 if let Some(at) = row {
                     self.result.nested_archives[at].classes = self.class_count - before;
                 }
@@ -1714,10 +1850,16 @@ fn parse_class_file_ending(class_data: &[u8], light: bool) -> Result<(ClassInfo,
     if count == 0 {
         return Err(anyhow!("Invalid class file: empty constant pool"));
     }
-    let mut pool = vec![Cp::Empty; count];
+    // The pool grows as slots are actually read: the declared count never drives an
+    // allocation (a 10-byte file may declare 65,534 slots).
+    let mut pool: Vec<Cp> = Vec::with_capacity(count.min(class_data.len() / 3 + 1));
+    pool.push(Cp::Empty);
     let mut i = 1usize;
     while i < count {
         let tag = r.u8()?;
+        if pool.len() <= i {
+            pool.resize(i + 1, Cp::Empty);
+        }
         pool[i] = match tag {
             1 => {
                 let len = usize::from(r.u16()?);
@@ -1768,6 +1910,7 @@ fn parse_class_file_ending(class_data: &[u8], light: bool) -> Result<(ClassInfo,
         };
         i += 1;
     }
+    pool.resize(count, Cp::Empty);
     let pool = Pool(pool);
 
     let mut info = ClassInfo {
@@ -1802,7 +1945,7 @@ fn parse_class_file_ending(class_data: &[u8], light: bool) -> Result<(ClassInfo,
     };
 
     // Everything from the pool is available even if the rest is damaged.
-    let (referenced, method_refs, apis, refs_cut) = collect_references(&pool, light);
+    let (referenced, method_refs, apis, refs_cut, apis_cut) = collect_references(&pool, light);
     info.referenced_classes = referenced;
     info.method_refs = method_refs;
     info.dangerous_apis = apis;
@@ -1823,6 +1966,9 @@ fn parse_class_file_ending(class_data: &[u8], light: bool) -> Result<(ClassInfo,
              references, or more than {MAX_REFS_PER_CLASS} of them"
         ));
     }
+    if apis_cut {
+        notes.push(API_CUT_NOTE.to_string());
+    }
     if !notes.is_empty() {
         info.parse_warning = Some(notes.join("; "));
     }
@@ -1840,6 +1986,10 @@ const MAX_REF_PART_CHARS: usize = 512;
 const MAX_REF_BYTES_PER_CLASS: usize = 64 * 1024;
 /// Most dangerous-API rows kept per class.
 const MAX_API_REFS_PER_CLASS: usize = 100;
+/// The note a class carries when dangerous-API rows were cut. The first row of every
+/// category is always kept (at most 12 more rows), so a severe API cannot be crowded out
+/// by 100 of a milder kind.
+const API_CUT_NOTE: &str = "dangerous-API rows cut at 100 per class";
 /// Longest owner or method name kept in a dangerous-API row.
 const MAX_API_PART_CHARS: usize = 128;
 /// Bytes of per-class dangerous-API rows kept across one analysis (later classes only
@@ -1927,7 +2077,10 @@ fn clip_chars(s: &str, max: usize) -> &str {
 ///
 /// Work per pool entry is constant: every name is looked at through [`clip_chars`], and an
 /// entry that repeats a class or method already seen costs one set lookup.
-fn collect_references(pool: &Pool, light: bool) -> (Vec<String>, Vec<String>, Vec<ApiRef>, bool) {
+fn collect_references(
+    pool: &Pool,
+    light: bool,
+) -> (Vec<String>, Vec<String>, Vec<ApiRef>, bool, bool) {
     let mut classes = BTreeSet::new();
     let mut methods = BTreeSet::new();
     let mut apis = BTreeSet::new();
@@ -1936,6 +2089,8 @@ fn collect_references(pool: &Pool, light: bool) -> (Vec<String>, Vec<String>, Ve
     let mut class_bytes = 0usize;
     let mut method_bytes = 0usize;
     let mut cut = false;
+    let mut api_cut = false;
+    let mut per_category: HashMap<&'static str, usize> = HashMap::new();
     for entry in &pool.0 {
         match entry {
             Cp::Class(_) if light => {}
@@ -1977,9 +2132,12 @@ fn collect_references(pool: &Pool, light: bool) -> (Vec<String>, Vec<String>, Ve
                 let name = clip_chars(name, MAX_REF_PART_CHARS);
                 let api_category = classify_api(owner, name);
                 if (light || methods.len() >= MAX_REFS_PER_CLASS)
-                    && api_category.is_none_or(|_| apis.len() >= MAX_API_REFS_PER_CLASS)
+                    && api_category.is_none_or(|c| {
+                        apis.len() >= MAX_API_REFS_PER_CLASS && per_category.contains_key(c)
+                    })
                 {
                     cut = true;
+                    api_cut |= api_category.is_some();
                     continue;
                 }
                 let owner_dotted = dotted(owner);
@@ -1999,17 +2157,22 @@ fn collect_references(pool: &Pool, light: bool) -> (Vec<String>, Vec<String>, Ve
                     }
                 }
                 if let Some(category) = api_category {
-                    if apis.len() < MAX_API_REFS_PER_CLASS {
-                        apis.insert(ApiRef {
-                            category: category.to_string(),
-                            api: format!(
-                                "{}.{}",
-                                clip_chars(&owner_dotted, MAX_API_PART_CHARS),
-                                clip_chars(name, MAX_API_PART_CHARS)
-                            ),
-                        });
-                    } else {
-                        cut = true;
+                    let api_ref = ApiRef {
+                        category: category.to_string(),
+                        api: format!(
+                            "{}.{}",
+                            clip_chars(&owner_dotted, MAX_API_PART_CHARS),
+                            clip_chars(name, MAX_API_PART_CHARS)
+                        ),
+                    };
+                    if !apis.contains(&api_ref) {
+                        let first_of_category = !per_category.contains_key(category);
+                        if apis.len() < MAX_API_REFS_PER_CLASS || first_of_category {
+                            *per_category.entry(category).or_insert(0) += 1;
+                            apis.insert(api_ref);
+                        } else {
+                            api_cut = true;
+                        }
                     }
                 }
             }
@@ -2021,6 +2184,7 @@ fn collect_references(pool: &Pool, light: bool) -> (Vec<String>, Vec<String>, Ve
         methods.into_iter().collect(),
         apis.into_iter().collect(),
         cut,
+        api_cut,
     )
 }
 
@@ -3250,6 +3414,15 @@ fn perform_security_analysis(result: &mut JavaAnalysisResult, facts: &ScanFacts)
             facts.groups_dropped, facts.dropped_severity
         ));
     }
+    if facts.api_rows_cut > 0 {
+        // The category (and so the severity) of every cut row is already counted; only
+        // the list of individual APIs is shorter.
+        basis.push(format!(
+            "{} class(es) had dangerous-API rows cut at {MAX_API_REFS_PER_CLASS} per class; \
+             findings list the first of each category, not every API",
+            facts.api_rows_cut
+        ));
+    }
     // Anything that was not read is not "clean": say what, and never report "nothing found".
     let not_read = |n: usize, what: &str| format!("{n} {what}");
     let mut unexamined: Vec<String> = Vec::new();
@@ -3263,7 +3436,7 @@ fn perform_security_analysis(result: &mut JavaAnalysisResult, facts: &ScanFacts)
     if facts.nested_unread > 0 {
         unexamined.push(not_read(
             facts.nested_unread,
-            "nested archive(s) were not opened (size cap, count cap, read budget or damage)",
+            "nested archive(s) were not opened (size cap, count cap, depth, read budget, encryption flag or damage)",
         ));
     }
     if facts.manifest_unread {
@@ -3287,8 +3460,16 @@ fn perform_security_analysis(result: &mut JavaAnalysisResult, facts: &ScanFacts)
         }
     }
     if basis.is_empty() && level == SecurityThreatLevel::Low {
+        let read = result.classes.len()
+            + result.nested_opened_total
+            + usize::from(result.android_manifest.is_some());
+        let unread =
+            result.unparsed_classes + facts.nested_unread + usize::from(facts.manifest_unread);
         basis.push(if result.security_analysis.api_findings.is_empty() {
-            "no dangerous API references or sensitive permissions found".to_string()
+            format!(
+                "no dangerous API references or sensitive permissions found in the {read} \
+                 entries read; {unread} were not read"
+            )
         } else {
             "only low-severity API references found (see findings)".to_string()
         });
