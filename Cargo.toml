@@ -176,7 +176,7 @@ threatflux-string-analysis = { version = "0.2.4" }
 threatflux-cache = { version = "0.2.3" } # TODO: Update library to use utoipa 5.4.0 for openapi feature
 threatflux-binary-analysis = { version = "0.3.2", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis
-threatflux-threat-detection = { version = "0.2.3", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
+threatflux-threat-detection = { version = "0.2.4", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
 # threatflux-package-security = { version = "0.1.0" } # Not used in actual source code
 
 # Core dependencies (using workspace versions)
@@ -311,4 +311,4 @@ debug = 2
 # Remove when published YARA-X resolves a patched Wasmtime release.
 [patch.crates-io]
 yara-x = { path = "vendor/yara-x-1.23.0" }
-libz-sys = { path = "vendor/libz-sys-1.1.31" }
+libz-sys = { path = "vendor/libz-sys-1.1.33" }

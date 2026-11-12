@@ -15,20 +15,20 @@ def require(condition, message):
 def main():
     root = Path(__file__).resolve().parent.parent
     manifest = tomllib.loads((root / "Cargo.toml").read_text())
-    relative = "vendor/libz-sys-1.1.31"
+    relative = "vendor/libz-sys-1.1.33"
     require(manifest["patch"]["crates-io"]["libz-sys"]["path"] == relative, "Native zlib patch changed")
     packages = tomllib.loads((root / "Cargo.lock").read_text())["package"]
     matches = [package for package in packages if package["name"] == "libz-sys"]
-    require(len(matches) == 1 and matches[0]["version"] == "1.1.31", "Native wrapper needs re-review")
+    require(len(matches) == 1 and matches[0]["version"] == "1.1.33", "Native wrapper needs re-review")
     require("source" not in matches[0], "Native zlib no longer resolves to reviewed local source")
     require(not any(dependency.split()[0] == "cmake"
                     for dependency in matches[0].get("dependencies", [])), "zlib-ng needs separate review")
     hashes = {
-        "Cargo.toml": "8bb02320e7386c6706861d118ea25f29c532b35ef01ac707e428a90d5d6d72cb",
+        "Cargo.toml": "73444b73ef59a62cdd205c8047f9e305782f737e0d68b1d0dfc324986527e40f",
         "build.rs": "7526233222d96150a0e594fa9e7cc36a07716330bbd4f1461fedf7c87d866c48",
-        "src/zlib/zlib.h": "818667d6ab6a37fe7469cb06a7f0cb2c2cb2f2c948a03e5accf1a4a74bf3020a",
-        "src/zlib/crc32.c": "da37f3483e77c20f64c28cf55d62d7bed9d62af33eb401be906835d84539b9c9",
-        "src/zlib/gzwrite.c": "31d0da140edf382b82b13e2d87a22f59e158d9014ee026459e01cf437d0ab07d",
+        "src/zlib/zlib.h": "2c404dcaa08709c2a129aea18f3dad4fb5acc5cb52ef12b6223bf8e78c195801",
+        "src/zlib/crc32.c": "dd941a0a499a27517e3be0624c2e0dc683f0591bf29dd1ed54e65443cb19beb6",
+        "src/zlib/gzwrite.c": "e57621b7fffbc1909401acad13bef42adb5debee24a4c356a246f6b480e2db02",
     }
     for name, digest in hashes.items():
         require(hashlib.sha256((root / relative / name).read_bytes()).hexdigest() == digest,
@@ -37,7 +37,7 @@ def main():
     selection = re.search(r"^ENV LIBZ_SYS_STATIC=1$", docker, re.MULTILINE)
     require(selection and selection.start() < docker.index("cargo build --release"),
             "Production must use patched bundled zlib")
-    print("Native zlib: reviewed local 1.3.2 CRC code, upstream gzip backport and static production selection verified")
+    print("Native zlib: reviewed official zlib1.4 CRC code and upstream-fixed gzip source and static production selection verified")
 
 
 if __name__ == "__main__":

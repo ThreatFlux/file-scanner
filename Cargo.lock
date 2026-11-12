@@ -2280,7 +2280,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libz-sys"
-version = "1.1.31"
+version = "1.1.33"
 dependencies = [
  "cc",
  "libc",
@@ -4397,9 +4397,9 @@ dependencies = [
 
 [[package]]
 name = "threatflux-threat-detection"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eac38a3387de15995263abc05295787b4692ab2a944d5a3071d1fff37b4cd18"
+checksum = "720272194e648b1de6a538671e89401d0ad3b86306fc836f2c6d5017d6708450"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -4407,6 +4407,7 @@ dependencies = [
  "chrono",
  "log",
  "regex",
+ "rsa",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

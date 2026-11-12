@@ -22,11 +22,16 @@ def main():
         package for package in packages
         if any(dependency.split()[0] == "rsa" for dependency in package.get("dependencies", []))
     ]
-    require(
-        len(users) == 1 and users[0]["name"] == "yara-x" and users[0]["version"] == "1.23.0",
-        "RSA has a new caller or YARA-X version",
-    )
-    require("source" not in users[0], "YARA-X no longer uses the reviewed local source")
+    yara = [package for package in users if package["name"] == "yara-x"]
+    require(len(yara) == 1 and yara[0]["version"] == "1.23.0",
+            "YARA-X verification parent changed")
+    require("source" not in yara[0], "YARA-X no longer uses reviewed local source")
+    shim = [package for package in users if package["name"] == "threatflux-threat-detection"]
+    # This immutable published producer enables RSA's pkcs1v15 feature for
+    # upstream YARA. Every Rust source file was checked: it invokes no RSA API.
+    require(len(users) == 2 and len(shim) == 1 and shim[0]["version"] == "0.2.4"
+            and shim[0].get("checksum") == "720272194e648b1de6a538671e89401d0ad3b86306fc836f2c6d5017d6708450",
+            "RSA feature-only producer shim changed")
     for relative in (".cargo/audit.toml", "deny.toml"):
         require("RUSTSEC-2023-0071" not in (root / relative).read_text(),
                 "obsolete RSA waiver was restored")
@@ -45,7 +50,7 @@ def main():
         for source in directory.rglob("*.rs"):
             if source != crypto:
                 require(not rsa_use.search(source.read_text()), f"new RSA use in {source.relative_to(root)}")
-    print("Stable RSA policy: version, sole YARA-X caller and public-key-only source verified; old advisory waiver removed")
+    print("Stable RSA policy: version, reviewed feature-only producer shim and public-key-only YARA source verified; old advisory waiver removed")
 
 
 if __name__ == "__main__":

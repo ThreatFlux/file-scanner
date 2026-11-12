@@ -8,3 +8,4 @@ vendor/threatflux-binary-analysis-0.3.1.patch -whitespace
 
 vendor/libz-sys-1.1.30/** linguist-vendored -whitespace
 vendor/libz-sys-1.1.30.patch -whitespace
+vendor/libz-sys-1.1.33/** linguist-vendored -whitespace
