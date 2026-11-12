@@ -30,8 +30,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUST_VERSION: 1.99.1
-  RUSTUP_TOOLCHAIN: 1.99.1
+  RUST_VERSION: 1.100.0
+  RUSTUP_TOOLCHAIN: 1.100.0
   # The crate is threatflux-file-scanner (crates.io treats - and _ alike, so the
   # unrelated file_scanner crate owns the file-scanner name); the binary, the
   # release asset names and the image keep the file-scanner name.

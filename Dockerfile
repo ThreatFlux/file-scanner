@@ -13,6 +13,15 @@
 # rust 1.99.1 on Debian 13 (trixie); multi-arch index digest
 FROM rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS rust-base
 
+# Rust 1.100.0 is stable; its official container tags are not available yet.
+# Use the pinned 1.99.1 image only to bootstrap the exact production compiler.
+ENV RUST_VERSION=1.100.0
+RUN rustup toolchain install 1.100.0 --profile minimal --no-self-update && \
+    rustup component add --toolchain 1.100.0 clippy rustfmt llvm-tools-preview && \
+    rustup default 1.100.0 && \
+    rustup toolchain uninstall 1.99.1 && \
+    rustc --version | grep -q '^rustc 1[.]100[.]0 '
+
 ARG VERSION=0.3.5
 ARG BUILD_DATE=unknown
 ARG VCS_REF=unknown
