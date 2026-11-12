@@ -31,37 +31,44 @@ use super::{
     FileScannerMcp,
 };
 
-const ANALYZE_NPM_DESCRIPTION: &str = "Vet an npm package for malicious code, vulnerable \
+/// The source files both package tools scan, whatever the ecosystem (a `.py` inside an
+/// npm package and a `.js` inside a Python package are scanned too).
+macro_rules! scanned_files {
+    () => {
+        "Source files (JavaScript/TypeScript .js .mjs .cjs .jsx .ts .tsx .mts .cts, Python .py .pyw .pth, \
+and scripts .sh .bash .zsh .cmd .bat .ps1, in every package; up to 400 files, 1 MiB each, 16 MiB in all)"
+    };
+}
+
+const ANALYZE_NPM_DESCRIPTION: &str = concat!("Vet an npm package for malicious code, vulnerable \
 dependencies and typosquatting. Offline: pass the absolute path of a LOCAL .tgz/.tar.gz (what \
 `npm pack` writes; detected by content), an unpacked package directory, or a package-lock.json / \
 npm-shrinkwrap.json (dependency list only). A registry name such as `express` or `lodash@4.17.4` \
-is rejected: nothing is downloaded. Source files (.js .mjs .cjs .jsx .ts .tsx .mts .cts and scripts .sh .bash .zsh .cmd .bat .ps1, up to 400 files, 1 MiB \
-each, 16 MiB in all) are scanned for download-and-execute, eval of decoded payloads, credential and wallet \
+is rejected: nothing is downloaded. ", scanned_files!(), " are scanned for download-and-execute (shell one-liners and Node/Python download-write-run code), eval of decoded payloads, credential and wallet \
 access, exfiltration endpoints, miners, reverse shells and obfuscation, with file and line \
-evidence. Vulnerability data is a SMALL OFFLINE TABLE (6 packages, newest advisory 2022): an empty \
+evidence; a file an install hook runs (`node scripts/setup.js`) counts as install-time code. A dependency on a release the table marks as malicious rates High or more; archive entries with `..`, absolute paths or links rate High. Vulnerability data is a SMALL OFFLINE TABLE (6 packages, newest advisory 2022): an empty \
 vulnerability list does not mean a package is clean; every result states the table's source, date \
 and size. The first call returns a summary. Then use `section` = findings (paged, worst first), \
 files, dependencies (paged; `query` filters by name) or scripts to dig in. For one suspicious \
-file call analyze_file or analyze_script on it; yara_scan_file runs a rule over the package. \
+file call analyze_file or analyze_script on it; yara_scan_file needs the UNPACKED directory (on a .tgz, .whl or .zip it would scan the compressed bytes and find nothing). \
 Results are compact JSON capped at `max_output_bytes` (default 80000, ceiling 400000); cut lists \
-are reported under `truncated`.";
+are reported under `truncated`.");
 
-const ANALYZE_PYTHON_DESCRIPTION: &str = "Vet a Python package for malicious code, vulnerable \
+const ANALYZE_PYTHON_DESCRIPTION: &str = concat!("Vet a Python package for malicious code, vulnerable \
 dependencies and typosquatting. Offline: pass the absolute path of a LOCAL wheel (.whl), sdist \
 (.tar.gz/.tgz) or .zip (all detected by content), a source directory, a setup.py / pyproject.toml, \
 or a dependency list (requirements.txt, poetry.lock). A PyPI name such as `requests` or \
-`requests==2.5.0` is rejected: nothing is downloaded. Source files (.py .pyw .pth and scripts .sh .bash .zsh .cmd .bat .ps1, up to 400 files, \
-1 MiB each, 16 MiB in all) are scanned for download-and-execute, exec of decoded payloads, credential and wallet \
+`requests==2.5.0` is rejected: nothing is downloaded. ", scanned_files!(), " are scanned for download-and-execute (shell one-liners and Node/Python download-write-run code), exec of decoded payloads, credential and wallet \
 access, exfiltration endpoints, miners, reverse shells and obfuscation, with file and line \
-evidence; setup.py is checked for install-time behaviour. Vulnerability data is a SMALL OFFLINE \
+evidence; setup.py is checked for install-time behaviour. A dependency on a release the table marks as malicious rates High or more; archive entries with `..`, absolute paths or links rate High. Vulnerability data is a SMALL OFFLINE \
 TABLE (7 packages, newest advisory 2023): an empty vulnerability list does not mean a package is \
 clean; every result states the table's source, date and size. Version matching follows PEP 440 \
 with normalised names; an unpinned requirement is unknown, not vulnerable. The first call returns \
 a summary. Then use `section` = findings (paged, worst first), files, dependencies (paged; \
 `query` filters by name) or scripts to dig in. For one suspicious file call analyze_file or \
-analyze_script on it; yara_scan_file runs a rule over the package. Results are compact JSON \
+analyze_script on it; yara_scan_file needs the UNPACKED directory (on a .tgz, .whl or .zip it would scan the compressed bytes and find nothing). Results are compact JSON \
 capped at `max_output_bytes` (default 80000, ceiling 400000); cut lists are reported under \
-`truncated`.";
+`truncated`.");
 
 /// Which part of the analysis a call returns.
 #[derive(
@@ -742,6 +749,7 @@ fn summary(ecosystem: Ecosystem, path: &Path, full: &Value) -> Value {
             },
             "vulnerable": vulnerable,
             "range_may_include_vulnerable": unresolved,
+            "known_malicious_releases": dep_summary["malicious_releases"],
         },
         "package_advisories": deps["package_vulnerabilities"]
             .as_array()
@@ -908,6 +916,7 @@ fn dependencies_page(full: &Value, view: &View) -> Value {
                     Value::Null
                 },
                 "resolved": details["resolved_version"],
+                "known_malicious_release": malicious_flag(details).then_some(true),
                 "advisories": advisories(&details["vulnerabilities"]),
                 "range_may_include": details["range_floor_advisories"].as_array().filter(|l| !l.is_empty()),
             }));
@@ -940,6 +949,7 @@ fn dependencies_page(full: &Value, view: &View) -> Value {
                 "name": name,
                 "kind": if dev { "locked-dev" } else { "locked" },
                 "resolved": package["version"],
+                "known_malicious_release": malicious_flag(package).then_some(true),
                 "advisories": advisories(&package["vulnerabilities"]),
             }));
         }
@@ -966,6 +976,15 @@ fn dependencies_page(full: &Value, view: &View) -> Value {
     let mut out = page(&rows, view.offset, view.limit);
     if let Some(object) = out.as_object_mut() {
         object.insert("section".to_string(), json!("dependencies"));
+        if deps["vulnerability_summary"]["malicious_releases"]
+            .as_array()
+            .is_some_and(|l| !l.is_empty())
+        {
+            object.insert(
+                "known_malicious_releases".to_string(),
+                deps["vulnerability_summary"]["malicious_releases"].clone(),
+            );
+        }
         object.insert(
             "advisory_data".to_string(),
             deps["vulnerability_db"].clone(),
@@ -977,6 +996,20 @@ fn dependencies_page(full: &Value, view: &View) -> Value {
         }
     }
     out
+}
+
+/// A dependency that is a release or package the built-in table marks as malware: the
+/// npm analysis sets the flag; the Python table writes a `KNOWN-` advisory entry.
+fn malicious_flag(row: &Value) -> bool {
+    row["known_malicious_release"] == json!(true)
+        || row["vulnerabilities"].as_array().is_some_and(|list| {
+            list.iter().any(|v| {
+                matches!(
+                    v["cve_id"].as_str(),
+                    Some("KNOWN-COMPROMISED-RELEASE" | "KNOWN-MALICIOUS-PACKAGE")
+                )
+            })
+        })
 }
 
 fn advisories(list: &Value) -> Value {
@@ -1048,6 +1081,49 @@ fn scripts_view(ecosystem: Ecosystem, full: &Value) -> Value {
         }
         Ecosystem::Python => {
             let setup = &full["setup_analysis"];
+            let kind = full["input"]["kind"].as_str().unwrap_or("");
+            // A dependency list or a wheel has no setup script: do not name a setup
+            // type it does not have.
+            let no_setup = match kind {
+                "requirements" | "lockfile" => Some(
+                    "A dependency list has no setup script: nothing in it runs at install time.",
+                ),
+                "wheel" => Some(
+                    "A wheel is already built and has no setup script; installing it runs none of the package's code (except .pth files).",
+                ),
+                _ => None,
+            };
+            if let Some(note) = no_setup {
+                return json!({
+                    "section": "scripts",
+                    "setup_type": Value::Null,
+                    "note": note,
+                    "setup_commands": [],
+                    "dangerous_operations": [],
+                    "external_downloads": [],
+                    "suspicious_imports": [],
+                });
+            }
+            // Operations are listed under dangerous_operations; the import rows are
+            // only the modules a setup script imports.
+            let operation_names: std::collections::HashSet<&str> = setup["dangerous_operations"]
+                .as_array()
+                .map(|l| l.iter().filter_map(|o| o["operation"].as_str()).collect())
+                .unwrap_or_default();
+            let modules: Vec<Value> = full["security_analysis"]["suspicious_imports"]
+                .as_array()
+                .map(|l| {
+                    l.iter()
+                        .filter(|i| {
+                            !i["module_name"]
+                                .as_str()
+                                .is_some_and(|m| operation_names.contains(m))
+                        })
+                        .take(40)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
             json!({
                 "section": "scripts",
                 "setup_type": setup["setup_type"],
@@ -1055,7 +1131,7 @@ fn scripts_view(ecosystem: Ecosystem, full: &Value) -> Value {
                 "custom_commands": setup["custom_commands"],
                 "dangerous_operations": setup["dangerous_operations"].as_array().map(|l| l.iter().take(40).cloned().collect::<Vec<_>>()),
                 "external_downloads": setup["external_downloads"],
-                "suspicious_imports": full["security_analysis"]["suspicious_imports"].as_array().map(|l| l.iter().take(40).cloned().collect::<Vec<_>>()),
+                "suspicious_imports": modules,
             })
         }
     }

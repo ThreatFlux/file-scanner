@@ -114,6 +114,10 @@ pub struct VulnerabilitySummary {
     /// Requirements whose specifier could install an affected version (not counted above).
     #[serde(default)]
     pub unresolved_range_hits: Vec<String>,
+    /// Dependencies (direct or locked) that are a known malicious release or package
+    /// according to the built-in table: malware, not an ordinary advisory.
+    #[serde(default)]
+    pub malicious_releases: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -458,8 +462,8 @@ fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<PythonPackageAna
     let mut scan = SourceScan::default();
     for file in &loaded.files {
         let mut analysis = PythonFileAnalysis {
-            file_path: file.path.clone(),
-            file_type: detect_python_file_type(&file.path),
+            file_path: file.display_path().to_string(),
+            file_type: detect_python_file_type(file.display_path()),
             size: file.size,
             suspicious_content: vec![],
             imports: vec![],
@@ -467,7 +471,7 @@ fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<PythonPackageAna
             source_scanned: false,
         };
         if let (Some(lang), Some(bytes)) = (language_of(&file.path), file.content.as_deref()) {
-            let result = scan_source(lang, &file.path, bytes);
+            let result = scan_source(lang, file.display_path(), bytes);
             analysis.source_scanned = true;
             analysis.obfuscation_score = result.obfuscation_score;
             analysis.imports = result.imports;
@@ -477,7 +481,7 @@ fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<PythonPackageAna
                 .map(|f| format!("line {}: {}", f.line, f.rule))
                 .collect();
             for (url, line) in result.suspicious_urls {
-                scan.urls.push((url, file.path.clone(), line));
+                scan.urls.push((url, file.display_path().to_string(), line));
             }
             if scan.findings.len() < MAX_FINDINGS {
                 scan.findings.extend(result.findings);
@@ -486,7 +490,10 @@ fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<PythonPackageAna
         files.push(analysis);
     }
     scan.findings.truncate(MAX_FINDINGS);
+    let unsafe_findings = package_scan::unsafe_entry_findings(loaded);
+    scan.findings.extend(unsafe_findings);
     sort_findings(&mut scan.findings);
+    let unsafe_note = package_scan::unsafe_entry_note(loaded);
 
     // A wheel: <name>-<version>.dist-info/METADATA at the top level.
     let wheel_metadata = loaded
@@ -507,6 +514,7 @@ fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<PythonPackageAna
             loaded,
             Some(&path),
         );
+        input.notes.extend(unsafe_note.clone());
         let other_dist_infos: std::collections::BTreeSet<String> = loaded
             .files
             .iter()
@@ -559,7 +567,8 @@ fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<PythonPackageAna
         .or(pkg_info.as_ref())
         .map(|(path, _)| path.clone());
     let lock = at("poetry.lock").map(|(_, text)| parse_poetry_lock(&text));
-    let input = InputInfo::from_loaded(kind, loaded, manifest.as_deref());
+    let mut input = InputInfo::from_loaded(kind, loaded, manifest.as_deref());
+    input.notes.extend(unsafe_note);
     let format = if kind == "directory" {
         PackageFormat::Directory
     } else {
@@ -853,14 +862,27 @@ fn finish_dependencies(
         }
     }
     summary.vulnerable_packages.sort();
+    summary.malicious_releases.sort();
+    summary.malicious_releases.dedup();
     summary.unresolved_range_hits.sort();
     summary.unresolved_range_hits.dedup();
     dependencies.vulnerability_summary = summary;
 }
 
+/// An advisory entry the built-in table writes for a release or package that is malware.
+fn is_malware_entry(vuln: &KnownVulnerability) -> bool {
+    matches!(
+        vuln.cve_id.as_str(),
+        "KNOWN-COMPROMISED-RELEASE" | "KNOWN-MALICIOUS-PACKAGE"
+    )
+}
+
 fn tally_vulns(summary: &mut VulnerabilitySummary, name: &str, vulns: &[KnownVulnerability]) {
     if vulns.is_empty() {
         return;
+    }
+    if vulns.iter().any(is_malware_entry) {
+        summary.malicious_releases.push(name.to_string());
     }
     summary.vulnerable_packages.push(name.to_string());
     summary.total_count += vulns.len();
@@ -1106,6 +1128,7 @@ fn dependency_list_analysis(
             total_count: 0,
             vulnerable_packages: vec![],
             unresolved_range_hits: vec![],
+            malicious_releases: vec![],
         },
         locked_packages: vec![],
         package_vulnerabilities: vec![],
@@ -1695,6 +1718,7 @@ fn calculate_vulnerability_summary(
         total_count: 0,
         vulnerable_packages: vec![],
         unresolved_range_hits: vec![],
+        malicious_releases: vec![],
     };
     let mut names: Vec<&String> = dependencies.keys().collect();
     names.sort();
@@ -1819,10 +1843,11 @@ fn perform_security_analysis(
 
     // Obfuscation: a file that looks packed, or an exec of decoded content in the setup script.
     let obfuscation_detected = detect_obfuscation(files)
-        || scan
-            .findings
-            .iter()
-            .any(|f| f.category == "obfuscation" && is_setup_py_finding(f));
+        || scan.findings.iter().any(|f| {
+            f.category == "obfuscation"
+                && !f.in_comment
+                && (is_setup_py_finding(f) || f.severity != "Medium")
+        });
 
     let crypto_mining_indicators = scan.findings.iter().any(|f| f.category == "cryptomining");
     // A download in setup.py is listed under network patterns; only an exfiltration
@@ -2051,6 +2076,41 @@ fn apply_input_floor(
     }
 }
 
+/// Advisory counts of the dependencies that are not malware entries:
+/// (total, critical, high, medium).
+fn ordinary_advisory_counts(
+    dependencies: &PythonDependencyAnalysis,
+) -> (usize, usize, usize, usize) {
+    let mut counts = (0usize, 0usize, 0usize, 0usize);
+    let mut add = |vulns: &[KnownVulnerability]| {
+        for vuln in vulns.iter().filter(|v| !is_malware_entry(v)) {
+            counts.0 += 1;
+            match vuln.severity {
+                VulnerabilitySeverity::Critical => counts.1 += 1,
+                VulnerabilitySeverity::High => counts.2 += 1,
+                VulnerabilitySeverity::Medium => counts.3 += 1,
+                _ => {}
+            }
+        }
+    };
+    let mut direct = std::collections::HashSet::new();
+    for (name, details) in dependencies
+        .install_requires
+        .iter()
+        .chain(&dependencies.setup_requires)
+        .chain(&dependencies.tests_require)
+    {
+        direct.insert(normalize_name(name));
+        add(&details.vulnerabilities);
+    }
+    for package in &dependencies.locked_packages {
+        if !direct.contains(&normalize_name(&package.name)) {
+            add(&package.vulnerabilities);
+        }
+    }
+    counts
+}
+
 /// Points the dependency vulnerability counts add to the risk score.
 fn vulnerability_points(critical: usize, high: usize, medium: usize) -> f32 {
     if critical > 0 {
@@ -2135,6 +2195,25 @@ fn detect_malicious_indicators(
     }
 
     let summary = &dependencies.vulnerability_summary;
+    let malicious_dependencies = !summary.malicious_releases.is_empty();
+    if malicious_dependencies {
+        reasons.push(format!(
+            "depends on {} known malicious release(s): {}",
+            summary.malicious_releases.len(),
+            summary
+                .malicious_releases
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    // The advisories of a malicious release are part of the malware finding above.
+    let (other_total, other_critical, other_high, _other_medium) =
+        ordinary_advisory_counts(dependencies);
+    // Points use the full counts (a malicious release adds at least a Critical
+    // advisory's weight); only the reason's wording leaves the malware out.
     let dep_points = vulnerability_points(
         summary.critical_count,
         summary.high_count,
@@ -2142,10 +2221,20 @@ fn detect_malicious_indicators(
     );
     if dep_points > 0.0 {
         overall_risk_score += dep_points;
-        reasons.push(format!(
-            "{} known vulnerability(ies) in dependencies ({} critical, {} high)",
-            summary.total_count, summary.critical_count, summary.high_count
-        ));
+        let (total, critical, high) = if malicious_dependencies {
+            (other_total, other_critical, other_high)
+        } else {
+            (
+                summary.total_count,
+                summary.critical_count,
+                summary.high_count,
+            )
+        };
+        if total > 0 {
+            reasons.push(format!(
+                "{total} known vulnerability(ies) in dependencies ({critical} critical, {high} high)"
+            ));
+        }
     }
     if !dependencies.package_vulnerabilities.is_empty() {
         let critical = dependencies
@@ -2194,8 +2283,17 @@ fn detect_malicious_indicators(
         // A known-bad name or release is Critical on its own.
         overall_risk_score = overall_risk_score.max(80.0);
     }
-    if !strong_evidence {
+    if malicious_dependencies {
+        // Depending on a hijacked or trojaned release is a supply-chain compromise,
+        // not an ordinary advisory: at least High.
+        overall_risk_score = overall_risk_score.max(70.0);
+    }
+    if !strong_evidence && !malicious_dependencies {
         overall_risk_score = overall_risk_score.min(59.0);
+    }
+    if typosquatting_risk.is_potential_typosquatting {
+        // The name is flagged as imitating another: the level must match the flag.
+        overall_risk_score = overall_risk_score.max(40.0);
     }
 
     let risk_level = match overall_risk_score {

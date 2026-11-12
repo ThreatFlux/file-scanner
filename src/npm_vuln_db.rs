@@ -1206,6 +1206,17 @@ pub fn get_known_malicious_versions() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// Whether `name@version` is a release the built-in table marks as malicious
+/// (hijacked or trojaned). `version` is normalised first (`=1.2.3`, `v1.2.3`).
+pub fn is_known_malicious_release(name: &str, version: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    let wanted = SemVer::parse(version.trim().trim_start_matches(['=', 'v']))
+        .map_or_else(|| version.trim().to_string(), |v| v.to_string());
+    get_known_malicious_versions()
+        .iter()
+        .any(|(n, v)| *n == lower && *v == wanted)
+}
+
 /// Typosquatting check against the popular-package list.
 ///
 /// The name is lower-cased first. A name that is itself on the list is never

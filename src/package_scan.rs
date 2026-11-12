@@ -69,6 +69,12 @@ const TAR_DAMAGED: &str =
 const MAX_PER_RULE_PER_FILE: usize = 3;
 /// Findings kept per file.
 const MAX_PER_FILE: usize = 40;
+/// Statements of one attack chain (fetch, write, run) sit within this many lines.
+const FLOW_WINDOW: usize = 60;
+/// Longer lines (minified bundles) are not judged by the whole-file checks.
+const FLOW_MAX_LINE: usize = 1000;
+/// The environment and the send that carries it are this close.
+const FLOW_ENV_WINDOW: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Advisory data provenance
@@ -303,6 +309,122 @@ pub struct LoadedFile {
     pub content: Option<Vec<u8>>,
     /// The content was cut at [`MAX_FILE_BYTES`].
     pub partial: bool,
+    /// The entry's path as the archive spells it, only when that differs from
+    /// `path` in a way that matters (an absolute path such as `/abs/evil.js`).
+    pub archive_path: Option<String>,
+}
+
+/// An archive entry no `npm pack` or `sdist` writes and that a careless extractor
+/// would follow out of the package directory (or link to a file outside it).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnsafeEntry {
+    /// The path as the archive spells it (`/abs/evil.js`, `package/../../x.js`).
+    pub path: String,
+    /// `parent-traversal`, `absolute-path`, `symlink` or `hardlink`.
+    pub kind: &'static str,
+    /// Where a link points.
+    pub target: Option<String>,
+}
+
+/// Most unsafe entries kept per package.
+const MAX_UNSAFE_ENTRIES: usize = 50;
+
+fn unsafe_path_kind(raw: &str) -> Option<&'static str> {
+    let path = raw.replace('\\', "/");
+    if path.starts_with('/') || path.as_bytes().get(1) == Some(&b':') {
+        return Some("absolute-path");
+    }
+    path.split('/')
+        .any(|part| part == "..")
+        .then_some("parent-traversal")
+}
+
+/// Classify one archive entry; `None` when it is an ordinary one.
+fn classify_unsafe(raw: &str, kind: tar::EntryType, link: Option<String>) -> Vec<UnsafeEntry> {
+    let mut out = Vec::new();
+    if let Some(path_kind) = unsafe_path_kind(raw) {
+        out.push(UnsafeEntry {
+            path: raw.to_string(),
+            kind: path_kind,
+            target: None,
+        });
+    }
+    let link_kind = match kind {
+        tar::EntryType::Symlink => Some("symlink"),
+        tar::EntryType::Link => Some("hardlink"),
+        _ => None,
+    };
+    if let Some(link_kind) = link_kind {
+        out.push(UnsafeEntry {
+            path: raw.to_string(),
+            kind: link_kind,
+            target: link,
+        });
+    }
+    out
+}
+
+impl UnsafeEntry {
+    fn describe(&self) -> String {
+        match (self.kind, &self.target) {
+            ("symlink", Some(target)) => format!("symlink {} -> {target}", self.path),
+            ("hardlink", Some(target)) => format!("hard link {} -> {target}", self.path),
+            ("symlink", None) => format!("symlink {}", self.path),
+            ("hardlink", None) => format!("hard link {}", self.path),
+            ("absolute-path", _) => format!("absolute path {}", self.path),
+            _ => format!("path with .. {}", self.path),
+        }
+    }
+}
+
+/// Findings for the unsafe entries of a package archive: one per entry, High. A
+/// real `npm pack` tarball or Python sdist never has such entries.
+pub fn unsafe_entry_findings(loaded: &LoadedPackage) -> Vec<SourceFinding> {
+    loaded
+        .unsafe_entries
+        .iter()
+        .map(|entry| {
+            let rule = match entry.kind {
+                "parent-traversal" => "Archive entry escapes the package directory",
+                "absolute-path" => "Archive entry with an absolute path",
+                "symlink" => "Symlink in a package archive",
+                _ => "Hard link in a package archive",
+            };
+            SourceFinding {
+                rule: rule.to_string(),
+                category: "unsafe-path".to_string(),
+                severity: "High".to_string(),
+                file: entry.path.clone(),
+                line: 1,
+                evidence: entry.describe().chars().take(160).collect(),
+                in_comment: false,
+            }
+        })
+        .collect()
+}
+
+/// One note for a package archive's unsafe entries, `None` when there are none.
+pub fn unsafe_entry_note(loaded: &LoadedPackage) -> Option<String> {
+    if loaded.unsafe_entries.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = loaded
+        .unsafe_entries
+        .iter()
+        .take(5)
+        .map(UnsafeEntry::describe)
+        .collect();
+    let more = loaded.unsafe_entries.len().saturating_sub(5);
+    let tail = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "UNSAFE ARCHIVE ENTRIES: {} entries leave the package directory or link outside it: {}{tail}. A tarball made by npm pack or an sdist never has such entries; extracting it could write outside the target directory.",
+        loaded.unsafe_entries.len(),
+        shown.join("; ")
+    ))
 }
 
 /// A package read into memory.
@@ -324,6 +446,15 @@ pub struct LoadedPackage {
     pub files_partial: usize,
     /// Source files not read because a limit was reached.
     pub files_skipped: usize,
+    /// Archive entries with `..` or absolute paths, and links (tar and zip only).
+    pub unsafe_entries: Vec<UnsafeEntry>,
+}
+
+impl LoadedFile {
+    /// The path to show: the archive's own spelling when it was an unsafe one.
+    pub fn display_path(&self) -> &str {
+        self.archive_path.as_deref().unwrap_or(&self.path)
+    }
 }
 
 impl LoadedPackage {
@@ -406,15 +537,20 @@ struct Listed {
     path: String,
     size: u64,
     ordinal: usize,
+    /// The archive's own spelling of an unsafe path.
+    raw: Option<String>,
 }
 
 /// Read a package.
 pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<LoadedPackage> {
     let mut notes = Vec::new();
+    let mut unsafe_entries: Vec<UnsafeEntry> = Vec::new();
     let (listed, listing_truncated, ignored) = match container {
         ContainerKind::Directory => list_dir(path, &mut notes)?,
-        ContainerKind::TarGz | ContainerKind::Tar => list_tar(path, container, &mut notes)?,
-        ContainerKind::Zip => list_zip(path)?,
+        ContainerKind::TarGz | ContainerKind::Tar => {
+            list_tar(path, container, &mut notes, &mut unsafe_entries)?
+        }
+        ContainerKind::Zip => list_zip(path, &mut unsafe_entries)?,
     };
     if ignored > 0 {
         notes.push(format!(
@@ -437,6 +573,8 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
     let mut want: HashSet<usize> = HashSet::new(); // ordinals
     let mut manifests = 0usize;
     let mut manifests_unread = 0usize;
+    let mut manifest_sources = 0usize;
+    let mut manifest_source_bytes = 0usize;
     let mut sources: Vec<usize> = Vec::new();
     for (index, entry) in listed.iter().enumerate() {
         if last_for_path.get(entry.path.as_str()) != Some(&index) {
@@ -446,6 +584,12 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
             if entry.size <= MAX_MANIFEST_BYTES as u64 && manifests < 64 {
                 manifests += 1;
                 want.insert(entry.ordinal);
+                // A manifest that is also source (setup.py) is read and scanned
+                // like any source file: the counters must include it.
+                if (select.is_source)(&entry.path) {
+                    manifest_sources += 1;
+                    manifest_source_bytes += entry.size as usize;
+                }
             } else {
                 manifests_unread += 1;
                 notes.push(format!(
@@ -458,8 +602,8 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
         }
     }
     sources.sort_by_key(|&i| (listed[i].path.matches('/').count(), listed[i].path.clone()));
-    let mut files_scanned = 0usize;
-    let mut bytes_scanned = 0usize;
+    let mut files_scanned = manifest_sources;
+    let mut bytes_scanned = manifest_source_bytes;
     let mut files_partial = 0usize;
     // An unread manifest (setup.py too big to parse) is a file that was not scanned.
     let mut files_skipped = manifests_unread;
@@ -499,7 +643,7 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
         ContainerKind::Zip => read_zip_files(path, &want)?,
     };
 
-    let files = listed
+    let mut files: Vec<LoadedFile> = listed
         .into_iter()
         .map(|entry| {
             let content = contents.remove(&entry.ordinal);
@@ -513,9 +657,27 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
                 path: entry.path,
                 size: entry.size,
                 content,
+                archive_path: entry.raw,
             }
         })
         .collect();
+    // Links carry no content, but a package that holds one should show it in its
+    // file list (unless a regular file of the same name replaces it).
+    let regular: HashSet<String> = files.iter().map(|f| f.path.clone()).collect();
+    for entry in &unsafe_entries {
+        if matches!(entry.kind, "symlink" | "hardlink") {
+            let path = normalise_entry_path(&entry.path);
+            if !regular.contains(&path) {
+                files.push(LoadedFile {
+                    path,
+                    size: 0,
+                    content: None,
+                    partial: false,
+                    archive_path: None,
+                });
+            }
+        }
+    }
 
     Ok(LoadedPackage {
         container,
@@ -526,6 +688,7 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
         bytes_scanned,
         files_partial,
         files_skipped,
+        unsafe_entries,
     })
 }
 
@@ -581,6 +744,7 @@ fn list_dir(dir: &Path, notes: &mut Vec<String>) -> Result<Listing> {
             path: relative,
             size,
             ordinal,
+            raw: None,
         });
     }
     // Say which well-known directories were left out, when they exist.
@@ -769,6 +933,8 @@ struct TarItem<'a> {
     path: String,
     kind: tar::EntryType,
     size: u64,
+    /// Where a symbolic or hard link points.
+    link: Option<String>,
     reader: &'a mut dyn Read,
 }
 
@@ -988,11 +1154,15 @@ fn walk_tar_noted(
                 "The tar archive has a directory, link or device entry that declares {size} bytes of data; other tar readers extract different files from it, so it was refused."
             );
         }
+        let link = entry
+            .link_name_bytes()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
         let item = TarItem {
             ordinal,
             path: String::from_utf8_lossy(&raw_name).into_owned(),
             kind,
             size,
+            link,
             reader: &mut entry,
         };
         ordinal += 1;
@@ -1003,7 +1173,12 @@ fn walk_tar_noted(
     Ok((pax_headers, was_cut(), trailing_bytes()))
 }
 
-fn list_tar(path: &Path, container: ContainerKind, notes: &mut Vec<String>) -> Result<Listing> {
+fn list_tar(
+    path: &Path,
+    container: ContainerKind,
+    notes: &mut Vec<String>,
+    unsafe_entries: &mut Vec<UnsafeEntry>,
+) -> Result<Listing> {
     let mut listed = Vec::new();
     let mut truncated = false;
     let mut ignored = 0usize;
@@ -1023,6 +1198,9 @@ fn list_tar(path: &Path, container: ContainerKind, notes: &mut Vec<String>) -> R
                 truncated = true;
                 return Ok(false);
             }
+            if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
+                unsafe_entries.extend(classify_unsafe(&item.path, item.kind, item.link.clone()));
+            }
             if !item.kind.is_file() {
                 // Directories, links and devices carry no package content.
                 return Ok(true);
@@ -1039,10 +1217,12 @@ fn list_tar(path: &Path, container: ContainerKind, notes: &mut Vec<String>) -> R
                 truncated = true;
                 return Ok(false);
             }
+            let raw = unsafe_path_kind(&item.path).map(|_| item.path.clone());
             listed.push(Listed {
                 path: normalised,
                 size: item.size,
                 ordinal: item.ordinal,
+                raw,
             });
             Ok(true)
         })?;
@@ -1083,7 +1263,7 @@ fn read_tar_files(
     Ok(out)
 }
 
-fn list_zip(path: &Path) -> Result<Listing> {
+fn list_zip(path: &Path, unsafe_entries: &mut Vec<UnsafeEntry>) -> Result<Listing> {
     let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
     let mut zip = zip::ZipArchive::new(file).context("The file is not a readable zip archive")?;
     let mut listed = Vec::new();
@@ -1094,6 +1274,16 @@ fn list_zip(path: &Path) -> Result<Listing> {
         let mut entry = zip.by_index(index)?;
         if entry.is_dir() {
             continue;
+        }
+        if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
+            let raw = entry.name()?.to_string();
+            if let Some(kind) = unsafe_path_kind(&raw) {
+                unsafe_entries.push(UnsafeEntry {
+                    path: raw,
+                    kind,
+                    target: None,
+                });
+            }
         }
         let name = normalise_entry_path(&entry.name()?);
         if is_metadata_entry(&name) {
@@ -1116,6 +1306,7 @@ fn list_zip(path: &Path) -> Result<Listing> {
             path: name,
             size: entry.size(),
             ordinal: index,
+            raw: None,
         });
     }
     if zip.len() > MAX_VISITED_ENTRIES {
@@ -1643,6 +1834,10 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
     // A Python file that declares an exotic source encoding (`unicode_escape`)
     // can turn the text of a comment into code: no line is trusted as comment.
     let distrust_comments = lang == Lang::Python && declares_exotic_encoding(&text);
+    // Lines that are code, and the first read of a credential file, for the
+    // whole-file checks that follow the line loop.
+    let mut code_lines: Vec<(usize, &str)> = Vec::new();
+    let mut credential_read: Option<(usize, &str)> = None;
 
     for (index, line) in source_lines(&text, lang).into_iter().enumerate() {
         let number = index + 1;
@@ -1663,6 +1858,9 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
         }
         let trimmed = line.trim_start();
         let comment = tracker.line_is_comment(line) && !distrust_comments;
+        if !comment {
+            code_lines.push((number, line));
+        }
         if is_pth && trimmed.starts_with("import ") {
             push_finding(
                 &mut scan,
@@ -1719,6 +1917,13 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
                 if rule.category == "obfuscation" && !comment {
                     obfuscation_hits += 1;
                 }
+                if rule.category == "credential-theft"
+                    && !comment
+                    && credential_read.is_none()
+                    && access_context_regex().is_match(line)
+                {
+                    credential_read = Some((number, line));
+                }
                 let (target, counts) = if comment {
                     (&mut comment_scan, &mut comment_per_rule)
                 } else {
@@ -1747,6 +1952,18 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
                 }
             }
         }
+    }
+
+    if lang != Lang::Shell {
+        correlate_file(
+            lang,
+            is_setup,
+            path,
+            &code_lines,
+            credential_read,
+            &mut scan,
+            &mut per_rule,
+        );
     }
 
     let mut score = 0.35 * (obfuscation_hits.min(3) as f32);
@@ -2189,6 +2406,226 @@ fn match_is_credible(rule: &Rule, line: &str, matched: &str) -> bool {
     }
 }
 
+/// Regexes for the whole-file checks of one language.
+struct FlowRegexes {
+    /// A network fetch.
+    fetch: Regex,
+    /// Something is written to disk.
+    write: Regex,
+    /// A child process is started with a variable or built-up command.
+    exec: Regex,
+    /// Any child process start (judged only in `setup.py`).
+    exec_loose: Regex,
+    /// Code is evaluated from a variable.
+    eval: Regex,
+    /// A request body is sent, not only a URL fetched.
+    send: Regex,
+    /// The whole environment is put in a value (not one variable read).
+    env_whole: Regex,
+    /// The line also builds a payload or message from it.
+    env_sink: Regex,
+    /// The environment is handed to a child process (`env=os.environ`).
+    env_child: Regex,
+}
+
+fn flow_regexes(lang: Lang) -> &'static FlowRegexes {
+    static JS_FLOW: OnceLock<FlowRegexes> = OnceLock::new();
+    static PY_FLOW: OnceLock<FlowRegexes> = OnceLock::new();
+    let build = |fetch: &str,
+                 write: &str,
+                 exec: &str,
+                 exec_loose: &str,
+                 eval: &str,
+                 send: &str,
+                 env_whole: &str,
+                 env_sink: &str,
+                 env_child: &str| FlowRegexes {
+        fetch: Regex::new(fetch).expect("flow regex"),
+        write: Regex::new(write).expect("flow regex"),
+        exec: Regex::new(exec).expect("flow regex"),
+        exec_loose: Regex::new(exec_loose).expect("flow regex"),
+        eval: Regex::new(eval).expect("flow regex"),
+        send: Regex::new(send).expect("flow regex"),
+        env_whole: Regex::new(env_whole).expect("flow regex"),
+        env_sink: Regex::new(env_sink).expect("flow regex"),
+        env_child: Regex::new(env_child).expect("flow regex"),
+    };
+    if lang == Lang::Python {
+        PY_FLOW.get_or_init(|| {
+            build(
+                r"(\burlretrieve\(|\burlopen\(|\brequests\.(get|post|put|request)\(|\bhttpx\.\w+\(|\bhttp\.client\b|\burllib3\b|\bwget\.download\(|\burllib\.request\.\w+\()",
+                r#"(\burlretrieve\(\s*[^,)]+,|\bopen\([^)]*,\s*['"][wa][b+]*['"]|\.write_bytes\(|\.write_text\(|\bcopyfileobj\(|\bwget\.download\()"#,
+                r#"((subprocess\.\w+|os\.(system|popen|exec\w+|spawn\w+)|pty\.spawn)\s*\(\s*(\[\s*)?([A-Za-z_][\w.]*\s*[,)\]]|f['"]|[^)\n]*(\+|%\s|\.format\()))"#,
+                r"((subprocess\.\w+|os\.(system|popen|exec\w+|spawn\w+)|pty\.spawn)\s*\()",
+                r"((^|[^.\w])(exec|eval)\s*\([^\n]*(\.text\b|\.content\b|\.read\(\)))",
+                r"(\brequests\.(post|put|patch)\(|\bhttpx\.(post|put|patch)\(|[(,]\s*(data|json|files)\s*=|\.sendall?\(|\bsmtplib\b|\bftplib\b|\burlopen\([^)]*,)",
+                r"(os\.environ(\s*[,)\]}]|\s*$)|dict\(os\.environ\)|os\.environ\.(copy|items)\(\))",
+                r"(json|data|dumps|post|b64|base64|encode)",
+                r"(\benv\s*=|\bstr\()",
+            )
+        })
+    } else {
+        JS_FLOW.get_or_init(|| {
+            build(
+                r#"(\b(https?|http2)\s*\.\s*(get|request)\s*\(|['"]\)\s*\.\s*(get|request)\s*\(|(^|[^.\w$])fetch\s*\(|\baxios\b|\bgot\s*[.(]|\bnode-fetch\b|\bsuperagent\b|\bneedle\s*[.(])"#,
+                r"\b(writeFile(Sync)?|appendFile(Sync)?|createWriteStream|copyFile(Sync)?)\s*\(",
+                r"((^|[^.\w$])(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)|\b(child_process|childProcess|cp)\s*\.\s*(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork))\s*\(\s*([A-Za-z_$][\w$.]*\s*[,)]|[^)\n]*(\+|\$\{))",
+                r"(^|[^.\w$])(exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(",
+                r"((^|[^.\w$])(eval\s*\(|new\s+Function\s*\()\s*[A-Za-z_$]|\bvm\.run\w+\s*\(\s*[A-Za-z_$])",
+                r#"(\.(post|put|patch)\s*\(|method\s*:\s*['"](POST|PUT|PATCH)['"]|\breq(uest)?\.(write|end)\s*\(\s*[^)\s]|\.send\s*\(|\bbody\s*:|\bform\s*:)"#,
+                r"process\.env(\s*[,})\]]|\s*$)",
+                r"(JSON\.stringify|base64|btoa|\.write\(|\.send\(|body\s*:|data\s*:|querystring|Object\.entries)",
+                r"(\benv\s*:|\bObject\.assign\b|\bspawn\w*\(|\bexec\w*\()",
+            )
+        })
+    }
+}
+
+/// Checks that need the whole file: a download that is written to disk and run,
+/// or passed to code evaluation, and a credential file or the environment that
+/// reaches a network send. One rule per line cannot see these; the Node and
+/// Python APIs spread them over several statements.
+fn correlate_file(
+    lang: Lang,
+    is_setup: bool,
+    path: &str,
+    code: &[(usize, &str)],
+    credential_read: Option<(usize, &str)>,
+    scan: &mut FileScan,
+    per_rule: &mut HashMap<&'static str, usize>,
+) {
+    let flow = flow_regexes(lang);
+    // Ordinary network code, build tools and bundles hold a fetch, a file write
+    // and a child process far apart. Only statements that are close together, in
+    // the order of an attack, count; a line too long to be hand-written (a
+    // minified bundle) is not judged here.
+    let code: Vec<(usize, &str)> = code
+        .iter()
+        .filter(|(_, line)| line.len() <= FLOW_MAX_LINE)
+        .copied()
+        .collect();
+    let code = &code[..];
+    let near = |a: usize, b: usize| a.abs_diff(b) <= FLOW_WINDOW;
+    if !code.iter().any(|(_, l)| flow.fetch.is_match(l)) {
+        return;
+    }
+    // The first line matching `re` that is at or after `from` and within the window.
+    let after = |re: &Regex, from: usize| {
+        code.iter()
+            .find(|(n, line)| *n >= from && near(*n, from) && re.is_match(line))
+            .copied()
+    };
+    // Every fetch is a possible start of the chain.
+    let fetches: Vec<usize> = code
+        .iter()
+        .filter(|(_, l)| flow.fetch.is_match(l))
+        .map(|(n, _)| *n)
+        .take(200)
+        .collect();
+    // `child_process` must be in the file for a JavaScript exec, or a regular
+    // expression's `.exec(` would count.
+    let uses_child_process =
+        lang != Lang::Js || code.iter().any(|(_, l)| l.contains("child_process"));
+    let mut add =
+        |rule: &'static str, category: &'static str, line: usize, text: &str, note: String| {
+            if scan.findings.iter().any(|f| f.rule == rule) {
+                return;
+            }
+            let shown = format!("{} ({note})", text.trim());
+            push_finding(
+                scan,
+                per_rule,
+                rule,
+                category,
+                "High",
+                path,
+                line,
+                &shown,
+                0,
+                shown.len(),
+                false,
+            );
+        };
+
+    for &f in &fetches {
+        let exec_re_hit = |from: usize| {
+            if !uses_child_process {
+                return None;
+            }
+            after(&flow.exec, from).or_else(|| {
+                (lang == Lang::Python && is_setup)
+                    .then(|| after(&flow.exec_loose, from))
+                    .flatten()
+            })
+        };
+        let Some((write_line, _)) = after(&flow.write, f) else {
+            continue;
+        };
+        if let Some((exec_line, exec_text)) = exec_re_hit(write_line) {
+            add(
+                "Download written to disk and run",
+                "download-exec",
+                exec_line,
+                exec_text,
+                format!("downloaded at line {f}, written at line {write_line}"),
+            );
+            break;
+        }
+    }
+    for &f in &fetches {
+        if let Some((eval_line, eval_text)) = after(&flow.eval, f) {
+            add(
+                "Download passed to code evaluation",
+                "download-exec",
+                eval_line,
+                eval_text,
+                format!("downloaded at line {f}"),
+            );
+            break;
+        }
+    }
+    if let Some((cred_line, cred_text)) = credential_read {
+        if let Some((send_line, _)) = code
+            .iter()
+            .find(|(n, l)| near(*n, cred_line) && flow.send.is_match(l))
+            .copied()
+        {
+            add(
+                "Credential file sent over the network",
+                "exfiltration",
+                cred_line,
+                cred_text,
+                format!("request body built at line {send_line}"),
+            );
+        }
+    }
+    // The environment must be in the value that is sent (a line that builds
+    // it), close to the send; handing it to a child process is not a send.
+    let env = code.iter().find(|(n, line)| {
+        flow.env_whole.is_match(line)
+            && flow.env_sink.is_match(line)
+            && !flow.env_child.is_match(line)
+            && code
+                .iter()
+                .any(|(m, l)| m.abs_diff(*n) <= FLOW_ENV_WINDOW && flow.send.is_match(l))
+    });
+    if let Some((env_line, env_text)) = env.copied() {
+        let send_line = code
+            .iter()
+            .filter(|(m, l)| m.abs_diff(env_line) <= FLOW_ENV_WINDOW && flow.send.is_match(l))
+            .map(|(m, _)| *m)
+            .next()
+            .unwrap_or(env_line);
+        add(
+            "Environment sent over the network",
+            "exfiltration",
+            env_line,
+            env_text,
+            format!("request body built at line {send_line}"),
+        );
+    }
+}
+
 fn setup_network_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -2301,7 +2738,7 @@ pub fn source_findings_score(findings: &[SourceFinding]) -> f32 {
             && !f.in_comment
             && matches!(
                 f.category.as_str(),
-                "download-exec" | "credential-theft" | "exfiltration" | "backdoor"
+                "download-exec" | "credential-theft" | "exfiltration" | "backdoor" | "unsafe-path"
             )
     }) {
         score = score.max(60.0);
