@@ -349,12 +349,20 @@ fn test_cli_mcp_reports_partial_string_indexing() -> Result<()> {
             "arguments": { "file_path": test_file, "strings": true }
         }
     });
-    let cache_home = TempDir::new().unwrap();
+    let query = serde_json::json!({
+        "jsonrpc": "2.0", "id": 24, "method": "tools/call",
+        "params": {
+            "name": "query_analysis",
+            "arguments": { "file_path": test_file, "section": "strings", "filter": "malware_token" }
+        }
+    });
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
     let assertion = cmd
         .arg("mcp-stdio")
-        .env("FILE_SCANNER_CACHE_DIR", cache_home.path())
-        .write_stdin(format!("{initialize}\n{call}\n"))
+        // A cache of its own: a disk cache shared with other runs or builds
+        // could answer with sections stored by different code.
+        .env("FILE_SCANNER_CACHE_DIR", temp_dir.path().join("cache"))
+        .write_stdin(format!("{initialize}\n{call}\n{query}\n"))
         .timeout(std::time::Duration::from_secs(20))
         .assert()
         .success()
@@ -372,6 +380,20 @@ fn test_cli_mcp_reports_partial_string_indexing() -> Result<()> {
         serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())?;
     // analyze_file answers a summary of the strings; the counts include both.
     assert!(analysis["strings"]["total_count"].as_u64().unwrap() >= 2);
+    // The string past the tracker's bounds is still found, by the filter.
+    let reply: serde_json::Value = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|message| message["id"] == 24)
+        .expect("a reply to the query");
+    assert_ne!(
+        reply["result"]["isError"],
+        serde_json::json!(true),
+        "{reply}"
+    );
+    let found: serde_json::Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap())?;
+    assert_eq!(found["items"][0]["value"], "malware_token", "{found}");
     Ok(())
 }
 

@@ -45,6 +45,9 @@ impl Matcher {
         };
         if regex {
             regex::RegexBuilder::new(filter)
+                // The fields of a non-string row are joined with newlines, so
+                // `^name$` has to match at a line.
+                .multi_line(true)
                 .size_limit(1 << 20)
                 .build()
                 .map(Self::Pattern)
@@ -75,6 +78,33 @@ impl Matcher {
             Self::Pattern(pattern) => pattern.is_match(text),
         }
     }
+}
+
+/// The test a string must pass to be kept by a re-scan of the file: the same
+/// filter, category and encoding `answer` applies to a cached list.
+pub(super) fn string_filter(
+    params: &Params<'_>,
+) -> Result<impl Fn(&crate::strings::FoundString) -> bool, String> {
+    let matcher = Matcher::new(params.filter, params.regex)?;
+    let category = params.category.map(str::to_string);
+    let encoding = params.encoding.map(str::to_string);
+    Ok(move |found: &crate::strings::FoundString| {
+        if let Some(wanted) = &category {
+            if !found
+                .category
+                .as_deref()
+                .is_some_and(|c| c.eq_ignore_ascii_case(wanted))
+            {
+                return false;
+            }
+        }
+        if let Some(wanted) = &encoding {
+            if !found.encoding.name().eq_ignore_ascii_case(wanted) {
+                return false;
+            }
+        }
+        matcher.is_match(&found.value)
+    })
 }
 
 /// The text a filter is matched against: a string's value, otherwise every
@@ -218,9 +248,32 @@ pub(super) fn answer(
             let end = start
                 .saturating_add(params.limit.clamp(1, crate::mcp_server::output::MAX_LIMIT))
                 .min(matched.len());
+            let names = (name == "call_graph"
+                && matches!(spec.name, "edges" | "unreachable_functions"))
+            .then(|| node_names(section));
+            let unreachable = name == "call_graph" && spec.name == "unreachable_functions";
             matched[start..end]
                 .iter()
-                .map(|(group, item)| row(*group, item, params.detail, is_strings, &matcher))
+                .map(|(group, item)| {
+                    if let (true, Some(address), Some(names)) = (unreachable, item.as_u64(), &names)
+                    {
+                        // A bare address becomes a row with the function's name.
+                        return serde_json::json!({
+                            "function_address": address,
+                            "function_name": names.get(&address).map(|n| super::sections::clip(n)),
+                        });
+                    }
+                    let mut out = row(*group, item, params.detail, is_strings, &matcher);
+                    if !params.detail {
+                        if let Some(names) = names.as_ref().filter(|_| !unreachable) {
+                            name_edge(&mut out, names);
+                        }
+                        if name == "taint" && spec.name == "flows" {
+                            out = flow_row(item);
+                        }
+                    }
+                    out
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -280,6 +333,71 @@ pub(super) fn answer(
     Ok(paged)
 }
 
+/// Function names by address, for naming the ends of an edge.
+fn node_names(section: &Value) -> std::collections::HashMap<u64, String> {
+    section
+        .pointer("/graph/nodes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|node| {
+            Some((
+                node.get("function_address")?.as_u64()?,
+                node.get("function_name")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// An edge row with the caller's and the callee's names added.
+fn name_edge(row: &mut Value, names: &std::collections::HashMap<u64, String>) {
+    let lookup = |key: &str| {
+        row.get(key)
+            .and_then(Value::as_u64)
+            .and_then(|a| names.get(&a))
+            .map(|n| super::sections::clip(n))
+    };
+    let (caller, callee) = (lookup("caller"), lookup("callee"));
+    if let Some(map) = row.as_object_mut() {
+        if let Some(caller) = caller {
+            map.insert("caller_name".into(), caller.into());
+        }
+        if let Some(callee) = callee {
+            map.insert("callee_name".into(), callee.into());
+        }
+    }
+}
+
+/// A taint flow as one flat row: where the data comes from and where it ends.
+fn flow_row(flow: &Value) -> Value {
+    let end = |key: &str| {
+        let item = flow.get(key);
+        let at = item.and_then(|i| i.get("location"));
+        serde_json::json!({
+            "line": at.and_then(|l| l.get("line_number")),
+            "function": at.and_then(|l| l.get("function_name")),
+            "code": at
+                .and_then(|l| l.get("code_snippet"))
+                .and_then(Value::as_str)
+                .map(super::sections::clip),
+            "description": item
+                .and_then(|i| i.get("description"))
+                .and_then(Value::as_str)
+                .map(super::sections::clip),
+        })
+    };
+    serde_json::json!({
+        "flow_id": flow.get("flow_id"),
+        "vulnerability_type": flow.get("vulnerability_type"),
+        "risk_score": flow.get("risk_score"),
+        "is_sanitized": flow.get("is_sanitized"),
+        "source": end("source"),
+        "sink": end("sink"),
+        "steps": flow.get("path").and_then(Value::as_array).map(Vec::len),
+        "attack_vector": flow.get("attack_vector").and_then(Value::as_str).map(super::sections::clip),
+    })
+}
+
 fn row(
     group: Option<&str>,
     item: &Value,
@@ -293,7 +411,15 @@ fn row(
             out["value"] = if detail {
                 value.into()
             } else {
-                clip_around(value, matcher.find(value)).into()
+                // Centered on the filter's match, otherwise on the text that
+                // made the string a URL, an address, a secret ...
+                let hit = matcher.find(value).or_else(|| {
+                    item.get("category")
+                        .and_then(Value::as_str)
+                        .and_then(|_| crate::strings::category_span(value))
+                        .map(|(from, _)| from)
+                });
+                clip_around(value, hit).into()
             };
         }
         out

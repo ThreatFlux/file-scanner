@@ -73,8 +73,11 @@ or the boolean flags, or `all: true`) to run them: each one is computed in full,
 file's SHA-256, and returned as a SUMMARY (headline numbers, top few items, total counts); `all: true` \
 runs every analysis and still returns summaries only. To read the items, call query_analysis (it pages \
 and filters strings, symbols, imports, functions, vulnerabilities, ... from the cache, so it is fast). \
-A directory path returns a paged triage table, one row per file (`recursive`, `max_files`, \
-`offset`, `limit`). Pass an absolute path. Results are compact JSON capped at `max_output_bytes` \
+Sections include call_graph (executables) and taint (source text only). `next_steps` also names \
+the specialist tool for the file's kind (analyze_document, analyze_script, inspect_archive, \
+analyze_java_file, analyze_npm_package, analyze_python_package). `arch` picks the slice of a \
+universal Mach-O. A directory path returns a paged triage table, one row per file (`recursive`, \
+`max_files`, `offset`, `limit`). Pass an absolute path. Results are compact JSON capped at `max_output_bytes` \
 (default 80000, ceiling 400000); anything cut is listed under `truncated`. Sections that fail or do \
 not apply to the file's format are listed under `errors` or `notes` with the reason. Then use \
 query_analysis to dig in, llm_analyze_file for a YARA-oriented digest, or yara_scan_file to test a rule.";
@@ -87,8 +90,9 @@ every row has offset, encoding, value, category), binary_info (sections, imports
 (functions, imports, exports, global_variables, cross_references), control_flow (functions: one \
 summary row per function), vulnerabilities, code_quality (functions, quality_issues), dependencies \
 (dependencies, compliance_issues), entropy (sections, high_entropy_regions), disassembly (functions, \
-instructions, suspicious_patterns; one function at a time via `filter`), threats and enhanced_threats \
-(matches, indicators), behavioral (findings, plus each group), yara_indicators. The answer is `{items, \
+instructions, suspicious_patterns; one function at a time via `filter`), call_graph (functions, edges, \
+unreachable_functions), taint (flows, vulnerabilities, sources, sinks, sanitizers), threats and \
+enhanced_threats (matches, indicators), behavioral (findings, plus each group), yara_indicators. The answer is `{items, \
 total, returned, offset, next_offset, cache}`: `total` counts the rows that match, `next_offset` asks \
 for the next page. A section the file's cache already holds is answered at once (`cache: \"hit\"`); \
 otherwise it is computed and cached (`cache: \"miss\"`). Rows are compact; `detail: true` returns the \
@@ -232,6 +236,8 @@ fn requested_names(args: &AnalyzeFileArgs) -> Result<Vec<&'static str>, String> 
             "threats" => args.threats,
             "enhanced_threats" => args.enhanced_threats,
             "behavioral" => args.behavioral,
+            "call_graph" => args.call_graph,
+            "taint" => args.taint,
             _ => args.yara_indicators,
         }
         .unwrap_or(false)
@@ -268,19 +274,30 @@ fn requested_names(args: &AnalyzeFileArgs) -> Result<Vec<&'static str>, String> 
         .collect())
 }
 
-/// A section summary as scalars and list lengths only.
+/// A section summary as scalars and list lengths only: arrays become
+/// `<key>_count`, and a nested `{count, sample}` object becomes `<key>_count`.
 fn counts_only(section: &Value) -> Value {
     let Some(map) = section.as_object() else {
         return section.clone();
     };
     let mut out = serde_json::Map::new();
     for (key, value) in map {
+        // What an analyzer said about its limits and failures is never reduced.
+        if sections::is_note_key(key) && (value.is_array() || value.is_string()) {
+            out.insert(key.clone(), value.clone());
+            continue;
+        }
         match value {
             Value::Array(items) => {
                 out.insert(format!("{key}_count"), items.len().into());
             }
             Value::String(text) if text.len() > 60 => {}
-            Value::Object(_) => {}
+            Value::Object(inner) => {
+                // The size of a nested `{count, sample}` list.
+                if let Some(count) = inner.get("count").filter(|c| c.is_number()) {
+                    out.insert(format!("{key}_count"), count.clone());
+                }
+            }
             other => {
                 out.insert(key.clone(), other.clone());
             }
@@ -352,9 +369,8 @@ impl FileScannerMcp {
 
         if path.is_dir() {
             let recursive = request.recursive.unwrap_or(false);
-            if let Err(message) = self.state.check_tree(&path, recursive) {
-                return tool_error(message);
-            }
+            // The path policy is applied entry by entry while the table walks
+            // (see `triage::table`), not by a whole-tree pass first.
             let max_files = request
                 .max_files
                 .unwrap_or(triage::DEFAULT_MAX_FILES)
@@ -367,12 +383,28 @@ impl FileScannerMcp {
             let shown = path.to_string_lossy().into_owned();
             let dir = path.clone();
             let ignored = names.clone();
+            let state = Arc::clone(&self.state);
             let outcome = self
                 .state
                 .run_blocking("analyze_file", move || {
                     let mut value = triage::table(
-                        &dir, &shown, recursive, max_files, offset, limit, &runtime, budget,
-                    );
+                        &dir,
+                        &shown,
+                        recursive,
+                        max_files,
+                        (offset, limit),
+                        &runtime,
+                        budget,
+                        &|entry| {
+                            // A link that cannot be resolved cannot be read either.
+                            if std::fs::metadata(entry).is_err() {
+                                return Ok(());
+                            }
+                            state
+                                .resolve_path(&entry.to_string_lossy(), "File", Expect::FileOrDir)
+                                .map(|_| ())
+                        },
+                    )?;
                     if !ignored.is_empty() {
                         value["note"] = format!(
                             "A directory gets the triage table; the analysis flags/sections ({}) \
@@ -381,12 +413,12 @@ impl FileScannerMcp {
                         )
                         .into();
                     }
-                    render(value, budget)
+                    Ok(render(value, budget))
                 })
                 .await;
             return match outcome {
-                Ok(text) => respond_text(text),
-                Err(crash) => tool_error(crash),
+                Ok(Ok(text)) => respond_text(text),
+                Ok(Err(message)) | Err(message) => tool_error(message),
             };
         }
 
@@ -397,6 +429,15 @@ impl FileScannerMcp {
                  call. Ask for at most {ANALYZE_HEX_DUMP_MAX} and move with hex_dump_offset, or use \
                  read_hex (negative offsets count from the end) to page through the file."
             ));
+        }
+        if let Some(min) = request.min_string_length {
+            if min > sections::MAX_MIN_STRING {
+                return tool_error(format!(
+                    "min_string_length {min} is above the limit of {} characters. Ask for a \
+                     shorter minimum; read_hex shows raw bytes.",
+                    sections::MAX_MIN_STRING
+                ));
+            }
         }
         let (path, sha256, file_size, mtime_ns) =
             match identify(self, &raw_path, Expect::File).await {
@@ -409,6 +450,7 @@ impl FileScannerMcp {
                 .unwrap_or(sections::DEFAULT_MIN_STRING),
             hex_size,
             hex_offset: absolute_offset(request.hex_dump_offset.unwrap_or(0), file_size),
+            arch: sections::arch_option(request.arch.as_deref()),
         };
         if names.contains(&"hex_dump") && file_size > 0 && options.hex_offset >= file_size {
             return tool_error(format!(
@@ -418,6 +460,15 @@ impl FileScannerMcp {
             ));
         }
 
+        let ignored_directory_arguments: Vec<&str> = [
+            ("recursive", request.recursive.is_some()),
+            ("max_files", request.max_files.is_some()),
+            ("offset", request.offset.is_some()),
+            ("limit", request.limit.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, given)| given.then_some(name))
+        .collect();
         let state = Arc::clone(&self.state);
         let runtime = tokio::runtime::Handle::current();
         let file_path = path.to_string_lossy().into_owned();
@@ -425,8 +476,9 @@ impl FileScannerMcp {
         let outcome = self
             .state
             .run_blocking("analyze_file", move || {
-                let ctx = Ctx::new(&path, &runtime, options);
-                let mut engine = Engine::new(state.section_cache(), &sha, ctx);
+                let ctx = Ctx::new(&path, &runtime, options.clone());
+                let mut engine =
+                    Engine::new(state.section_cache(), &sha, ctx, state.cache_enabled());
                 let mut tracker_source: Option<Arc<Value>> = None;
                 let mut value;
                 if names.is_empty() {
@@ -505,11 +557,33 @@ impl FileScannerMcp {
                             max_output_bytes; ask for fewer sections at once, or raise \
                             max_output_bytes, for the details."
                             .into();
+                        // Whole steps from the end, so the list is shortened
+                        // rather than emptied by the final cut.
+                        while serde_json::to_string(&value).map_or(0, |t| t.len()) + 200 > budget {
+                            let popped = value
+                                .get_mut("next_steps")
+                                .and_then(Value::as_array_mut)
+                                .and_then(Vec::pop);
+                            if popped.is_none() {
+                                break;
+                            }
+                        }
                     }
+                }
+                if let Some(note) = sections::arch_note(&mut engine, &options, &file_path, mtime_ns)
+                {
+                    value["notes"]["arch"] = note.into();
                 }
                 value["cache"] = engine.cache_state().into();
                 if let Some(note) = engine.cache_note() {
                     value["cache_note"] = note.into();
+                }
+                if !ignored_directory_arguments.is_empty() {
+                    value["notes"]["directory_arguments"] = format!(
+                        "{} only apply to a directory path and were ignored for this file.",
+                        ignored_directory_arguments.join(", ")
+                    )
+                    .into();
                 }
                 let strings = tracker_source.as_deref().map(sections::tracker_strings);
                 let entry = value.clone();
@@ -540,7 +614,7 @@ impl FileScannerMcp {
             return tool_error(format!(
                 "Unknown section '{}'. Sections with lists: strings, binary_info, symbols, \
                  control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, \
-                 threats, enhanced_threats, behavioral, yara_indicators.",
+                 call_graph, threats, enhanced_threats, behavioral, taint, yara_indicators.",
                 request.section
             ));
         };
@@ -557,6 +631,15 @@ impl FileScannerMcp {
                     .to_string(),
             );
         }
+        if let Some(min) = request.min_string_length {
+            if min > sections::MAX_MIN_STRING {
+                return tool_error(format!(
+                    "min_string_length {min} is above the limit of {} characters. Ask for a \
+                     shorter minimum; read_hex shows raw bytes.",
+                    sections::MAX_MIN_STRING
+                ));
+            }
+        }
         let (path, sha256, _size, mtime_ns) =
             match identify(self, &request.file_path, Expect::File).await {
                 Ok(identity) => identity,
@@ -566,6 +649,7 @@ impl FileScannerMcp {
             min: request
                 .min_string_length
                 .unwrap_or(sections::DEFAULT_MIN_STRING),
+            arch: sections::arch_option(request.arch.as_deref()),
             ..Options::default()
         };
         let state = Arc::clone(&self.state);
@@ -574,8 +658,9 @@ impl FileScannerMcp {
         let outcome = self
             .state
             .run_blocking("query_analysis", move || {
-                let ctx = Ctx::new(&path, &runtime, options);
-                let mut engine = Engine::new(state.section_cache(), &sha256, ctx);
+                let ctx = Ctx::new(&path, &runtime, options.clone());
+                let mut engine =
+                    Engine::new(state.section_cache(), &sha256, ctx, state.cache_enabled());
                 let planned = sections::plan(name, &options, &file_path, mtime_ns);
                 let section = engine.load(&planned).map_err(|failure| match failure {
                     Failure::Error(m) => format!("The {name} analysis failed: {m}"),
@@ -594,12 +679,104 @@ impl FileScannerMcp {
                     limit: request.limit.unwrap_or(DEFAULT_LIMIT),
                     detail: request.detail.unwrap_or(false),
                 };
-                let mut value = query::answer(name, &section, &params, budget)?;
-                value["file_path"] = file_path.clone().into();
-                value["cache"] = engine.cache_state().into();
-                if let Some(note) = engine.cache_note() {
-                    value["cache_note"] = note.into();
+                // A string list that was cut when it was cached is searched
+                // again with the filter, so a match beyond the kept rows is found.
+                let mut section = section;
+                let mut rescanned = false;
+                let narrowed = params.filter.is_some_and(|f| !f.is_empty())
+                    || params.category.is_some()
+                    || params.encoding.is_some();
+                if name == "strings"
+                    && narrowed
+                    && section.get("truncated").and_then(Value::as_bool) == Some(true)
+                {
+                    let accept = query::string_filter(&params)?;
+                    let limits = crate::strings::ScanLimits {
+                        only: Some(&accept),
+                        ..Default::default()
+                    };
+                    let scan = crate::strings::scan_strings_limited(&path, options.min, &limits)
+                        .map_err(|e| format!("{e:#}"))?;
+                    let value = serde_json::to_value(&scan).map_err(|e| e.to_string())?;
+                    section = Arc::new(value);
+                    rescanned = true;
                 }
+                let cache_state = engine.cache_state();
+                let cache_note = engine.cache_note();
+                // The fields added around the page count against the budget:
+                // when they push the answer over, the page is fitted again to
+                // what is left, so `returned` and `next_offset` stay true.
+                let mut page_budget = budget;
+                let value = loop {
+                    let mut value = query::answer(name, &section, &params, page_budget)?;
+                    if rescanned {
+                        let cap = crate::strings::KEEP_PLAIN.min(crate::strings::KEEP_CATEGORIZED);
+                        if value.get("note").is_none() {
+                            value["note"] = format!(
+                                "The strings list was cut when it was cached, so the file was \
+                                 scanned again for the rows that match. At most {cap} plain and \
+                                 {cap} categorized matches are kept: when `total` is that high, \
+                                 narrow the filter."
+                            )
+                            .into();
+                        }
+                    }
+                    if name == "strings"
+                        && !rescanned
+                        && section.get("truncated").and_then(Value::as_bool) == Some(true)
+                    {
+                        // `total` counts the rows that were kept; the file has more.
+                        value["strings_in_file"] = section["total_count"].clone();
+                        if let Some(note) = section.get("note").cloned() {
+                            let existing = value.get("note").cloned();
+                            value["note"] = match existing {
+                                Some(first) => format!(
+                                    "{} {}",
+                                    first.as_str().unwrap_or_default(),
+                                    note.as_str().unwrap_or_default()
+                                )
+                                .into(),
+                                None => note,
+                            };
+                        }
+                    }
+                    if name == "disassembly" {
+                        let stored = section
+                            .get("instructions")
+                            .and_then(Value::as_array)
+                            .map_or(0, Vec::len);
+                        let total = section
+                            .get("instructions_total")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        if total as usize > stored {
+                            // The stored section keeps a bounded part: totals
+                            // and filters here describe that part only.
+                            value["instructions_in_file"] = total.into();
+                            let cut = format!(
+                                "Limit: only the first {stored} of {total} instructions are \
+                                 stored, so `total`, filters and function instruction lists here \
+                                 cover that part only (instruction_count has a function's true \
+                                 count); `disassemble` lists any range."
+                            );
+                            value["note"] = match value.get("note").and_then(Value::as_str) {
+                                Some(first) => format!("{first} {cut}"),
+                                None => cut,
+                            }
+                            .into();
+                        }
+                    }
+                    value["file_path"] = file_path.clone().into();
+                    value["cache"] = cache_state.into();
+                    if let Some(note) = &cache_note {
+                        value["cache_note"] = note.clone().into();
+                    }
+                    let size = serde_json::to_vec(&value).map_or(0, |v| v.len());
+                    if size <= budget || page_budget <= 600 {
+                        break value;
+                    }
+                    page_budget = page_budget.saturating_sub(size - budget + 16);
+                };
                 Ok::<String, String>(render(value, budget))
             })
             .await;
@@ -851,7 +1028,7 @@ pub struct AnalyzeFileArgs {
     )]
     pub file_path: String,
     #[schemars(
-        description = "Analyses to run, by name: metadata, hashes, strings, hex_dump, binary_info, signatures, symbols, control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, threats, enhanced_threats, behavioral, yara_indicators. With none named (and no flag) the answer is the triage overview. Each named section is returned as a summary; query_analysis pages its items"
+        description = "Analyses to run, by name: metadata, hashes, strings, hex_dump, binary_info, signatures, symbols, control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, call_graph, threats, enhanced_threats, behavioral, taint, yara_indicators. With none named (and no flag) the answer is the triage overview. Each named section is returned as a summary; query_analysis pages its items"
     )]
     pub sections: Option<Vec<String>>,
     #[schemars(
@@ -906,6 +1083,14 @@ pub struct AnalyzeFileArgs {
     pub behavioral: Option<bool>,
     #[schemars(description = "Extract YARA rule indicators")]
     pub yara_indicators: Option<bool>,
+    #[schemars(
+        description = "Call graph of an executable (who calls whom; summary with the most-called functions, query_analysis pages functions and edges). Needs function symbols"
+    )]
+    pub call_graph: Option<bool>,
+    #[schemars(
+        description = "Taint analysis of UTF-8 source or script text (user-controlled sources reaching dangerous sinks; heuristic). Not for compiled binaries"
+    )]
+    pub taint: Option<bool>,
     #[schemars(description = "Directory only: descend into subdirectories (default false)")]
     pub recursive: Option<bool>,
     #[schemars(
@@ -916,6 +1101,10 @@ pub struct AnalyzeFileArgs {
     pub offset: Option<usize>,
     #[schemars(description = "Directory only: rows to return (default 50, at most 200)")]
     pub limit: Option<usize>,
+    #[schemars(
+        description = "Universal (fat) Mach-O only: the architecture slice to analyze, one of binary_info.universal_slices (for example arm64, arm64e, x86_64). Default: the host's, else the first"
+    )]
+    pub arch: Option<String>,
 }
 
 /// The arguments of the `query_analysis` tool.
@@ -925,7 +1114,7 @@ pub struct QueryAnalysisRequest {
     #[schemars(description = "Absolute path of the file (a leading ~/ is expanded)")]
     pub file_path: String,
     #[schemars(
-        description = "Section to query: strings, binary_info, symbols, control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, threats, enhanced_threats, behavioral, yara_indicators"
+        description = "Section to query: strings, binary_info, symbols, control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, call_graph, threats, enhanced_threats, behavioral, taint, yara_indicators"
     )]
     pub section: String,
     #[schemars(
@@ -952,6 +1141,10 @@ pub struct QueryAnalysisRequest {
     pub limit: Option<usize>,
     #[schemars(description = "Return the raw rows instead of compact ones (default false)")]
     pub detail: Option<bool>,
+    #[schemars(
+        description = "Universal (fat) Mach-O only: the architecture slice to analyze, one of binary_info.universal_slices (for example arm64, arm64e, x86_64). Default: the host's, else the first"
+    )]
+    pub arch: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]

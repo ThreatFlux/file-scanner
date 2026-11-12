@@ -45,6 +45,10 @@ pub struct LlmDigest {
     /// Why a part is empty or approximate.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Why no draft rule came with the digest, when one was asked for and
+    /// `suggest_yara_rule` refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yara_rule_note: Option<String>,
     /// Present when the output budget cut something: what and how to get it back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<Value>,
@@ -155,8 +159,9 @@ fn fit(digest: &mut LlmDigest, limit: usize) -> Result<(), String> {
         }
         if !trim_step(&mut digest.result) {
             // The identity alone is over the limit: drop the notes, then give up.
-            if !digest.notes.is_empty() {
+            if !digest.notes.is_empty() || digest.yara_rule_note.is_some() {
                 digest.notes.clear();
+                digest.yara_rule_note = None;
                 continue;
             }
             return Err(format!(
@@ -260,6 +265,26 @@ fn entry_opcodes(path: &Path, max: usize) -> Result<(Vec<String>, u64), String> 
         if out.len() >= max {
             break;
         }
+        // The window runs past a short entry stub into whatever follows (other
+        // code, data); the instructions after an unconditional transfer are
+        // not the entry point's.
+        if matches!(
+            insn.mnemonic().unwrap_or_default(),
+            "ret"
+                | "retn"
+                | "retf"
+                | "hlt"
+                | "ud2"
+                | "int3"
+                | "jmp"
+                | "b"
+                | "br"
+                | "bx"
+                | "brk"
+                | "udf"
+        ) {
+            break;
+        }
     }
     Ok((out, address))
 }
@@ -351,9 +376,12 @@ impl FileScannerMcp {
             entropy: entropy_analysis.as_ref().map(|e| e.overall_entropy),
             yara_rule_suggestion: None,
         };
+        let mut yara_rule_note = None;
         if request.suggest_yara_rule.unwrap_or(true) {
-            result.yara_rule_suggestion =
-                crate::mcp_server::tools_yara::suggest_yara_rule(&result, &request.file_path).ok();
+            match crate::mcp_server::tools_yara::suggest_yara_rule(&result, &request.file_path) {
+                Ok(rule) => result.yara_rule_suggestion = Some(rule),
+                Err(reason) => yara_rule_note = Some(format!("no draft rule: {reason}")),
+            }
         }
         Ok(LlmDigest {
             sha256: hashes.sha256,
@@ -362,6 +390,7 @@ impl FileScannerMcp {
             is_packed: entropy_analysis.map(|e| e.packed_indicators.likely_packed),
             result,
             notes,
+            yara_rule_note,
             truncated: None,
         })
     }
@@ -404,18 +433,24 @@ impl FileScannerMcp {
         let mut key_strings: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        let mut interesting: Vec<_> = strings
+        // A categorized string that is too long to be a key string as a whole
+        // (a Go blob holding a URL) is represented by the text that made it
+        // categorized.
+        let mut interesting: Vec<(usize, usize, &str)> = strings
             .interesting_strings
             .iter()
-            .filter(|s| (8..=100).contains(&s.value.len()))
+            .filter_map(|s| {
+                let text = key_text(&s.value, 100)?;
+                Some((category_rank(&s.category), s.offset, text))
+            })
             .collect();
-        interesting.sort_by_key(|s| (category_rank(&s.category), s.offset));
-        for s in interesting {
+        interesting.sort_by_key(|(rank, offset, _)| (*rank, *offset));
+        for (_, _, text) in interesting {
             if key_strings.len() >= max_count {
                 return key_strings;
             }
-            if seen.insert(s.value.as_str()) {
-                key_strings.push(s.value.clone());
+            if seen.insert(text) {
+                key_strings.push(text.to_string());
             }
         }
         for s in &strings.ascii_strings {
@@ -492,12 +527,31 @@ impl FileScannerMcp {
             is_packed: None,
             result,
             notes: Vec::new(),
+            yara_rule_note: None,
             truncated: None,
         };
         // Past the point where nothing can be trimmed the result is returned as it is.
         let _ = fit(&mut digest, token_limit);
         digest.result
     }
+}
+
+/// The part of a categorized string worth putting in a rule: the whole string
+/// when it is 8 to `max` bytes, otherwise the text that made it categorized
+/// (cut to `max` bytes), when that is at least 8 bytes.
+pub(super) fn key_text(value: &str, max: usize) -> Option<&str> {
+    const MIN: usize = 8;
+    if (MIN..=max).contains(&value.len()) {
+        return Some(value);
+    }
+    if value.len() < MIN {
+        return None;
+    }
+    let (from, to) = crate::strings::category_span(value)?;
+    let from = value.ceil_char_boundary(from);
+    let to = value.floor_char_boundary(to.min(from + max).min(value.len()));
+    let text = value.get(from..to)?;
+    (text.len() >= MIN).then_some(text)
 }
 
 #[cfg(test)]

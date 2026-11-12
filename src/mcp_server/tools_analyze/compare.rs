@@ -82,7 +82,8 @@ fn load_side(
     match binary_info {
         Ok(info) => {
             side.format = info.get("format").and_then(Value::as_str).map(String::from);
-            if matches!(side.format.as_deref(), Some("Raw" | "Unknown") | None) {
+            let raw = matches!(side.format.as_deref(), Some("Raw" | "Unknown") | None);
+            if raw {
                 side.notes.push(format!(
                     "{label}: binary_info: not an executable format, so it has no imports or sections"
                 ));
@@ -91,10 +92,15 @@ fn load_side(
                 .get("architecture")
                 .and_then(Value::as_str)
                 .map(String::from);
+            // A raw file's one "section" is a placeholder, not structure.
+            let keys: &[&str] = if raw { &[] } else { &["imports", "sections"] };
             for (key, set) in [
                 ("imports", &mut side.imports),
                 ("sections", &mut side.sections),
-            ] {
+            ]
+            .into_iter()
+            .filter(|(key, _)| keys.contains(key))
+            {
                 for item in info
                     .get(key)
                     .and_then(Value::as_array)
@@ -116,6 +122,17 @@ fn load_side(
     }
     match strings {
         Ok(section) => {
+            if section.get("truncated").and_then(Value::as_bool) == Some(true) {
+                side.notes.push(format!(
+                    "{label}: strings: only the first {} of {} categorized strings were \
+                     compared (the stored list is cut)",
+                    section
+                        .get("strings")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len),
+                    section.get("total_count").unwrap_or(&Value::Null)
+                ));
+            }
             for s in section
                 .get("strings")
                 .and_then(Value::as_array)
@@ -251,8 +268,8 @@ impl FileScannerMcp {
                     (&mut a, &a_path, &a_sha, a_mtime, "file_a"),
                     (&mut b, &b_path, &b_sha, b_mtime, "file_b"),
                 ] {
-                    let ctx = Ctx::new(path, &runtime, options);
-                    let mut engine = Engine::new(state.section_cache(), sha, ctx);
+                    let ctx = Ctx::new(path, &runtime, options.clone());
+                    let mut engine = Engine::new(state.section_cache(), sha, ctx, state.cache_enabled());
                     load_side(&mut engine, side, label, &options, mtime);
                     computed += engine.computed;
                     cached += engine.cached;

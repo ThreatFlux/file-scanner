@@ -101,16 +101,21 @@ impl FileScannerMcp {
 }
 
 /// What the server tells a client at `initialize` (and `server/discover`).
-pub const INSTRUCTIONS: &str = "File Scanner analyzes files and packages for security work. \
-Call analyze_file first and pass the flags for what you need (metadata and hashes are a cheap \
-start; `all: true` runs every analysis, and later calls for single sections on the same file are \
-answered from the cache), then dig in with the other tools: llm_analyze_file for a compact digest and a draft \
-YARA rule, yara_scan_file to test a rule against a file or directory, analyze_java_file for \
-JAR/WAR/EAR/APK/AAR/CLASS files, analyze_npm_package and analyze_python_package for packages. \
-Always pass absolute paths (a leading ~/ is expanded; relative paths depend on the server's \
-working directory). Every result is compact JSON capped at max_output_bytes (default 80000, \
-ceiling 400000); anything cut is listed under 'truncated' - ask for a narrower view instead of \
-raising the cap. A failed call returns isError with a message that says what to fix.";
+pub const INSTRUCTIONS: &str = "File Scanner is a static analyzer for files and packages (nothing is executed). \
+Call analyze_file first with only a path: it returns a small overview (type, hashes, headline facts, \
+the most telling strings) and `next_steps` naming the right next call. Then dig in: analyze_file with \
+`sections: [...]` returns a summary of those sections, and query_analysis pages and filters their lists \
+(strings, symbols, imports, functions, findings ...). `all: true` runs every analysis once, still \
+answers with summaries, and makes the later query_analysis, disassemble and read_hex calls on that \
+file fast (answered from the cache; cache_status and cache_clear show and empty it). Other tools: \
+disassemble (function list, then one function's instructions), read_hex (raw bytes at any offset), \
+compare_files, search_strings and string_details (strings across files), llm_analyze_file (a compact \
+digest and draft YARA rule) and yara_scan_file (test a rule). By file kind: analyze_document (PDF, \
+Office), analyze_script, inspect_archive (zip, tar, rar, 7z), analyze_java_file, \
+analyze_npm_package and analyze_python_package. Pass absolute paths (a leading ~/ is expanded). \
+Every result is capped at max_output_bytes (default 80000, ceiling 400000): lists come back in \
+pages (`returned`, `next_offset`, `total`; repeat the call with `offset`), anything cut is listed \
+under `truncated`, and a failed call returns isError with a message that says what to fix.";
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for FileScannerMcp {
@@ -157,5 +162,33 @@ mod tests {
         assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
         assert!(info.instructions.is_some());
         assert!(info.capabilities.tools.is_some());
+    }
+
+    /// The instructions name every tool, and the session-opening advice the
+    /// transport tests rely on, and stay short (a model reads them every session).
+    #[test]
+    fn the_instructions_name_every_tool_and_stay_short() {
+        let mcp = FileScannerMcp::new();
+        for tool in mcp.tool_definitions() {
+            if tool.name == "test_panic" || tool.name == "sample" {
+                continue;
+            }
+            assert!(
+                INSTRUCTIONS.contains(tool.name.as_ref()),
+                "the instructions do not mention {}",
+                tool.name
+            );
+        }
+        for phrase in [
+            "analyze_file first",
+            "absolute",
+            "all: true",
+            "query_analysis",
+            "max_output_bytes",
+            "next_offset",
+        ] {
+            assert!(INSTRUCTIONS.contains(phrase), "missing: {phrase}");
+        }
+        assert!(INSTRUCTIONS.len() < 2_600, "{} bytes", INSTRUCTIONS.len());
     }
 }

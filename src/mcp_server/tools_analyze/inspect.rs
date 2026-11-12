@@ -1,8 +1,9 @@
 //! `disassemble` and `read_hex`: the two targeted looks at the code and the
 //! bytes of one file. Neither ever returns a whole binary.
 //!
-//! `disassemble` is served from the section cache (the full disassembly is
-//! computed once per file and kept), so asking for a second function is fast.
+//! `disassemble` is served from the section cache, which keeps a bounded part
+//! of the disassembly (the function table, the first instructions); a range
+//! outside that part is decoded again for the call.
 //! `read_hex` reads the file directly: a few hundred bytes need no cache.
 
 use std::{collections::HashMap, fmt::Write as _};
@@ -37,13 +38,13 @@ const CANDIDATES: usize = 12;
 
 pub(super) const DISASSEMBLE_DESCRIPTION: &str =
     "Read the machine code of ONE function or address \
-range of an ELF or thin Mach-O binary as a text listing (address, bytes, mnemonic, operands, call \
-targets named). Never the whole binary. Pass `function` (a name from query_analysis section \
+range of an ELF or thin Mach-O binary as a text listing (address, bytes, mnemonic, operands, direct call and jump targets named when they match a function). Never the whole binary. Pass `function` (a name from query_analysis section \
 `disassembly` list `functions`, or from analyze_file's symbols) or `address` (\"0x401136\" or a \
 number); the listing is capped at `max_instructions` (default 200, at most 1000) and says where to \
 continue (`next_address`). With neither, it lists the functions (name, address, size, complexity) \
-paged with `offset`/`limit`/`filter`, so you can pick one. The full disassembly is computed once \
-and cached by the file's SHA-256 (`cache: hit` afterwards). Call analyze_file first to see whether \
+paged with `offset`/`limit`/`filter`, so you can pick one. A bounded part of the \
+disassembly is cached by the file's SHA-256 (`cache: hit`); a range outside that part is decoded \
+again for the call, which takes a moment on a large file. Call analyze_file first to see whether \
 the file is an executable; use query_analysis for suspicious patterns and read_hex for raw bytes.";
 
 pub(super) const READ_HEX_DESCRIPTION: &str = "Read raw bytes of a file as a hex dump: `offset` \
@@ -143,6 +144,10 @@ pub struct DisassembleRequest {
         description = "With no function or address: functions to return (default 50, at most 500)"
     )]
     pub limit: Option<usize>,
+    #[schemars(
+        description = "Universal (fat) Mach-O only: names a slice (binary_info.universal_slices), but disassembly does not read one of its slices yet, so a fat binary is refused whatever this says"
+    )]
+    pub arch: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +284,176 @@ impl FileScannerMcp {
 // disassemble
 // ---------------------------------------------------------------------------
 
+/// Instructions decoded again around an address that the stored section does
+/// not hold.
+const WINDOW_INSTRUCTIONS: usize = 2_000;
+
+/// The stored section with what the request needs filled in when the bounded
+/// section does not hold it: the instructions of the one function asked for,
+/// or a window of the flat list from the address. The typed disassembly is
+/// decoded again for that (`window_note` says so); nothing else changes.
+fn with_window(
+    section: &std::sync::Arc<Value>,
+    request: &DisassembleRequest,
+    typed: &mut dyn FnMut()
+        -> Result<std::sync::Arc<crate::disassembly::DisassemblyResult>, String>,
+) -> Result<(std::sync::Arc<Value>, Option<String>), String> {
+    let functions = section
+        .get("functions")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let address = request
+        .address
+        .as_ref()
+        .map(AddressArg::parse)
+        .transpose()?
+        .or_else(|| {
+            request
+                .function
+                .as_deref()
+                .filter(|f| f.trim_start().starts_with("0x"))
+                .and_then(|f| parse_address(f).ok())
+        });
+    let function = match (&request.function, address) {
+        (Some(name), None) => Some(find_function(functions, name, section)?),
+        (_, Some(a)) => function_containing(functions, a),
+        (None, None) => return Ok((std::sync::Arc::clone(section), None)),
+    };
+    let stored_count = |f: &Value| {
+        f.get("instructions")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    let flat = section
+        .get("instructions")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let flat_total = section
+        .get("instructions_total")
+        .and_then(Value::as_u64)
+        .map_or(flat.len(), |n| n as usize);
+    let truncated = flat_total > flat.len();
+    let last_stored = flat.last().and_then(address_of);
+    let page = request
+        .max_instructions
+        .unwrap_or(DEFAULT_INSTRUCTIONS)
+        .clamp(1, MAX_INSTRUCTIONS);
+    // The stored list answers a page only when the whole page lies inside it:
+    // a page that would run past its last instruction continues in a decoded
+    // window, so the walk never stops at the stored part.
+    let flat_covers_page = |a: u64| {
+        !truncated
+            || flat
+                .iter()
+                .position(|i| {
+                    address_of(i).is_some_and(|start| {
+                        let size = i.get("size").and_then(Value::as_u64).unwrap_or(1).max(1);
+                        start <= a && a < start.saturating_add(size)
+                    })
+                })
+                .is_some_and(|at| at + page <= flat.len())
+    };
+    // A function whose instructions are not stored is read from the flat list
+    // only when its whole range lies inside the stored part.
+    let function_in_flat = |f: &Value| {
+        !truncated
+            || (f.get("size").and_then(Value::as_u64).unwrap_or(0) > 0
+                && address_of(f).is_some_and(|start| {
+                    let end =
+                        start.saturating_add(f.get("size").and_then(Value::as_u64).unwrap_or(0));
+                    last_stored.is_some_and(|last| last >= end)
+                }))
+    };
+    let need_function = function
+        .filter(|f| instruction_count(f).unwrap_or(0) > stored_count(f) && !function_in_flat(f));
+    let need_flat = function.is_none() && address.is_some_and(|a| !flat_covers_page(a));
+    if need_function.is_none() && !need_flat {
+        return Ok((std::sync::Arc::clone(section), None));
+    }
+    let result = typed()?;
+    let mut patched = (**section).clone();
+    if let Some(wanted) = need_function {
+        let (at, name) = (
+            address_of(wanted),
+            wanted.get("name").and_then(Value::as_str),
+        );
+        if let Some(full) = result
+            .functions
+            .iter()
+            .find(|f| Some(f.address) == at && Some(f.name.as_str()) == name)
+        {
+            // A window of the function from the requested address (or its
+            // start), not all of it: a function can hold a million instructions.
+            let from = address
+                .and_then(|a| {
+                    full.instructions.iter().position(|i| {
+                        i.address <= a && a < i.address.saturating_add(i.size.max(1) as u64)
+                    })
+                })
+                .unwrap_or(0);
+            let instructions: Vec<Value> = full.instructions[from..]
+                .iter()
+                .take(WINDOW_INSTRUCTIONS)
+                .map(super::sections::instruction_value)
+                .collect();
+            let window_from = from;
+            if let Some(entry) = patched
+                .get_mut("functions")
+                .and_then(Value::as_array_mut)
+                .and_then(|list| {
+                    list.iter_mut().find(|f| {
+                        address_of(f) == at && f.get("name").and_then(Value::as_str) == name
+                    })
+                })
+            {
+                entry["instructions"] = instructions.into();
+                entry["window_from"] = window_from.into();
+            }
+        }
+    } else if let Some(a) = address {
+        let from = result
+            .instructions
+            .iter()
+            .position(|i| i.address <= a && a < i.address.saturating_add(i.size.max(1) as u64))
+            .or_else(|| result.instructions.iter().position(|i| i.address >= a));
+        if let Some(from) = from {
+            let window: Vec<Value> = result.instructions[from..]
+                .iter()
+                .take(WINDOW_INSTRUCTIONS)
+                .map(super::sections::instruction_value)
+                .collect();
+            let beyond = result
+                .instructions
+                .len()
+                .saturating_sub(from + window.len());
+            patched["instructions"] = window.into();
+            patched["instructions_beyond"] = beyond.into();
+        }
+    }
+    Ok((
+        std::sync::Arc::new(patched),
+        Some(
+            "These instructions are not in the stored section (it keeps a bounded part of a \
+             large disassembly), so the file was decoded again for them."
+                .to_string(),
+        ),
+    ))
+}
+
+/// Instructions a function has: its stored count, else the stored list's length.
+fn instruction_count(function: &Value) -> Option<usize> {
+    function
+        .get("instruction_count")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .or_else(|| {
+            function
+                .get("instructions")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
+}
+
 fn address_of(value: &Value) -> Option<u64> {
     value.get("address").and_then(Value::as_u64)
 }
@@ -293,7 +468,11 @@ fn describe(function: &Value) -> String {
 }
 
 /// The function a `function` argument names.
-fn find_function<'a>(functions: &'a [Value], query: &str) -> Result<&'a Value, String> {
+fn find_function<'a>(
+    functions: &'a [Value],
+    query: &str,
+    section: &Value,
+) -> Result<&'a Value, String> {
     let query = query.trim();
     let by_name = |matches: &dyn Fn(&str) -> bool| -> Vec<&'a Value> {
         functions
@@ -315,12 +494,28 @@ fn find_function<'a>(functions: &'a [Value], query: &str) -> Result<&'a Value, S
     };
     match candidates.as_slice() {
         [one] => Ok(one),
-        [] => Err(format!(
-            "No function named '{query}' in this file's disassembly ({} functions). Call \
-             disassemble with only file_path (and `filter`: part of a name) to list them, or pass \
-             an `address`.",
-            functions.len()
-        )),
+        [] => {
+            // What the analyzer said about functions it left out.
+            let limits: Vec<&str> = section
+                .pointer("/coverage/notes")
+                .and_then(Value::as_array)
+                .map_or(&[][..], Vec::as_slice)
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|n| n.starts_with("Limit"))
+                .collect();
+            Err(format!(
+                "No function named '{query}' in this file's disassembly ({} functions). Call \
+                 disassemble with only file_path (and `filter`: part of a name) to list them, or \
+                 pass an `address`.{}",
+                functions.len(),
+                if limits.is_empty() {
+                    String::new()
+                } else {
+                    format!(" The analyzer said: {}", limits.join(" "))
+                }
+            ))
+        }
         many => {
             let list = many
                 .iter()
@@ -351,22 +546,41 @@ fn function_containing(functions: &[Value], address: u64) -> Option<&Value> {
     })
 }
 
+/// The address a direct `call` or jump names in its operand (`call 0x1549`),
+/// for when the analyzer did not resolve it.
+fn direct_target(mnemonic: &str, operands: &str) -> Option<u64> {
+    let mnemonic = mnemonic.to_ascii_lowercase();
+    let branch = mnemonic.starts_with("call")
+        || mnemonic.starts_with('j')
+        || matches!(mnemonic.as_str(), "b" | "bl" | "loop")
+        || mnemonic.starts_with("b.");
+    if !branch {
+        return None;
+    }
+    let digits = operands.trim().strip_prefix("0x")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(digits, 16).ok()
+}
+
 /// One listing line: `0x401136  55 48 89 e5  push rbp  ; call -> main`.
 fn line(instruction: &Value, names: &HashMap<u64, &str>) -> String {
     let address = address_of(instruction).unwrap_or(0);
-    let mut bytes = String::new();
-    for (i, b) in instruction
-        .get("bytes")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .enumerate()
-    {
-        if i > 0 {
-            bytes.push(' ');
+    let bytes = match instruction.get("bytes") {
+        Some(Value::String(hex)) => hex.clone(),
+        Some(Value::Array(items)) => {
+            let mut text = String::new();
+            for (i, b) in items.iter().enumerate() {
+                if i > 0 {
+                    text.push(' ');
+                }
+                let _ = write!(text, "{:02x}", b.as_u64().unwrap_or(0));
+            }
+            text
         }
-        let _ = write!(bytes, "{:02x}", b.as_u64().unwrap_or(0));
-    }
+        _ => String::new(),
+    };
     let mnemonic = instruction
         .get("mnemonic")
         .and_then(Value::as_str)
@@ -378,23 +592,48 @@ fn line(instruction: &Value, names: &HashMap<u64, &str>) -> String {
     let mut out = format!("0x{address:x}  {bytes:<23}  {mnemonic} {operands}")
         .trim_end()
         .to_string();
-    let target = instruction.get("flow_control").and_then(|f| {
-        f.get("Call")
-            .or_else(|| f.get("Jump"))
-            .and_then(|c| c.get("target"))
-            .and_then(Value::as_u64)
-    });
+    let target = instruction
+        .get("flow_control")
+        .and_then(|f| {
+            f.get("Call")
+                .or_else(|| f.get("Jump"))
+                .and_then(|c| c.get("target"))
+                .and_then(Value::as_u64)
+        })
+        .or_else(|| direct_target(mnemonic, operands));
     if let Some(target) = target {
-        match names.get(&target) {
-            Some(name) => {
-                let _ = write!(out, "  ; -> {name}");
-            }
-            None => {
-                let _ = write!(out, "  ; -> 0x{target:x}");
-            }
+        if let Some(name) = names.get(&target) {
+            let _ = write!(out, "  ; -> {name}");
         }
     }
     out
+}
+
+/// Instructions the whole disassembly holds (the stored list can be shorter).
+fn total_instructions(section: &Value) -> usize {
+    let stored = section
+        .get("instructions")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    section
+        .get("instructions_total")
+        .and_then(Value::as_u64)
+        .map_or(stored, |n| n as usize)
+        .max(stored)
+}
+
+/// First and last address of the whole instruction list, not of the stored part.
+fn decoded_bounds(section: &Value) -> Option<(u64, u64)> {
+    let stored = section.get("instructions").and_then(Value::as_array);
+    let first = section
+        .get("instructions_first_address")
+        .and_then(Value::as_u64)
+        .or_else(|| stored.and_then(|l| l.first()).and_then(address_of))?;
+    let last = section
+        .get("instructions_last_address")
+        .and_then(Value::as_u64)
+        .or_else(|| stored.and_then(|l| l.last()).and_then(address_of))?;
+    Some((first, last))
 }
 
 /// The function table of a `disassemble` call with no target.
@@ -403,6 +642,7 @@ fn function_table(
     request: &DisassembleRequest,
     file_path: &str,
     budget: usize,
+    extras: &Value,
 ) -> Value {
     let functions = section
         .get("functions")
@@ -423,7 +663,7 @@ fn function_table(
                 "name": f.get("name"),
                 "address": format!("0x{:x}", address_of(f).unwrap_or(0)),
                 "size": f.get("size"),
-                "instructions": f.get("instructions").and_then(Value::as_array).map(Vec::len),
+                "instructions": instruction_count(f),
                 "complexity": f.get("complexity"),
             })
         })
@@ -440,29 +680,17 @@ fn function_table(
         .pointer("/analysis/total_instructions")
         .cloned()
         .unwrap_or(Value::Null);
-    fit_rows(
-        &mut value,
-        "items",
-        budget.saturating_sub(800),
-        request.offset.unwrap_or(0),
-        rows.len(),
-    );
-    let flat = section
-        .get("instructions")
-        .and_then(Value::as_array)
-        .map_or(&[][..], Vec::as_slice);
-    let first = flat.first().and_then(address_of);
-    let last = flat.last().and_then(address_of);
+    let (first, last) = match decoded_bounds(section) {
+        Some((a, b)) => (Some(a), Some(b)),
+        None => (None, None),
+    };
     if rows.is_empty() {
         // No function names to pass: start from an address instead.
-        let mut step = json!({
+        let step = json!({
             "tool": "disassemble",
             "arguments": {"file_path": file_path, "address": first.map(|a| format!("0x{a:x}"))},
             "gives": "the first decoded instructions; follow next_address for the rest",
         });
-        if let Some(entry) = section.get("entry_point").and_then(Value::as_u64) {
-            step["note"] = format!("the entry point is 0x{entry:x}").into();
-        }
         value["note"] = if filter.is_some() {
             "No function name matches the filter."
         } else {
@@ -481,7 +709,24 @@ fn function_table(
     if let (Some(first), Some(last)) = (first, last) {
         value["decoded_range"] = format!("0x{first:x}..0x{last:x}").into();
     }
+    merge(&mut value, extras);
+    fit_rows(
+        &mut value,
+        "items",
+        budget,
+        request.offset.unwrap_or(0),
+        rows.len(),
+    );
     value
+}
+
+/// The fields of the object `extras` copied into `value`.
+fn merge(value: &mut Value, extras: &Value) {
+    if let (Some(into), Some(from)) = (value.as_object_mut(), extras.as_object()) {
+        for (k, v) in from {
+            into.insert(k.clone(), v.clone());
+        }
+    }
 }
 
 /// The listing of one function or address range.
@@ -489,6 +734,8 @@ fn listing(
     section: &Value,
     request: &DisassembleRequest,
     file_path: &str,
+    budget: usize,
+    extras: &Value,
 ) -> Result<Value, String> {
     let empty = Vec::new();
     let functions = section
@@ -522,7 +769,7 @@ fn listing(
                 .and_then(|f| parse_address(f).ok())
         });
     let function = match (&request.function, address) {
-        (Some(name), None) => Some(find_function(functions, name)?),
+        (Some(name), None) => Some(find_function(functions, name, section)?),
         (_, Some(a)) => function_containing(functions, a),
         (None, None) => None,
     };
@@ -572,15 +819,12 @@ fn listing(
             .filter_map(address_of)
             .filter(|a| *a >= start_at)
             .min();
-        let range = match (
-            flat.first().and_then(address_of),
-            flat.last().and_then(address_of),
-        ) {
-            (Some(a), Some(b)) => format!(
+        let range = match decoded_bounds(section) {
+            Some((a, b)) => format!(
                 " The analyzer decoded {} instructions in 0x{a:x}..0x{b:x} and stops at the \
                  first byte it cannot decode, so addresses outside that range are not listed; \
                  read_hex shows the raw bytes there.",
-                flat.len()
+                total_instructions(section)
             ),
             _ => String::new(),
         };
@@ -599,47 +843,107 @@ fn listing(
         .filter_map(|f| Some((address_of(f)?, f.get("name")?.as_str()?)))
         .collect();
     let slice = &pool[first..];
-    let shown = &slice[..slice.len().min(max)];
-    let mut text = String::new();
-    for instruction in shown {
-        text.push_str(&line(instruction, &names));
-        text.push('\n');
-    }
-    let mut value = json!({
-        "view": "listing",
-        "file_path": file_path,
-        "architecture": section.get("architecture"),
-        "start_address": format!("0x{:x}", address_of(shown[0]).unwrap_or(0)),
-        "returned": shown.len(),
-        "max_instructions": max,
-        "listing": text,
+    // Instructions of a decoded-again window (or of the part that is not
+    // stored) that lie past the end of the pool.
+    let flat_beyond = section
+        .get("instructions_beyond")
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .unwrap_or_else(|| total_instructions(section).saturating_sub(flat.len()));
+    let beyond = if function_instructions.is_none() && function.is_none() {
+        flat_beyond
+    } else {
+        0
+    } + function_instructions.map_or(0, |items| {
+        let from = function
+            .and_then(|f| f.get("window_from"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        function
+            .and_then(instruction_count)
+            .unwrap_or(0)
+            .saturating_sub(from + items.len())
     });
-    if let Some(f) = function {
-        value["function"] = json!({
-            "name": f.get("name"),
-            "address": format!("0x{:x}", address_of(f).unwrap_or(0)),
-            "size": f.get("size"),
-            "complexity": f.get("complexity"),
-            "instructions": pool.len(),
+    let wanted = &slice[..slice.len().min(max)];
+    let texts: Vec<String> = wanted.iter().map(|i| line(i, &names)).collect();
+    // The answer with `count` lines; whole lines only, and the count is
+    // lowered until the whole answer (path, cache fields, next step) fits.
+    let build = |count: usize| -> Value {
+        let shown = &wanted[..count];
+        let mut text = String::new();
+        for t in &texts[..count] {
+            text.push_str(t);
+            text.push('\n');
+        }
+        let mut value = json!({
+            "view": "listing",
+            "file_path": file_path,
+            "architecture": section.get("architecture"),
+            "start_address": format!("0x{:x}", address_of(shown[0]).unwrap_or(0)),
+            "returned": shown.len(),
+            "max_instructions": max,
+            "listing": text,
         });
+        if let Some(f) = function {
+            value["function"] = json!({
+                "name": f.get("name"),
+                "address": format!("0x{:x}", address_of(f).unwrap_or(0)),
+                "size": f.get("size"),
+                "complexity": f.get("complexity"),
+                "instructions": instruction_count(f).unwrap_or(pool.len()),
+            });
+        }
+        if requested > max {
+            value["note"] = format!(
+                "max_instructions {requested} was lowered to the limit of {MAX_INSTRUCTIONS}"
+            )
+            .into();
+        }
+        if count < wanted.len() {
+            let cut = format!(
+                "The listing was shortened to {count} of the {} instructions asked for to fit \
+                 max_output_bytes; next_address continues where it stops.",
+                wanted.len()
+            );
+            value["note"] = match value.get("note").and_then(Value::as_str) {
+                Some(earlier) => format!("{earlier}. {cut}"),
+                None => cut,
+            }
+            .into();
+        }
+        if slice.len() + beyond > shown.len() {
+            let next = match slice.get(shown.len()) {
+                Some(i) => address_of(i).unwrap_or(0),
+                None => shown.last().map_or(0, |i| {
+                    address_of(i)
+                        .unwrap_or(0)
+                        .saturating_add(i.get("size").and_then(Value::as_u64).unwrap_or(1).max(1))
+                }),
+            };
+            value["more"] = true.into();
+            value["remaining"] = (slice.len() - shown.len() + beyond).into();
+            value["next_address"] = format!("0x{next:x}").into();
+            value["next_steps"] = json!([{
+                "tool": "disassemble",
+                "arguments": {"file_path": file_path, "address": format!("0x{next:x}")},
+                "gives": "the next instructions",
+            }]);
+        }
+        merge(&mut value, extras);
+        value
+    };
+    let mut count = texts.len();
+    loop {
+        let value = build(count);
+        let size = serde_json::to_vec(&value).map_or(0, |v| v.len());
+        if size <= budget || count <= 1 {
+            return Ok(value);
+        }
+        let average = (size / count).max(1);
+        count = count
+            .saturating_sub(((size - budget) / average).max(1))
+            .max(1);
     }
-    if requested > max {
-        value["note"] =
-            format!("max_instructions {requested} was lowered to the limit of {MAX_INSTRUCTIONS}")
-                .into();
-    }
-    if slice.len() > shown.len() {
-        let next = address_of(slice[shown.len()]).unwrap_or(0);
-        value["truncated"] = true.into();
-        value["remaining"] = (slice.len() - shown.len()).into();
-        value["next_address"] = format!("0x{next:x}").into();
-        value["next_steps"] = json!([{
-            "tool": "disassemble",
-            "arguments": {"file_path": file_path, "address": format!("0x{next:x}")},
-            "gives": "the next instructions",
-        }]);
-    }
-    Ok(value)
 }
 
 impl FileScannerMcp {
@@ -670,12 +974,17 @@ impl FileScannerMcp {
         let state = std::sync::Arc::clone(&self.state);
         let runtime = tokio::runtime::Handle::current();
         let file_path = path.to_string_lossy().into_owned();
+        let arch = super::sections::arch_option(request.arch.as_deref());
         let outcome = self
             .state
             .run_blocking("disassemble", move || {
-                let options = Options::default();
-                let ctx = Ctx::new(&path, &runtime, options);
-                let mut engine = Engine::new(state.section_cache(), &sha256, ctx);
+                let options = Options {
+                    arch: arch.clone(),
+                    ..Options::default()
+                };
+                let ctx = Ctx::new(&path, &runtime, options.clone());
+                let mut engine =
+                    Engine::new(state.section_cache(), &sha256, ctx, state.cache_enabled());
                 let planned = plan("disassembly", &options, &file_path, mtime_ns);
                 let section = engine.load(&planned).map_err(|failure| match failure {
                     Failure::Error(m) => format!("The disassembly failed: {m}"),
@@ -684,15 +993,21 @@ impl FileScannerMcp {
                          only file_path to see what kind of file it is."
                     ),
                 })?;
-                let mut value = if request.function.is_none() && request.address.is_none() {
-                    function_table(&section, &request, &file_path, budget)
-                } else {
-                    listing(&section, &request, &file_path)?
-                };
-                value["cache"] = engine.cache_state().into();
+                let (section, window_note) =
+                    with_window(&section, &request, &mut || engine.typed_disassembly())
+                        .map_err(|m| format!("The disassembly failed: {m}"))?;
+                let mut extras = json!({"cache": engine.cache_state()});
                 if let Some(note) = engine.cache_note() {
-                    value["cache_note"] = note.into();
+                    extras["cache_note"] = note.into();
                 }
+                if let Some(note) = window_note {
+                    extras["window_note"] = note.into();
+                }
+                let value = if request.function.is_none() && request.address.is_none() {
+                    function_table(&section, &request, &file_path, budget, &extras)
+                } else {
+                    listing(&section, &request, &file_path, budget, &extras)?
+                };
                 Ok::<String, String>(render(value, budget))
             })
             .await;
@@ -701,5 +1016,163 @@ impl FileScannerMcp {
             Ok(Err(message)) => tool_error(message),
             Ok(Ok(text)) => respond_text(text),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> DisassembleRequest {
+        serde_json::from_value(json!({"file_path": "/x"})).unwrap()
+    }
+
+    /// A stripped binary has no function names: the table says so, its next
+    /// step is an address, and the decoded range is named.
+    #[test]
+    fn a_table_without_functions_points_at_an_address_and_the_decoded_range() {
+        let section = json!({
+            "architecture": "x86_64",
+            "functions": [],
+            "instructions": [
+                {"address": 0x1000, "size": 1, "bytes": [0x90], "mnemonic": "nop", "operands": ""},
+                {"address": 0x1001, "size": 1, "bytes": [0xc3], "mnemonic": "ret", "operands": ""},
+            ],
+        });
+        let table = function_table(&section, &request(), "/x", 80_000, &json!({}));
+        assert!(table["note"]
+            .as_str()
+            .unwrap()
+            .contains("no function symbols"));
+        assert_eq!(table["next_steps"][0]["arguments"]["address"], "0x1000");
+        assert_eq!(table["decoded_range"], "0x1000..0x1001");
+    }
+
+    #[test]
+    fn direct_branch_operands_are_resolved_to_names() {
+        let names: HashMap<u64, &str> = HashMap::from([(0x1549, "detect_debugger")]);
+        let call = json!({"address": 0x1d93, "bytes": [0xe8], "mnemonic": "call",
+                          "operands": "0x1549"});
+        assert!(line(&call, &names).ends_with("; -> detect_debugger"));
+        let indirect = json!({"address": 0x1d93, "bytes": [0xff], "mnemonic": "call",
+                              "operands": "rax"});
+        assert!(!line(&indirect, &names).contains("; ->"));
+        let mov = json!({"address": 0x1d93, "bytes": [0x48], "mnemonic": "mov",
+                         "operands": "0x1549"});
+        assert!(!line(&mov, &names).contains("; ->"));
+    }
+
+    fn nops(count: u64) -> std::sync::Arc<crate::disassembly::DisassemblyResult> {
+        use crate::disassembly::{
+            ControlFlowSummary, DisassembledFunction, DisassemblyResult, GraphVisualizationData,
+            Instruction, InstructionAnalysis, InstructionType, OutputFormats,
+        };
+        let instructions: Vec<Instruction> = (0..count)
+            .map(|address| Instruction {
+                address: 0x1000 + address,
+                bytes: vec![0x90],
+                mnemonic: "nop".into(),
+                operands: String::new(),
+                instruction_type: InstructionType::Other,
+                flow_control: None,
+                size: 1,
+            })
+            .collect();
+        let functions = vec![DisassembledFunction {
+            address: 0x1000,
+            name: "big".into(),
+            size: count as usize,
+            instructions: instructions.clone(),
+            basic_blocks: Vec::new(),
+            complexity: 1,
+        }];
+        std::sync::Arc::new(DisassemblyResult {
+            architecture: "x86_64".into(),
+            analysis: InstructionAnalysis {
+                total_instructions: instructions.len(),
+                instruction_types: Default::default(),
+                register_usage: Default::default(),
+                memory_accesses: Vec::new(),
+                system_calls: Vec::new(),
+                crypto_operations: Vec::new(),
+                suspicious_patterns: Vec::new(),
+                control_flow_summary: ControlFlowSummary {
+                    total_jumps: 0,
+                    conditional_jumps: 0,
+                    unconditional_jumps: 0,
+                    function_calls: 0,
+                    indirect_calls: 0,
+                    returns: 0,
+                    interrupts: 0,
+                },
+            },
+            instructions,
+            functions,
+            output_formats: OutputFormats {
+                assembly: String::new(),
+                json_structured: Value::Null,
+                graph_data: GraphVisualizationData {
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                },
+            },
+        })
+    }
+
+    /// Follows next_address from `first` (or the function) until the answer
+    /// has no `more`; returns the lines listed.
+    fn walk(
+        section: &std::sync::Arc<Value>,
+        typed: &std::sync::Arc<crate::disassembly::DisassemblyResult>,
+        function: Option<&str>,
+    ) -> usize {
+        let mut lines = 0;
+        let mut next: Option<String> = None;
+        for _ in 0..200 {
+            let mut args = json!({"file_path": "/x", "max_instructions": 1000});
+            match (&next, function) {
+                (Some(a), _) => args["address"] = a.clone().into(),
+                (None, Some(name)) => args["function"] = name.into(),
+                (None, None) => args["address"] = "0x1000".into(),
+            }
+            let request: DisassembleRequest = serde_json::from_value(args).unwrap();
+            let (patched, _) = with_window(section, &request, &mut || Ok(typed.clone())).unwrap();
+            let answer = listing(&patched, &request, "/x", 10_000_000, &json!({})).unwrap();
+            lines += answer["returned"].as_u64().unwrap() as usize;
+            match answer.get("next_address").and_then(Value::as_str) {
+                Some(a) if answer["more"] == true => next = Some(a.to_string()),
+                _ => return lines,
+            }
+        }
+        panic!("the walk did not end");
+    }
+
+    /// The stored part keeps 20,000 instructions; a walk by next_address
+    /// continues past it and ends at the true total, by address and by
+    /// function.
+    #[test]
+    fn a_walk_continues_past_the_stored_instructions() {
+        let typed = nops(45_000);
+        let mut stored =
+            crate::mcp_server::tools_analyze::sections::bounded_disassembly(&typed, None).unwrap();
+        stored["functions"][0]["instructions"] = json!([]);
+        let section = std::sync::Arc::new(stored);
+        assert_eq!(section["instructions"].as_array().unwrap().len(), 20_000);
+        assert_eq!(walk(&section, &typed, None), 45_000);
+        assert_eq!(walk(&section, &typed, Some("big")), 45_000);
+        let table = function_table(&section, &request(), "/x", 80_000, &json!({}));
+        assert_eq!(table["decoded_range"], "0x1000..0xbfc7");
+        let err = listing(
+            &section,
+            &serde_json::from_value(json!({"file_path": "/x", "address": "0x100000"})).unwrap(),
+            "/x",
+            80_000,
+            &json!({}),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("45000 instructions in 0x1000..0xbfc7"),
+            "{err}"
+        );
     }
 }

@@ -64,8 +64,6 @@ const HEAD_BYTES: usize = 4096;
 /// Magic bytes come first (executables, Java class, the ZIP family, gzip, tar,
 /// RAR, 7z, OLE2, PDF, RTF); a shebang line or a known script extension on a
 /// text file comes next; then plain text; everything else is `unknown`.
-// Called from `tools_analyze.rs` once the overview lands.
-#[allow(dead_code)]
 pub(crate) fn detect_file_kind(path: &Path) -> std::io::Result<FileKind> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
@@ -627,8 +625,6 @@ const TOP_LEVEL_NAMES: usize = 10;
 /// Archives (ZIP family, tar, gzip-compressed tar, RAR, 7z) get entry counts,
 /// sizes, the top-level names and risk flags; documents and scripts name the
 /// tool to call; Java kinds name `analyze_java_file`.
-// Called from `tools_analyze.rs` once the overview lands.
-#[allow(dead_code)]
 pub(crate) fn format_overview(path: &Path, kind: &FileKind) -> Option<Value> {
     let file_path = path.to_string_lossy().into_owned();
     let tool = |name: &str| {

@@ -119,32 +119,57 @@ impl PathPolicy {
             walker = walker.max_depth(1);
         }
         for entry in walker.into_iter().filter_map(Result::ok) {
-            let shown = entry.path().strip_prefix(dir).unwrap_or(entry.path());
-            if entry.path_is_symlink() {
-                if self.allow_roots.is_empty() {
-                    continue;
-                }
-                // A link that cannot be resolved cannot be read either.
-                let Ok(target) = std::fs::canonicalize(entry.path()) else {
-                    continue;
-                };
-                if !self.is_inside_a_root(&target) {
-                    return Err(format!(
-                        "{} contains the symlink {}, which points outside the directories this \
-                         server may read ({}). Remove the link, or start the server with \
-                         --allow-root <dir> for its target.",
-                        dir.display(),
-                        shown.display(),
-                        self.roots_text()
-                    ));
-                }
-                if let Ok(metadata) = std::fs::metadata(&target) {
-                    special_kind(&metadata)
-                        .map_or(Ok(()), |kind| Err(special_in_tree(dir, shown, kind)))?;
-                }
-            } else if let Some(kind) = special_kind_of(entry.file_type()) {
-                return Err(special_in_tree(dir, shown, kind));
+            self.check_entry(
+                dir,
+                entry.path(),
+                entry.file_type(),
+                entry.path_is_symlink(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Vet one entry found under `dir` by a walk that does not follow links
+    /// (what [`Self::check_tree`] does for every entry). For a caller that
+    /// walks lazily and stops early, so a huge tree is not read to the end
+    /// before the work starts: call this on each entry before opening it.
+    ///
+    /// `file_type` is the entry's own type (not its target's) and `is_symlink`
+    /// says whether the entry is a link. Fails on a FIFO, socket or device, and,
+    /// when roots are set, on a symlink whose target is outside every root.
+    pub fn check_entry(
+        &self,
+        dir: &Path,
+        path: &Path,
+        file_type: std::fs::FileType,
+        is_symlink: bool,
+    ) -> Result<(), String> {
+        let shown = path.strip_prefix(dir).unwrap_or(path);
+        if is_symlink {
+            if self.allow_roots.is_empty() {
+                return Ok(());
             }
+            // A link that cannot be resolved cannot be read either.
+            let Ok(target) = std::fs::canonicalize(path) else {
+                return Ok(());
+            };
+            if !self.is_inside_a_root(&target) {
+                return Err(format!(
+                    "{} contains the symlink {}, which points outside the directories this \
+                     server may read ({}). Remove the link, or start the server with \
+                     --allow-root <dir> for its target.",
+                    dir.display(),
+                    shown.display(),
+                    self.roots_text()
+                ));
+            }
+            if let Ok(metadata) = std::fs::metadata(&target) {
+                if let Some(kind) = special_kind(&metadata) {
+                    return Err(special_in_tree(dir, shown, kind));
+                }
+            }
+        } else if let Some(kind) = special_kind_of(file_type) {
+            return Err(special_in_tree(dir, shown, kind));
         }
         Ok(())
     }
@@ -385,6 +410,26 @@ mod tests {
             outside.path().file_name().unwrap().to_string_lossy()
         });
         assert!(policy.resolve(&sneaky, "File", Expect::File).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_entry_vets_one_entry_the_way_check_tree_does() {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("x"), b"x").unwrap();
+        std::fs::write(root.path().join("f"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("x"), root.path().join("l")).unwrap();
+        let policy = PathPolicy::new([root.path().to_path_buf()]);
+        let dir = root.path().canonicalize().unwrap();
+        let check = |name: &str| {
+            let path = dir.join(name);
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            policy.check_entry(&dir, &path, meta.file_type(), meta.file_type().is_symlink())
+        };
+        assert!(check("f").is_ok());
+        assert!(check("l").unwrap_err().contains("points outside"));
+        assert!(policy.check_tree(&dir, false).is_err());
     }
 
     #[cfg(unix)]

@@ -247,7 +247,7 @@ async fn disassemble_lists_functions_then_one_function_within_the_cap() {
     assert!(size < 5_000, "{size}");
     assert_eq!(one["function"]["name"], "beacon_home");
     assert_eq!(one["returned"], 5);
-    assert_eq!(one["truncated"], true);
+    assert_eq!(one["more"], true);
     let listing = one["listing"].as_str().unwrap();
     assert_eq!(listing.lines().count(), 5);
     assert!(listing.starts_with("0x"), "{listing}");
@@ -675,6 +675,9 @@ async fn compare_files_copes_with_text_and_with_big_binaries() {
         "{result}"
     );
     assert_eq!(result["categorized_strings"]["common"], 0);
+    // The placeholder section of a raw file is not counted as a section.
+    assert_eq!(result["sections"]["a"], 0, "{result}");
+    assert_eq!(result["sections"]["common"], 0, "{result}");
 
     let (big, size) = harness
         .ok(
@@ -762,4 +765,75 @@ async fn disassemble_without_function_names_points_at_an_address() {
         )
         .await;
     assert!(message.contains("0x401136"), "{message}");
+}
+
+/// A listing cut by a small budget reports the lines it sent and continues at
+/// the first line it did not send.
+#[tokio::test]
+async fn a_listing_cut_by_the_budget_continues_where_it_stopped() {
+    let harness = Harness::new().await;
+    let file = sample("c_advanced_binary");
+    let (uncut, _) = harness
+        .ok(
+            "disassemble",
+            json!({"file_path": file, "function": "main", "max_instructions": 1000,
+                   "max_output_bytes": 400000}),
+        )
+        .await;
+    let all_lines: Vec<String> = uncut["listing"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert!(all_lines.len() > 60, "{}", all_lines.len());
+
+    let mut walked: Vec<String> = Vec::new();
+    let mut request = json!({"file_path": file, "function": "main", "max_instructions": 1000,
+                             "max_output_bytes": 4000});
+    for _ in 0..40 {
+        let (page, size) = harness.ok("disassemble", request.clone()).await;
+        assert!(size <= 4000, "{size}");
+        let lines: Vec<String> = page["listing"]
+            .as_str()
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(page["returned"], json!(lines.len()), "{page}");
+        assert!(page.get("truncated").is_none(), "{page}");
+        walked.extend(lines);
+        let Some(next) = page["next_address"].as_str() else {
+            break;
+        };
+        assert_eq!(
+            page["next_steps"][0]["arguments"]["address"], next,
+            "{page}"
+        );
+        request = json!({"file_path": file, "address": next, "max_instructions": 1000,
+                         "max_output_bytes": 4000});
+    }
+    // Following next_address at a small budget reads the code the cut left out.
+    assert!(walked.len() >= 90, "{}", walked.len());
+    assert_eq!(walked[..60], all_lines[..60]);
+}
+
+/// A call or jump to an address that is a function is shown with its name.
+#[tokio::test]
+async fn direct_calls_are_named_in_the_listing() {
+    let harness = Harness::new().await;
+    let (page, _) = harness
+        .ok(
+            "disassemble",
+            json!({"file_path": sample("c_advanced_binary"), "function": "main",
+                   "max_instructions": 300}),
+        )
+        .await;
+    let listing = page["listing"].as_str().unwrap();
+    assert!(
+        listing
+            .lines()
+            .any(|l| l.contains(" call 0x") && l.contains("; -> ")),
+        "{listing}"
+    );
 }

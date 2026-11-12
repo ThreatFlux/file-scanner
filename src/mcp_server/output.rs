@@ -100,8 +100,6 @@ pub fn page<T: serde::Serialize>(items: &[T], offset: usize, limit: usize) -> Va
 /// Nothing changes when the value already fits. At least one row is kept.
 pub fn fit_rows(value: &mut Value, key: &str, budget: usize, offset: usize, total: usize) {
     let size = |v: &Value| serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0);
-    // Room for the fields the caller adds after paging (file_path, cache...).
-    let budget = budget.saturating_sub(400);
     if size(value) <= budget {
         return;
     }
@@ -109,35 +107,39 @@ pub fn fit_rows(value: &mut Value, key: &str, budget: usize, offset: usize, tota
         return;
     };
     let asked = rows.len();
+    // The page with `kept` rows, `returned`, `next_offset` and the hint as the
+    // answer will carry them, so what is measured is what is sent.
+    let apply = |value: &mut Value, kept: usize| {
+        value[key] = Value::Array(rows[..kept].to_vec());
+        if kept == asked {
+            return;
+        }
+        let next = offset + kept;
+        value["returned"] = kept.into();
+        if next < total {
+            value["next_offset"] = next.into();
+            value["hint"] = format!(
+                "The page was cut to {kept} of the {asked} rows asked for to fit \
+                 max_output_bytes; repeat the call with offset {next} for the rest (a smaller \
+                 limit or a larger max_output_bytes avoids the cut)."
+            )
+            .into();
+        } else if let Some(map) = value.as_object_mut() {
+            map.remove("next_offset");
+            map.remove("hint");
+        }
+    };
     let (mut low, mut high) = (1usize, asked);
     while low < high {
         let mid = (low + high).div_ceil(2);
-        value[key] = Value::Array(rows[..mid].to_vec());
+        apply(value, mid);
         if size(value) <= budget {
             low = mid;
         } else {
             high = mid - 1;
         }
     }
-    let kept = low.min(asked);
-    value[key] = Value::Array(rows[..kept].to_vec());
-    if kept == asked {
-        return;
-    }
-    let next = offset + kept;
-    value["returned"] = kept.into();
-    if next < total {
-        value["next_offset"] = next.into();
-        value["hint"] = format!(
-            "The page was cut to {kept} of the {asked} rows asked for to fit max_output_bytes; \
-             repeat the call with offset {next} for the rest (a smaller limit or a larger \
-             max_output_bytes avoids the cut)."
-        )
-        .into();
-    } else if let Some(map) = value.as_object_mut() {
-        map.remove("next_offset");
-        map.remove("hint");
-    }
+    apply(value, low.min(asked));
 }
 
 /// A failed tool call: `isError: true` with a message a model can act on.
@@ -424,6 +426,24 @@ fn compact_len(value: &Value) -> usize {
     counter.0
 }
 
+/// Whether a JSON pointer names a note, error or limit text.
+fn is_protected(path: &str) -> bool {
+    path.split('/').any(|segment| {
+        matches!(
+            segment,
+            "note"
+                | "notes"
+                | "error"
+                | "errors"
+                | "warnings"
+                | "limit"
+                | "cache_note"
+                | "walk_note"
+                | "hint"
+        )
+    })
+}
+
 struct Candidate {
     path: String,
     is_string: bool,
@@ -497,6 +517,11 @@ fn shrink(value: &mut Value, target: usize, known_len: usize, cuts: &mut Cuts) {
         collect(value, &mut String::new(), &mut candidates);
         if candidates.is_empty() {
             return;
+        }
+        // Notes and errors are the part of an answer that says what was not
+        // done: they are cut only when nothing else is left to cut.
+        if candidates.iter().any(|c| !is_protected(&c.path)) {
+            candidates.retain(|c| !is_protected(&c.path));
         }
         candidates.sort_by_key(|c| std::cmp::Reverse(c.size));
 
@@ -582,11 +607,13 @@ fn cut_string_node(node: &mut Value, amount: usize) -> (usize, usize, isize) {
         return (0, 0, 0);
     };
     let original = s.len();
-    let marker = format!("...[cut {amount} of {original} bytes]");
-    let keep = original.saturating_sub(amount).saturating_sub(marker.len());
+    // The marker never reports more bytes cut than the string had.
+    let asked = amount.min(original);
+    let marker_len = format!("...[cut {asked} of {original} bytes]").len();
+    let keep = original.saturating_sub(asked).saturating_sub(marker_len);
     let mut cut = cut_str(s, keep).to_string();
     let kept = cut.len();
-    cut.push_str(&marker);
+    cut.push_str(&format!("...[cut {} of {original} bytes]", original - kept));
     let removed = original as isize - cut.len() as isize;
     *s = cut;
     (original, kept, removed)
@@ -697,6 +724,36 @@ mod tests {
         assert_eq!(parsed["truncated"]["cut"][0]["path"], "/hex_dump");
         assert_eq!(parsed["truncated"]["original_bytes"], 200_026);
         assert!(parsed["hex_dump"].as_str().unwrap().contains("...[cut"));
+    }
+
+    #[test]
+    fn the_cut_marker_never_reports_more_bytes_than_the_string_had() {
+        for len in [65_533usize, 65_534, 65_535, 65_536, 4_000, 1_000] {
+            let mut node = Value::String("x".repeat(len));
+            // More than the string plus its quotes: the water level can ask for it.
+            let (original, kept, _) = cut_string_node(&mut node, len + 2);
+            let text = node.as_str().unwrap();
+            let marker = text.rsplit("...[cut ").next().unwrap();
+            let cut: usize = marker.split(' ').next().unwrap().parse().unwrap();
+            assert_eq!(original, len);
+            assert!(cut <= original, "cut {cut} of {original}");
+            assert_eq!(cut, original - kept);
+        }
+    }
+
+    #[test]
+    fn notes_and_errors_are_cut_after_the_bulk_lists() {
+        let note = "n".repeat(3_000);
+        let value = json!({
+            "notes": {"disassembly": note.clone()},
+            "errors": ["e".repeat(1_000)],
+            "strings": (0..20_000).map(|i| format!("string number {i}")).collect::<Vec<_>>(),
+        });
+        let text = render(value, 20_000);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["notes"]["disassembly"], note.as_str());
+        assert_eq!(parsed["errors"][0].as_str().unwrap().len(), 1_000);
+        assert!(parsed["strings"].as_array().unwrap().len() < 20_000);
     }
 
     #[test]
