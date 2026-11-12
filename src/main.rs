@@ -100,8 +100,7 @@ use threat_detection::analyze_threats;
 use vulnerability_detection::analyze_vulnerabilities;
 
 #[derive(Parser, Debug)]
-#[command(name = "file-scanner")]
-#[command(version)]
+#[command(name = "file-scanner", version)]
 #[command(about = "A native static file scanner that provides comprehensive file metadata", long_about = None)]
 struct Args {
     #[command(subcommand)]

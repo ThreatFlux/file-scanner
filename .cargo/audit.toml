@@ -1,6 +1,3 @@
 [advisories]
-# Existing RSA exemption: RUSTSEC-2023-0071 has no patched stable release.
-# YARA-X uses RsaPublicKey/PKCS#1 signature verification only; it never loads
-# private keys or invokes RSA signing/decryption (vendor source crypto.rs).
-# Reassess this exemption if upstream or scanner usage adds private operations.
-ignore = ["RUSTSEC-2023-0071"]
+# Stable RSA0.10 replaces the historical public-key-only0.9 exception.
+ignore = []

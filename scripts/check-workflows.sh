@@ -6,4 +6,6 @@ yamllint_bin=${YAMLLINT_BIN:-yamllint}
 "$yamllint_bin" --version | rg -q '^yamllint 1\.38\.0$'
 mapfile -t workflows < <(rg --files --hidden -g '*.yml' -g '*.yaml' .github/workflows)
 "$yamllint_bin" -c .yamllint.yml "${workflows[@]}"
+# The exact queue-field schema exception is scoped to auto-release.yml in
+# .github/actionlint.yaml. All other workflow and shell checks remain enabled.
 "$actionlint_bin" "${workflows[@]}"

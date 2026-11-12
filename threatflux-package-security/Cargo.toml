@@ -20,7 +20,7 @@ anyhow = "1.0.104"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # Retain the source API alias while replacing unmaintained serde_yaml/libyaml.
-serde_yaml = { package = "serde-saphyr", version = "2.0.0" }
+serde_yaml = { package = "serde-saphyr", version = "2.1.1" }
 tokio = { version = "1.54.1", features = ["full"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 regex = "1.13.1"
@@ -35,10 +35,10 @@ async-trait = "0.1.92"
 thiserror = "2.0.21"
 
 # Package-specific dependencies
-zip = { version = "9.0.5", default-features = false, features = ["deflate"] }  # For Java archives
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }  # For Java archives
 tar = "0.4.46"  # For Python packages
-flate2 = "1.1.10"  # For compressed archives
-toml = "1.1.8"  # For parsing pyproject.toml
+flate2 = "1.1.11"  # For compressed archives
+toml = "1.2.1+spec-1.1.0"  # For parsing pyproject.toml
 dirs = "7.0.0"  # For finding cache directories
 
 # Optional features

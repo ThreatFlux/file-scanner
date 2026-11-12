@@ -1,3 +1,9 @@
 ---
 exclude_paths:
   - "tests/**"
+engines:
+  lizard:
+    # Generated dependency metadata is not hand-written application code.
+    # Keep dependency/security engines and hosted lockfile audits intact.
+    exclude_paths:
+      - "ci/yara-crypto-compat/Cargo.lock"
