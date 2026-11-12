@@ -527,6 +527,107 @@ fn a_long_digit_or_space_run_before_obj_costs_linear_work() {
     }
 }
 
+/// Hidden objects with the object header written in a way a reader accepts.
+fn hidden_with_header(header: &str, tail: &[u8]) -> Vec<u8> {
+    let mut pdf = b"%PDF-1.7\n9 0 obj\n<< /X (".to_vec();
+    pdf.extend_from_slice(header.as_bytes());
+    pdf.extend_from_slice(
+        b"\n<< /Type /Catalog /Pages 2 0 R /OpenAction 3 0 R >>\nendobj\n\
+          2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n\
+          3 0 obj\n<< /Type /Action /S /Launch /F (cmd.exe) >>\nendobj\n",
+    );
+    pdf.extend_from_slice(b") >>\nendobj\n");
+    pdf.extend_from_slice(tail);
+    pdf
+}
+
+#[test]
+fn unusual_but_valid_object_headers_do_not_hide_the_document() {
+    let free = b"xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 6 >>\n";
+    let headers = [
+        format!("1 0{}obj", " ".repeat(17)),
+        format!("1 0{}obj", " ".repeat(5000)),
+        format!("1{}0 obj", " ".repeat(20)),
+        format!("1\t0{}obj", "\t".repeat(40)),
+        "000000000001 0 obj".to_string(),
+        "1 000000 obj".to_string(),
+    ];
+    let dir = TempDir::new().unwrap();
+    for (i, header) in headers.iter().enumerate() {
+        for (shape, tail) in [("free", &free[..]), ("none", &b""[..])] {
+            let pdf = hidden_with_header(header, tail);
+            let scan = scan_pdf(write_pdf(&dir, &format!("h{i}{shape}.pdf"), &pdf)).unwrap();
+            assert_eq!(
+                feature(&scan, "Launch").map(|f| f.count),
+                Some(1),
+                "header {i} {shape}"
+            );
+            assert!(!matches!(scan.overall_risk, RiskLevel::Low), "{i} {shape}");
+        }
+    }
+    // The same header inside the data of an image stream.
+    let mut stream = b"%PDF-1.7\n9 0 obj\n<< /Subtype /Image /Length 400 >>\nstream\n".to_vec();
+    stream.extend_from_slice(format!("1 0{}obj", " ".repeat(30)).as_bytes());
+    stream.extend_from_slice(
+        b"\n<< /Type /Catalog /OpenAction << /S /Launch /F (cmd.exe) >> >>\nendobj\n\
+          \nendstream\nendobj\n",
+    );
+    let scan = scan_pdf(write_pdf(&dir, "image.pdf", &stream)).unwrap();
+    assert_eq!(feature(&scan, "Launch").map(|f| f.count), Some(1));
+}
+
+#[test]
+fn an_object_cut_by_the_single_object_window_is_read_in_a_window_of_its_own() {
+    // A decoy header without `endobj`, then padding, then the real catalog so that its header
+    // ends exactly at the end of the 1 MiB window of the decoy (and 40 bytes before it).
+    let window = 1024 * 1024;
+    let dir = TempDir::new().unwrap();
+    for shift in [0usize, 40] {
+        // The objects sit in the data of a Flate object stream that is only a dummy, which
+        // the first read does not look into.
+        let mut pdf =
+            b"%PDF-1.7\n9 0 obj\n<< /Type /ObjStm /N 1 /First 5 /Filter /FlateDecode >>\nstream\n"
+                .to_vec();
+        pdf.extend_from_slice(&zlib(b"11 0 (decoy)"));
+        pdf.push(b'\n');
+        let decoy_at = pdf.len();
+        pdf.extend_from_slice(b"7 0 obj\n<< /Decoy true >>\n");
+        let header = b"1 0 obj";
+        while pdf.len() < decoy_at + window - shift {
+            pdf.extend_from_slice(b"x\n");
+        }
+        pdf.truncate(decoy_at + window - shift - header.len() - 1);
+        pdf.push(b'\n');
+        pdf.extend_from_slice(header);
+        pdf.extend_from_slice(
+            b"\n<< /Type /Catalog /Pages 2 0 R /OpenAction << /S /JavaScript /JS (app.alert\\(1\\)) >> \
+              /AA << /WC << /S /Launch /F (cmd.exe) >> >> >>\nendobj\n",
+        );
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        let scan = scan_pdf(write_pdf(&dir, &format!("edge{shift}.pdf"), &pdf)).unwrap();
+        assert_eq!(
+            feature(&scan, "Launch").map(|f| f.count),
+            Some(1),
+            "{shift}"
+        );
+        assert!(feature(&scan, "JavaScript").is_some(), "{shift}");
+        assert!(!matches!(scan.overall_risk, RiskLevel::Low), "{shift}");
+    }
+}
+
+#[test]
+fn a_file_of_attachment_names_costs_a_bounded_amount_of_work() {
+    let mut pdf = b"%PDF-1.7\n1 0 obj\n<< ".to_vec();
+    for _ in 0..200_000 {
+        pdf.extend_from_slice(b"/EF ");
+    }
+    pdf.extend_from_slice(b">>\nendobj\n");
+    let dir = TempDir::new().unwrap();
+    let path = write_pdf(&dir, "ef.pdf", &pdf);
+    let scan = timed(30, || scan_pdf(path).unwrap());
+    assert!(scan.attachments_total >= 200_000);
+}
+
 #[test]
 fn objects_a_swallowing_string_hides_are_read_from_the_xref_offsets() {
     // An unbalanced `(` in object 1 reaches the `)` inside object 9, so a linear read
@@ -683,4 +784,62 @@ fn a_file_of_hidden_object_markers_stays_inside_the_work_budget() {
     let path = write_pdf(&dir, "markers.pdf", &pdf);
     let scan = timed(10, || scan_pdf(&path).unwrap());
     assert_eq!(scan.stream_count, 20_000);
+}
+
+/// A dummy object stream whose data is `inner`, followed by the stream end.
+fn dummy_objstm(inner: &[u8]) -> Vec<u8> {
+    let mut pdf =
+        b"%PDF-1.7\n9 0 obj\n<< /Type /ObjStm /N 1 /First 5 /Filter /FlateDecode >>\nstream\n"
+            .to_vec();
+    pdf.extend_from_slice(&zlib(b"11 0 (decoy)"));
+    pdf.push(b'\n');
+    pdf.extend_from_slice(inner);
+    pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    pdf
+}
+
+fn long_catalog(padding: usize) -> Vec<u8> {
+    let mut inner = b"1 0 obj << /Type /Catalog /Pages 2 0 R ".to_vec();
+    inner.extend(std::iter::repeat_n(b' ', padding));
+    inner.extend_from_slice(
+        b"/OpenAction << /S /JavaScript /JS (app.alert\\('hidden'\\);) >> \
+          /AA << /WC << /S /Launch /F (cmd.exe) >> >> >> endobj\n\
+          2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+          3 0 obj << /Type /Page /Parent 2 0 R >> endobj\n",
+    );
+    dummy_objstm(&inner)
+}
+
+#[test]
+fn an_object_longer_than_the_single_object_window_is_noted_and_not_low() {
+    let window = 1024 * 1024;
+    let dir = TempDir::new().unwrap();
+    let over = scan_pdf(write_pdf(&dir, "over.pdf", &long_catalog(window + 4096))).unwrap();
+    assert!(!matches!(over.overall_risk, RiskLevel::Low), "{over:?}");
+    assert!(
+        over.notes.iter().any(|n| n.contains("run past the 1 MiB")),
+        "{:?}",
+        over.notes
+    );
+    assert!(!over.unread.is_empty());
+    let under = scan_pdf(write_pdf(&dir, "under.pdf", &long_catalog(window - 4096))).unwrap();
+    assert_eq!(feature(&under, "Launch").map(|f| f.count), Some(1));
+    assert!(matches!(under.overall_risk, RiskLevel::Critical));
+}
+
+#[test]
+fn a_script_object_without_endobj_inside_the_window_is_listed_and_counted() {
+    let dir = TempDir::new().unwrap();
+    let mut inner = b"1 0 obj << /Type /Catalog /Pages 2 0 R /OpenAction << /S /JavaScript /JS 4 0 R >> >> endobj\n\
+        2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+        3 0 obj << /Type /Page /Parent 2 0 R >> endobj\n\
+        4 0 obj (app.alert\\('hidden'\\);)\n"
+        .to_vec();
+    while inner.len() < 1024 * 1024 + 50_000 {
+        inner.extend_from_slice(b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n");
+    }
+    let scan = scan_pdf(write_pdf(&dir, "noendobj.pdf", &dummy_objstm(&inner))).unwrap();
+    assert!(scan.object_count >= 4, "{}", scan.object_count);
+    assert_eq!(scan.scripts_total, 1, "{:?}", scan.notes);
+    assert!(scan.scripts.iter().any(|s| s.preview.contains("hidden")));
 }

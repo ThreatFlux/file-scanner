@@ -281,11 +281,14 @@ const MAX_CONTENT_INFLATE: usize = 32 * 1024 * 1024;
 const MAX_SCRIPT_INFLATE: usize = 16 * 1024 * 1024;
 /// Most bytes the second pass (objects hidden in stream data, objects the cross-reference
 /// table points at) may read or lex in all.
-const RESCAN_BUDGET: usize = 192 * 1024 * 1024;
+const RESCAN_BUDGET: usize = 64 * 1024 * 1024;
 /// Most single objects re-read from cross-reference offsets.
 const MAX_SINGLE_RESCANS: usize = 5_000;
 /// Longest stretch read for one such object.
 const MAX_SINGLE_RESCAN_BYTES: usize = 1024 * 1024;
+/// Least charged to the second-pass budget for one single-object rescan, so that many
+/// short objects still add up.
+const MIN_SINGLE_RESCAN_CHARGE: usize = 4096;
 /// Most cross-reference entries read in all.
 const MAX_XREF_ENTRIES: usize = 4_000_000;
 /// Most passes of the hidden-object search (a hidden region can hold another).
@@ -791,6 +794,8 @@ struct ScanState {
     searched_objects: u32,
     /// Positions just after every `N G obj` header the scan has read as an object.
     obj_bodies: std::collections::HashSet<usize>,
+    /// Objects longer than the read window for one object; the rest of each was not read.
+    window_cut_objects: u32,
 }
 
 /// Where a top-level stream's data sits, and whether it could hold unread objects.
@@ -857,6 +862,44 @@ struct ObjCtx {
     skip_decode: bool,
 }
 
+/// Where a scan of one buffer stopped, and the object (if any) it was inside of when the
+/// buffer ended: its number, its body position and whether this scan created its table entry.
+struct ScanStop {
+    /// How far the lexer got.
+    pos: usize,
+    open: Option<(u32, usize, bool)>,
+}
+
+/// After a scan of a window that ended before the end of the file, an object that was still
+/// open was cut by the window: take it back out of the tables so that a search of the whole
+/// file reads it again in a window of its own.
+fn release_cut_object(
+    buf_len: usize,
+    window_end: usize,
+    start_body: usize,
+    stop: &ScanStop,
+    state: &mut ScanState,
+) {
+    let Some((number, body, created)) = stop.open else {
+        return;
+    };
+    if window_end >= buf_len {
+        return;
+    }
+    if body == start_body {
+        // The object the window started at is longer than the window and never gets another
+        // one: keep what was read and say that the rest was not.
+        state.window_cut_objects += 1;
+        return;
+    }
+    if state.obj_bodies.remove(&body) {
+        state.object_count = state.object_count.saturating_sub(1);
+    }
+    if created {
+        state.objects.remove(&number);
+    }
+}
+
 /// Scan one buffer of PDF syntax. `base` is the file offset where the stream data starts when
 /// the buffer is a decompressed stream (`decoded`), `owner` the object that holds the stream.
 fn scan_syntax(
@@ -867,7 +910,8 @@ fn scan_syntax(
     owner: Option<u32>,
     state: &mut ScanState,
     single_object: bool,
-) {
+) -> ScanStop {
+    let mut open: Option<(u32, usize, bool)> = None;
     let mut lexer = Lexer::at(buf, start);
     let mut prev: [Option<(usize, usize)>; 2] = [None, None];
     let mut cur_obj: Option<u32> = owner;
@@ -895,11 +939,13 @@ fn scan_syntax(
                         ) {
                             cur_obj = Some(num);
                             state.object_count += 1;
+                            let mut recorded = false;
                             if state.obj_bodies.len() < MAX_OBJ_BODIES {
-                                state.obj_bodies.insert(e);
+                                recorded = state.obj_bodies.insert(e);
                             } else {
                                 state.objects_capped = true;
                             }
+                            open = recorded.then(|| (num, e, !state.objects.contains_key(&num)));
                             if state.objects.len() < MAX_OBJECT_TABLE
                                 || state.objects.contains_key(&num)
                             {
@@ -912,8 +958,12 @@ fn scan_syntax(
                     }
                     b"endobj" if !decoded => {
                         cur_obj = None;
+                        open = None;
                         if single_object {
-                            return;
+                            return ScanStop {
+                                pos: lexer.pos,
+                                open: None,
+                            };
                         }
                     }
                     b"xref" if !decoded => {
@@ -966,6 +1016,10 @@ fn scan_syntax(
             }
             _ => prev = [prev[1], None],
         }
+    }
+    ScanStop {
+        pos: lexer.pos.min(buf.len()),
+        open,
     }
 }
 
@@ -1291,7 +1345,9 @@ fn handle_name(name: &str, site: &NameSite<'_>, state: &mut ScanState, ctx: &mut
         },
         "EF" if !decoded => {
             state.attachments_total += 1;
-            if state.attachment_refs.len() >= MAX_ITEMS {
+            // Past this many, the references are only counted: a look-ahead per name would
+            // let a file of nothing but `/EF` cost far more than it weighs.
+            if state.attachment_refs.len() >= MAX_ITEMS || state.attachments_total > 4 * MAX_ITEMS {
                 return;
             }
             // `/EF << /F N 0 R >>`: remember the stream object, resolve its size later.
@@ -1641,6 +1697,12 @@ pub fn scan_pdf<P: AsRef<Path>>(path: P) -> Result<PdfScan> {
             state.objstm_unread
         ));
     }
+    if state.window_cut_objects > 0 {
+        notes.push(format!(
+            "{} object(s) run past the 1 MiB read for one object; the rest of each was not read.",
+            state.window_cut_objects
+        ));
+    }
     if state.hidden_regions > 0 {
         notes.push(format!(
             "{} region(s) of stream data hold PDF objects ({} object(s)) that a reader following \
@@ -1740,6 +1802,12 @@ pub fn scan_pdf<P: AsRef<Path>>(path: P) -> Result<PdfScan> {
             state.objstm_unread
         ));
     }
+    if state.window_cut_objects > 0 {
+        unread.push(format!(
+            "{} object(s) are longer than the 1 MiB read for one object",
+            state.window_cut_objects
+        ));
+    }
     if state.rescan_budget_hit || state.single_rescan_cap_hit {
         unread.push("the search for objects hidden in stream data hit its limit".to_string());
     }
@@ -1814,39 +1882,24 @@ fn find_obj_marker(buf: &[u8], start: usize, end: usize) -> Option<usize> {
     find_obj_header(buf, start, end).map(|(at, _)| at)
 }
 
-/// The longest run of white space, digits in an object number and digits in a generation
-/// number that a header search walks back over; longer runs are not headers. This keeps
-/// the walk constant per marker whatever the file holds.
-const HEADER_WS_RUN: usize = 16;
-const HEADER_NUMBER_DIGITS: usize = 10;
-const HEADER_GEN_DIGITS: usize = 5;
-
-/// Walk back from `k` over at most `max` bytes that satisfy `pred`; `None` when the run is
-/// longer than `max`.
-fn walk_back(
-    slice: &[u8],
-    start: usize,
-    mut k: usize,
-    max: usize,
-    pred: fn(u8) -> bool,
-) -> Option<usize> {
-    let mut n = 0;
-    while k > start && pred(slice[k - 1]) {
+/// Walk back from `k` over bytes that satisfy `pred`, but not below `floor`.
+fn walk_back(slice: &[u8], floor: usize, mut k: usize, pred: fn(u8) -> bool) -> usize {
+    while k > floor && pred(slice[k - 1]) {
         k -= 1;
-        n += 1;
-        if n > max {
-            return None;
-        }
     }
-    Some(k)
+    k
 }
 
 /// Start of the first `N G obj` header inside `buf[start..end]` and the end of its `obj`
-/// keyword. Work is linear in the bytes searched.
+/// keyword. Any amount of white space and any number of digits (leading zeros) is accepted,
+/// as a reader does; whether the numbers fit is checked by `obj_header_at`. Work is linear
+/// in the bytes searched: a header cannot contain an earlier `obj`, so each walk back stops at
+/// the end of the previous marker and every byte is walked over at most once.
 fn find_obj_header(buf: &[u8], start: usize, end: usize) -> Option<(usize, usize)> {
     let slice = &buf[..end.min(buf.len())];
     let mut from = start;
     while let Some(at) = find_bytes(slice, b"obj", from) {
+        let floor = from;
         from = at + 3;
         if slice
             .get(at + 3)
@@ -1854,31 +1907,19 @@ fn find_obj_header(buf: &[u8], start: usize, end: usize) -> Option<(usize, usize
         {
             continue;
         }
-        let Some(generation_end) = walk_back(slice, start, at, HEADER_WS_RUN, is_ws) else {
-            continue;
-        };
-        if generation_end == at || generation_end == start {
+        let generation_end = walk_back(slice, floor, at, is_ws);
+        if generation_end == at || generation_end == floor {
             continue;
         }
-        let Some(space_end) = walk_back(slice, start, generation_end, HEADER_GEN_DIGITS, |b| {
-            b.is_ascii_digit()
-        }) else {
-            continue;
-        };
-        if space_end == generation_end || space_end == start {
+        let space_end = walk_back(slice, floor, generation_end, |b| b.is_ascii_digit());
+        if space_end == generation_end || space_end == floor {
             continue;
         }
-        let Some(number_end) = walk_back(slice, start, space_end, HEADER_WS_RUN, is_ws) else {
-            continue;
-        };
-        if number_end == space_end || number_end == start {
+        let number_end = walk_back(slice, floor, space_end, is_ws);
+        if number_end == space_end || number_end == floor {
             continue;
         }
-        let Some(k) = walk_back(slice, start, number_end, HEADER_NUMBER_DIGITS, |b| {
-            b.is_ascii_digit()
-        }) else {
-            continue;
-        };
+        let k = walk_back(slice, floor, number_end, |b| b.is_ascii_digit());
         if k == number_end {
             continue;
         }
@@ -2035,19 +2076,24 @@ fn rescan_hidden(buf: &[u8], header_offset: usize, state: &mut ScanState) {
                     state.single_rescan_cap_hit = true;
                     break;
                 }
-                let Some((number, _)) = obj_header_at(buf, offset) else {
+                let Some((number, start_body)) = obj_header_at(buf, offset) else {
                     continue;
                 };
                 if state.objects.contains_key(&number) {
                     continue;
                 }
                 let end = buf.len().min(offset + MAX_SINGLE_RESCAN_BYTES);
-                if !state.spend_rescan(end - offset) {
+                if !state.spend_rescan(MIN_SINGLE_RESCAN_CHARGE.min(end - offset)) {
                     return;
                 }
                 state.single_rescans += 1;
                 state.missed_objects += 1;
-                scan_syntax(&buf[..end], offset, false, 0, None, state, true);
+                let stop = scan_syntax(&buf[..end], offset, false, 0, None, state, true);
+                release_cut_object(buf.len(), end, start_body, &stop, state);
+                let read = stop.pos.saturating_sub(offset);
+                if !state.spend_rescan(read.saturating_sub(MIN_SINGLE_RESCAN_CHARGE)) {
+                    return;
+                }
                 progressed = true;
             }
         }
@@ -2070,6 +2116,7 @@ fn rescan_unrecorded(buf: &[u8], header_offset: usize, state: &mut ScanState) {
         let Some((_, body)) = obj_header_at(buf, at) else {
             continue;
         };
+        let start_body = body;
         if state.obj_bodies.contains(&body) {
             continue;
         }
@@ -2078,12 +2125,19 @@ fn rescan_unrecorded(buf: &[u8], header_offset: usize, state: &mut ScanState) {
             return;
         }
         let end = buf.len().min(at + MAX_SINGLE_RESCAN_BYTES);
-        if !state.spend_rescan(end - at) {
+        if !state.spend_rescan(MIN_SINGLE_RESCAN_CHARGE.min(end - at)) {
             return;
         }
         state.single_rescans += 1;
         state.searched_objects += 1;
-        scan_syntax(&buf[..end], at, false, 0, None, state, true);
+        let stop = scan_syntax(&buf[..end], at, false, 0, None, state, true);
+        // An object a window cut that started later is read again in a window of its own
+        // when the search reaches its header; the window's own object is kept and flagged.
+        release_cut_object(buf.len(), end, start_body, &stop, state);
+        let read = stop.pos.saturating_sub(at);
+        if !state.spend_rescan(read.saturating_sub(MIN_SINGLE_RESCAN_CHARGE)) {
+            return;
+        }
     }
 }
 
@@ -2180,6 +2234,18 @@ fn score_scan(scan: &mut PdfScan) {
         && scan.attachments_total > 0
     {
         add(15, "Embedded file(s)".to_string());
+    }
+    if scan
+        .notes
+        .iter()
+        .any(|n| n.contains("found by searching the whole file"))
+    {
+        add(
+            5,
+            "Objects the first read missed were found by searching the whole file: the \
+             structure is not one a reader follows cleanly"
+                .to_string(),
+        );
     }
     if scan.notes.iter().any(|n| n.contains("hold PDF objects")) {
         add(

@@ -1429,6 +1429,11 @@ fn analyze_compound<R: Read + Seek>(
     if (encrypted || unreadable || cut) && matches!(assessment.overall_risk, RiskLevel::Low) {
         assessment.overall_risk = RiskLevel::Medium;
     }
+    // A medium level with score 0 reads as "nothing found": say that the content was not read.
+    let mut suspicious = suspicious;
+    if (encrypted || unreadable || cut) && suspicious.risk_score < 30 {
+        suspicious.risk_score = 30;
+    }
     if items.len() > MAX_LISTED_ENTRIES {
         report.notes.push(format!(
             "The compound file has {} entries; the first {MAX_LISTED_ENTRIES} are listed.",
@@ -1570,7 +1575,7 @@ fn analyze_ooxml(file: File) -> Result<OfficeReport> {
             report.notes.push(format!(
                 "{part} is not a readable compound file ({error}), so the macros could not be \
                  read; the package still declares a VBA project. inspect_archive lists the \
-                 part, and read_hex or analyze_file shows its bytes."
+                 part; its bytes can be read only after it is extracted from the package."
             ));
             return Ok(report);
         }

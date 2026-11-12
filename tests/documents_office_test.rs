@@ -433,6 +433,8 @@ fn encrypted_packages_unreadable_projects_and_tiny_files_are_reported() {
         report.analysis.security_assessment.overall_risk,
         file_scanner::ole_vba_analysis::RiskLevel::Low
     ));
+    // Medium with score 0 would read as "nothing found".
+    assert!(report.analysis.suspicious_indicators.risk_score >= 30);
 
     // A VBA storage with no dir stream: macros exist but cannot be read, so not "low".
     let mut cfb = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
@@ -454,6 +456,7 @@ fn encrypted_packages_unreadable_projects_and_tiny_files_are_reported() {
         report.analysis.security_assessment.overall_risk,
         file_scanner::ole_vba_analysis::RiskLevel::Low
     ));
+    assert!(report.analysis.suspicious_indicators.risk_score >= 30);
 
     // Short files starting with the signatures give a usable answer, not a read error.
     let short_ole = write(
