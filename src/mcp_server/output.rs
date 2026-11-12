@@ -91,6 +91,9 @@ pub fn page<T: serde::Serialize>(items: &[T], offset: usize, limit: usize) -> Va
     Value::Object(out)
 }
 
+/// Bytes `fit_rows` keeps free for fields the caller adds after it.
+const FIT_RESERVE: usize = 256;
+
 /// Make a paged answer fit `budget` by dropping whole rows from the end of
 /// `value[key]`, then make `returned`, `next_offset` and `hint` describe the
 /// rows actually sent, so following `next_offset` skips nothing.
@@ -99,6 +102,9 @@ pub fn page<T: serde::Serialize>(items: &[T], offset: usize, limit: usize) -> Va
 /// whole list has from index 0 (the same numbers `next_offset` counts in).
 /// Nothing changes when the value already fits. At least one row is kept.
 pub fn fit_rows(value: &mut Value, key: &str, budget: usize, offset: usize, total: usize) {
+    // A caller adds small fields (`cache`, `file_path`) after sizing the page;
+    // `render` must not cut a page that was sized to the budget to the byte.
+    let budget = budget.saturating_sub(FIT_RESERVE);
     let size = |v: &Value| serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0);
     if size(value) <= budget {
         return;
@@ -897,6 +903,25 @@ mod tests {
         // The first row sent is the one asked for, the next page starts after the last.
         assert_eq!(value["items"][0]["n"], 10);
         assert_eq!(value["items"][kept - 1]["n"], 10 + kept - 1);
+    }
+
+    /// A page sized at the smallest budget stays whole when the caller adds
+    /// its usual small fields and `render` checks it against the same budget.
+    #[test]
+    fn render_leaves_a_page_that_fit_rows_sized() {
+        let rows: Vec<Value> = (0..200)
+            .map(|i| json!({"n": i, "text": "x".repeat(100)}))
+            .collect();
+        let mut value = page(&rows, 0, 200);
+        fit_rows(&mut value, "items", MIN_OUTPUT_BYTES, 0, rows.len());
+        let kept = value["items"].as_array().unwrap().len();
+        value["cache"] = "miss".into();
+        value["file_path"] = "/some/where/a/package".into();
+        let text = render(value, MIN_OUTPUT_BYTES);
+        let sent: Value = serde_json::from_str(&text).unwrap();
+        assert!(sent.get("truncated").is_none(), "{text}");
+        assert_eq!(sent["items"].as_array().unwrap().len(), kept);
+        assert_eq!(sent["returned"], kept);
     }
 
     #[test]

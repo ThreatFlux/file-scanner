@@ -496,13 +496,17 @@ fn find_function<'a>(
         [one] => Ok(one),
         [] => {
             // What the analyzer said about functions it left out.
+            let truncated = section
+                .pointer("/coverage/truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let limits: Vec<&str> = section
                 .pointer("/coverage/notes")
                 .and_then(Value::as_array)
                 .map_or(&[][..], Vec::as_slice)
                 .iter()
                 .filter_map(Value::as_str)
-                .filter(|n| n.starts_with("Limit"))
+                .filter(|n| truncated || n.starts_with("Limit"))
                 .collect();
             Err(format!(
                 "No function named '{query}' in this file's disassembly ({} functions). Call \
@@ -1022,6 +1026,23 @@ impl FileScannerMcp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name that is not found carries the analyzer's coverage notes when it
+    /// left functions out, whatever the notes start with.
+    #[test]
+    fn a_missing_function_name_carries_the_coverage_note() {
+        let section = json!({
+            "coverage": {
+                "truncated": true,
+                "notes": ["functions are grouped for the first 5000 function symbols only"],
+            },
+        });
+        let err = find_function(&[], "main.main", &section).unwrap_err();
+        assert!(err.contains("first 5000 function symbols"), "{err}");
+        let whole = json!({"coverage": {"truncated": false, "notes": ["other remark"]}});
+        let err = find_function(&[], "main.main", &whole).unwrap_err();
+        assert!(!err.contains("other remark"), "{err}");
+    }
 
     fn request() -> DisassembleRequest {
         serde_json::from_value(json!({"file_path": "/x"})).unwrap()

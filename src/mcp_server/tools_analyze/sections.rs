@@ -730,6 +730,10 @@ const STORED_CFG_BLOCKS: usize = 20_000;
 const STORED_CFG_INSTRUCTIONS: usize = 20_000;
 /// Edges kept, all functions together.
 const STORED_CFG_EDGES: usize = 40_000;
+/// Entries kept in all, over every function, of each of: loops (a loop and its
+/// block lists count by their entries), exit blocks, unreachable blocks, and
+/// the successor and predecessor lists of the kept blocks.
+const STORED_CFG_LISTS: usize = 20_000;
 
 /// The stored control-flow section: the metrics and statistics whole, one row
 /// per function graph with its true counts, and the blocks, edges and block
@@ -743,6 +747,14 @@ pub(super) fn bounded_control_flow(flow: &ControlFlowAnalysis) -> Result<Value, 
     let mut cut_blocks = 0usize;
     let mut cut_instructions = 0usize;
     let mut cut_edges = 0usize;
+    let mut loops_left = STORED_CFG_LISTS;
+    let mut exits_left = STORED_CFG_LISTS;
+    let mut unreachable_left = STORED_CFG_LISTS;
+    let mut links_left = STORED_CFG_LISTS;
+    let mut cut_loops = 0usize;
+    let mut cut_exits = 0usize;
+    let mut cut_unreachable = 0usize;
+    let mut cut_links = 0usize;
     let mut cfgs: Vec<Value> = Vec::with_capacity(flow.cfgs.len());
     for cfg in &flow.cfgs {
         let keep_blocks = cfg.basic_blocks.len().min(blocks_left);
@@ -758,12 +770,22 @@ pub(super) fn bounded_control_flow(flow: &ControlFlowAnalysis) -> Result<Value, 
                 cut_instructions += b.instructions.len();
                 Vec::new()
             };
+            let links = b.successors.len() + b.predecessors.len();
+            let (successors, predecessors): (&[usize], &[usize]) = if links <= links_left {
+                links_left -= links;
+                (&b.successors, &b.predecessors)
+            } else {
+                cut_links += links;
+                (&[], &[])
+            };
             let row = json!({
                 "id": b.id,
                 "start_address": b.start_address,
                 "end_address": b.end_address,
-                "successors": b.successors,
-                "predecessors": b.predecessors,
+                "successors": successors,
+                "successors_count": b.successors.len(),
+                "predecessors": predecessors,
+                "predecessors_count": b.predecessors.len(),
                 "block_type": to_value(&b.block_type)?,
                 "instruction_count": b.instruction_count,
                 "instructions": instructions,
@@ -774,6 +796,28 @@ pub(super) fn bounded_control_flow(flow: &ControlFlowAnalysis) -> Result<Value, 
         edges_left -= keep_edges;
         cut_edges += cfg.edges.len() - keep_edges;
         let edges = to_value(&cfg.edges[..keep_edges].to_vec())?;
+        let keep_exits = cfg.exit_blocks.len().min(exits_left);
+        exits_left -= keep_exits;
+        cut_exits += cfg.exit_blocks.len() - keep_exits;
+        let mut loops: Vec<Value> = Vec::new();
+        for l in &cfg.loops {
+            let cost = 1 + l.body_blocks.len() + l.exit_blocks.len();
+            if cost > loops_left {
+                break;
+            }
+            loops_left -= cost;
+            loops.push(to_value(l)?);
+        }
+        cut_loops += cfg.loops.len() - loops.len();
+        let keep_unreachable = cfg
+            .complexity
+            .unreachable_blocks
+            .len()
+            .min(unreachable_left);
+        unreachable_left -= keep_unreachable;
+        cut_unreachable += cfg.complexity.unreachable_blocks.len() - keep_unreachable;
+        let mut complexity_cut = cfg.complexity.clone();
+        complexity_cut.unreachable_blocks.truncate(keep_unreachable);
         cfgs.push(json!({
             "function_address": cfg.function_address,
             "function_name": cfg.function_name,
@@ -782,9 +826,12 @@ pub(super) fn bounded_control_flow(flow: &ControlFlowAnalysis) -> Result<Value, 
             "edges": edges,
             "edges_count": cfg.edges.len(),
             "entry_block": cfg.entry_block,
-            "exit_blocks": cfg.exit_blocks,
-            "loops": to_value(&cfg.loops)?,
-            "complexity": to_value(&cfg.complexity)?,
+            "exit_blocks": &cfg.exit_blocks[..keep_exits],
+            "exit_blocks_count": cfg.exit_blocks.len(),
+            "loops": loops,
+            "loops_count": cfg.loops.len(),
+            "complexity": to_value(&complexity_cut)?,
+            "unreachable_blocks_count": cfg.complexity.unreachable_blocks.len(),
         }));
     }
     let mut notes: Vec<String> = Vec::new();
@@ -805,6 +852,31 @@ pub(super) fn bounded_control_flow(flow: &ControlFlowAnalysis) -> Result<Value, 
             "Limit: the stored section keeps {STORED_CFG_EDGES} edges in all; {cut_edges} edges of \
              later functions are counted (edges_count) but not listed."
         ));
+    }
+    for (cut, what, counted) in [
+        (
+            cut_loops,
+            "loops (counting their block lists)",
+            "loops_count",
+        ),
+        (cut_exits, "exit blocks", "exit_blocks_count"),
+        (
+            cut_unreachable,
+            "unreachable blocks",
+            "unreachable_blocks_count",
+        ),
+        (
+            cut_links,
+            "successor and predecessor entries",
+            "successors_count and predecessors_count",
+        ),
+    ] {
+        if cut > 0 {
+            notes.push(format!(
+                "Limit: the stored section keeps {STORED_CFG_LISTS} {what} in all; {cut} \
+                 of later functions are counted ({counted}) but not listed."
+            ));
+        }
     }
     let mut value = json!({
         "cfgs": cfgs,
@@ -2452,9 +2524,40 @@ mod tests {
                 errors: vec!["one analyzer error".into()],
             },
         };
+        let mut flow = flow;
+        flow.cfgs[0].exit_blocks = (0..30_000).collect();
+        flow.cfgs[0].complexity.unreachable_blocks = (0..30_000).collect();
+        flow.cfgs[0].loops = (0..30_000)
+            .map(|n| crate::control_flow::Loop {
+                header_block: n,
+                body_blocks: vec![n],
+                exit_blocks: Vec::new(),
+                loop_type: crate::control_flow::LoopType::Natural,
+                nesting_level: 0,
+            })
+            .collect();
         let value = bounded_control_flow(&flow).unwrap();
         let bytes = serde_json::to_vec(&value).unwrap().len();
         assert!(bytes < 16_000_000, "{bytes} bytes stored");
+        let first = &value["cfgs"][0];
+        assert_eq!(first["exit_blocks_count"], 30_000);
+        assert_eq!(first["exit_blocks"].as_array().unwrap().len(), 20_000);
+        assert_eq!(first["unreachable_blocks_count"], 30_000);
+        assert_eq!(
+            first["complexity"]["unreachable_blocks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            20_000
+        );
+        assert_eq!(first["loops_count"], 30_000);
+        assert_eq!(first["loops"].as_array().unwrap().len(), 10_000);
+        assert_eq!(first["basic_blocks"][0]["successors_count"], 1);
+        let all = value["notes"].to_string();
+        assert!(
+            all.contains("exit blocks") && all.contains("loops"),
+            "{all}"
+        );
         let cfgs = value["cfgs"].as_array().unwrap();
         assert_eq!(cfgs.len(), 50);
         assert_eq!(cfgs[49]["basic_blocks_count"], 1000);

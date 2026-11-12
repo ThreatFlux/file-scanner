@@ -558,6 +558,35 @@ pub(super) fn key_text(value: &str, max: usize) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// The reason a draft rule was left out is in the answer the caller reads.
+    #[test]
+    fn the_reason_a_rule_was_left_out_reaches_the_caller() {
+        let digest = LlmDigest {
+            sha256: "00".into(),
+            file_type: None,
+            architecture: None,
+            is_packed: None,
+            result: LlmFileAnalysisResult {
+                md5: String::new(),
+                file_size: 0,
+                key_strings: Vec::new(),
+                hex_patterns: Vec::new(),
+                imports: Vec::new(),
+                opcodes: Vec::new(),
+                entropy: None,
+                yara_rule_suggestion: None,
+            },
+            notes: Vec::new(),
+            yara_rule_note: Some("no draft rule: did not compile".into()),
+            truncated: None,
+        };
+        let text = serde_json::to_string(&digest).unwrap();
+        assert!(
+            text.contains("\"yara_rule_note\":\"no draft rule"),
+            "{text}"
+        );
+    }
+
     /// A minimal ELF64 with one PT_LOAD segment whose file offset is `p_offset`.
     fn elf_with_segment_offset(p_offset: u64) -> Vec<u8> {
         let mut b = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0];

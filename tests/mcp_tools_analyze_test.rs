@@ -608,11 +608,11 @@ async fn a_page_cut_by_the_budget_continues_where_it_stopped() {
         let (page, size) = harness
             .ok(
                 "query_analysis",
-                json!({"file_path": file, "section": "vulnerabilities", "limit": 500,
-                       "offset": offset, "max_output_bytes": 20_000}),
+                json!({"file_path": file, "section": "strings", "limit": 500,
+                       "offset": offset, "max_output_bytes": 8_000}),
             )
             .await;
-        assert!(size <= 20_000, "{size}");
+        assert!(size <= 8_000, "{size}");
         let rows = page["items"].as_array().unwrap().len();
         assert_eq!(page["returned"], json!(rows));
         assert!(page.get("truncated").is_none(), "rows are dropped whole");

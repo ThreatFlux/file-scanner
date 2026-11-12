@@ -766,6 +766,24 @@ impl FileScannerMcp {
                             .into();
                         }
                     }
+                    if name == "control_flow" {
+                        let limits: Vec<&str> = section
+                            .get("notes")
+                            .and_then(Value::as_array)
+                            .map_or(&[][..], Vec::as_slice)
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .filter(|n| n.starts_with("Limit"))
+                            .collect();
+                        if !limits.is_empty() {
+                            let cut = limits.join(" ");
+                            value["note"] = match value.get("note").and_then(Value::as_str) {
+                                Some(first) => format!("{first} {cut}"),
+                                None => cut,
+                            }
+                            .into();
+                        }
+                    }
                     value["file_path"] = file_path.clone().into();
                     value["cache"] = cache_state.into();
                     if let Some(note) = &cache_note {

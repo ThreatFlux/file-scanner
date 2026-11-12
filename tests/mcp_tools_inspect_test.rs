@@ -386,10 +386,20 @@ async fn disassemble_after_all_is_a_cache_hit() {
             .await;
         assert_eq!(table["cache"], "hit", "{file}: {}", table["cache_note"]);
         assert!(size <= BUDGET);
-        let name = table["items"][0]["name"].as_str().unwrap().to_string();
-        let (listing, size) = harness
-            .ok("disassemble", json!({"file_path": file, "function": name}))
-            .await;
+        // A stripped binary (the system /bin/ls) has no function names: the
+        // table says so and names an address to list from instead.
+        let arguments = match table["items"][0]["name"].as_str() {
+            Some(name) => json!({"file_path": file, "function": name}),
+            None => {
+                assert!(table["note"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no function symbols"));
+                let address = table["next_steps"][0]["arguments"]["address"].clone();
+                json!({"file_path": file, "address": address})
+            }
+        };
+        let (listing, size) = harness.ok("disassemble", arguments).await;
         assert_eq!(listing["cache"], "hit", "{file}");
         assert!(size <= BUDGET, "{file}: {size}");
         assert!(listing["returned"].as_u64().unwrap() >= 1);
