@@ -231,12 +231,16 @@ jobs:
       - name: Smoke test binary
         env:
           TARGET: ${{ matrix.target }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           binary="target/${TARGET}/release/${BINARY_NAME}"
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             binary="${binary}.exe"
           fi
+          actual_version="$("${binary}" --version)"
+          [[ "$actual_version" == "file-scanner ${RELEASE_VERSION}" ]]
+          printf '%s\n' "$actual_version"
           "${binary}" --help > /dev/null
           printf 'file-scanner release smoke test\n' > smoke-test.txt
           "${binary}" smoke-test.txt --format json > smoke-test.json

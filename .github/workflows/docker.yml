@@ -249,8 +249,20 @@ jobs:
           docker pull "${IMAGE_REF}"
       - name: Test runtime image
         env:
+          IS_PULL_REQUEST: ${{ github.event_name == 'pull_request' }}
           IMAGE_TAG: ${{ github.event_name == 'pull_request' && format('{0}:scan', steps.lowercase.outputs.image_name) || format('{0}/{1}@{2}', env.REGISTRY, steps.lowercase.outputs.image_name, steps.build.outputs.digest) }}
         run: |
+          set -euo pipefail
+          expected_version="$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"])')"
+          architectures=(amd64 arm64)
+          if [[ "$IS_PULL_REQUEST" == true ]]; then
+            architectures=(amd64)
+          fi
+          for architecture in "${architectures[@]}"; do
+            actual_version="$(docker run --rm --platform "linux/$architecture" "$IMAGE_TAG" --version)"
+            [[ "$actual_version" == "file-scanner $expected_version" ]]
+            printf '%s: %s\n' "$architecture" "$actual_version"
+          done
           docker run --rm "${IMAGE_TAG}" --help
           echo "Test Docker content" > test-file.txt
           docker run --rm -v "${PWD}:/data:ro" "${IMAGE_TAG}" /data/test-file.txt --format json
