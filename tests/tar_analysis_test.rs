@@ -520,3 +520,85 @@ fn test_edge_case_filenames() {
         );
     }
 }
+
+fn write_tar(dir: &TempDir, name: &str, builder: tar::Builder<Vec<u8>>) -> std::path::PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, builder.into_inner().unwrap()).unwrap();
+    path
+}
+
+/// Names made of four-byte characters are capped in bytes, not characters,
+/// and everything kept from them is small once the archive-wide name budget
+/// is spent (one such name used to be kept four times over at 1 KB each).
+#[test]
+fn four_byte_names_are_capped_in_bytes() {
+    let emoji = "\u{1F600}".repeat(290);
+    let mut builder = tar::Builder::new(Vec::new());
+    for i in 0..3500 {
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_mode(0o7777);
+        header.set_size(0);
+        header.set_cksum();
+        let path = format!("dir/{i:05}{emoji}.txt");
+        let target = format!("x/{emoji}");
+        builder
+            .append_pax_extensions([("path", path.as_bytes()), ("linkpath", target.as_bytes())])
+            .unwrap();
+        builder.append(&header, std::io::empty()).unwrap();
+    }
+    let dir = TempDir::new().unwrap();
+    let path = write_tar(&dir, "emoji.tar", builder);
+    let analysis = analyze_tar(&path).unwrap();
+    assert_eq!(analysis.entries.len(), 3500);
+    let marker = " (... bytes in all)".len() + 8;
+    let mut kept = 0usize;
+    for entry in &analysis.entries[3000..] {
+        for text in [
+            Some(entry.path.as_str()),
+            Some(entry.file_name.as_str()),
+            entry.link_target.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(text.len() <= 255 + marker, "{} bytes", text.len());
+        }
+        for risk in &entry.risk_indicators {
+            assert!(risk.description.len() <= 256 + 2 * marker + 64);
+        }
+        kept += entry.path.len() + entry.file_name.len();
+    }
+    assert!(kept < 500 * (2 * (255 + marker)));
+    assert!(analysis.suspicious_indicators.name_bytes > 0);
+}
+
+/// An archive with exactly the entry cap is complete; one more is not.
+#[test]
+fn an_archive_of_exactly_the_entry_cap_has_no_cap_note() {
+    use file_scanner::archive_analysis::MAX_ENTRIES;
+    let build = |n: usize| {
+        let mut builder = tar::Builder::new(Vec::new());
+        for i in 0..n {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            builder
+                .append_data(&mut header, format!("f{i}"), std::io::empty())
+                .unwrap();
+        }
+        builder
+    };
+    let dir = TempDir::new().unwrap();
+    let exact = analyze_tar(write_tar(&dir, "exact.tar", build(MAX_ENTRIES))).unwrap();
+    assert_eq!(exact.entries.len(), MAX_ENTRIES);
+    assert!(exact.notes.is_empty(), "{:?}", exact.notes);
+    let over = analyze_tar(write_tar(&dir, "over.tar", build(MAX_ENTRIES + 1))).unwrap();
+    assert_eq!(over.entries.len(), MAX_ENTRIES);
+    assert!(
+        over.notes.iter().any(|n| n.contains("only the first")),
+        "{:?}",
+        over.notes
+    );
+}

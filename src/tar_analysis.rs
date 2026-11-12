@@ -79,8 +79,10 @@ impl<R: Read> Source for GzSource<R> {
 enum Stop {
     /// The end-of-archive marker, or the end of the data at a header boundary.
     Clean,
-    /// [`MAX_ENTRIES`] entries were recorded.
+    /// [`MAX_ENTRIES`] entries were recorded and another header follows.
     EntryCap,
+    /// The names kept so far used up the listing budget.
+    Budget,
     /// The decompression limit was reached.
     Limit,
     /// The data ended inside a header or an entry's data.
@@ -153,6 +155,13 @@ pub fn analyze_tar_limited<P: AsRef<Path>>(path: P, stream_limit: u64) -> Result
         Stop::EntryCap => notes.push(format!(
             "{LISTING_PARTIAL}: only the first {MAX_ENTRIES} entries were recorded; the counts, \
              sizes and risk rating cover only those."
+        )),
+        Stop::Budget => notes.push(format!(
+            "{LISTING_PARTIAL}: the names and link targets of the first {} used up the {} MiB \
+             listing budget, so later entries are not recorded; the counts, sizes and risk \
+             rating cover only those.",
+            count_entries(listed),
+            crate::archive_analysis::LISTING_BUDGET_BYTES >> 20
         )),
         Stop::Limit if listed == 0 => notes.push(format!(
             "{LISTING_UNAVAILABLE}: reading stopped at the {} MiB decompression limit before \
@@ -245,9 +254,6 @@ fn walk_tar<S: Source>(
     let mut lone_zero = false;
     let mut resumed_after_zero = false;
     let result = loop {
-        if entries.len() >= MAX_ENTRIES {
-            break Stop::EntryCap;
-        }
         let mut block = [0u8; TAR_BLOCK_SIZE];
         match read_block(&mut source, &mut block) {
             Ok(0) if source.cut_by_limit() => break Stop::Limit,
@@ -271,6 +277,14 @@ fn walk_tar<S: Source>(
         if lone_zero {
             lone_zero = false;
             resumed_after_zero = true;
+        }
+        // Another header follows: stop here when no more can be recorded. (An
+        // archive of exactly MAX_ENTRIES entries ends cleanly above.)
+        if entries.len() >= MAX_ENTRIES {
+            break Stop::EntryCap;
+        }
+        if indicators.listing_full() {
+            break Stop::Budget;
         }
         if !validate_tar_checksum(&block) {
             break Stop::Failed("a header block failed its checksum");
@@ -357,7 +371,7 @@ fn walk_tar<S: Source>(
     }
     if cut_names > 0 {
         notes.push(format!(
-            "{cut_names} entry path(s) or link target(s) longer than {MAX_PATH_CHARS} characters \
+            "{cut_names} entry path(s) or link target(s) longer than {MAX_PATH_CHARS} bytes \
              were cut in the listing (the risk checks ran on the full names)."
         ));
     }
@@ -408,10 +422,10 @@ fn tar_entry(
         .filter(|bytes| !bytes.is_empty())
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
 
-    let was_cut = path.chars().count() > MAX_PATH_CHARS
+    let was_cut = path.len() > MAX_PATH_CHARS
         || link_target
             .as_ref()
-            .is_some_and(|t| t.chars().count() > MAX_PATH_CHARS);
+            .is_some_and(|t| t.len() > MAX_PATH_CHARS);
     let entry = build_entry(
         EntrySpec {
             path,
@@ -1081,7 +1095,7 @@ mod tests {
             "{}",
             entry.path.len()
         );
-        assert!(entry.path.ends_with("chars in all)"));
+        assert!(entry.path.ends_with("bytes in all)"));
         assert!(analysis.suspicious_indicators.has_path_traversal);
         assert!(analysis.notes.join(" ").contains("were cut"));
         let modified = entry.last_modified.as_deref().unwrap();

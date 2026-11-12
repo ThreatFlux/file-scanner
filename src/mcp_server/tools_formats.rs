@@ -560,9 +560,16 @@ fn is_text(head: &[u8]) -> bool {
     if head.contains(&0) {
         return false;
     }
+    // A backspace after a printable byte is overstriking (man pages), which
+    // `file` still calls text; it is not counted as a stray control byte.
     let controls = head
         .iter()
-        .filter(|&&b| b < 0x20 && !matches!(b, b'\t' | b'\n' | 0x0c | b'\r' | 0x1b))
+        .enumerate()
+        .filter(|&(i, &b)| {
+            b < 0x20
+                && !matches!(b, b'\t' | b'\n' | 0x0c | b'\r' | 0x1b)
+                && !(b == 0x08 && i > 0 && (0x20..0x7f).contains(&head[i - 1]))
+        })
         .count();
     if controls * 10 > head.len() {
         return false;
@@ -731,22 +738,25 @@ fn risk_flags(analysis: &ArchiveAnalysis) -> Vec<&'static str> {
 }
 
 fn top_level_names(entries: &[ArchiveEntry]) -> (Vec<String>, usize) {
-    let mut seen = Vec::new();
+    // Only the first TOP_LEVEL_NAMES are kept; a hash set tells whether a name
+    // was seen, so a flat archive of 100,000 files costs one pass.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut shown: Vec<String> = Vec::new();
+    let mut total = 0usize;
     for entry in entries {
-        let normalized = entry.path.replace('\\', "/");
-        let trimmed = normalized.trim_start_matches("./");
-        let first = trimmed.split('/').next().unwrap_or_default();
-        if !first.is_empty() && !seen.iter().any(|s: &String| s == first) {
-            seen.push(first.to_string());
+        let trimmed = entry.path.trim_start_matches("./");
+        let first = trimmed.split(['/', '\\']).next().unwrap_or_default();
+        // The marker that capped_text appends to a cut name is not a name.
+        let is_marker = first.starts_with("... (") && first.ends_with(" bytes in all)");
+        if first.is_empty() || is_marker || !seen.insert(first) {
+            continue;
+        }
+        total += 1;
+        if shown.len() < TOP_LEVEL_NAMES {
+            shown.push(capped_text(first, OVERVIEW_NAME_CHARS));
         }
     }
-    let total = seen.len();
-    seen.truncate(TOP_LEVEL_NAMES);
-    let seen = seen
-        .iter()
-        .map(|name| capped_text(name, OVERVIEW_NAME_CHARS))
-        .collect();
-    (seen, total)
+    (shown, total)
 }
 
 fn format_name(archive_type: &ArchiveType) -> &'static str {
@@ -1353,6 +1363,149 @@ mod tests {
         // A truncated RAR signature and NUL-filled data stay binary.
         assert_eq!(kind_of(dir.path(), "r", b"Rar!\x1a").kind, "unknown");
         assert_eq!(kind_of(dir.path(), "z", b"ab\0cd").kind, "unknown");
+        // Backspace overstriking (a man page) is text.
+        let man = kind_of(
+            dir.path(),
+            "man.txt",
+            b"N\x08NA\x08AM\x08ME\x08E\n   ls - list\n",
+        );
+        assert_eq!(man.kind, "text", "{}", man.label);
+        // A run of backspaces with nothing printable before them is not.
+        assert_eq!(kind_of(dir.path(), "bs", &[8u8; 40]).kind, "unknown");
+    }
+
+    /// Lower the entry counts in the end record of a zip.
+    fn declare(bytes: &mut [u8], count: u16) {
+        let eocd = bytes
+            .windows(4)
+            .rposition(|w| w == b"PK\x05\x06")
+            .expect("end record");
+        bytes[eocd + 8..eocd + 10].copy_from_slice(&count.to_le_bytes());
+        bytes[eocd + 10..eocd + 12].copy_from_slice(&count.to_le_bytes());
+    }
+
+    /// A zip whose end record is followed through a ZIP64 end record: the classic
+    /// record carries the 0xFFFF markers, the ZIP64 one the count (`declared`, or
+    /// the true count when `None`).
+    fn zip64_with(names: &[&str], declared: Option<u64>) -> Vec<u8> {
+        let bytes = zip_with(names);
+        let eocd = bytes.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        let count = u64::from(u16::from_le_bytes([bytes[eocd + 10], bytes[eocd + 11]]));
+        let cd_size = u64::from(u32::from_le_bytes(
+            bytes[eocd + 12..eocd + 16].try_into().unwrap(),
+        ));
+        let cd_offset = u64::from(u32::from_le_bytes(
+            bytes[eocd + 16..eocd + 20].try_into().unwrap(),
+        ));
+        let mut out = bytes[..eocd].to_vec();
+        let z64_at = out.len() as u64;
+        let shown = declared.unwrap_or(count);
+        out.extend_from_slice(b"PK\x06\x06");
+        out.extend_from_slice(&44u64.to_le_bytes());
+        out.extend_from_slice(&[45, 0, 45, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        out.extend_from_slice(&shown.to_le_bytes());
+        out.extend_from_slice(&shown.to_le_bytes());
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(b"PK\x06\x07");
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&z64_at.to_le_bytes());
+        out.extend_from_slice(&1u32.to_le_bytes());
+        let mut record = bytes[eocd..eocd + 22].to_vec();
+        record[8..12].copy_from_slice(&[0xFF; 4]);
+        record[12..20].copy_from_slice(&[0xFF; 8]);
+        out.extend_from_slice(&record);
+        out
+    }
+
+    #[test]
+    fn a_zip_declaring_fewer_entries_than_it_holds_lists_the_rest_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        for declared in [0u16, 1] {
+            let mut bytes = zip_with(&["a.txt", "../../x.sh", "invoice.pdf.exe"]);
+            declare(&mut bytes, declared);
+            let path = write(dir.path(), "short.zip", &bytes);
+            let kind = detect_file_kind(&path).unwrap();
+            let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+            let paths: Vec<&str> = analysis.entries.iter().map(|e| e.path.as_str()).collect();
+            assert!(paths.contains(&"../../x.sh"), "{declared}: {paths:?}");
+            assert!(paths.contains(&"invoice.pdf.exe"), "{declared}: {paths:?}");
+            assert!(analysis.suspicious_indicators.has_path_traversal);
+            let notes = analysis.notes.join(" ");
+            assert!(notes.contains("Entry listing is incomplete"), "{notes}");
+            assert!(notes.contains("central directory holds 3"), "{notes}");
+            let gaps = ListingGaps::of(analysis.notes.iter().map(String::as_str));
+            assert!(gaps.counts_unknown);
+        }
+        // The directory size lowered with the count (classic record).
+        for (declared, size) in [(0u16, 0u32), (1, 46 + 5)] {
+            let mut bytes = zip_with(&["a.txt", "../../x.sh", "invoice.pdf.exe"]);
+            declare(&mut bytes, declared);
+            let eocd = bytes.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+            bytes[eocd + 12..eocd + 16].copy_from_slice(&size.to_le_bytes());
+            let path = write(dir.path(), "size.zip", &bytes);
+            let kind = detect_file_kind(&path).unwrap();
+            let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+            let paths: Vec<&str> = analysis.entries.iter().map(|e| e.path.as_str()).collect();
+            assert!(paths.contains(&"../../x.sh"), "{declared}: {paths:?}");
+            assert!(paths.contains(&"invoice.pdf.exe"), "{declared}: {paths:?}");
+            assert!(analysis
+                .notes
+                .join(" ")
+                .contains("Entry listing is incomplete"));
+        }
+        // A ZIP64 archive, honest and with the count lowered in its ZIP64 record.
+        for declared in [None, Some(0u64), Some(1)] {
+            let bytes = zip64_with(&["a.txt", "../../x.sh", "invoice.pdf.exe"], declared);
+            let path = write(dir.path(), "z64.zip", &bytes);
+            let kind = detect_file_kind(&path).unwrap();
+            let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+            let paths: Vec<&str> = analysis.entries.iter().map(|e| e.path.as_str()).collect();
+            assert!(paths.contains(&"../../x.sh"), "{declared:?}: {paths:?}");
+            assert!(
+                paths.contains(&"invoice.pdf.exe"),
+                "{declared:?}: {paths:?}"
+            );
+            let noted = analysis
+                .notes
+                .join(" ")
+                .contains("Entry listing is incomplete");
+            assert_eq!(
+                noted,
+                declared.is_some(),
+                "{declared:?}: {:?}",
+                analysis.notes
+            );
+        }
+        // An honest archive gets no such note.
+        let path = write(dir.path(), "ok.zip", &zip_with(&["a.txt", "b.txt"]));
+        let kind = detect_file_kind(&path).unwrap();
+        let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+        assert!(analysis.notes.is_empty(), "{:?}", analysis.notes);
+        assert_eq!(analysis.entries.len(), 2);
+    }
+
+    #[test]
+    fn top_level_names_are_unique_ordered_and_skip_the_cut_marker() {
+        let spec = |path: &str| {
+            crate::archive_analysis::build_entry(
+                crate::archive_analysis::EntrySpec {
+                    path: path.to_string(),
+                    ..Default::default()
+                },
+                &mut Default::default(),
+            )
+        };
+        let mut entries: Vec<ArchiveEntry> = (0..30_000)
+            .map(|i| spec(&format!("dir{}/f{i}", i % 15)))
+            .collect();
+        entries.push(spec("./.../x"));
+        entries.push(spec("... (262144 bytes in all)"));
+        entries.push(spec("back\\slash\\f"));
+        let (shown, total) = top_level_names(&entries);
+        assert_eq!(shown.len(), TOP_LEVEL_NAMES);
+        assert_eq!(shown[0], "dir0");
+        assert_eq!(total, 15 + 2, "{shown:?}");
     }
 
     #[test]

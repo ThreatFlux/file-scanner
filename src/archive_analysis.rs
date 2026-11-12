@@ -50,14 +50,27 @@ pub const LISTING_CAPPED: &str = "Only the first";
 /// Longest archive or entry comment kept in a result (bytes).
 pub(crate) const MAX_COMMENT_BYTES: usize = 512;
 
-/// Longest entry path or link target kept in a result (characters); PATH_MAX.
+/// Longest entry path or link target kept in a result (bytes); PATH_MAX.
 pub(crate) const MAX_PATH_CHARS: usize = 4096;
 /// Archive-wide budget for the names and link targets kept in a listing
 /// (bytes). A hostile archive can name 100,000 entries with 4,096 characters
 /// each; once the budget is spent, names are kept to [`SHORT_PATH_CHARS`].
 pub(crate) const NAME_BUDGET_BYTES: usize = 8 << 20;
-/// Longest name kept once [`NAME_BUDGET_BYTES`] is spent (characters).
+/// Longest name kept once [`NAME_BUDGET_BYTES`] is spent (bytes).
 pub(crate) const SHORT_PATH_CHARS: usize = 255;
+/// Hard budget for everything kept from names, link targets and the texts
+/// built from them (bytes). The per-name caps keep a full 100,000-entry
+/// listing well under it; an analyzer that reaches it stops recording entries
+/// and says so.
+pub(crate) const LISTING_BUDGET_BYTES: usize = 128 << 20;
+/// Names and link targets examined in full, archive-wide (bytes). Past this,
+/// a name longer than [`CHECK_PREFIX_BYTES`] is checked only up to that length.
+pub(crate) const FULL_CHECK_BUDGET_BYTES: usize = 64 << 20;
+/// How much of a name is still checked once [`FULL_CHECK_BUDGET_BYTES`] is spent.
+pub(crate) const CHECK_PREFIX_BYTES: usize = 4096;
+/// Longest file name the keyword check reads whole (bytes); a longer one is
+/// checked at its start and end only.
+const KEYWORD_SCAN_BYTES: usize = 8192;
 /// Longest path shown in the security lists, which repeat the paths of risky entries.
 const MAX_RISK_PATH_CHARS: usize = 256;
 /// Longest name copied into a pattern or indicator text.
@@ -73,17 +86,37 @@ fn push_pattern(indicators: &mut SuspiciousArchiveIndicators, text: impl FnOnce(
     }
 }
 
-/// A name cut to `max` characters, with its full length when cut. The risk
-/// checks run on the whole name before it is cut.
+/// The largest prefix of `text` of at most `max` bytes that ends on a
+/// character boundary.
+fn prefix_end(text: &str, max: usize) -> usize {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// A name cut to `max` bytes (on a character boundary), with its full length
+/// in bytes when cut. The risk checks run on the whole name before it is cut.
+/// Built at its exact size, so the kept text costs what it measures.
 pub(crate) fn capped_text(text: &str, max: usize) -> String {
-    let mut chars = text.char_indices();
-    match chars.nth(max) {
-        None => text.to_string(),
-        Some((end, _)) => format!(
-            "{}... ({} chars in all)",
-            &text[..end],
-            text.chars().count()
-        ),
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let end = prefix_end(text, max);
+    let marker = format!("... ({} bytes in all)", text.len());
+    let mut out = String::with_capacity(end + marker.len());
+    out.push_str(&text[..end]);
+    out.push_str(&marker);
+    out
+}
+
+/// `text` with backslashes read as slashes; borrowed when it has none.
+fn slashed(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains('\\') {
+        std::borrow::Cow::Owned(text.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
     }
 }
 
@@ -278,6 +311,21 @@ pub struct SuspiciousArchiveIndicators {
     /// Names or link targets that were cut under the short cap.
     #[serde(default, skip_serializing)]
     pub names_cut: usize,
+    /// Bytes of names and link targets examined in full so far.
+    #[serde(default, skip_serializing)]
+    pub examined_bytes: usize,
+    /// Names that were checked only in part (the archive-wide check budget
+    /// was spent, or the name is too long to scan for keywords).
+    #[serde(default, skip_serializing)]
+    pub names_unscanned: usize,
+}
+
+impl SuspiciousArchiveIndicators {
+    /// Whether the kept names have used up [`LISTING_BUDGET_BYTES`]; an
+    /// analyzer stops recording entries when this is true.
+    pub(crate) const fn listing_full(&self) -> bool {
+        self.name_bytes >= LISTING_BUDGET_BYTES
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,14 +348,7 @@ pub fn analyze_zip<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
     let mut suspicious_indicators = SuspiciousArchiveIndicators::default();
     let mut notes = Vec::new();
 
-    let declared = zip_declared_entries(path);
-    if let Some(declared) = declared.filter(|d| *d > archive.len()) {
-        let unlisted_duplicates = declared - archive.len();
-        notes.push(format!(
-            "{LISTING_PARTIAL}: {unlisted_duplicates} entries share a name with a later entry \
-             and are not listed; sizes and the risk level cover only the listed entries."
-        ));
-    }
+    let directory = zip_end_record(path);
     let listed = archive.len().min(MAX_ENTRIES);
     if archive.len() > listed {
         notes.push(format!(
@@ -324,7 +365,77 @@ pub fn analyze_zip<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
         let mut entry = archive.by_index_raw(i)?;
         let entry_info = analyze_zip_entry(&mut entry, link_target, &mut suspicious_indicators)?;
         entries.push(entry_info);
+        if suspicious_indicators.listing_full() {
+            notes.push(format!(
+                "{LISTING_PARTIAL}: the names of the first {} used up the {} MiB listing \
+                 budget, so later entries are not recorded; the counts, sizes and risk rating \
+                 cover only those.",
+                count_entries(entries.len()),
+                LISTING_BUDGET_BYTES >> 20
+            ));
+            break;
+        }
     }
+
+    // The zip reader trusts the entry count in the end record and keeps one
+    // record per name. Count the headers the central directory really holds:
+    // when they differ from what was read, list the extra ones from the
+    // directory itself (so a hidden `../x.sh` or setuid file is still seen)
+    // and say that the listing is not the archive's own count.
+    if let Some(dir) = directory {
+        let read = archive.len();
+        let found = zip_directory_headers(path, &dir, &mut |_, _| ());
+        if let Some(found) = found.filter(|found| *found != read) {
+            let known: std::collections::HashSet<Vec<u8>> = (0..listed)
+                .filter_map(|i| archive.by_index_raw(i).ok().map(|e| e.name_raw().to_vec()))
+                .collect();
+            let mut extra: Vec<EntrySpec> = Vec::new();
+            let room = MAX_ENTRIES.saturating_sub(entries.len());
+            zip_directory_headers(path, &dir, &mut |raw, spec| {
+                if !known.contains(raw) && extra.len() < room {
+                    extra.push(spec);
+                }
+            });
+            let appended = extra.len();
+            let shared_names = found.saturating_sub(appended + listed);
+            for spec in extra {
+                metadata.total_size_compressed = metadata
+                    .total_size_compressed
+                    .saturating_add(spec.size_compressed);
+                metadata.total_size_uncompressed = metadata
+                    .total_size_uncompressed
+                    .saturating_add(spec.size_uncompressed);
+                entries.push(build_entry(spec, &mut suspicious_indicators));
+            }
+            let mut what = format!(
+                "the end record declares {} but the central directory holds {} header(s)",
+                count_entries(dir.declared),
+                found
+            );
+            if appended > 0 {
+                what.push_str(&format!(
+                    "; {appended} that the zip reader skipped are listed from the directory"
+                ));
+            }
+            if shared_names > 0 {
+                what.push_str(&format!(
+                    "; {shared_names} share a name with a listed entry and are not listed"
+                ));
+            }
+            notes.push(format!(
+                "{LISTING_PARTIAL}: {what}. Sizes and the risk level cover only the listed \
+                 entries."
+            ));
+        } else if found.is_none() {
+            notes.push(format!(
+                "{LISTING_PARTIAL}: the end record declares {} but the central directory it \
+                 points at could not be read. Sizes and the risk level cover only the listed \
+                 entries.",
+                count_entries(dir.declared)
+            ));
+        }
+    }
+    metadata.total_entries = entries.len();
     metadata.has_encryption = entries.iter().any(|e| e.is_encrypted);
 
     finish_analysis(
@@ -336,15 +447,30 @@ pub fn analyze_zip<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
     )
 }
 
-/// The entry count the end-of-central-directory record declares, read from
-/// the end of the file. `None` when it cannot be found or is a ZIP64 marker.
-/// The zip reader keeps one record per name, so this can exceed its length.
-fn zip_declared_entries(path: &Path) -> Option<usize> {
+/// What the end-of-central-directory record says about the central directory.
+struct ZipEndRecord {
+    /// The entry count it declares.
+    declared: usize,
+    offset: u64,
+    /// The size it declares. The walk does not trust it: it can be lowered to hide headers.
+    size: u64,
+    /// Where the end record (or the ZIP64 end record) starts: the directory cannot run past it.
+    end: u64,
+}
+
+/// Largest central directory walked for the header count (bytes).
+const MAX_DIRECTORY_BYTES: u64 = 64 << 20;
+
+/// The end record, read from the end of the file. A ZIP64 archive is followed
+/// through its locator to the ZIP64 end record, which holds the real counts.
+/// `None` when no end record can be found or a ZIP64 one cannot be read.
+fn zip_end_record(path: &Path) -> Option<ZipEndRecord> {
     use std::io::SeekFrom;
     let mut file = File::open(path).ok()?;
     let size = file.seek(SeekFrom::End(0)).ok()?;
-    let take = size.min(22 + 65_535);
-    file.seek(SeekFrom::Start(size - take)).ok()?;
+    let take = size.min(22 + 20 + 65_535);
+    let tail_start = size - take;
+    file.seek(SeekFrom::Start(tail_start)).ok()?;
     let mut tail = vec![0u8; usize::try_from(take).ok()?];
     file.read_exact(&mut tail).ok()?;
     let mut pos = tail.len().checked_sub(22)?;
@@ -353,11 +479,141 @@ fn zip_declared_entries(path: &Path) -> Option<usize> {
             let comment = usize::from(u16::from_le_bytes([tail[pos + 20], tail[pos + 21]]));
             if pos + 22 + comment == tail.len() {
                 let total = u16::from_le_bytes([tail[pos + 10], tail[pos + 11]]);
-                return (total != 0xFFFF).then_some(usize::from(total));
+                let cd_size = u32::from_le_bytes(tail[pos + 12..pos + 16].try_into().ok()?);
+                let cd_offset = u32::from_le_bytes(tail[pos + 16..pos + 20].try_into().ok()?);
+                let end = tail_start + pos as u64;
+                if total == 0xFFFF || cd_size == u32::MAX || cd_offset == u32::MAX {
+                    return zip64_end_record(&mut file, &tail[..pos], end, size);
+                }
+                return Some(ZipEndRecord {
+                    declared: usize::from(total),
+                    offset: u64::from(cd_offset),
+                    size: u64::from(cd_size),
+                    end,
+                });
             }
         }
         pos = pos.checked_sub(1)?;
     }
+}
+
+/// The ZIP64 end record named by the locator that sits in front of the classic
+/// end record (`before` holds the bytes up to it; `end` is where it starts).
+fn zip64_end_record(
+    file: &mut File,
+    before: &[u8],
+    end: u64,
+    file_size: u64,
+) -> Option<ZipEndRecord> {
+    use std::io::SeekFrom;
+    let locator = before.get(before.len().checked_sub(20)?..)?;
+    if !locator.starts_with(b"PK\x06\x07") {
+        return None;
+    }
+    let at = u64::from_le_bytes(locator[8..16].try_into().ok()?);
+    if at.checked_add(56)? > end || end > file_size {
+        return None;
+    }
+    file.seek(SeekFrom::Start(at)).ok()?;
+    let mut record = [0u8; 56];
+    file.read_exact(&mut record).ok()?;
+    if !record.starts_with(b"PK\x06\x06") {
+        return None;
+    }
+    let u64_at = |i: usize| u64::from_le_bytes(record[i..i + 8].try_into().unwrap_or([0; 8]));
+    Some(ZipEndRecord {
+        declared: usize::try_from(u64_at(32)).unwrap_or(usize::MAX),
+        offset: u64_at(48),
+        size: u64_at(40),
+        end: at,
+    })
+}
+
+/// Walk the central directory the end record points at and hand each header
+/// (as the facts the shared checks need) to `each`. The declared size is not
+/// trusted: headers are read from the offset while their signature matches, up
+/// to the end record, and every field is checked against the bytes left. A cut
+/// header ends the walk with the count so far. Returns how many headers were
+/// found, at most `MAX_ENTRIES + 1`; `None` when the directory cannot be read.
+fn zip_directory_headers(
+    path: &Path,
+    dir: &ZipEndRecord,
+    each: &mut dyn FnMut(&[u8], EntrySpec),
+) -> Option<usize> {
+    use std::io::SeekFrom;
+    let mut file = File::open(path).ok()?;
+    let file_size = file.seek(SeekFrom::End(0)).ok()?;
+    let limit = dir.end.min(file_size);
+    if dir.offset > limit {
+        return None;
+    }
+    let span = (limit - dir.offset).min(MAX_DIRECTORY_BYTES);
+    file.seek(SeekFrom::Start(dir.offset)).ok()?;
+    let mut data = vec![0u8; usize::try_from(span).ok()?];
+    file.read_exact(&mut data).ok()?;
+    let mut reader = ByteReader::new(&data);
+    let mut found = 0usize;
+    while found <= MAX_ENTRIES && reader.remaining() >= 46 {
+        let Some(spec_name) = zip_central_header(&mut reader) else {
+            break;
+        };
+        found += 1;
+        each(spec_name.0, spec_name.1);
+    }
+    Some(found)
+}
+
+/// One central-directory header, or `None` when the signature is wrong or the
+/// header runs past the buffer.
+fn zip_central_header<'a>(reader: &mut ByteReader<'a>) -> Option<(&'a [u8], EntrySpec)> {
+    if reader.bytes(4)? != b"PK\x01\x02" {
+        return None;
+    }
+    let made_by = reader.u16le()?;
+    reader.skip(2)?;
+    let flags = reader.u16le()?;
+    let method = reader.u16le()?;
+    reader.skip(4)?;
+    let crc = reader.u32le()?;
+    let compressed = reader.u32le()?;
+    let uncompressed = reader.u32le()?;
+    let name_len = usize::from(reader.u16le()?);
+    let extra_len = usize::from(reader.u16le()?);
+    let comment_len = usize::from(reader.u16le()?);
+    reader.skip(4)?;
+    let external = reader.u32le()?;
+    reader.skip(4)?;
+    let name = reader.bytes(name_len)?;
+    reader.skip(extra_len.checked_add(comment_len)?)?;
+    let path = String::from_utf8_lossy(name).into_owned();
+    let mode = (made_by >> 8 == 3)
+        .then_some(external >> 16)
+        .filter(|mode| *mode != 0);
+    let kind = if path.ends_with('/') {
+        EntryKind::Directory
+    } else {
+        mode.map_or(EntryKind::File, unix_kind)
+    };
+    Some((
+        name,
+        EntrySpec {
+            path,
+            kind,
+            size_compressed: u64::from(compressed),
+            size_uncompressed: u64::from(uncompressed),
+            method: match method {
+                0 => "Stored".to_string(),
+                8 => "Deflated".to_string(),
+                other => format!("Method({other})"),
+            },
+            last_modified: None,
+            crc32: Some(crc),
+            is_encrypted: flags & 1 != 0,
+            permissions: mode.map(|m| m & 0o7777),
+            comment: None,
+            link_target: None,
+        },
+    ))
 }
 
 /// A bounds-checked little-endian reader over a header buffer. Every read
@@ -474,7 +730,7 @@ pub(crate) struct EntrySpec {
 
 /// Why `path` would write outside the extraction directory, if it would.
 pub(crate) fn path_risk(path: &str) -> Option<&'static str> {
-    let normalized = path.replace('\\', "/");
+    let normalized = slashed(path);
     let bytes = normalized.as_bytes();
     if normalized.starts_with('/') {
         return Some("absolute path");
@@ -490,9 +746,9 @@ pub(crate) fn path_risk(path: &str) -> Option<&'static str> {
 
 /// `path` with `.` and `..` components resolved lexically; leading `..`
 /// components that climb out of the root are kept.
-/// A name without the " (N chars in all)" marker [`capped_text`] appends.
+/// A name without the " (N bytes in all)" marker [`capped_text`] appends.
 fn uncut(name: &str) -> &str {
-    if name.ends_with(" chars in all)") {
+    if name.ends_with(" bytes in all)") {
         if let Some(at) = name.rfind("... (") {
             return &name[..at];
         }
@@ -503,17 +759,17 @@ fn uncut(name: &str) -> &str {
 /// A name already cut by [`capped_text`] shortened further for the security
 /// lists, keeping the original full length in its marker.
 fn short_path(name: &str) -> String {
-    match (name.ends_with(" chars in all)"), name.rfind("... (")) {
+    match (name.ends_with(" bytes in all)"), name.rfind("... (")) {
         (true, Some(at)) => {
-            let head: String = name[..at].chars().take(MAX_RISK_PATH_CHARS).collect();
-            format!("{head}{}", &name[at..])
+            let end = prefix_end(&name[..at], MAX_RISK_PATH_CHARS);
+            format!("{}{}", &name[..end], &name[at..])
         }
         _ => capped_text(name, MAX_RISK_PATH_CHARS),
     }
 }
 
 fn lexical_resolve(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
+    let normalized = slashed(path);
     let mut parts: Vec<&str> = Vec::new();
     for part in normalized.split('/') {
         match part {
@@ -536,18 +792,18 @@ fn lexical_resolve(path: &str) -> String {
 /// extraction root. `relative_to_entry` is true for symbolic links (resolved
 /// from the link's own directory) and false for hard links (from the root).
 pub(crate) fn link_escapes(entry_path: &str, target: &str, relative_to_entry: bool) -> bool {
-    let target = target.replace('\\', "/");
+    let target = slashed(target);
     if target.starts_with('/') || path_risk(&target) == Some("drive-letter path") {
         return true;
     }
     let mut depth: i64 = 0;
     if relative_to_entry {
-        let entry = entry_path.replace('\\', "/");
-        let parts: Vec<&str> = entry
+        let entry = slashed(entry_path);
+        let parts = entry
             .split('/')
             .filter(|p| !p.is_empty() && *p != ".")
-            .collect();
-        depth = parts.len().saturating_sub(1) as i64;
+            .count();
+        depth = parts.saturating_sub(1) as i64;
     }
     for part in target.split('/') {
         match part {
@@ -568,25 +824,45 @@ pub(crate) fn link_escapes(entry_path: &str, target: &str, relative_to_entry: bo
 /// shares (type by extension, double extension, traversal, link escape,
 /// device nodes, setuid bits, hidden and suspicious names).
 pub(crate) fn build_entry(
-    spec: EntrySpec,
+    mut spec: EntrySpec,
     indicators: &mut SuspiciousArchiveIndicators,
 ) -> ArchiveEntry {
+    // Every name and link target is examined in full until an archive-wide
+    // budget is spent; after that a long one is checked only up to a prefix,
+    // and the archive says so (its risk is then never "low").
+    let examined = spec.path.len() + spec.link_target.as_ref().map_or(0, String::len);
+    indicators.examined_bytes = indicators.examined_bytes.saturating_add(examined);
+    if indicators.examined_bytes > FULL_CHECK_BUDGET_BYTES {
+        let mut clipped = false;
+        if spec.path.len() > CHECK_PREFIX_BYTES {
+            let end = prefix_end(&spec.path, CHECK_PREFIX_BYTES);
+            spec.path.truncate(end);
+            clipped = true;
+        }
+        if let Some(target) = spec.link_target.as_mut() {
+            if target.len() > CHECK_PREFIX_BYTES {
+                let end = prefix_end(target, CHECK_PREFIX_BYTES);
+                target.truncate(end);
+                clipped = true;
+            }
+        }
+        indicators.names_unscanned += usize::from(clipped);
+    }
     let full_path = spec.path;
-    let path = full_path.clone();
-    let normalized = path.replace('\\', "/");
-    let file_name = normalized
+    let path: &str = &full_path;
+    let normalized = slashed(path);
+    let file_name: &str = normalized
         .trim_end_matches('/')
         .rsplit('/')
         .next()
-        .unwrap_or_default()
-        .to_string();
+        .unwrap_or_default();
     let is_directory = spec.kind == EntryKind::Directory;
     let compression_ratio = saved_ratio(spec.size_compressed, spec.size_uncompressed);
 
     let file_type = if is_directory {
         FileType::Unknown
     } else {
-        determine_file_type(&file_name, &path)
+        determine_file_type(file_name, path)
     };
     let mut risk_indicators = Vec::new();
     let mut flag = |indicator_type: &str, description: String, severity: RiskLevel| {
@@ -617,7 +893,7 @@ pub(crate) fn build_entry(
         );
     }
 
-    if has_double_extension(&file_name) {
+    if has_double_extension(file_name) {
         indicators.has_double_extension = true;
         flag(
             "DoubleExtension",
@@ -626,7 +902,7 @@ pub(crate) fn build_entry(
         );
     }
 
-    if let Some(why) = path_risk(&path) {
+    if let Some(why) = path_risk(path) {
         indicators.has_path_traversal = true;
         flag(
             "PathTraversal",
@@ -638,7 +914,7 @@ pub(crate) fn build_entry(
     match (spec.kind, spec.link_target.as_deref()) {
         (EntryKind::Symlink | EntryKind::Hardlink, Some(target)) => {
             let relative = spec.kind == EntryKind::Symlink;
-            if link_escapes(&path, target, relative) {
+            if link_escapes(path, target, relative) {
                 indicators.has_path_traversal = true;
                 flag(
                     "LinkEscape",
@@ -661,7 +937,7 @@ pub(crate) fn build_entry(
         }
         (EntryKind::CharDevice | EntryKind::BlockDevice, _) => {
             push_pattern(indicators, || {
-                format!("device node: {}", capped_text(&path, MAX_PATTERN_CHARS))
+                format!("device node: {}", capped_text(path, MAX_PATTERN_CHARS))
             });
             flag(
                 "DeviceNode",
@@ -678,7 +954,7 @@ pub(crate) fn build_entry(
     if let Some(mode) = spec.permissions {
         if mode & 0o4000 != 0 {
             push_pattern(indicators, || {
-                format!("setuid: {}", capped_text(&path, MAX_PATTERN_CHARS))
+                format!("setuid: {}", capped_text(path, MAX_PATTERN_CHARS))
             });
             flag(
                 "Setuid",
@@ -688,7 +964,7 @@ pub(crate) fn build_entry(
         }
         if mode & 0o2000 != 0 && !is_directory {
             push_pattern(indicators, || {
-                format!("setgid: {}", capped_text(&path, MAX_PATTERN_CHARS))
+                format!("setgid: {}", capped_text(path, MAX_PATTERN_CHARS))
             });
             flag(
                 "Setgid",
@@ -710,9 +986,12 @@ pub(crate) fn build_entry(
         );
     }
 
-    if is_suspicious_filename(&file_name) {
+    if file_name.len() > KEYWORD_SCAN_BYTES {
+        indicators.names_unscanned += 1;
+    }
+    if is_suspicious_filename(file_name) {
         indicators.has_suspicious_names = true;
-        push_pattern(indicators, || capped_text(&file_name, MAX_PATTERN_CHARS));
+        push_pattern(indicators, || capped_text(file_name, MAX_PATTERN_CHARS));
     }
 
     let name_cap = if indicators.name_bytes > NAME_BUDGET_BYTES {
@@ -720,26 +999,31 @@ pub(crate) fn build_entry(
     } else {
         MAX_PATH_CHARS
     };
-    let kept_path = capped_text(&full_path, name_cap);
-    let kept_file_name = capped_text(&file_name, name_cap);
+    let kept_path = capped_text(path, name_cap);
+    let kept_file_name = capped_text(file_name, name_cap);
     let kept_target = spec
         .link_target
         .as_deref()
         .map(|target| capped_text(target, name_cap));
     if name_cap == SHORT_PATH_CHARS
-        && (kept_path != full_path
-            || kept_file_name != file_name
+        && (path.len() > name_cap
+            || file_name.len() > name_cap
             || spec
                 .link_target
-                .as_deref()
-                .zip(kept_target.as_deref())
-                .is_some_and(|(a, b)| a != b))
+                .as_ref()
+                .is_some_and(|t| t.len() > name_cap))
     {
         indicators.names_cut += 1;
     }
+    // Everything kept from the names is charged to one budget: the path, the
+    // file name, the link target and the texts built from them.
+    let kept_texts: usize = risk_indicators
+        .iter()
+        .map(|r| r.description.len() + r.indicator_type.len())
+        .sum();
     indicators.name_bytes = indicators
         .name_bytes
-        .saturating_add(kept_path.len() + kept_file_name.len())
+        .saturating_add(kept_path.len() + kept_file_name.len() + kept_texts)
         .saturating_add(kept_target.as_ref().map_or(0, String::len));
     ArchiveEntry {
         path: kept_path,
@@ -786,10 +1070,19 @@ pub(crate) fn finish_analysis(
     if suspicious_indicators.names_cut > 0 {
         notes.push(format!(
             "The names and link targets of this archive are very long: after the first {} MiB, \
-             {} names were cut to {SHORT_PATH_CHARS} characters (risk checks still ran on the \
+             {} names were cut to {SHORT_PATH_CHARS} bytes (risk checks still ran on the \
              whole names).",
             NAME_BUDGET_BYTES >> 20,
             suspicious_indicators.names_cut
+        ));
+    }
+    if suspicious_indicators.names_unscanned > 0 {
+        notes.push(format!(
+            "{NAMES_UNCHECKED}: {} names were too long to check in full (over {} KiB, or past \
+             the archive-wide limit on long names); only their start (and end) was read, \
+             so a low risk level is not claimed.",
+            suspicious_indicators.names_unscanned,
+            KEYWORD_SCAN_BYTES >> 10
         ));
     }
     let compressed = !matches!(archive_type, ArchiveType::Tar);
@@ -1010,7 +1303,20 @@ fn has_double_extension(file_name: &str) -> bool {
 }
 
 fn is_suspicious_filename(file_name: &str) -> bool {
-    let lower_name = file_name.to_lowercase();
+    // A name over KEYWORD_SCAN_BYTES is read at its start and its end, so the
+    // cost of a hostile name stays small and linear (the caller counts it).
+    let lower_name = if file_name.len() > KEYWORD_SCAN_BYTES {
+        let head = &file_name[..prefix_end(file_name, KEYWORD_SCAN_BYTES / 2)];
+        let mut from = file_name.len() - KEYWORD_SCAN_BYTES / 2;
+        while !file_name.is_char_boundary(from) {
+            from += 1;
+        }
+        // A separator between the two parts keeps a word from being formed
+        // across the cut.
+        format!("{head}/{}", &file_name[from..]).to_lowercase()
+    } else {
+        file_name.to_lowercase()
+    };
 
     // Suspicious keywords
     let suspicious_keywords = [
@@ -1452,5 +1758,110 @@ mod tests {
         };
         assert!(!check_zip_bomb(&[], &metadata(0.0), true).is_potential_bomb);
         assert!(check_zip_bomb(&[], &metadata(0.95), true).is_potential_bomb);
+    }
+
+    fn spec(path: String) -> EntrySpec {
+        EntrySpec {
+            path,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn names_are_capped_in_bytes_on_a_character_boundary() {
+        let name = "\u{1F600}".repeat(1000);
+        let cut = capped_text(&name, 255);
+        let (head, marker) = cut.split_once("... (").unwrap();
+        assert!(head.len() <= 255 && head.chars().all(|c| c == '\u{1F600}'));
+        assert_eq!(marker, "4000 bytes in all)");
+        assert_eq!(capped_text("short", 255), "short");
+        assert_eq!(cut.capacity(), cut.len(), "built at its exact size");
+    }
+
+    #[test]
+    fn long_names_after_the_check_budget_are_checked_by_prefix_and_said_so() {
+        let mut indicators = SuspiciousArchiveIndicators::default();
+        // A traversal at the start of a huge name is still found.
+        let evil = format!("../x/{}", "\u{130}".repeat(500_000));
+        indicators.examined_bytes = FULL_CHECK_BUDGET_BYTES;
+        let entry = build_entry(spec(evil.clone()), &mut indicators);
+        assert!(indicators.has_path_traversal);
+        assert_eq!(indicators.names_unscanned, 1);
+        assert!(entry.path.len() < 4200, "{}", entry.path.len());
+        // Within the budget the same name is examined whole: no note.
+        let mut fresh = SuspiciousArchiveIndicators::default();
+        build_entry(spec(format!("ok/{}", "a".repeat(5000))), &mut fresh);
+        assert_eq!(fresh.names_unscanned, 0);
+        // A traversal after 20,000 characters is seen while the budget lasts.
+        let late = format!("{}/../../x", "d".repeat(20_000));
+        let mut fresh = SuspiciousArchiveIndicators::default();
+        build_entry(spec(late), &mut fresh);
+        assert!(fresh.has_path_traversal);
+        // The archive is not rated low: the note names the cut names.
+        let analysis = finish_analysis(
+            ArchiveType::Tar,
+            ArchiveMetadata {
+                total_entries: 1,
+                total_size_compressed: 0,
+                total_size_uncompressed: 0,
+                compression_ratio: 0.0,
+                has_encryption: false,
+                has_password: false,
+                comment: None,
+                created_by: None,
+                creation_date: None,
+            },
+            vec![entry],
+            indicators,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(analysis
+            .notes
+            .iter()
+            .any(|n| n.starts_with(NAMES_UNCHECKED)));
+    }
+
+    #[test]
+    fn a_name_too_long_to_scan_for_keywords_is_counted() {
+        let mut indicators = SuspiciousArchiveIndicators::default();
+        let name = format!("{}.keygen", "a".repeat(30_000));
+        build_entry(spec(name), &mut indicators);
+        assert_eq!(indicators.names_unscanned, 1);
+        // The end of a long name is still read.
+        assert!(indicators.has_suspicious_names);
+        let mut indicators = SuspiciousArchiveIndicators::default();
+        build_entry(
+            spec(format!("{}/keygen.exe", "a".repeat(30_000))),
+            &mut indicators,
+        );
+        assert!(indicators.has_suspicious_names);
+        let mut indicators = SuspiciousArchiveIndicators::default();
+        build_entry(spec("a".repeat(2000)), &mut indicators);
+        assert_eq!(indicators.names_unscanned, 0);
+    }
+
+    #[test]
+    fn the_kept_texts_are_charged_to_the_name_budget() {
+        let mut indicators = SuspiciousArchiveIndicators::default();
+        let entry = build_entry(
+            EntrySpec {
+                path: "a/b".to_string(),
+                kind: EntryKind::Symlink,
+                link_target: Some("t".repeat(2000)),
+                ..Default::default()
+            },
+            &mut indicators,
+        );
+        let description: usize = entry
+            .risk_indicators
+            .iter()
+            .map(|r| r.description.len())
+            .sum();
+        assert!(description >= 200);
+        assert!(indicators.name_bytes >= 3 + 1 + 2000 + description);
+        assert!(!indicators.listing_full());
+        indicators.name_bytes = LISTING_BUDGET_BYTES;
+        assert!(indicators.listing_full());
     }
 }

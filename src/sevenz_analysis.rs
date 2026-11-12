@@ -802,8 +802,13 @@ pub fn analyze_7z<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
         });
     if names_cut > 0 {
         notes.push(format!(
-            "{NAMES_UNCHECKED}: {names_cut} names are longer than {NAME_UNITS} characters and \
-             the risk checks ran only on their first {NAME_UNITS} characters."
+            "{NAMES_UNCHECKED}: {} longer than {NAME_UNITS} characters; the risk checks ran \
+             only on the first {NAME_UNITS} characters of each.",
+            if names_cut == 1 {
+                "1 name is".to_string()
+            } else {
+                format!("{names_cut} names are")
+            }
         ));
     }
     if total_files > entries.len() {

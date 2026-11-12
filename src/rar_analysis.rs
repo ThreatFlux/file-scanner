@@ -149,6 +149,28 @@ pub fn analyze_rar<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
 }
 
 /// DOS date and time (as RAR 4 stores them) to `YYYY-MM-DD HH:MM:SS`.
+/// The note for a walk that met another file header when no more entries can
+/// be recorded: [`MAX_ENTRIES`] are listed, or the names used up the listing
+/// budget. `None` while there is room.
+fn entry_limit_note(listed: usize, indicators: &SuspiciousArchiveIndicators) -> Option<String> {
+    if listed >= MAX_ENTRIES {
+        Some(format!(
+            "{LISTING_PARTIAL}: only the first {MAX_ENTRIES} entries were recorded; the counts, \
+             sizes and risk rating cover only those."
+        ))
+    } else if indicators.listing_full() {
+        Some(format!(
+            "{LISTING_PARTIAL}: the names of the first {} used up the {} MiB listing budget, \
+             so later entries are not recorded; the counts, sizes and risk rating cover only \
+             those.",
+            crate::archive_analysis::count_entries(listed),
+            crate::archive_analysis::LISTING_BUDGET_BYTES >> 20
+        ))
+    } else {
+        None
+    }
+}
+
 /// The note for a walk that stopped at [`MAX_BLOCKS`] header blocks.
 fn blocks_note(read: usize) -> String {
     if read == 0 {
@@ -190,7 +212,7 @@ fn walk_v4<R: Read + Seek>(
     walk: &mut Walk,
 ) -> Result<()> {
     let mut blocks = 0u32;
-    while walk.entries.len() < MAX_ENTRIES {
+    while blocks <= MAX_BLOCKS {
         blocks += 1;
         if blocks > MAX_BLOCKS {
             walk.notes.push(blocks_note(walk.entries.len()));
@@ -223,6 +245,10 @@ fn walk_v4<R: Read + Seek>(
                 }
             }
             0x74 => {
+                if let Some(note) = entry_limit_note(walk.entries.len(), indicators) {
+                    walk.notes.push(note);
+                    break;
+                }
                 let (entry, packed) = parse_v4_file(&body, flags, indicators)?;
                 data_size = packed;
                 walk.entries.push(entry);
@@ -241,12 +267,6 @@ fn walk_v4<R: Read + Seek>(
         if pos > file_size {
             walk.cut_short = true;
         }
-    }
-    if walk.entries.len() >= MAX_ENTRIES {
-        walk.notes.push(format!(
-            "{LISTING_PARTIAL}: only the first {MAX_ENTRIES} entries were recorded; the counts, \
-             sizes and risk rating cover only those."
-        ));
     }
     Ok(())
 }
@@ -328,7 +348,7 @@ fn walk_v5<R: Read + Seek>(
     walk: &mut Walk,
 ) -> Result<()> {
     let mut blocks = 0u32;
-    while walk.entries.len() < MAX_ENTRIES {
+    while blocks <= MAX_BLOCKS {
         blocks += 1;
         if blocks > MAX_BLOCKS {
             walk.notes.push(blocks_note(walk.entries.len()));
@@ -386,6 +406,10 @@ fn walk_v5<R: Read + Seek>(
                 break;
             }
             2 => {
+                if let Some(note) = entry_limit_note(walk.entries.len(), indicators) {
+                    walk.notes.push(note);
+                    break;
+                }
                 let entry = parse_v5_file(&mut r, &body, extra_size, data_size, indicators)
                     .ok_or_else(damaged)?;
                 walk.entries.push(entry);
@@ -398,12 +422,6 @@ fn walk_v5<R: Read + Seek>(
         if pos > file_size {
             walk.cut_short = true;
         }
-    }
-    if walk.entries.len() >= MAX_ENTRIES {
-        walk.notes.push(format!(
-            "{LISTING_PARTIAL}: only the first {MAX_ENTRIES} entries were recorded; the counts, \
-             sizes and risk rating cover only those."
-        ));
     }
     Ok(())
 }
