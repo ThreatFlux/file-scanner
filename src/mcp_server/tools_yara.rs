@@ -116,24 +116,31 @@ pub struct YaraScanArgs {
     pub detailed_matches: Option<bool>,
 
     #[schemars(
+        range(min = 1),
         description = "Most matched strings listed per rule per file (default 10, at most 1000); \
                        `strings_total` always has the full count"
     )]
     pub max_matches_per_rule: Option<usize>,
 
-    #[schemars(description = "Most matching rules listed per file (default 100, at most 1000)")]
+    #[schemars(
+        range(min = 1),
+        description = "Most matching rules listed per file (default 100, at most 1000)"
+    )]
     pub max_rules_per_file: Option<usize>,
 
     #[schemars(
+        range(min = 1),
         description = "Most files examined (default 10000, at most 100000); the walk stops there \
                        and `files_not_scanned` is then a lower bound (`more_files_not_counted`)"
     )]
     pub max_files: Option<usize>,
 
     #[schemars(
-        description = "Wall-clock budget for the scan and its directory walk in seconds (default \
-                       60, at most 600; the server's check of the tree before the scan is not \
-                       included); a file still running when it ends is reported in `errors`"
+        range(min = 1),
+        description = "Wall-clock budget in seconds (default 60, at most 600). It covers the \
+                       scan and the directory walk under `path` (each entry is checked as the \
+                       walk meets it); loading `rule_path` rules is not included. A file still \
+                       running when it ends is reported in `errors`"
     )]
     pub timeout_seconds: Option<u64>,
 
@@ -510,9 +517,12 @@ fn reply_value(
             summary.errors.len()
         ));
     }
-    if summary.skipped.len() > list_cap {
+    // One statement about `skipped`, whichever cut applies (the scan keeps the
+    // first 100 names, the answer lists at most `list_cap` of them).
+    let skipped_named = summary.skipped.len().min(list_cap);
+    if summary.skipped_total > skipped_named {
         limits.push(format!(
-            "skipped names the first {list_cap} of {} files (`skipped_total`).",
+            "skipped names the first {skipped_named} of {} files (`skipped_total`).",
             summary.skipped_total
         ));
     }
@@ -737,13 +747,6 @@ fn summarize(
             "{rules_cut} files list only the first {} matching rules (max_rules_per_file); \
              `rules_total` has the full count.",
             options.max_rules_per_file
-        ));
-    }
-    if scan.skipped_total > scan.skipped.len() {
-        limits.push(format!(
-            "{} skipped files are named; {} more are only counted in `skipped_total`.",
-            scan.skipped.len(),
-            scan.skipped_total - scan.skipped.len()
         ));
     }
     YaraScanResult {
@@ -1527,8 +1530,61 @@ rule TestRule {
             let skipped = body["skipped"].as_array().unwrap();
             assert_eq!(skipped.len(), 1, "{body}");
             assert!(skipped[0]["file_path"].as_str().unwrap().ends_with("pipe"));
-            assert!(skipped[0]["reason"].as_str().unwrap().contains("FIFO"));
+            let reason = skipped[0]["reason"].as_str().unwrap();
+            assert!(reason.contains("FIFO"), "{reason}");
+            assert!(!reason.contains("Remove it"), "{reason}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_directory_given_as_path_is_scanned_and_not_listed_as_skipped() {
+        let target = TempDir::new().unwrap();
+        write(target.path(), "a.txt", b"MARKER_ALPHA");
+        let holder = TempDir::new().unwrap();
+        let link = holder.path().join("dirlink");
+        std::os::unix::fs::symlink(target.path(), &link).unwrap();
+        let (err, body) = call(
+            &mcp(),
+            json!({"path": link, "yara_rule": "rule a { strings: $a = \"MARKER_ALPHA\" condition: $a }"}),
+        )
+        .await;
+        assert!(!err, "{body}");
+        assert_eq!(body["total_files_scanned"], 1, "{body}");
+        assert_eq!(body["files_matched"], 1, "{body}");
+        assert_eq!(body["skipped_total"], 0, "{body}");
+        assert!(body["skipped"].as_array().unwrap().is_empty(), "{body}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn skipped_names_are_described_by_one_limits_message() {
+        let dir = TempDir::new().unwrap();
+        let real = write(dir.path(), "real.txt", b"x");
+        let links = TempDir::new().unwrap();
+        for i in 0..150 {
+            std::os::unix::fs::symlink(&real, links.path().join(format!("l{i:03}"))).unwrap();
+        }
+        let (err, body) = call(
+            &mcp(),
+            json!({"path": links.path(), "yara_rule": "rule t { condition: true }"}),
+        )
+        .await;
+        assert!(!err, "{body}");
+        let named = body["skipped"].as_array().unwrap().len();
+        assert_eq!(body["skipped_total"], 150, "{body}");
+        let about_skipped: Vec<&str> = body["limits_reached"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|m| m.contains("skipped"))
+            .collect();
+        assert_eq!(about_skipped.len(), 1, "{body}");
+        assert!(
+            about_skipped[0].contains(&format!("first {named} of 150")),
+            "{body}"
+        );
     }
 
     #[cfg(unix)]
@@ -1965,6 +2021,21 @@ rule TestRule {
         ] {
             assert!(properties.contains_key(name), "missing {name}: {schema}");
         }
+        for name in [
+            "max_files",
+            "max_matches_per_rule",
+            "max_rules_per_file",
+            "timeout_seconds",
+        ] {
+            assert_eq!(properties[name]["minimum"], 1, "{name}: {schema}");
+        }
+        let timeout_text = properties["timeout_seconds"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            !timeout_text.contains("check of the tree"),
+            "{timeout_text}"
+        );
         assert_eq!(schema["required"], json!(["path"]), "{schema}");
         let description = tool.description.as_deref().unwrap();
         assert!(description.contains("builtin") && description.contains("rule_path"));

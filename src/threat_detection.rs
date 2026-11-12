@@ -261,10 +261,11 @@ pub fn analyze_threats(path: &Path) -> Result<ThreatAnalysis> {
     let mut threat_classifications = Vec::new();
     let mut indicators = Vec::new();
 
+    let text_file = looks_like_text(&file_data);
     for matching_rule in scan_results.matching_rules() {
         // The built-in rules are few and small: no detail budget applies.
         let (mut budget, mut trimmed) = (usize::MAX, false);
-        let rule_match = convert_rule_match(
+        let mut rule_match = convert_rule_match(
             &matching_rule,
             &file_data,
             true,
@@ -272,8 +273,27 @@ pub fn analyze_threats(path: &Path) -> Result<ThreatAnalysis> {
             &mut budget,
             &mut trimmed,
         );
+        // A match on weak evidence is reported, marked, and counts for nothing.
+        let weak = weak_evidence_reason(
+            &matching_rule,
+            &file_data,
+            &rule_match.tags,
+            text_file,
+            rule_match.metadata.get("severity").map(String::as_str) == Some("high"),
+        );
+        if let Some(reason) = weak {
+            rule_match
+                .metadata
+                .insert(WEAK_EVIDENCE_KEY.to_string(), "weak".to_string());
+            rule_match
+                .metadata
+                .insert("evidence_reason".to_string(), reason.to_string());
+        }
 
         for tag in &rule_match.tags {
+            if weak.is_some() {
+                break;
+            }
             if let Some(classification) = tag_to_classification(tag) {
                 if !threat_classifications.contains(&classification) {
                     threat_classifications.push(classification);
@@ -286,8 +306,10 @@ pub fn analyze_threats(path: &Path) -> Result<ThreatAnalysis> {
             tags: rule_match.tags.clone(),
             metadata: rule_match.metadata.clone(),
         };
-        if let Some(indicator) = create_threat_indicator(&yara_match) {
-            indicators.push(indicator);
+        if weak.is_none() {
+            if let Some(indicator) = create_threat_indicator(&yara_match) {
+                indicators.push(indicator);
+            }
         }
         evidence.push(RuleEvidence {
             rule_identifier: rule_match.rule_identifier,
@@ -323,13 +345,76 @@ pub fn analyze_threats(path: &Path) -> Result<ThreatAnalysis> {
     })
 }
 
+/// Metadata key set on a built-in match that rests on weak evidence.
+const WEAK_EVIDENCE_KEY: &str = "evidence_strength";
+/// A matched string shorter than this says nothing on its own.
+const MIN_STRONG_STRING_BYTES: usize = 4;
+
+/// Whether the file is text: no NUL byte anywhere in it and valid UTF-8 in
+/// its first 64 KiB. A binary part after long leading text is not text.
+fn looks_like_text(data: &[u8]) -> bool {
+    let head = &data[..data.len().min(64 * 1024)];
+    if data.contains(&0) {
+        return false;
+    }
+    match std::str::from_utf8(head) {
+        Ok(_) => true,
+        // A multi-byte character cut by the window is not a binary signal.
+        Err(e) => e.error_len().is_none() && head.len() < data.len(),
+    }
+}
+
+/// Why a rule's match is weak evidence, or `None` when it is not: every matched
+/// string is under four bytes or a run of one repeated byte (padding), or the
+/// rule names a debugger or virtual-machine technique and the file is text
+/// (documentation that describes it). Such a match is still reported.
+fn weak_evidence_reason(
+    rule: &yara_x::Rule<'_, '_>,
+    data: &[u8],
+    tags: &[String],
+    text_file: bool,
+    high_severity: bool,
+) -> Option<&'static str> {
+    if text_file && !high_severity && tags.iter().any(|t| t == "anti_vm" || t == "anti_debug") {
+        return Some("a text file that describes the technique in words");
+    }
+    // The words "bind shell" and "reverse shell" in a text file are
+    // documentation; a command line that opens one is not.
+    if text_file
+        && tags.iter().any(|t| t == "backdoor")
+        && rule
+            .patterns()
+            .filter(|p| p.matches().next().is_some())
+            .all(|p| matches!(p.identifier(), "$bind" | "$reverse"))
+    {
+        return Some("a text file that describes the technique in words");
+    }
+    let mut any = false;
+    for pattern in rule.patterns() {
+        for m in pattern.matches() {
+            any = true;
+            let range = m.range();
+            let bytes = &data[range.start.min(data.len())..range.end.min(data.len())];
+            let padding = bytes.windows(2).all(|w| w[0] == w[1]);
+            if bytes.len() >= MIN_STRONG_STRING_BYTES && !padding {
+                return None;
+            }
+        }
+    }
+    any.then_some("every matched string is under 4 bytes or a run of one repeated byte")
+}
+
 /// The level for a set of matches. Rules that declare `severity = "low"` are
 /// informational (a URL or the word "AES" in a binary says little on its
-/// own): they are reported but do not raise the level.
+/// own), and so are matches marked as weak evidence: they are reported but do
+/// not raise the level.
 fn level_for_matches(matches: &[YaraMatch], indicators: &[ThreatIndicator]) -> ThreatLevel {
     let significant: Vec<YaraMatch> = matches
         .iter()
-        .filter(|m| m.metadata.get("severity").map(String::as_str) != Some("low"))
+        .filter(|m| {
+            m.metadata.get("severity").map(String::as_str) != Some("low")
+                && m.metadata.get(WEAK_EVIDENCE_KEY).map(String::as_str) != Some("weak")
+        })
         .cloned()
         .collect();
     let significant_indicators: Vec<ThreatIndicator> = indicators
@@ -824,7 +909,7 @@ rule ransomware_indicators : ransomware critical {
         $ext2 = ".encrypted" ascii
         $ext3 = ".crypto" ascii
     condition:
-        2 of ($ransom*) or (1 of ($ransom*) and 1 of ($ext*))
+        2 of ($ransom*) or (1 of ($ransom1, $ransom3, $ransom4) and 1 of ($ext*))
 }"#,
         // Rule 3: Crypto operations
         r#"
@@ -852,7 +937,7 @@ rule anti_analysis : anti_vm anti_debug {
         $vm1 = "VMware" ascii nocase
         $vm2 = "VirtualBox" ascii nocase
         $vm3 = "QEMU" ascii nocase
-        $vm4 = "Xen" ascii nocase
+        $vm4 = "XenVMMXenVMM" ascii
         $dbg1 = "IsDebuggerPresent" ascii
         $dbg2 = "OutputDebugString" ascii
         $dbg3 = "CheckRemoteDebuggerPresent" ascii
@@ -955,13 +1040,15 @@ rule backdoor_patterns : backdoor {
         description = "Detects backdoor patterns"
         category = "backdoor"
     strings:
-        $cmd1 = "cmd.exe" ascii nocase
-        $cmd2 = "/c" ascii
-        $shell1 = "sh -c" ascii
+        $cmd = "cmd.exe /c" ascii nocase
+        // Classic reverse-shell command lines. A bare "sh -c" is how every
+        // program that runs a command (editors, shells, Node.js) starts a shell.
+        $shell1 = "bash -i >& /dev/tcp/" ascii
+        $shell2 = "nc -e /bin/" ascii
         $bind = "bind shell" ascii nocase
         $reverse = "reverse shell" ascii nocase
     condition:
-        (all of ($cmd*) or $shell1) or any of ($bind, $reverse)
+        $cmd or any of ($shell*) or any of ($bind, $reverse)
 }"#,
         // Rule 11: A hard-coded domain that imitates a vendor's update service
         r#"
@@ -1605,7 +1692,13 @@ fn collect_files_to_scan(path: &Path, options: &YaraScanOptions, deadline: Insta
                             candidates.refused = Some(reason);
                             break;
                         }
-                        // A FIFO, socket or device is never opened.
+                        // A FIFO, socket or device is never opened. It is only
+                        // skipped, so the refusal's advice to remove it is dropped.
+                        let reason = reason
+                            .strip_suffix(" Remove it or pass a directory without special files.")
+                            .map_or(reason.clone(), |r| {
+                                format!("{r} It is skipped, not opened.")
+                            });
                         candidates.skip(entry.path().display().to_string(), reason);
                         continue;
                     }
@@ -1617,7 +1710,8 @@ fn collect_files_to_scan(path: &Path, options: &YaraScanOptions, deadline: Insta
                 if !candidates.consider(entry.path().to_path_buf(), size, options) {
                     break;
                 }
-            } else if entry.path_is_symlink() {
+            } else if entry.path_is_symlink() && entry.depth() > 0 {
+                // (A symlink given as `path` was resolved and is scanned below it.)
                 candidates.skip(
                     entry.path().display().to_string(),
                     "symbolic link (not followed)".to_string(),
