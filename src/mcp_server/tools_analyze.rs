@@ -479,6 +479,7 @@ impl FileScannerMcp {
                 let ctx = Ctx::new(&path, &runtime, options.clone());
                 let mut engine =
                     Engine::new(state.section_cache(), &sha, ctx, state.cache_enabled());
+                sections::check_arch(&mut engine, &options, &file_path, mtime_ns)?;
                 let mut tracker_source: Option<Arc<Value>> = None;
                 let mut value;
                 if names.is_empty() {
@@ -661,6 +662,7 @@ impl FileScannerMcp {
                 let ctx = Ctx::new(&path, &runtime, options.clone());
                 let mut engine =
                     Engine::new(state.section_cache(), &sha256, ctx, state.cache_enabled());
+                sections::check_arch(&mut engine, &options, &file_path, mtime_ns)?;
                 let planned = sections::plan(name, &options, &file_path, mtime_ns);
                 let section = engine.load(&planned).map_err(|failure| match failure {
                     Failure::Error(m) => format!("The {name} analysis failed: {m}"),
@@ -1120,7 +1122,7 @@ pub struct AnalyzeFileArgs {
     #[schemars(description = "Directory only: rows to return (default 50, at most 200)")]
     pub limit: Option<usize>,
     #[schemars(
-        description = "Universal (fat) Mach-O only: the architecture slice to analyze, one of binary_info.universal_slices (for example arm64, arm64e, x86_64). Default: the host's, else the first"
+        description = "Universal (fat) Mach-O only: the architecture slice every code section (binary_info, symbols, control_flow, vulnerabilities, code_quality, disassembly, call_graph) reads, one of binary_info.universal_slices (for example arm64, arm64e, x86_64). Default: the host's, else the first. A name the file does not have is an error that lists its slices"
     )]
     pub arch: Option<String>,
 }
@@ -1160,7 +1162,7 @@ pub struct QueryAnalysisRequest {
     #[schemars(description = "Return the raw rows instead of compact ones (default false)")]
     pub detail: Option<bool>,
     #[schemars(
-        description = "Universal (fat) Mach-O only: the architecture slice to analyze, one of binary_info.universal_slices (for example arm64, arm64e, x86_64). Default: the host's, else the first"
+        description = "Universal (fat) Mach-O only: the architecture slice every code section (binary_info, symbols, control_flow, vulnerabilities, code_quality, disassembly, call_graph) reads, one of binary_info.universal_slices (for example arm64, arm64e, x86_64). Default: the host's, else the first. A name the file does not have is an error that lists its slices"
     )]
     pub arch: Option<String>,
 }

@@ -14,12 +14,12 @@ use serde_json::{json, Map, Value};
 use crate::{
     behavioral_analysis::analyze_behavior,
     binary_parser::{parse_binary_with_arch, BinaryInfo},
-    call_graph::{generate_call_graph, summarize_call_graph},
+    call_graph::{generate_call_graph_with_arch, summarize_call_graph},
     code_metrics::analyze_code_quality,
-    control_flow::{analyze_control_flow, ControlFlowAnalysis},
+    control_flow::{analyze_control_flow_with_arch, BlockType, ControlFlowAnalysis},
     dependency_analysis::analyze_dependencies,
     disassembly::FlowControl,
-    disassembly::{disassemble_binary_with_coverage, DisassemblyCoverage, DisassemblyResult},
+    disassembly::{disassemble_binary_with_arch, DisassemblyCoverage, DisassemblyResult},
     entropy_analysis::{analyze_entropy, EntropyAnalysis},
     function_analysis::{analyze_symbols_with_arch, SymbolTable},
     hash::{calculate_all_hashes, Hashes},
@@ -33,7 +33,7 @@ use crate::{
     strings::{scan_strings, StringScan},
     taint_tracking::taint_report_for_path,
     threat_detection::{analyze_threats, analyze_threats_enhanced},
-    vulnerability_detection::analyze_vulnerabilities,
+    vulnerability_detection::analyze_vulnerabilities_with_arch,
 };
 
 use super::YaraIndicators;
@@ -112,13 +112,17 @@ pub(super) const MAX_MIN_STRING: usize = 4_096;
 const ARCH_MAX: usize = 32;
 
 /// The `arch` argument as an option value: blank means none; lowercase, only
-/// letters, digits and `_ . -`, at most [`ARCH_MAX`] characters (it is echoed
-/// in a note and is part of the cache key, so `ARM64E` and `arm64e` are one).
+/// letters, digits, spaces and `_ . - ( )` (so a slice name as the overview
+/// prints it, `ARM64 (subtype 12)`, is accepted), at most [`ARCH_MAX`]
+/// characters (it is echoed in a note and is part of the cache key, so
+/// `ARM64E` and `arm64e` are one).
 pub(super) fn arch_option(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .map(|a| {
             a.chars()
-                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+                .filter(|c| {
+                    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | ' ' | '(' | ')')
+                })
                 .take(ARCH_MAX)
                 .collect::<String>()
                 .to_ascii_lowercase()
@@ -260,10 +264,11 @@ impl<'a> Ctx<'a> {
     fn control_flow(&mut self) -> Result<Arc<ControlFlowAnalysis>, String> {
         let symbols = self.symbols()?;
         let path = self.path;
+        let arch = self.options.arch.clone();
         self.control_flow
             .get_or_insert_with(|| {
                 mark_section("control_flow");
-                analyze_control_flow(path, &symbols)
+                analyze_control_flow_with_arch(path, arch.as_deref(), &symbols)
                     .map(Arc::new)
                     .map_err(|e| format!("{e:#}"))
             })
@@ -274,9 +279,11 @@ impl<'a> Ctx<'a> {
         if let Some(done) = &self.disassembly {
             return done.clone();
         }
+        let arch = self.options.arch.clone();
         let outcome = self.symbols().and_then(|symbols| {
             mark_section("disassembly");
-            disassemble_binary_with_coverage(self.path, &symbols).map_err(|e| format!("{e:#}"))
+            disassemble_binary_with_arch(self.path, arch.as_deref(), &symbols)
+                .map_err(|e| format!("{e:#}"))
         });
         let outcome = outcome.map(|(result, coverage)| {
             self.coverage = Some(coverage);
@@ -381,8 +388,15 @@ impl<'a> Ctx<'a> {
             "vulnerabilities" => {
                 let symbols = self.symbols().map_err(classify)?;
                 let flow = self.control_flow().map_err(classify)?;
-                let value =
-                    to_value(&analyze_vulnerabilities(path, &symbols, &flow).map_err(error)?)?;
+                let value = to_value(
+                    &analyze_vulnerabilities_with_arch(
+                        path,
+                        self.options.arch.as_deref(),
+                        &symbols,
+                        &flow,
+                    )
+                    .map_err(error)?,
+                )?;
                 Ok(with_notes(value, partial_flow_notes(&flow)))
             }
             "code_quality" => {
@@ -443,7 +457,13 @@ impl<'a> Ctx<'a> {
             .iter()
             .filter(|i| matches!(i.flow_control, Some(FlowControl::Call { .. })))
             .count();
-        let graph = generate_call_graph(self.path, &disassembly, &symbols).map_err(error)?;
+        let graph = generate_call_graph_with_arch(
+            self.path,
+            self.options.arch.as_deref(),
+            &disassembly,
+            &symbols,
+        )
+        .map_err(error)?;
         let no_edges = graph.edges.is_empty();
         let mut report = summarize_call_graph(graph);
         if let Some(coverage) = self.coverage.as_ref().filter(|c| c.truncated) {
@@ -551,13 +571,22 @@ impl<'a> Ctx<'a> {
 }
 
 /// The limits control-flow analysis hit, for the sections built on it
-/// (vulnerabilities, code quality): they saw only the functions it analyzed.
+/// (vulnerabilities, code quality). A limit that left functions or
+/// instructions out says the section was "built on a partial control-flow
+/// analysis"; one that only shortened a listed set (loops, exit blocks,
+/// unreachable blocks: the counts stay complete) is passed on as it is.
 fn partial_flow_notes(flow: &ControlFlowAnalysis) -> Vec<String> {
     flow.analysis_stats
         .errors
         .iter()
         .filter(|e| e.starts_with("Limit"))
-        .map(|e| format!("built on a partial control-flow analysis. {e}"))
+        .map(|e| {
+            if e.starts_with("Limit: the lists of ") {
+                e.clone()
+            } else {
+                format!("built on a partial control-flow analysis. {e}")
+            }
+        })
         .collect()
 }
 
@@ -816,6 +845,16 @@ pub(super) fn bounded_control_flow(flow: &ControlFlowAnalysis) -> Result<Value, 
             .min(unreachable_left);
         unreachable_left -= keep_unreachable;
         cut_unreachable += cfg.complexity.unreachable_blocks.len() - keep_unreachable;
+        // The analysis cuts these lists across all functions, so their lengths
+        // are not the counts: the loop count is kept whole in `complexity`, and
+        // every exit block is a block of type Return or Exit.
+        let loops_total = cfg.complexity.loop_count.max(cfg.loops.len());
+        let exit_blocks_total = cfg
+            .basic_blocks
+            .iter()
+            .filter(|b| matches!(b.block_type, BlockType::Return | BlockType::Exit))
+            .count()
+            .max(cfg.exit_blocks.len());
         let mut complexity_cut = cfg.complexity.clone();
         complexity_cut.unreachable_blocks.truncate(keep_unreachable);
         cfgs.push(json!({
@@ -827,9 +866,9 @@ pub(super) fn bounded_control_flow(flow: &ControlFlowAnalysis) -> Result<Value, 
             "edges_count": cfg.edges.len(),
             "entry_block": cfg.entry_block,
             "exit_blocks": &cfg.exit_blocks[..keep_exits],
-            "exit_blocks_count": cfg.exit_blocks.len(),
+            "exit_blocks_count": exit_blocks_total,
             "loops": loops,
-            "loops_count": cfg.loops.len(),
+            "loops_count": loops_total,
             "complexity": to_value(&complexity_cut)?,
             "unreachable_blocks_count": cfg.complexity.unreachable_blocks.len(),
         }));
@@ -1214,6 +1253,13 @@ pub(super) fn brief(value: &Value) -> Value {
                     // contradict it.
                     Value::Array(_)
                         if key == "instructions" && map.contains_key("instruction_count") => {}
+                    // A list the section stores cut (loops, exit blocks ...)
+                    // next to its true `<name>_count` keeps that count: the
+                    // length of the kept part would contradict it.
+                    Value::Array(_)
+                        if map
+                            .get(&format!("{key}_count"))
+                            .is_some_and(Value::is_number) => {}
                     Value::Array(items) => {
                         out.insert(format!("{key}_count"), items.len().into());
                     }
@@ -2012,8 +2058,6 @@ pub(super) fn overview(
     if matches!(kind_name, "jar" | "apk") {
         binary_ok = false;
     }
-    // Code analysis does not read a slice of a universal Mach-O yet.
-    let fat = binary_ok && kind_name == "macho-fat";
     if binary_ok {
         available.extend([
             "binary_info",
@@ -2021,32 +2065,12 @@ pub(super) fn overview(
             "symbols",
             "dependencies",
             "entropy",
+            "control_flow",
+            "vulnerabilities",
+            "code_quality",
+            "disassembly",
+            "call_graph",
         ]);
-        if fat {
-            for name in [
-                "control_flow",
-                "vulnerabilities",
-                "code_quality",
-                "disassembly",
-                "call_graph",
-            ] {
-                not_available.insert(
-                    name.to_string(),
-                    "this is a universal (fat) Mach-O; code analysis does not read one of its \
-                     slices yet (binary_info and symbols take `arch`, one of \
-                     format.universal_slices)"
-                        .into(),
-                );
-            }
-        } else {
-            available.extend([
-                "control_flow",
-                "vulnerabilities",
-                "code_quality",
-                "disassembly",
-                "call_graph",
-            ]);
-        }
     } else {
         available.extend(["signatures", "entropy"]);
         let why = "this file is not a recognized executable (PE, ELF, Mach-O, Java class)";
@@ -2108,7 +2132,7 @@ pub(super) fn overview(
             "gives": "page the imported symbols",
         }));
     }
-    if binary_ok && !fat {
+    if binary_ok {
         steps.push(json!({
             "tool": "disassemble",
             "arguments": {"file_path": file_path},
@@ -2133,9 +2157,74 @@ pub(super) fn overview(
     }
 }
 
-/// What happened to the `arch` argument, when it changed nothing the caller
-/// would expect: ignored on a file that is not a universal Mach-O, or no slice
-/// of that name (the default slice was analyzed instead).
+/// Whether slice or architecture name `have` is what `wanted` names (case and
+/// `- _ space` do not matter; `aarch64` is `arm64`, `amd64` is `x86_64`).
+fn arch_matches(have: &str, wanted: &str) -> bool {
+    let norm = |s: &str| s.to_ascii_lowercase().replace(['-', '_', ' '], "");
+    let (have, wanted) = (norm(have), norm(wanted));
+    have == wanted
+        || (wanted == "aarch64" && have == "arm64")
+        || (wanted == "amd64" && have == "x8664")
+}
+
+/// An `arch` the file does not have is an error that names what it has: the
+/// slices of a universal Mach-O, or the one architecture of a thin binary. A
+/// file that is not a recognized executable has no architecture to name and
+/// passes (the overview notes that `arch` was ignored).
+pub(super) fn check_arch(
+    engine: &mut Engine<'_>,
+    options: &Options,
+    file_path: &str,
+    mtime_ns: u128,
+) -> Result<(), String> {
+    let Some(arch) = options.arch.as_deref() else {
+        return Ok(());
+    };
+    let Ok(info) = engine.load(&plan("binary_info", options, file_path, mtime_ns)) else {
+        return Ok(());
+    };
+    if let Some(slices) = info.get("universal_slices").and_then(Value::as_array) {
+        let names: Vec<&str> = slices
+            .iter()
+            .filter_map(|s| s.get("architecture").and_then(Value::as_str))
+            .collect();
+        if names.iter().any(|n| arch_matches(n, arch)) {
+            return Ok(());
+        }
+        return Err(format!(
+            "arch '{arch}' is not a slice of this universal (fat) Mach-O. Its slices: {}. Pass \
+             one of them, or leave `arch` out for the host's slice (else the first).",
+            names.join(", ")
+        ));
+    }
+    // Only a native executable with a named architecture can contradict `arch`;
+    // text, archives, jars and other raw files just get the "ignored" note.
+    let native = info.get("format").and_then(Value::as_str).is_some_and(|f| {
+        let f = f.to_ascii_lowercase();
+        f.contains("elf") || f.starts_with("pe") || f.contains("mach")
+    });
+    match info.get("architecture").and_then(Value::as_str) {
+        Some(have)
+            if native
+                && !have.is_empty()
+                && !have.eq_ignore_ascii_case("unknown")
+                && !have.eq_ignore_ascii_case("universal")
+                && !arch_matches(have, arch) =>
+        {
+            Err(format!(
+                "arch '{arch}' does not match this file, a single-architecture binary ({have}); \
+             `arch` only picks a slice of a universal (fat) Mach-O. Leave it out, or pass \
+             '{have}'."
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// What happened to the `arch` argument when it changed nothing the caller
+/// would expect: a file that is not a universal Mach-O has no slices, so the
+/// (matching) name was ignored. A name the file lacks is refused by
+/// [`check_arch`] before this runs.
 pub(super) fn arch_note(
     engine: &mut Engine<'_>,
     options: &Options,
@@ -2146,32 +2235,15 @@ pub(super) fn arch_note(
     let info = engine
         .load(&plan("binary_info", options, file_path, mtime_ns))
         .ok()?;
-    let Some(slices) = info.get("universal_slices").and_then(Value::as_array) else {
-        return Some(format!(
-            "arch '{arch}' was ignored: only a universal (fat) Mach-O has architecture slices, \
-             and this file is not one."
-        ));
-    };
-    let norm = |s: &str| s.to_ascii_lowercase().replace(['-', '_', ' '], "");
-    let names: Vec<&str> = slices
-        .iter()
-        .filter_map(|s| s.get("architecture").and_then(Value::as_str))
-        .collect();
-    let wanted = norm(arch);
-    let found = names.iter().any(|n| {
-        let n = norm(n);
-        n == wanted || (wanted == "aarch64" && n == "arm64") || (wanted == "amd64" && n == "x8664")
-    });
-    (!found).then(|| {
-        format!(
-            "arch '{arch}' is not a slice of this file, so the default slice ({}) was analyzed. \
-             Slices: {}.",
-            info.get("analyzed_slice")
-                .and_then(Value::as_str)
-                .unwrap_or("?"),
-            names.join(", ")
-        )
-    })
+    info.get("universal_slices")
+        .and_then(Value::as_array)
+        .is_none()
+        .then(|| {
+            format!(
+                "arch '{arch}' was ignored: only a universal (fat) Mach-O has architecture \
+                 slices, and this file is not one."
+            )
+        })
 }
 
 /// Longest string, and most list items, `format_details` keeps.
@@ -2448,7 +2520,11 @@ mod tests {
         assert_eq!(arch_option(Some("   ")), None);
         let long = "A".repeat(200_000);
         assert_eq!(arch_option(Some(&long)).unwrap().len(), ARCH_MAX);
-        assert_eq!(arch_option(Some("x86 64;rm")).as_deref(), Some("x8664rm"));
+        assert_eq!(arch_option(Some("x86 64;rm")).as_deref(), Some("x86 64rm"));
+        assert_eq!(
+            arch_option(Some("ARM64 (subtype 12)")).as_deref(),
+            Some("arm64 (subtype 12)")
+        );
     }
 
     /// Fifty graphs of 1,000 blocks of 10 instructions each: the stored
@@ -2570,5 +2646,150 @@ mod tests {
             notes.contains("Limit") && notes.contains("basic blocks"),
             "{notes}"
         );
+    }
+
+    /// A graph whose loop and exit lists were cut by the analysis keeps its
+    /// true counts in the stored row and in the brief row a query shows.
+    #[test]
+    fn counts_come_from_the_metrics_and_block_types_not_from_cut_lists() {
+        use crate::control_flow::{
+            AnalysisStats, BasicBlock, ControlFlowGraph, ControlFlowMetrics, Loop, LoopType,
+            OverallMetrics,
+        };
+        let blocks: Vec<BasicBlock> = (0..40)
+            .map(|id| BasicBlock {
+                id,
+                start_address: id as u64,
+                end_address: id as u64,
+                instructions: Vec::new(),
+                successors: Vec::new(),
+                predecessors: Vec::new(),
+                block_type: if id % 2 == 0 {
+                    BlockType::Return
+                } else {
+                    BlockType::Normal
+                },
+                instruction_count: 0,
+            })
+            .collect();
+        let cfg = ControlFlowGraph {
+            function_address: 1,
+            function_name: "f".into(),
+            basic_blocks: blocks,
+            edges: Vec::new(),
+            entry_block: 0,
+            // What the analysis kept of 20 exits and 3,000 loops.
+            exit_blocks: vec![0, 2],
+            loops: (0..16)
+                .map(|n| Loop {
+                    header_block: n,
+                    body_blocks: vec![n],
+                    exit_blocks: Vec::new(),
+                    loop_type: LoopType::Natural,
+                    nesting_level: 0,
+                })
+                .collect(),
+            complexity: ControlFlowMetrics {
+                cyclomatic_complexity: 1,
+                cognitive_complexity: 0,
+                nesting_depth: 0,
+                basic_block_count: 40,
+                edge_count: 0,
+                loop_count: 3_000,
+                unreachable_blocks: Vec::new(),
+            },
+        };
+        let flow = ControlFlowAnalysis {
+            cfgs: vec![cfg],
+            overall_metrics: OverallMetrics {
+                total_functions: 1,
+                analyzed_functions: 1,
+                total_basic_blocks: 40,
+                average_complexity: 1.0,
+                max_complexity: 1,
+                function_with_max_complexity: None,
+            },
+            analysis_stats: AnalysisStats {
+                analysis_duration: 0,
+                bytes_analyzed: 0,
+                instructions_analyzed: 0,
+                errors: Vec::new(),
+            },
+        };
+        let value = bounded_control_flow(&flow).unwrap();
+        let row = &value["cfgs"][0];
+        assert_eq!(row["loops_count"], 3_000);
+        assert_eq!(row["exit_blocks_count"], 20);
+        let brief_row = brief(row);
+        assert_eq!(brief_row["loops_count"], 3_000, "{brief_row}");
+        assert_eq!(brief_row["exit_blocks_count"], 20, "{brief_row}");
+    }
+
+    /// Only a limit that left functions or instructions out calls the section
+    /// "built on a partial control-flow analysis"; a shortened list does not.
+    #[test]
+    fn only_a_limit_that_left_code_out_is_called_partial() {
+        use crate::control_flow::{AnalysisStats, OverallMetrics};
+        let flow = |errors: Vec<&str>| ControlFlowAnalysis {
+            cfgs: Vec::new(),
+            overall_metrics: OverallMetrics {
+                total_functions: 0,
+                analyzed_functions: 0,
+                total_basic_blocks: 0,
+                average_complexity: 0.0,
+                max_complexity: 0,
+                function_with_max_complexity: None,
+            },
+            analysis_stats: AnalysisStats {
+                analysis_duration: 0,
+                bytes_analyzed: 0,
+                instructions_analyzed: 0,
+                errors: errors.into_iter().map(String::from).collect(),
+            },
+        };
+        let lists =
+            "Limit: the lists of loops, exit blocks and unreachable blocks are cut to 20000";
+        let notes = partial_flow_notes(&flow(vec![lists, "not a limit"]));
+        assert_eq!(notes, vec![lists.to_string()]);
+        let notes = partial_flow_notes(&flow(vec![
+            "Limit: 112 of 128 functions (the highest addresses) were not analyzed because x",
+            "Limit: 2 functions longer than 10 bytes were analyzed only up to that size",
+        ]));
+        assert_eq!(notes.len(), 2);
+        assert!(notes
+            .iter()
+            .all(|n| n.starts_with("built on a partial control-flow analysis. Limit:")));
+    }
+
+    /// Every section that reads code is keyed by the slice, so two slices of
+    /// one file never share a cached section; the names accepted for a slice
+    /// are the ones the overview prints.
+    #[test]
+    fn slice_names_key_the_code_sections_and_match_the_overview() {
+        let key = |name, arch: Option<&str>| {
+            let options = Options {
+                arch: arch_option(arch),
+                ..Options::default()
+            };
+            plan(name, &options, "/x", 1).key
+        };
+        for name in [
+            "binary_info",
+            "symbols",
+            "control_flow",
+            "vulnerabilities",
+            "code_quality",
+            "disassembly",
+            "call_graph",
+        ] {
+            let x86 = key(name, Some("x86_64"));
+            assert_ne!(x86, key(name, Some("arm64e")), "{name}");
+            assert_ne!(x86, key(name, None), "{name}");
+        }
+        assert!(arch_matches("x86_64", "X86-64"));
+        assert!(arch_matches("ARM64", "aarch64"));
+        assert!(arch_matches("x86_64", "amd64"));
+        assert!(!arch_matches("arm64e", "arm64"));
+        assert!(!arch_matches("x86_64", "ppc"));
     }
 }

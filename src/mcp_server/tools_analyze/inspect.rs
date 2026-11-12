@@ -38,7 +38,7 @@ const CANDIDATES: usize = 12;
 
 pub(super) const DISASSEMBLE_DESCRIPTION: &str =
     "Read the machine code of ONE function or address \
-range of an ELF or thin Mach-O binary as a text listing (address, bytes, mnemonic, operands, direct call and jump targets named when they match a function). Never the whole binary. Pass `function` (a name from query_analysis section \
+range of an ELF or Mach-O binary (a universal Mach-O: the slice `arch` names, else the host's, else the first) as a text listing (address, bytes, mnemonic, operands, direct call and jump targets named when they match a function). Never the whole binary. Pass `function` (a name from query_analysis section \
 `disassembly` list `functions`, or from analyze_file's symbols) or `address` (\"0x401136\" or a \
 number); the listing is capped at `max_instructions` (default 200, at most 1000) and says where to \
 continue (`next_address`). With neither, it lists the functions (name, address, size, complexity) \
@@ -145,7 +145,7 @@ pub struct DisassembleRequest {
     )]
     pub limit: Option<usize>,
     #[schemars(
-        description = "Universal (fat) Mach-O only: names a slice (binary_info.universal_slices), but disassembly does not read one of its slices yet, so a fat binary is refused whatever this says"
+        description = "Universal (fat) Mach-O only: the slice to disassemble, one of binary_info.universal_slices (for example arm64, arm64e, x86_64). Default: the host's, else the first. A name the file does not have is an error that lists its slices"
     )]
     pub arch: Option<String>,
 }
@@ -495,18 +495,17 @@ fn find_function<'a>(
     match candidates.as_slice() {
         [one] => Ok(one),
         [] => {
-            // What the analyzer said about functions it left out.
-            let truncated = section
-                .pointer("/coverage/truncated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            // The analyzer's notes about functions its table leaves out
+            // ("... later functions are not listed"); the other coverage
+            // notes (undecodable bytes, clipped sizes) are not about a name
+            // that is missing.
             let limits: Vec<&str> = section
                 .pointer("/coverage/notes")
                 .and_then(Value::as_array)
                 .map_or(&[][..], Vec::as_slice)
                 .iter()
                 .filter_map(Value::as_str)
-                .filter(|n| truncated || n.starts_with("Limit"))
+                .filter(|n| n.contains("functions are not listed"))
                 .collect();
             Err(format!(
                 "No function named '{query}' in this file's disassembly ({} functions). Call \
@@ -516,7 +515,7 @@ fn find_function<'a>(
                 if limits.is_empty() {
                     String::new()
                 } else {
-                    format!(" The analyzer said: {}", limits.join(" "))
+                    format!(" The analyzer said: {}.", limits.join("; "))
                 }
             ))
         }
@@ -989,6 +988,7 @@ impl FileScannerMcp {
                 let ctx = Ctx::new(&path, &runtime, options.clone());
                 let mut engine =
                     Engine::new(state.section_cache(), &sha256, ctx, state.cache_enabled());
+                super::sections::check_arch(&mut engine, &options, &file_path, mtime_ns)?;
                 let planned = plan("disassembly", &options, &file_path, mtime_ns);
                 let section = engine.load(&planned).map_err(|failure| match failure {
                     Failure::Error(m) => format!("The disassembly failed: {m}"),
@@ -1027,21 +1027,40 @@ impl FileScannerMcp {
 mod tests {
     use super::*;
 
-    /// A name that is not found carries the analyzer's coverage notes when it
-    /// left functions out, whatever the notes start with.
+    /// A name that is not found carries only the analyzer's notes about the
+    /// function table being cut, each separated and the last closed.
     #[test]
-    fn a_missing_function_name_carries_the_coverage_note() {
+    fn a_missing_function_name_carries_the_notes_about_a_cut_table() {
         let section = json!({
             "coverage": {
                 "truncated": true,
-                "notes": ["functions are grouped for the first 5000 function symbols only"],
+                "notes": [
+                    "1 bytes in 1 runs could not be decoded",
+                    "functions are grouped for the first 5000 function symbols only; 817 later functions are not listed",
+                    "5 function symbols declare a size that runs into the next function symbol",
+                    "functions are grouped until 900 instructions were copied; 3 later functions are not listed",
+                ],
             },
         });
         let err = find_function(&[], "main.main", &section).unwrap_err();
-        assert!(err.contains("first 5000 function symbols"), "{err}");
+        assert!(
+            err.ends_with(
+                "The analyzer said: functions are grouped for the first 5000 function symbols \
+                 only; 817 later functions are not listed; functions are grouped until 900 \
+                 instructions were copied; 3 later functions are not listed."
+            ),
+            "{err}"
+        );
+        assert!(
+            !err.contains("decoded") && !err.contains("declare a size"),
+            "{err}"
+        );
         let whole = json!({"coverage": {"truncated": false, "notes": ["other remark"]}});
         let err = find_function(&[], "main.main", &whole).unwrap_err();
-        assert!(!err.contains("other remark"), "{err}");
+        assert!(
+            !err.contains("other remark") && !err.contains("analyzer said"),
+            "{err}"
+        );
     }
 
     fn request() -> DisassembleRequest {

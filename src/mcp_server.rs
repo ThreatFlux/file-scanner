@@ -106,7 +106,7 @@ Call analyze_file first with only a path: it returns a small overview (type, has
 the most telling strings) and `next_steps` naming the right next call. Then dig in: analyze_file with \
 `sections: [...]` returns a summary of those sections, and query_analysis pages and filters their lists \
 (strings, symbols, imports, functions, findings ...). `all: true` runs every analysis once, still \
-answers with summaries, and makes the later query_analysis, disassemble and read_hex calls on that \
+answers with summaries, and makes the later query_analysis and disassemble calls on that \
 file fast (answered from the cache; cache_status and cache_clear show and empty it). Other tools: \
 disassemble (function list, then one function's instructions), read_hex (raw bytes at any offset), \
 compare_files, search_strings and string_details (strings across files), llm_analyze_file (a compact \

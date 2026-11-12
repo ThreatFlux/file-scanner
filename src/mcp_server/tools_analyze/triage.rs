@@ -94,9 +94,35 @@ const MAX_ENTRIES_WALKED: usize = 200_000;
 /// Time one triage walk may spend listing entries (not counting the rows).
 const WALK_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// `vet` checks the path policy on one entry that is a symlink or a special
-/// file, as the walk reaches it, so a huge tree is not read to the end before
-/// the first row (an `Err` fails the whole table, naming the entry).
+/// Most skipped special files named in the table; the rest are counted.
+const SKIPPED_LISTED: usize = 10;
+
+/// What a directory entry that is neither a regular file, a directory nor a
+/// symlink is, when it is one that could block a reader: a named pipe, a
+/// socket or a device. Such an entry is never opened.
+fn special_reason(file_type: std::fs::FileType) -> Option<&'static str> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if file_type.is_fifo() {
+            return Some("a named pipe (FIFO)");
+        }
+        if file_type.is_socket() {
+            return Some("a socket");
+        }
+        if file_type.is_block_device() || file_type.is_char_device() {
+            return Some("a device file");
+        }
+    }
+    let _ = file_type;
+    None
+}
+
+/// `vet` checks the path policy on one entry that is a symlink, as the walk
+/// reaches it, so a huge tree is not read to the end before the first row (an
+/// `Err` fails the whole table, naming the entry). A FIFO, socket or device in
+/// the tree is not an error: it is skipped without being opened, and the table
+/// lists it under `skipped` with the reason.
 pub(super) fn table(
     root: &Path,
     file_path: &str,
@@ -120,6 +146,8 @@ pub(super) fn table(
     let mut examined = 0usize;
     let mut walk_cut = false;
     let mut links_skipped = 0usize;
+    let mut special_skipped: Vec<(String, &'static str)> = Vec::new();
+    let mut special_count = 0usize;
     let started = std::time::Instant::now();
     for entry in walker.into_iter().filter_map(Result::ok) {
         // A tree of millions of directories and few files is walked for a
@@ -130,6 +158,16 @@ pub(super) fn table(
         {
             walk_cut = true;
             break;
+        }
+        if !entry.path_is_symlink() {
+            if let Some(reason) = special_reason(entry.file_type()) {
+                special_count += 1;
+                if special_skipped.len() < SKIPPED_LISTED {
+                    let shown = entry.path().strip_prefix(root).unwrap_or(entry.path());
+                    special_skipped.push((shown.display().to_string(), reason));
+                }
+                continue;
+            }
         }
         if entry.path_is_symlink() || !(entry.file_type().is_file() || entry.file_type().is_dir()) {
             vet(entry.path()).map_err(|reason| {
@@ -206,6 +244,17 @@ pub(super) fn table(
                 if links_skipped == 1 { "was" } else { "were" }
             )
             .into();
+        }
+        if special_count > 0 {
+            let listed: Vec<Value> = special_skipped
+                .iter()
+                .map(|(path, reason)| {
+                    json!({"path": super::sections::clip(path), "skipped": reason,
+                           "why": "never opened: reading it could block forever"})
+                })
+                .collect();
+            out["skipped"] = listed.into();
+            out["skipped_count"] = special_count.into();
         }
         if more_than_max {
             out["truncated_listing"] = format!(

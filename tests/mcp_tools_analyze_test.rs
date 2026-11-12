@@ -1095,7 +1095,7 @@ async fn the_arch_argument_is_explained_when_it_changes_nothing() {
     let (value, _) = harness
         .ok(
             "analyze_file",
-            json!({"file_path": binary, "sections": ["symbols"], "arch": "arm64"}),
+            json!({"file_path": binary, "sections": ["symbols"], "arch": "x86_64"}),
         )
         .await;
     assert!(
@@ -1131,20 +1131,221 @@ async fn the_arch_argument_is_explained_when_it_changes_nothing() {
             )
             .await;
         assert_ne!(other["binary_info"]["analyzed_slice"], "x86_64", "{other}");
-        let (bad, _) = harness
-            .ok(
+        // A slice the file does not have is an error that names the slices.
+        let message = harness
+            .err(
                 "analyze_file",
                 json!({"file_path": "/bin/ls", "sections": ["binary_info"], "arch": "sparc"}),
             )
             .await;
         assert!(
-            bad["notes"]["arch"]
-                .as_str()
-                .unwrap()
-                .contains("not a slice"),
-            "{bad}"
+            message.contains("not a slice") && message.contains("x86_64"),
+            "{message}"
         );
     }
+}
+
+fn is_fat(path: &str) -> bool {
+    std::fs::read(path).is_ok_and(|b| b.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]))
+}
+
+/// `arch` reaches every section that reads code, not only binary_info and
+/// symbols: on a universal Mach-O the control-flow section reads the named
+/// slice (the x86_64 slice has no function symbols; the ARM64 one is refused
+/// as not x86), and the disassembly lists the named slice's code.
+#[tokio::test]
+async fn arch_reaches_the_code_sections_of_a_universal_binary() {
+    if !is_fat("/bin/ls") {
+        return;
+    }
+    let harness = Harness::new().await;
+    let flow = |arch: &'static str| {
+        let harness = &harness;
+        async move {
+            harness
+                .err(
+                    "analyze_file",
+                    json!({"file_path": "/bin/ls", "sections": ["control_flow"], "arch": arch}),
+                )
+                .await
+        }
+    };
+    let x86 = flow("x86_64").await;
+    let arm = flow("arm64e").await;
+    assert!(!x86.contains("ARM64"), "{x86}");
+    assert!(arm.contains("ARM64"), "{arm}");
+    // The names the overview prints are accepted.
+    let printed = flow("ARM64 (subtype 12)").await;
+    assert!(printed.contains("ARM64"), "{printed}");
+
+    let (x86, _) = harness
+        .ok(
+            "analyze_file",
+            json!({"file_path": "/bin/ls", "sections": ["disassembly"], "arch": "x86_64"}),
+        )
+        .await;
+    let (arm, _) = harness
+        .ok(
+            "analyze_file",
+            json!({"file_path": "/bin/ls", "sections": ["disassembly"], "arch": "arm64e"}),
+        )
+        .await;
+    assert_eq!(x86["disassembly"]["architecture"], "x86_64", "{x86}");
+    assert_ne!(arm["disassembly"]["architecture"], "x86_64", "{arm}");
+    // Two slices never share a cached section: the second call computed its own.
+    assert_ne!(
+        x86["disassembly"]["analysis"]["total_instructions"],
+        arm["disassembly"]["analysis"]["total_instructions"],
+        "{x86} {arm}"
+    );
+}
+
+/// `arch` on a file that is not a native executable (text, a jar) is
+/// ignored with a note, never an error.
+#[tokio::test]
+async fn arch_on_a_non_executable_file_is_ignored_with_a_note() {
+    use std::io::Write;
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    let text = dir.path().join("note.txt");
+    std::fs::write(&text, "hello world, this is a plain note\n").unwrap();
+    let jar = dir.path().join("app.jar");
+    {
+        let mut zip = zip::write::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("META-INF/MANIFEST.MF", opts).unwrap();
+        zip.write_all(b"Manifest-Version: 1.0\n").unwrap();
+        zip.start_file("A.class", opts).unwrap();
+        zip.write_all(&[0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 52, 0, 1])
+            .unwrap();
+        zip.finish().unwrap();
+    }
+    for file in [&text, &jar] {
+        let (value, _) = harness
+            .ok(
+                "analyze_file",
+                json!({"file_path": file, "sections": ["strings"], "arch": "arm64"}),
+            )
+            .await;
+        assert!(
+            value["notes"]["arch"]
+                .as_str()
+                .unwrap()
+                .contains("was ignored"),
+            "{file:?}: {value}"
+        );
+        let (value, _) = harness
+            .ok(
+                "query_analysis",
+                json!({"file_path": file, "section": "strings", "arch": "x86_64"}),
+            )
+            .await;
+        assert!(value["total"].is_u64(), "{file:?}: {value}");
+    }
+}
+
+/// An `arch` the file does not have is a tool error on analyze_file,
+/// query_analysis and disassemble; a thin binary names its one architecture.
+#[tokio::test]
+async fn an_arch_the_file_does_not_have_is_an_error_that_names_what_it_has() {
+    let harness = Harness::new().await;
+    let thin = sample("c_advanced_binary");
+    for (tool, args) in [
+        (
+            "analyze_file",
+            json!({"file_path": thin, "sections": ["symbols"], "arch": "ppc"}),
+        ),
+        (
+            "query_analysis",
+            json!({"file_path": thin, "section": "symbols", "arch": "bogus"}),
+        ),
+        ("disassemble", json!({"file_path": thin, "arch": "ppc"})),
+    ] {
+        let message = harness.err(tool, args).await;
+        assert!(
+            message.contains("single-architecture") && message.contains("x86_64"),
+            "{tool}: {message}"
+        );
+    }
+    // The architecture it does have is accepted, with its other spellings.
+    for arch in ["x86_64", "X86-64", "amd64"] {
+        let (value, _) = harness
+            .ok(
+                "analyze_file",
+                json!({"file_path": thin, "sections": ["symbols"], "arch": arch}),
+            )
+            .await;
+        assert!(value["symbols"].is_object(), "{arch}: {value}");
+    }
+    if is_fat("/bin/ls") {
+        for (tool, args) in [
+            (
+                "analyze_file",
+                json!({"file_path": "/bin/ls", "vulnerabilities": true, "arch": "ppc"}),
+            ),
+            (
+                "query_analysis",
+                json!({"file_path": "/bin/ls", "section": "symbols", "arch": "bogus"}),
+            ),
+            (
+                "disassemble",
+                json!({"file_path": "/bin/ls", "arch": "ppc"}),
+            ),
+        ] {
+            let message = harness.err(tool, args).await;
+            assert!(
+                message.contains("x86_64") && message.to_lowercase().contains("arm64"),
+                "{tool}: {message}"
+            );
+        }
+    }
+}
+
+/// A FIFO in a directory is skipped, never opened, and the table says so.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_triage_table_skips_a_fifo_and_reports_it() {
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+    assert!(std::process::Command::new("mkfifo")
+        .arg(dir.path().join("pipe"))
+        .status()
+        .unwrap()
+        .success());
+    let (table, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        harness.ok(
+            "analyze_file",
+            json!({"file_path": dir.path().to_string_lossy()}),
+        ),
+    )
+    .await
+    .expect("a FIFO in the directory must not block the table");
+    assert_eq!(table["total"], 1, "{table}");
+    assert_eq!(table["files"][0]["path"], "a.txt", "{table}");
+    assert_eq!(table["skipped_count"], 1, "{table}");
+    assert_eq!(table["skipped"][0]["path"], "pipe", "{table}");
+    assert!(
+        table["skipped"][0]["skipped"]
+            .as_str()
+            .unwrap()
+            .contains("named pipe"),
+        "{table}"
+    );
+}
+
+/// The instructions do not promise a cache for read_hex, which reads the file.
+#[tokio::test]
+async fn the_instructions_do_not_say_read_hex_is_cached() {
+    let harness = Harness::new().await;
+    let instructions = harness
+        .client
+        .peer_info()
+        .and_then(|info| info.instructions.clone())
+        .unwrap_or_default();
+    assert!(instructions.contains("query_analysis and disassemble calls"));
+    assert!(!instructions.contains("disassemble and read_hex"));
 }
 
 #[tokio::test]
