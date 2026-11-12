@@ -1485,6 +1485,165 @@ mod tests {
         assert_eq!(analysis.entries.len(), 2);
     }
 
+    /// The three ways round the end-record check that kept a lowered count from
+    /// being noticed: bytes after the end record, a wrong ZIP64 locator offset,
+    /// and a directory offset lowered with the count.
+    #[test]
+    fn a_lowered_count_is_still_noticed_with_trailing_bytes_a_bad_locator_or_a_lowered_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = ["a.txt", "../../x.sh", "invoice.pdf.exe"];
+        let check = |name: &str, bytes: Vec<u8>, expect_note: bool| {
+            let path = write(dir.path(), name, &bytes);
+            let kind = detect_file_kind(&path).unwrap();
+            let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+            let paths: Vec<&str> = analysis.entries.iter().map(|e| e.path.as_str()).collect();
+            let notes = analysis.notes.join(" ");
+            let noted = notes.contains("Entry listing is incomplete");
+            assert_eq!(noted, expect_note, "{name}: {notes}");
+            if expect_note {
+                assert!(paths.contains(&"../../x.sh"), "{name}: {paths:?}");
+                assert!(paths.contains(&"invoice.pdf.exe"), "{name}: {paths:?}");
+                assert!(analysis.suspicious_indicators.has_path_traversal, "{name}");
+                let gaps = ListingGaps::of(analysis.notes.iter().map(String::as_str));
+                assert!(gaps.counts_unknown, "{name}");
+            }
+        };
+        // Count 0 and one byte after the end record, classic and ZIP64.
+        for trailing in [1usize, 4096] {
+            let mut classic = zip_with(&names);
+            declare(&mut classic, 0);
+            classic.extend(std::iter::repeat_n(0u8, trailing));
+            check("classic_trailing.zip", classic, true);
+            let mut z64 = zip64_with(&names, Some(0));
+            z64.extend(std::iter::repeat_n(0u8, trailing));
+            check("z64_trailing.zip", z64, true);
+        }
+        // ZIP64 count 0 and a locator that points at offset 7.
+        let mut z64 = zip64_with(&names, Some(0));
+        let locator = z64.windows(4).rposition(|w| w == b"PK\x06\x07").unwrap();
+        z64[locator + 8..locator + 16].copy_from_slice(&7u64.to_le_bytes());
+        check("z64_bad_locator.zip", z64, true);
+        // Count 0 and the directory offset lowered by a leading entry's length.
+        let mut shifted = zip_with(&["readme.txt", "a.txt", "../../x.sh", "invoice.pdf.exe"]);
+        declare(&mut shifted, 0);
+        let eocd = shifted
+            .windows(4)
+            .rposition(|w| w == b"PK\x05\x06")
+            .unwrap();
+        let offset = u32::from_le_bytes(shifted[eocd + 16..eocd + 20].try_into().unwrap());
+        shifted[eocd + 16..eocd + 20].copy_from_slice(&(offset - 41).to_le_bytes());
+        check("shifted.zip", shifted, true);
+        // Honest archives with an appended byte: no note.
+        let mut honest = zip_with(&["a.txt", "b.txt"]);
+        honest.push(0);
+        check("honest_trailing.zip", honest, false);
+        let mut honest64 = zip64_with(&["a.txt", "b.txt"], None);
+        honest64.push(0);
+        check("honest64_trailing.zip", honest64, false);
+        // A gap between the directory and the end record is never rated as checked.
+        let mut gap = zip_with(&names);
+        let eocd = gap.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        gap.splice(eocd..eocd, [1u8, 2, 3, 4]);
+        check("gap.zip", gap, true);
+    }
+
+    /// A cap of the walk is not a mismatch: honest archives past a cap carry no
+    /// claim about the directory's header count, and a lowered count still does.
+    #[test]
+    fn a_cap_of_the_directory_walk_is_not_reported_as_a_count_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        // More entries than the cap, honest count.
+        let total = crate::archive_analysis::MAX_ENTRIES + 2;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            for i in 0..total {
+                zip.start_file(format!("f{i}"), zip::write::SimpleFileOptions::default())
+                    .unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+        let path = write(dir.path(), "many.zip", &bytes);
+        let kind = detect_file_kind(&path).unwrap();
+        let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+        let notes = analysis.notes.join(" | ");
+        assert!(notes.contains("Only the first"), "{notes}");
+        assert!(!notes.contains("declares"), "{notes}");
+        assert!(!notes.contains("share a name"), "{notes}");
+        let gaps = ListingGaps::of(analysis.notes.iter().map(String::as_str));
+        assert!(!gaps.counts_unknown, "{notes}");
+        // The same directory with the count lowered: listed up to the cap, said plainly.
+        let mut lowered = zip64_lower_count(&bytes, 0);
+        lowered.push(0);
+        let path = write(dir.path(), "many_lowered.zip", &lowered);
+        let kind = detect_file_kind(&path).unwrap();
+        let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+        let notes = analysis.notes.join(" | ");
+        assert!(notes.contains("Entry listing is incomplete"), "{notes}");
+        assert!(notes.contains("more than 100000 header"), "{notes}");
+        assert!(!notes.contains("share a name"), "{notes}");
+    }
+
+    /// The ZIP64 end record of a zip written by the zip crate, with its count replaced.
+    fn zip64_lower_count(bytes: &[u8], declared: u64) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        let record = out.windows(4).rposition(|w| w == b"PK\x06\x06").unwrap();
+        out[record + 24..record + 32].copy_from_slice(&declared.to_le_bytes());
+        out[record + 32..record + 40].copy_from_slice(&declared.to_le_bytes());
+        out
+    }
+
+    /// A directory over 64 MiB: the walk reads up to the cap and says so, an honest
+    /// archive keeps its entries and rating, and no header count is claimed.
+    #[test]
+    fn a_directory_over_the_byte_cap_is_reported_as_read_up_to_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let comment = "c".repeat(60_000);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            for i in 0..1_200 {
+                let options =
+                    zip::write::FullFileOptions::default().with_file_comment(comment.clone());
+                zip.start_file(format!("f{i}"), options).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let bytes = buf.into_inner();
+        let path = write(dir.path(), "bigdir.zip", &bytes);
+        let kind = detect_file_kind(&path).unwrap();
+        let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+        let notes = analysis.notes.join(" | ");
+        assert_eq!(analysis.entries.len(), 1_200, "{notes}");
+        assert!(notes.contains("larger than 64 MiB"), "{notes}");
+        assert!(!notes.contains("declares"), "{notes}");
+        assert!(notes.contains("Entry listing is incomplete"), "{notes}");
+        let gaps = ListingGaps::of(analysis.notes.iter().map(String::as_str));
+        assert_eq!(gaps.risk("low"), "unknown", "{notes}");
+
+        // The lowered side: two more headers past the cap, the count left at 1,200.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            for i in 0..1_202 {
+                let options =
+                    zip::write::FullFileOptions::default().with_file_comment(comment.clone());
+                zip.start_file(format!("f{i}"), options).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let mut bytes = buf.into_inner();
+        let eocd = bytes.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        bytes[eocd + 8..eocd + 12].copy_from_slice(&1_200u16.to_le_bytes().repeat(2));
+        let path = write(dir.path(), "lowered.zip", &bytes);
+        let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+        let notes = analysis.notes.join(" | ");
+        assert!(notes.contains("Entry listing is incomplete"), "{notes}");
+        let gaps = ListingGaps::of(analysis.notes.iter().map(String::as_str));
+        assert_eq!(gaps.risk("low"), "unknown", "{notes}");
+    }
+
     #[test]
     fn top_level_names_are_unique_ordered_and_skip_the_cut_marker() {
         let spec = |path: &str| {

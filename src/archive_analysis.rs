@@ -378,55 +378,112 @@ pub fn analyze_zip<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
     }
 
     // The zip reader trusts the entry count in the end record and keeps one
-    // record per name. Count the headers the central directory really holds:
-    // when they differ from what was read, list the extra ones from the
-    // directory itself (so a hidden `../x.sh` or setuid file is still seen)
-    // and say that the listing is not the archive's own count.
+    // record per name. Walk the central directory itself: when its headers
+    // differ from what was read, list the extra ones from the directory (so a
+    // hidden `../x.sh` or setuid file is still seen) and say that the listing
+    // is not the archive's own count. A directory that cannot be followed up to
+    // the end record is never rated as if it had been checked.
     if let Some(dir) = directory {
         let read = archive.len();
-        let found = zip_directory_headers(path, &dir, &mut |_, _| ());
-        if let Some(found) = found.filter(|found| *found != read) {
-            let known: std::collections::HashSet<Vec<u8>> = (0..listed)
-                .filter_map(|i| archive.by_index_raw(i).ok().map(|e| e.name_raw().to_vec()))
-                .collect();
-            let mut extra: Vec<EntrySpec> = Vec::new();
-            let room = MAX_ENTRIES.saturating_sub(entries.len());
-            zip_directory_headers(path, &dir, &mut |raw, spec| {
-                if !known.contains(raw) && extra.len() < room {
-                    extra.push(spec);
+        let mut start = dir.offset;
+        let mut walk = zip_directory_headers(path, start, &dir, &mut |_, _| ());
+        // The offset and the size give two places for the directory to start; when they
+        // disagree (a lowered or wrong offset, a prefix in front of the archive), the
+        // size's reading is used if it runs cleanly up to the end record and holds more.
+        let alt = dir.end.saturating_sub(dir.size);
+        if alt != start {
+            if let Some(found) = zip_directory_headers(path, alt, &dir, &mut |_, _| ())
+                .filter(|w| w.stop == WalkStop::AtEnd && w.found > 0)
+            {
+                let better = walk
+                    .as_ref()
+                    .is_none_or(|w| !w.reliable() || found.found > w.found);
+                if better {
+                    start = alt;
+                    walk = Some(found);
                 }
-            });
-            let appended = extra.len();
-            let shared_names = found.saturating_sub(appended + listed);
-            for spec in extra {
-                metadata.total_size_compressed = metadata
-                    .total_size_compressed
-                    .saturating_add(spec.size_compressed);
-                metadata.total_size_uncompressed = metadata
-                    .total_size_uncompressed
-                    .saturating_add(spec.size_uncompressed);
-                entries.push(build_entry(spec, &mut suspicious_indicators));
             }
-            let mut what = format!(
-                "the end record declares {} but the central directory holds {} header(s)",
-                count_entries(dir.declared),
-                found
-            );
-            if appended > 0 {
-                what.push_str(&format!(
-                    "; {appended} that the zip reader skipped are listed from the directory"
+        }
+        if let Some(walk) = walk {
+            let capped = matches!(walk.stop, WalkStop::EntryCap | WalkStop::ByteCap);
+            let broken = walk.stop == WalkStop::Broken;
+            let differs = walk.found != read && !(capped && walk.found < read);
+            let mut appended = 0usize;
+            if differs {
+                let known: std::collections::HashSet<Vec<u8>> = (0..listed)
+                    .filter_map(|i| archive.by_index_raw(i).ok().map(|e| e.name_raw().to_vec()))
+                    .collect();
+                let mut extra: Vec<EntrySpec> = Vec::new();
+                let room = MAX_ENTRIES.saturating_sub(entries.len());
+                zip_directory_headers(path, start, &dir, &mut |raw, spec| {
+                    if !known.contains(raw) && extra.len() < room {
+                        extra.push(spec);
+                    }
+                });
+                appended = extra.len();
+                for spec in extra {
+                    metadata.total_size_compressed = metadata
+                        .total_size_compressed
+                        .saturating_add(spec.size_compressed);
+                    metadata.total_size_uncompressed = metadata
+                        .total_size_uncompressed
+                        .saturating_add(spec.size_uncompressed);
+                    entries.push(build_entry(spec, &mut suspicious_indicators));
+                }
+            }
+            let cap_text = match walk.stop {
+                WalkStop::EntryCap => {
+                    format!("more than {MAX_ENTRIES} header(s) (the walk stops there)")
+                }
+                WalkStop::ByteCap => format!(
+                    "at least {} header(s) (the walk stops after {} MiB of directory)",
+                    walk.found,
+                    MAX_DIRECTORY_BYTES >> 20
+                ),
+                _ => format!("{} header(s)", walk.found),
+            };
+            if differs || broken || walk.stop == WalkStop::ByteCap {
+                let mut what = if differs {
+                    format!(
+                        "the end record declares {} but the central directory holds {cap_text}",
+                        count_entries(dir.declared)
+                    )
+                } else if capped {
+                    format!(
+                        "the central directory is larger than {} MiB and was read up to that \
+                         point ({cap_text}); entries beyond it may not be listed",
+                        MAX_DIRECTORY_BYTES >> 20
+                    )
+                } else {
+                    format!(
+                        "the end record declares {} and the directory holds {cap_text}",
+                        count_entries(dir.declared)
+                    )
+                };
+                if appended > 0 {
+                    what.push_str(&format!(
+                        "; {appended} that the zip reader skipped are listed from the directory"
+                    ));
+                }
+                let shared_names = walk.found.saturating_sub(appended + listed);
+                if differs && !capped && shared_names > 0 {
+                    what.push_str(&format!(
+                        "; {shared_names} share a name with a listed entry and are not listed"
+                    ));
+                }
+                if broken {
+                    what.push_str(&format!(
+                        "; the headers do not run up to the end record ({} byte(s) before it \
+                         were not read as headers)",
+                        walk.unread
+                    ));
+                }
+                notes.push(format!(
+                    "{LISTING_PARTIAL}: {what}. Sizes and the risk level cover only the listed \
+                     entries."
                 ));
             }
-            if shared_names > 0 {
-                what.push_str(&format!(
-                    "; {shared_names} share a name with a listed entry and are not listed"
-                ));
-            }
-            notes.push(format!(
-                "{LISTING_PARTIAL}: {what}. Sizes and the risk level cover only the listed \
-                 entries."
-            ));
-        } else if found.is_none() {
+        } else {
             notes.push(format!(
                 "{LISTING_PARTIAL}: the end record declares {} but the central directory it \
                  points at could not be read. Sizes and the risk level cover only the listed \
@@ -434,6 +491,12 @@ pub fn analyze_zip<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
                 count_entries(dir.declared)
             ));
         }
+    } else {
+        notes.push(format!(
+            "{LISTING_PARTIAL}: the end-of-central-directory record could not be checked \
+             against the central directory (it is damaged, or its ZIP64 record cannot be found). \
+             Sizes and the risk level cover only the listed entries."
+        ));
     }
     metadata.total_entries = entries.len();
     metadata.has_encryption = entries.iter().any(|e| e.is_encrypted);
@@ -463,12 +526,14 @@ const MAX_DIRECTORY_BYTES: u64 = 64 << 20;
 
 /// The end record, read from the end of the file. A ZIP64 archive is followed
 /// through its locator to the ZIP64 end record, which holds the real counts.
-/// `None` when no end record can be found or a ZIP64 one cannot be read.
+/// The last signature whose comment fits in the file counts (bytes may follow
+/// it, as the zip reader, `unzip` and Python accept). `None` when no end record
+/// can be found or a ZIP64 one cannot be read.
 fn zip_end_record(path: &Path) -> Option<ZipEndRecord> {
     use std::io::SeekFrom;
     let mut file = File::open(path).ok()?;
     let size = file.seek(SeekFrom::End(0)).ok()?;
-    let take = size.min(22 + 20 + 65_535);
+    let take = size.min(22 + 20 + 65_535 + 65_536);
     let tail_start = size - take;
     file.seek(SeekFrom::Start(tail_start)).ok()?;
     let mut tail = vec![0u8; usize::try_from(take).ok()?];
@@ -477,13 +542,13 @@ fn zip_end_record(path: &Path) -> Option<ZipEndRecord> {
     loop {
         if tail[pos..].starts_with(b"PK\x05\x06") {
             let comment = usize::from(u16::from_le_bytes([tail[pos + 20], tail[pos + 21]]));
-            if pos + 22 + comment == tail.len() {
+            if pos + 22 + comment <= tail.len() {
                 let total = u16::from_le_bytes([tail[pos + 10], tail[pos + 11]]);
                 let cd_size = u32::from_le_bytes(tail[pos + 12..pos + 16].try_into().ok()?);
                 let cd_offset = u32::from_le_bytes(tail[pos + 16..pos + 20].try_into().ok()?);
                 let end = tail_start + pos as u64;
                 if total == 0xFFFF || cd_size == u32::MAX || cd_offset == u32::MAX {
-                    return zip64_end_record(&mut file, &tail[..pos], end, size);
+                    return zip64_end_record(&mut file, &tail[..pos], tail_start, end, size);
                 }
                 return Some(ZipEndRecord {
                     declared: usize::from(total),
@@ -497,27 +562,9 @@ fn zip_end_record(path: &Path) -> Option<ZipEndRecord> {
     }
 }
 
-/// The ZIP64 end record named by the locator that sits in front of the classic
-/// end record (`before` holds the bytes up to it; `end` is where it starts).
-fn zip64_end_record(
-    file: &mut File,
-    before: &[u8],
-    end: u64,
-    file_size: u64,
-) -> Option<ZipEndRecord> {
-    use std::io::SeekFrom;
-    let locator = before.get(before.len().checked_sub(20)?..)?;
-    if !locator.starts_with(b"PK\x06\x07") {
-        return None;
-    }
-    let at = u64::from_le_bytes(locator[8..16].try_into().ok()?);
-    if at.checked_add(56)? > end || end > file_size {
-        return None;
-    }
-    file.seek(SeekFrom::Start(at)).ok()?;
-    let mut record = [0u8; 56];
-    file.read_exact(&mut record).ok()?;
-    if !record.starts_with(b"PK\x06\x06") {
+/// The fields of a ZIP64 end record that starts at `at`.
+fn zip64_fields(record: &[u8], at: u64) -> Option<ZipEndRecord> {
+    if record.len() < 56 || !record.starts_with(b"PK\x06\x06") {
         return None;
     }
     let u64_at = |i: usize| u64::from_le_bytes(record[i..i + 8].try_into().unwrap_or([0; 8]));
@@ -529,38 +576,140 @@ fn zip64_end_record(
     })
 }
 
-/// Walk the central directory the end record points at and hand each header
-/// (as the facts the shared checks need) to `each`. The declared size is not
-/// trusted: headers are read from the offset while their signature matches, up
-/// to the end record, and every field is checked against the bytes left. A cut
-/// header ends the walk with the count so far. Returns how many headers were
-/// found, at most `MAX_ENTRIES + 1`; `None` when the directory cannot be read.
+/// The ZIP64 end record named by the locator that sits in front of the classic
+/// end record (`before` holds the bytes up to it, starting at file offset
+/// `before_start`; `end` is where the classic record starts). When the
+/// locator's offset does not hold the record, it is looked for in front of the
+/// locator instead, where Python and `unzip` look.
+fn zip64_end_record(
+    file: &mut File,
+    before: &[u8],
+    before_start: u64,
+    end: u64,
+    file_size: u64,
+) -> Option<ZipEndRecord> {
+    use std::io::SeekFrom;
+    let locator_at = before.len().checked_sub(20)?;
+    let locator = &before[locator_at..];
+    if !locator.starts_with(b"PK\x06\x07") {
+        return None;
+    }
+    let at = u64::from_le_bytes(locator[8..16].try_into().ok()?);
+    if at.checked_add(56).is_some_and(|stop| stop <= end) && end <= file_size {
+        file.seek(SeekFrom::Start(at)).ok()?;
+        let mut record = [0u8; 56];
+        if file.read_exact(&mut record).is_ok() {
+            if let Some(found) = zip64_fields(&record, at) {
+                return Some(found);
+            }
+        }
+    }
+    // Fallback: the last record in front of the locator whose own size reaches it.
+    let region = &before[..locator_at];
+    let mut idx = region.len().checked_sub(56)?;
+    loop {
+        if region[idx..].starts_with(b"PK\x06\x06") {
+            let own = u64::from_le_bytes(region[idx + 4..idx + 12].try_into().ok()?);
+            if (idx as u64).checked_add(12)?.checked_add(own)? == region.len() as u64 {
+                return zip64_fields(&region[idx..], before_start + idx as u64);
+            }
+        }
+        idx = idx.checked_sub(1)?;
+    }
+}
+
+/// How a walk of the central directory ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WalkStop {
+    /// The headers ran exactly up to the end record.
+    AtEnd,
+    /// `MAX_ENTRIES + 1` headers were counted.
+    EntryCap,
+    /// The directory is longer than `MAX_DIRECTORY_BYTES`; the walk read that much.
+    ByteCap,
+    /// Something other than a header (or a cut header) came before the end record.
+    Broken,
+}
+
+/// The result of walking a central directory.
+struct DirectoryWalk {
+    /// Headers found, at most `MAX_ENTRIES + 1`.
+    found: usize,
+    stop: WalkStop,
+    /// Bytes between where the walk stopped and the end record (`Broken` only).
+    unread: u64,
+}
+
+impl DirectoryWalk {
+    /// The count says something true about the directory: it was followed to the
+    /// end record or stopped at a cap of ours.
+    fn reliable(&self) -> bool {
+        self.stop != WalkStop::Broken
+    }
+}
+
+/// Walk the central directory from `start` and hand each header (as the facts
+/// the shared checks need) to `each`. The declared size is not trusted: headers
+/// are read from `start` while their signature matches, up to the end record,
+/// and every field is checked against the bytes left. A cut header or other
+/// bytes end the walk as `Broken`. `None` when the directory cannot be read.
 fn zip_directory_headers(
     path: &Path,
+    start: u64,
     dir: &ZipEndRecord,
     each: &mut dyn FnMut(&[u8], EntrySpec),
-) -> Option<usize> {
+) -> Option<DirectoryWalk> {
     use std::io::SeekFrom;
     let mut file = File::open(path).ok()?;
     let file_size = file.seek(SeekFrom::End(0)).ok()?;
     let limit = dir.end.min(file_size);
-    if dir.offset > limit {
+    if start > limit {
         return None;
     }
-    let span = (limit - dir.offset).min(MAX_DIRECTORY_BYTES);
-    file.seek(SeekFrom::Start(dir.offset)).ok()?;
+    let truncated = limit - start > MAX_DIRECTORY_BYTES;
+    let span = (limit - start).min(MAX_DIRECTORY_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
     let mut data = vec![0u8; usize::try_from(span).ok()?];
     file.read_exact(&mut data).ok()?;
     let mut reader = ByteReader::new(&data);
     let mut found = 0usize;
-    while found <= MAX_ENTRIES && reader.remaining() >= 46 {
-        let Some(spec_name) = zip_central_header(&mut reader) else {
-            break;
-        };
-        found += 1;
-        each(spec_name.0, spec_name.1);
-    }
-    Some(found)
+    let stop = loop {
+        if found > MAX_ENTRIES {
+            break WalkStop::EntryCap;
+        }
+        let rest = &data[reader.position()..];
+        if !truncated
+            && (rest.is_empty()
+                || rest.starts_with(b"PK\x05\x05")
+                || rest.starts_with(b"PK\x06\x06"))
+        {
+            // A digital signature record, or the ZIP64 end record of an archive whose
+            // classic record carries no markers, may sit before the end record.
+            break WalkStop::AtEnd;
+        }
+        if !rest.starts_with(b"PK\x01\x02") && !(truncated && rest.len() < 4) {
+            break WalkStop::Broken;
+        }
+        match zip_central_header(&mut reader) {
+            Some((raw, spec)) => {
+                found += 1;
+                each(raw, spec);
+            }
+            None if truncated => break WalkStop::ByteCap,
+            None => break WalkStop::Broken,
+        }
+    };
+    let unread = if stop == WalkStop::Broken {
+        let at = start + reader.position() as u64;
+        limit.saturating_sub(at)
+    } else {
+        0
+    };
+    Some(DirectoryWalk {
+        found,
+        stop,
+        unread,
+    })
 }
 
 /// One central-directory header, or `None` when the signature is wrong or the
