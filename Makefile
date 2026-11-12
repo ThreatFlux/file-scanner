@@ -336,7 +336,7 @@ security-audit:
 	@echo "Running security audit..."
 	python3 scripts/check-rsa-exception.py
 	$(MAKE) native-zlib-check
-	@command -v cargo-audit >/dev/null 2>&1 || $(CARGO) install cargo-audit --version 0.22.2 --locked
+	@command -v cargo-audit >/dev/null 2>&1 || $(CARGO) install cargo-audit --version 0.23.0 --locked
 	$(CARGO) audit
 	cd threatflux-package-security && $(CARGO) audit
 
