@@ -318,3 +318,369 @@ fn a_uri_action_counts_once_and_empty_or_unfinished_files_are_noted() {
     .unwrap();
     assert!(scan.notes.iter().any(|n| n.contains("No xref")));
 }
+
+/// A whole document placed inside the unfiltered stream of a dummy object; the xref table
+/// points into the stream, as poppler follows it.
+fn hidden_in_stream(endstream: bool, with_xref: bool) -> Vec<u8> {
+    hidden_in_dict_stream("<< /Length 0 >>", endstream, with_xref)
+}
+
+fn hidden_in_dict_stream(dict: &str, endstream: bool, with_xref: bool) -> Vec<u8> {
+    let mut out = format!("%PDF-1.7\n9 0 obj\n{dict}\nstream\n").into_bytes();
+    let mut offsets = Vec::new();
+    let objects: [&[u8]; 5] = [
+        b"<< /Type /Catalog /Pages 2 0 R /OpenAction 4 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+        b"<< /Type /Action /S /JavaScript /JS (app.alert\\('hidden'\\); this.exportDataObject\\({cName:'x', nLaunch:2}\\);) >>",
+        b"<< /Type /Action /S /Launch /F (cmd.exe) >>",
+    ];
+    for (index, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    if endstream {
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+    if with_xref {
+        let xref = out.len();
+        out.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+        );
+    }
+    out
+}
+
+#[test]
+fn objects_hidden_in_a_dummy_stream_are_found_and_noted() {
+    let dir = TempDir::new().unwrap();
+    for (name, endstream, with_xref) in [
+        ("h1.pdf", true, true),
+        ("h2.pdf", false, true),
+        ("h3.pdf", true, false),
+        ("h4.pdf", false, false),
+    ] {
+        let pdf = hidden_in_stream(endstream, with_xref);
+        let scan = scan_pdf(write_pdf(&dir, name, &pdf)).unwrap();
+        assert_eq!(
+            feature(&scan, "OpenAction").map(|f| f.count),
+            Some(1),
+            "{name}"
+        );
+        assert_eq!(feature(&scan, "Launch").map(|f| f.count), Some(1), "{name}");
+        assert_eq!(scan.scripts.len(), 1, "{name}");
+        assert_eq!(scan.page_count, 1, "{name}");
+        assert!(
+            scan.notes
+                .iter()
+                .any(|n| n.contains("stream data hold PDF objects")),
+            "{name}: {:?}",
+            scan.notes
+        );
+        assert!(
+            matches!(scan.overall_risk, RiskLevel::Critical),
+            "{name}: {:?} {}",
+            scan.overall_risk,
+            scan.risk_score
+        );
+        // Evidence offsets still point at the name in the file.
+        let at = feature(&scan, "OpenAction").unwrap().evidence[0].offset as usize;
+        assert_eq!(&pdf[at + 1..at + 11], b"OpenAction", "{name}");
+    }
+}
+
+#[test]
+fn a_disguised_dummy_stream_without_a_classic_xref_is_still_read() {
+    // The cross-reference data is a stream or missing, so only a rebuild-style read finds the
+    // document; the dummy stream calls itself an image, a font, a hex-filtered or a
+    // Flate-filtered stream.
+    let dir = TempDir::new().unwrap();
+    for (name, dict) in [
+        (
+            "image",
+            "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /Length 0 >>",
+        ),
+        ("font", "<< /Length1 5 /Length 0 >>"),
+        ("hex", "<< /Filter /ASCIIHexDecode /Length 0 >>"),
+        ("flate", "<< /Filter /FlateDecode /Length 0 >>"),
+        ("plain", "<< /Length 0 >>"),
+    ] {
+        for xref_stream in [false, true] {
+            let mut pdf = hidden_in_dict_stream(dict, true, false);
+            if name == "flate" {
+                // Data that inflates to something small ahead of the objects.
+                let at = pdf.windows(7).position(|w| w == b"stream\n").unwrap() + 7;
+                let mut packed = zlib(b"x");
+                packed.push(b'\n');
+                pdf.splice(at..at, packed);
+            }
+            if xref_stream {
+                pdf.extend_from_slice(
+                    b"20 0 obj\n<< /Type /XRef /Size 21 /W [1 2 1] /Root 1 0 R /Length 0 >>\nstream\n\nendstream\nendobj\nstartxref\n0\n%%EOF\n",
+                );
+            } else {
+                pdf.extend_from_slice(b"trailer\n<< /Root 1 0 R >>\n%%EOF\n");
+            }
+            let label = format!("{name} xref_stream={xref_stream}");
+            let scan = scan_pdf(write_pdf(&dir, "disguised.pdf", &pdf)).unwrap();
+            assert_eq!(
+                feature(&scan, "OpenAction").map(|f| f.count),
+                Some(1),
+                "{label}"
+            );
+            assert_eq!(scan.scripts.len(), 1, "{label}");
+            assert!(
+                matches!(scan.overall_risk, RiskLevel::Critical),
+                "{label}: {:?} {}",
+                scan.overall_risk,
+                scan.risk_score
+            );
+        }
+    }
+}
+
+#[test]
+fn objects_inside_a_balanced_string_are_read_with_and_without_an_xref() {
+    let mut out =
+        b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 5 0 R /OpenAction 3 0 R /X (".to_vec();
+    let mut offsets = vec![9usize];
+    for (n, body) in [
+        (2, "<< /Type /Pages /Kids [] /Count 0 >>"),
+        (3, "<< /Type /Action /S /Launch /F (cmd.exe) >>"),
+    ] {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+    }
+    out.extend_from_slice(b") >>\nendobj\n");
+    let mut with_xref = out.clone();
+    let xref = with_xref.len();
+    with_xref.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+    for offset in &offsets {
+        with_xref.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    with_xref.extend_from_slice(
+        format!("trailer\n<< /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out.extend_from_slice(b"trailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    let dir = TempDir::new().unwrap();
+    for (name, pdf) in [("xref.pdf", &with_xref), ("none.pdf", &out)] {
+        let scan = scan_pdf(write_pdf(&dir, name, pdf)).unwrap();
+        assert_eq!(feature(&scan, "Launch").map(|f| f.count), Some(1), "{name}");
+        assert!(
+            scan.notes
+                .iter()
+                .any(|n| n.contains("were missed by the first read")),
+            "{name}: {:?}",
+            scan.notes
+        );
+        assert!(
+            !matches!(scan.overall_risk, RiskLevel::Low),
+            "{name}: {}",
+            scan.risk_score
+        );
+    }
+}
+
+#[test]
+fn a_stray_classic_xref_entry_does_not_stop_the_whole_file_search() {
+    // The hidden objects sit inside a balanced string; the only classic table is one free
+    // entry (or lists only the dummy object), so it never leads to them.
+    let mut base = b"%PDF-1.7\n9 0 obj\n<< /X (".to_vec();
+    base.extend_from_slice(
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OpenAction 3 0 R >>\nendobj\n\
+          2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n\
+          3 0 obj\n<< /Type /Action /S /Launch /F (cmd.exe) >>\nendobj\n",
+    );
+    base.extend_from_slice(b") >>\nendobj\n");
+    let free = b"xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 6 /Root 1 0 R >>\n";
+    let dummy = b"xref\n9 1\n0000000009 00000 n \ntrailer\n<< /Size 10 >>\n";
+    let dir = TempDir::new().unwrap();
+    for (name, tail) in [("free.pdf", &free[..]), ("dummy.pdf", &dummy[..])] {
+        let mut pdf = base.clone();
+        pdf.extend_from_slice(tail);
+        let scan = scan_pdf(write_pdf(&dir, name, &pdf)).unwrap();
+        assert_eq!(feature(&scan, "Launch").map(|f| f.count), Some(1), "{name}");
+        assert!(!matches!(scan.overall_risk, RiskLevel::Low), "{name}");
+    }
+}
+
+#[test]
+fn a_long_digit_or_space_run_before_obj_costs_linear_work() {
+    let dir = TempDir::new().unwrap();
+    let mut digits = b"%PDF-1.4\n".to_vec();
+    digits.extend(std::iter::repeat_n(b'1', 400_000));
+    digits.extend_from_slice(b" 0 obj\n<<>>\nendobj\n");
+    let mut spaces = b"%PDF-1.4\n".to_vec();
+    spaces.extend(std::iter::repeat_n(b'1', 100_000));
+    spaces.extend_from_slice(b" 0");
+    spaces.extend(std::iter::repeat_n(b' ', 100_000));
+    spaces.extend_from_slice(b"obj\n<<>>\nendobj\n");
+    for (name, pdf) in [("digits.pdf", digits), ("spaces.pdf", spaces)] {
+        let path = write_pdf(&dir, name, &pdf);
+        timed(10, || scan_pdf(path).unwrap());
+    }
+}
+
+#[test]
+fn objects_a_swallowing_string_hides_are_read_from_the_xref_offsets() {
+    // An unbalanced `(` in object 1 reaches the `)` inside object 9, so a linear read
+    // never sees objects 2 and 3. The xref table points at them.
+    let mut out = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 5 0 R /X (a\nendobj\n".to_vec();
+    let mut offsets = Vec::new();
+    offsets.push(9usize);
+    for (n, body) in [
+        (
+            2,
+            "<< /Type /Action /S /JavaScript /JS (app.alert\\(1\\);) >>",
+        ),
+        (3, "<< /Type /Action /S /Launch /F (cmd.exe) >>"),
+    ] {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{n} 0 obj\n{body}\nendobj\n").as_bytes());
+    }
+    out.extend_from_slice(b"9 0 obj\n<< /Y (b) >>\nendobj\n");
+    let xref = out.len();
+    out.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    let dir = TempDir::new().unwrap();
+    let scan = scan_pdf(write_pdf(&dir, "swallow.pdf", &out)).unwrap();
+    // Unbalanced strings give up at their opening parenthesis, so the plain read sees the
+    // objects; the point is that either way they are counted once.
+    assert_eq!(feature(&scan, "Launch").map(|f| f.count), Some(1));
+    assert_eq!(scan.scripts.len(), 1);
+}
+
+#[test]
+fn padding_streams_cannot_use_up_the_budget_before_the_object_stream() {
+    // 12 Flate streams of 4 MiB of spaces, then an object stream with the catalog.
+    let pad = zlib(&vec![b' '; 4 * 1024 * 1024 + 4096]);
+    let mut pdf = b"%PDF-1.5\n".to_vec();
+    for n in 1..=12 {
+        pdf.extend_from_slice(
+            format!(
+                "{n} 0 obj\n<< /Length {} /Filter /FlateDecode >>\nstream\n",
+                pad.len()
+            )
+            .as_bytes(),
+        );
+        pdf.extend_from_slice(&pad);
+        pdf.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+    let inner = b"<< /Type /Catalog /OpenAction << /S /JavaScript /JS (app.launchURL\\('http://evil.test/'\\);) >> >>";
+    let data = zlib(inner);
+    pdf.extend_from_slice(
+        format!(
+            "20 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length {} /Filter /FlateDecode >>\nstream\n",
+            data.len()
+        )
+        .as_bytes(),
+    );
+    pdf.extend_from_slice(&data);
+    pdf.extend_from_slice(b"\nendstream\nendobj\nstartxref\n0\n%%EOF\n");
+    let dir = TempDir::new().unwrap();
+    let scan = timed(20, || scan_pdf(write_pdf(&dir, "pad.pdf", &pdf)).unwrap());
+    assert!(feature(&scan, "OpenAction").is_some(), "{:?}", scan.notes);
+    assert_eq!(scan.scripts.len(), 1);
+    assert!(matches!(
+        scan.overall_risk,
+        RiskLevel::High | RiskLevel::Critical
+    ));
+    assert!(scan
+        .unread
+        .iter()
+        .any(|u| u.contains("page and other streams")));
+    assert!(scan.notes.iter().any(|n| n.contains("stopped at")));
+}
+
+#[test]
+fn an_object_stream_that_could_not_be_read_is_never_low_risk() {
+    // An object stream with a filter the scan does not decode.
+    let pdf = b"%PDF-1.5\n7 0 obj\n<< /Type /ObjStm /N 1 /First 0 /Filter /LZWDecode /Length 4 >>\nstream\nabcd\nendstream\nendobj\nstartxref\n0\n%%EOF\n";
+    let dir = TempDir::new().unwrap();
+    let scan = scan_pdf(write_pdf(&dir, "lzw.pdf", pdf)).unwrap();
+    assert!(!scan.unread.is_empty());
+    assert!(!matches!(scan.overall_risk, RiskLevel::Low));
+    assert!(scan.notes.iter().any(|n| n.contains("could not be read")));
+}
+
+#[test]
+fn a_cross_reference_stream_is_a_cross_reference() {
+    let pdf = b"%PDF-1.5\n1 0 obj\n<< /Type /Catalog >>\nendobj\n2 0 obj\n<< /Type /XRef /Size 3 /W [1 1 1] /Length 0 >>\nstream\n\nendstream\nendobj\nstartxref\n0\n%%EOF\n";
+    let dir = TempDir::new().unwrap();
+    let scan = scan_pdf(write_pdf(&dir, "xrefstream.pdf", pdf)).unwrap();
+    assert!(
+        !scan.notes.iter().any(|n| n.contains("No xref")),
+        "{:?}",
+        scan.notes
+    );
+}
+
+#[test]
+fn an_attachment_without_the_embedded_file_type_still_scores() {
+    let pdf = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /Annots [4 0 R] >>\nendobj\n4 0 obj\n<< /Type /Annot /Subtype /FileAttachment /FS 5 0 R >>\nendobj\n5 0 obj\n<< /Type /Filespec /F (invoice.exe) /EF << /F 6 0 R >> >>\nendobj\n6 0 obj\n<< /Length 12 >>\nstream\nMZ\x90\x00AAAAAAAA\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n";
+    let dir = TempDir::new().unwrap();
+    let scan = scan_pdf(write_pdf(&dir, "attach.pdf", pdf)).unwrap();
+    assert_eq!(scan.attachments_total, 1);
+    assert!(scan.risk_score >= 15, "{:?}", scan.risk_reasons);
+    assert!(scan
+        .risk_reasons
+        .iter()
+        .any(|r| r.contains("Embedded file")));
+}
+
+#[test]
+fn the_link_reason_counts_every_link_not_the_listed_ones() {
+    let mut pdf = b"%PDF-1.4\n1 0 obj\n<<".to_vec();
+    for _ in 0..700 {
+        pdf.extend_from_slice(b" /A << /S /URI /URI (http://e.test/) >>");
+    }
+    pdf.extend_from_slice(b" >>\nendobj\ntrailer\n<< >>\n");
+    let dir = TempDir::new().unwrap();
+    let scan = scan_pdf(write_pdf(&dir, "links700.pdf", &pdf)).unwrap();
+    assert!(
+        scan.risk_reasons.iter().any(|r| r == "700 link(s)"),
+        "{:?}",
+        scan.risk_reasons
+    );
+}
+
+#[test]
+fn many_repeated_encrypt_dictionaries_cost_one_parse() {
+    let mut pdf = b"%PDF-1.4\n1 0 obj\n<<".to_vec();
+    for _ in 0..200_000 {
+        pdf.extend_from_slice(b" /Encrypt << /V 1 /R 2 >>");
+    }
+    pdf.extend_from_slice(b" >>\nendobj\ntrailer\n<< >>\n");
+    let dir = TempDir::new().unwrap();
+    let path = write_pdf(&dir, "encrypts.pdf", &pdf);
+    let scan = timed(5, || scan_pdf(&path).unwrap());
+    assert!(scan.is_encrypted);
+}
+
+#[test]
+fn a_file_of_hidden_object_markers_stays_inside_the_work_budget() {
+    // Many unfiltered streams, each holding object headers: the second pass must not
+    // repeat work per stream.
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    for n in 1..=20_000 {
+        pdf.extend_from_slice(
+            format!("{n} 0 obj\n<< /Length 30 >>\nstream\n7 0 obj << /A 1 >> endobj\nendstream\nendobj\n")
+                .as_bytes(),
+        );
+    }
+    let dir = TempDir::new().unwrap();
+    let path = write_pdf(&dir, "markers.pdf", &pdf);
+    let scan = timed(10, || scan_pdf(&path).unwrap());
+    assert_eq!(scan.stream_count, 20_000);
+}

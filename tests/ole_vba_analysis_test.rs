@@ -1098,8 +1098,9 @@ fn test_file_type_detection_edge_cases() {
     temp_file3.flush().unwrap();
 
     let mut file3 = std::fs::File::open(temp_file3.path()).unwrap();
+    // A file shorter than the header is simply not an OLE file (no error).
     let result3 = detect_ole_file_type(&mut file3);
-    assert!(result3.is_err());
+    assert!(matches!(result3, Ok(OleFileType::NotOleFile)));
 }
 
 #[test]
@@ -1729,18 +1730,18 @@ fn test_error_handling_comprehensive() {
     let mut empty_file = NamedTempFile::new().unwrap();
     empty_file.flush().unwrap();
 
-    let result = analyze_ole_vba(empty_file.path());
-    // Should fail due to insufficient header size
-    assert!(result.is_err());
+    // An empty file is reported as not an OLE file, with no macros.
+    let result = analyze_ole_vba(empty_file.path()).unwrap();
+    assert!(matches!(result.file_type, OleFileType::NotOleFile));
+    assert!(result.vba_project.is_none());
 
     // Test with file that's too small for OLE header
     let mut small_file = NamedTempFile::new().unwrap();
     small_file.write_all(b"small").unwrap();
     small_file.flush().unwrap();
 
-    let result = analyze_ole_vba(small_file.path());
-    // Should fail due to insufficient header size
-    assert!(result.is_err());
+    let result = analyze_ole_vba(small_file.path()).unwrap();
+    assert!(matches!(result.file_type, OleFileType::NotOleFile));
 }
 
 #[test]

@@ -393,6 +393,10 @@ const MAX_PART_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_LISTED_ENTRIES: usize = 500;
 /// Most modules decoded from one project (a `dir` stream may name any number of them).
 const MAX_VBA_MODULES: usize = 1000;
+/// Most VBA storages read (and listed) in one file; each may carry its own `dir` stream.
+const MAX_VBA_STORAGES: usize = 16;
+/// Most `Module=` style lines taken from a PROJECT stream.
+const MAX_PROJECT_LINES: usize = 20_000;
 /// Most bytes of stream data read and source decompressed for one project. Several modules
 /// may point at one stream, so the count is of work done, not of distinct data.
 const MAX_VBA_WORK_BYTES: usize = 8 * 1024 * 1024;
@@ -417,6 +421,12 @@ pub struct OfficeReport {
     pub module_source: Option<String>,
     /// Modules whose source could not be decompressed.
     pub undecoded_modules: Vec<String>,
+    /// Modules whose stream was only partly read because the work budget ran out; their
+    /// source (and any findings in it) is incomplete.
+    pub partial_modules: Vec<String>,
+    /// True when a cap (modules, storages, work budget) stopped the read: the VBA project
+    /// was not read in full.
+    pub truncated: bool,
     /// Facts that limit the analysis.
     pub notes: Vec<String>,
 }
@@ -541,6 +551,23 @@ fn contains_word(haystack: &str, keyword: &str) -> bool {
     false
 }
 
+/// Number of whole-word occurrences of `keyword` in `haystack` (see [`contains_word`]).
+fn count_word(haystack: &str, keyword: &str) -> usize {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let (mut from, mut count) = (0, 0);
+    while let Some(found) = haystack[from..].find(keyword) {
+        let start = from + found;
+        let end = start + keyword.len();
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[end..].chars().next();
+        if !before.is_some_and(is_ident) && !after.is_some_and(is_ident) {
+            count += 1;
+        }
+        from = start + keyword.len().max(1);
+    }
+    count
+}
+
 /// The suspicious keywords of [`detect_suspicious_vba_patterns`], one hit per line (at most
 /// 1000 per module).
 pub fn vba_keyword_hits(source: &str, module_name: &str) -> Vec<VbaKeywordHit> {
@@ -650,7 +677,7 @@ fn project_stream_modules(text: &str) -> Vec<(String, VbaModuleType)> {
             _ => continue,
         };
         let name = value.split('/').next().unwrap_or(value).trim();
-        if !name.is_empty() {
+        if !name.is_empty() && modules.len() < MAX_PROJECT_LINES {
             modules.push((name.to_string(), kind));
         }
     }
@@ -901,7 +928,7 @@ fn extract_vba_project<R: Read + Seek>(
     items: &[CfbItem],
     report: &mut OfficeReport,
 ) -> Option<VbaProject> {
-    let storages: Vec<&CfbItem> = cfb
+    let mut storages: Vec<&CfbItem> = cfb
         .walk()
         .filter(|entry| {
             entry.is_storage() && !entry.is_root() && entry.name().eq_ignore_ascii_case("VBA")
@@ -909,6 +936,14 @@ fn extract_vba_project<R: Read + Seek>(
         .map(|entry| entry.path().to_string_lossy().into_owned())
         .filter_map(|path| items.iter().find(|item| item.path == path))
         .collect();
+    if storages.len() > MAX_VBA_STORAGES {
+        report.notes.push(format!(
+            "The file has {} storages named VBA; only the first {MAX_VBA_STORAGES} were read and listed.",
+            storages.len()
+        ));
+        storages.truncate(MAX_VBA_STORAGES);
+        report.truncated = true;
+    }
     report.vba_storages = storages.iter().map(|s| s.path.clone()).collect();
 
     let mut project_name = None;
@@ -923,15 +958,24 @@ fn extract_vba_project<R: Read + Seek>(
     let mut work_cap_hit = false;
 
     for storage in &storages {
+        if work_bytes >= MAX_VBA_WORK_BYTES {
+            work_cap_hit = true;
+            break;
+        }
         let parent = parent_of(&storage.path).to_string();
         // The PROJECT stream sits beside the VBA storage and names each module's kind.
-        let project_text = find_in(items, &parent, "PROJECT")
-            .and_then(|item| read_cfb_stream(cfb, &item.path, 1024 * 1024))
-            .map(|bytes| latin1(&bytes));
-        let kinds = project_text
+        let project_bytes = find_in(items, &parent, "PROJECT")
+            .and_then(|item| read_cfb_stream(cfb, &item.path, 1024 * 1024));
+        work_bytes += project_bytes.as_ref().map_or(0, Vec::len);
+        let project_text = project_bytes.map(|bytes| latin1(&bytes));
+        let mut kinds: HashMap<String, VbaModuleType> = HashMap::new();
+        for (name, kind) in project_text
             .as_deref()
             .map(project_stream_modules)
-            .unwrap_or_default();
+            .unwrap_or_default()
+        {
+            kinds.entry(name.to_ascii_lowercase()).or_insert(kind);
+        }
         if let Some(text) = &project_text {
             for line in text.lines() {
                 if let Some((key, value)) = line.split_once('=') {
@@ -957,8 +1001,16 @@ fn extract_vba_project<R: Read + Seek>(
         }
 
         let dir = find_in(items, &storage.path, "dir")
-            .and_then(|item| read_cfb_stream(cfb, &item.path, MAX_PART_BYTES))
-            .and_then(|raw| ovba_decompress(&raw));
+            .and_then(|item| {
+                let room = MAX_VBA_WORK_BYTES.saturating_sub(work_bytes) as u64;
+                read_cfb_stream(cfb, &item.path, MAX_PART_BYTES.min(room.max(1)))
+            })
+            .and_then(|raw| {
+                work_bytes += raw.len();
+                let decoded = ovba_decompress(&raw);
+                work_bytes += decoded.as_ref().map_or(0, Vec::len);
+                decoded
+            });
         if let Some(dir) = dir {
             let info = parse_dir_stream(&dir);
             found = true;
@@ -987,10 +1039,7 @@ fn extract_vba_project<R: Read + Seek>(
                     ));
                     continue;
                 }
-                let kind = kinds
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(&module.name))
-                    .map(|(_, kind)| kind);
+                let kind = kinds.get(&module.name.to_ascii_lowercase());
                 let mut built = empty_module(
                     &module.name,
                     module_type_for(&module.name, kind, module.is_class),
@@ -1002,6 +1051,11 @@ fn extract_vba_project<R: Read + Seek>(
                 match stream {
                     Some(bytes) => {
                         work_bytes += bytes.len();
+                        let whole = find_in(items, &storage.path, &module.stream_name)
+                            .is_none_or(|item| item.len <= bytes.len() as u64);
+                        if !whole {
+                            report.partial_modules.push(module.name.clone());
+                        }
                         let start = (module.offset as usize).min(bytes.len());
                         match ovba_decompress(&bytes[start..]) {
                             Some(source) => {
@@ -1025,7 +1079,8 @@ fn extract_vba_project<R: Read + Seek>(
             found = true;
             report.module_source = Some("stream names".to_string());
             report.notes.push(format!(
-                "The VBA storage {} has no readable dir stream, so module source could not be recovered.",
+                "The VBA storage {} has no readable dir stream; its module streams are listed by name and \
+                 read as plain text where they hold plain text (compiled code is not decoded).",
                 storage.path
             ));
             for item in items
@@ -1041,8 +1096,30 @@ fn extract_vba_project<R: Read + Seek>(
                     continue;
                 }
                 let mut module = empty_module(&item.name, module_type_for(&item.name, None, false));
-                module.compiled_code = read_cfb_stream(cfb, &item.path, 65_536);
-                report.undecoded_modules.push(item.name.clone());
+                let room = MAX_VBA_WORK_BYTES.saturating_sub(work_bytes) as u64;
+                if room == 0 {
+                    work_cap_hit = true;
+                    report.undecoded_modules.push(item.name.clone());
+                    modules.push(module);
+                    continue;
+                }
+                let bytes =
+                    read_cfb_stream(cfb, &item.path, room.min(1024 * 1024)).unwrap_or_default();
+                work_bytes += bytes.len();
+                if item.len > bytes.len() as u64 {
+                    report.partial_modules.push(item.name.clone());
+                }
+                // A module stored as plain text (hand-built or converted files) is source.
+                if !bytes.is_empty()
+                    && bytes
+                        .iter()
+                        .all(|&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
+                {
+                    module.source_code = Some(latin1(&bytes));
+                } else {
+                    module.compiled_code = Some(bytes.into_iter().take(65_536).collect());
+                    report.undecoded_modules.push(item.name.clone());
+                }
                 modules.push(module);
             }
         }
@@ -1059,6 +1136,13 @@ fn extract_vba_project<R: Read + Seek>(
             if let Some(text) = read_cfb_stream(cfb, &project.path, 1024 * 1024).map(|b| latin1(&b))
             {
                 let named = project_stream_modules(&text);
+                if named.len() >= MAX_PROJECT_LINES {
+                    report.truncated = true;
+                    report.notes.push(format!(
+                        "The PROJECT stream names {MAX_PROJECT_LINES} or more modules; only the \
+                         first {MAX_PROJECT_LINES} lines were read."
+                    ));
+                }
                 if text.contains("Name=") || !named.is_empty() {
                     found = true;
                     report.module_source = Some("PROJECT stream".to_string());
@@ -1067,10 +1151,30 @@ fn extract_vba_project<R: Read + Seek>(
                             project_name = Some(value.trim().trim_matches('"').to_string());
                         }
                     }
+                    let mut seen = std::collections::HashSet::new();
                     for (name, kind) in named {
+                        // Each stream is read once, however many lines name it.
+                        if !seen.insert(name.to_ascii_lowercase()) {
+                            continue;
+                        }
+                        if modules.len() >= MAX_VBA_MODULES {
+                            module_cap_hit = true;
+                            break;
+                        }
+                        if work_bytes >= MAX_VBA_WORK_BYTES {
+                            work_cap_hit = true;
+                            report.undecoded_modules.push(name.clone());
+                            modules.push(empty_module(&name, kind));
+                            continue;
+                        }
                         if let Some(item) = find_in(items, &parent, &name) {
-                            let bytes = read_cfb_stream(cfb, &item.path, MAX_PART_BYTES)
+                            let room = MAX_VBA_WORK_BYTES.saturating_sub(work_bytes) as u64;
+                            let bytes = read_cfb_stream(cfb, &item.path, MAX_PART_BYTES.min(room))
                                 .unwrap_or_default();
+                            work_bytes += bytes.len();
+                            if item.len > bytes.len() as u64 {
+                                report.partial_modules.push(name.clone());
+                            }
                             let mut module = empty_module(&name, kind);
                             if bytes
                                 .iter()
@@ -1078,7 +1182,8 @@ fn extract_vba_project<R: Read + Seek>(
                             {
                                 module.source_code = Some(latin1(&bytes));
                             } else {
-                                module.compiled_code = Some(bytes);
+                                module.compiled_code =
+                                    Some(bytes.into_iter().take(65_536).collect());
                             }
                             modules.push(module);
                         }
@@ -1094,10 +1199,35 @@ fn extract_vba_project<R: Read + Seek>(
              {MAX_VBA_MODULES} were read."
         ));
     }
-    if work_cap_hit {
+    if module_cap_hit || work_cap_hit || !report.partial_modules.is_empty() {
+        report.truncated = true;
+    }
+    if work_cap_hit || !report.partial_modules.is_empty() {
         report.notes.push(format!(
-            "Reading stopped after {MAX_VBA_WORK_BYTES} bytes of module data (modules that \
-             share a stream count each time); later modules were not decoded."
+            "{}{}.",
+            if work_cap_hit {
+                format!(
+                    "Reading stopped after {MAX_VBA_WORK_BYTES} bytes of module data (modules \
+                     that share a stream count each time); later modules were not decoded"
+                )
+            } else {
+                "A module stream was longer than the amount read from one stream".to_string()
+            },
+            if report.partial_modules.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", and these were read only in part so their source and findings are \
+                     incomplete: {}",
+                    report
+                        .partial_modules
+                        .iter()
+                        .take(10)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
         ));
     }
     if !found {
@@ -1246,6 +1376,8 @@ fn analyze_compound<R: Read + Seek>(
         vba_storages: Vec::new(),
         module_source: None,
         undecoded_modules: Vec::new(),
+        partial_modules: Vec::new(),
+        truncated: false,
         notes: Vec::new(),
     };
     let structure = structure_of(&cfb, &items);
@@ -1284,7 +1416,17 @@ fn analyze_compound<R: Read + Seek>(
         });
     }
     let unreadable = vba_project.is_some() && !report.undecoded_modules.is_empty();
-    if (encrypted || unreadable) && matches!(assessment.overall_risk, RiskLevel::Low) {
+    let cut = vba_project.is_some() && report.truncated;
+    if cut {
+        assessment.risk_factors.push(RiskFactor {
+            factor_type: RiskFactorType::MacroPresence,
+            description: "VBA project only partly read (a size or count limit was reached)"
+                .to_string(),
+            severity: RiskLevel::Medium,
+            confidence: 0.8,
+        });
+    }
+    if (encrypted || unreadable || cut) && matches!(assessment.overall_risk, RiskLevel::Low) {
         assessment.overall_risk = RiskLevel::Medium;
     }
     if items.len() > MAX_LISTED_ENTRIES {
@@ -1327,14 +1469,19 @@ pub fn analyze_office(path: &Path) -> Result<OfficeReport> {
             vba_storages: Vec::new(),
             module_source: None,
             undecoded_modules: Vec::new(),
+            partial_modules: Vec::new(),
+            truncated: false,
             notes: vec!["The file is neither an OLE2 compound file nor a zip package.".to_string()],
         }),
         OleFileType::OfficeOpenXml => analyze_ooxml(file),
         other => {
             let cfb = CompoundFile::open(file).map_err(|error| {
                 anyhow::anyhow!(
-                    "Failed to parse OLE compound file: {error}. The file may be damaged or use an \
-                     unusual layout; use analyze_file for strings and a generic overview."
+                    "Failed to parse OLE compound file: {error}. The file may still be a valid \
+                     document: the compound-file reader here is strict and rejects some files \
+                     that other programs open (for example .doc files written by macOS \
+                     textutil). analyze_file still works on it (strings, entropy and a generic \
+                     overview), and read_hex shows raw bytes at an offset."
                 )
             })?;
             Ok(analyze_compound(cfb, other, "ole2", None))
@@ -1344,7 +1491,11 @@ pub fn analyze_office(path: &Path) -> Result<OfficeReport> {
 
 fn analyze_ooxml(file: File) -> Result<OfficeReport> {
     let mut archive = zip::ZipArchive::new(file).map_err(|error| {
-        anyhow::anyhow!("The file starts with PK but is not a readable zip package: {error}")
+        anyhow::anyhow!(
+            "The file starts with PK but is not a readable zip package: {error}. The file may be \
+             damaged or not an Office file; analyze_file gives a generic overview, and \
+             inspect_archive lists the entries of a zip."
+        )
     })?;
     let names: Vec<String> = (0..archive.len())
         .filter_map(|index| {
@@ -1372,6 +1523,8 @@ fn analyze_ooxml(file: File) -> Result<OfficeReport> {
             vba_storages: Vec::new(),
             module_source: None,
             undecoded_modules: Vec::new(),
+            partial_modules: Vec::new(),
+            truncated: false,
             notes: vec![
                 "The zip has no [Content_Types].xml, so it is not an Office package.".to_string(),
             ],
@@ -1395,8 +1548,33 @@ fn analyze_ooxml(file: File) -> Result<OfficeReport> {
         .take(MAX_PART_BYTES)
         .read_to_end(&mut bytes)
         .with_context(|| format!("Failed to read {part}"))?;
-    let cfb = CompoundFile::open(std::io::Cursor::new(bytes))
-        .map_err(|error| anyhow::anyhow!("{part} is not a readable compound file: {error}"))?;
+    let cfb = match CompoundFile::open(std::io::Cursor::new(bytes)) {
+        Ok(cfb) => cfb,
+        Err(error) => {
+            // The package declares a macro project even though it cannot be read.
+            let mut report = analyze_compound_empty(OleFileType::OfficeOpenXml);
+            report.vba_part = Some(part.clone());
+            report.analysis.suspicious_indicators.has_macros = true;
+            report
+                .analysis
+                .security_assessment
+                .risk_factors
+                .push(RiskFactor {
+                    factor_type: RiskFactorType::MacroPresence,
+                    description: format!("{part} is present but not a readable compound file"),
+                    severity: RiskLevel::Medium,
+                    confidence: 0.8,
+                });
+            report.analysis.security_assessment.overall_risk = RiskLevel::Medium;
+            report.analysis.suspicious_indicators.risk_score = 30;
+            report.notes.push(format!(
+                "{part} is not a readable compound file ({error}), so the macros could not be \
+                 read; the package still declares a VBA project. inspect_archive lists the \
+                 part, and read_hex or analyze_file shows its bytes."
+            ));
+            return Ok(report);
+        }
+    };
     Ok(analyze_compound(
         cfb,
         OleFileType::OfficeOpenXml,
@@ -1422,6 +1600,8 @@ fn analyze_compound_empty(file_type: OleFileType) -> OfficeReport {
         vba_storages: Vec::new(),
         module_source: None,
         undecoded_modules: Vec::new(),
+        partial_modules: Vec::new(),
+        truncated: false,
         notes: Vec::new(),
     }
 }
@@ -1980,11 +2160,11 @@ pub fn detect_suspicious_api_calls(source: &str, module_name: &str) -> Vec<Suspi
     ];
 
     for (api, risk, desc) in api_patterns {
-        if source_lower.contains(api) {
+        if contains_word(&source_lower, api) {
             calls.push(SuspiciousApiCall {
                 api_name: api.to_string(),
                 module_name: module_name.to_string(),
-                call_count: source_lower.matches(api).count() as u32,
+                call_count: count_word(&source_lower, api) as u32,
                 context: format!("Found in module {module_name}"),
                 risk_level: risk,
                 description: desc.to_string(),
