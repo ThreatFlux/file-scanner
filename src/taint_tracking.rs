@@ -1036,6 +1036,21 @@ pub fn taint_report_for_path(path: &Path) -> Result<TaintReport> {
     cap!(analysis.sinks);
     cap!(analysis.sanitizers);
     cap!(analysis.vulnerabilities);
+    // Each vulnerability lists the flows it covers: cut those lists too, and
+    // say how many ids were dropped.
+    let mut flow_ids_dropped = 0usize;
+    for v in &mut analysis.vulnerabilities {
+        if v.affected_flows.len() > MAX_TAINT_ITEMS {
+            flow_ids_dropped += v.affected_flows.len() - MAX_TAINT_ITEMS;
+            v.affected_flows.truncate(MAX_TAINT_ITEMS);
+            cut = true;
+        }
+    }
+    if flow_ids_dropped > 0 {
+        notes.push(format!(
+            "each vulnerability lists at most {MAX_TAINT_ITEMS} affected flow ids ({flow_ids_dropped} ids omitted)"
+        ));
+    }
     if cut {
         notes.push(format!(
             "lists are cut to {MAX_TAINT_ITEMS} entries each; see totals for the real counts"

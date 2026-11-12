@@ -86,15 +86,27 @@ pub struct CallGraphStatistics {
 /// Generates a complete call graph from disassembly and symbol information
 #[allow(dead_code)]
 pub fn generate_call_graph(
-    _path: &Path,
+    path: &Path,
+    disassembly: &DisassemblyResult,
+    symbols: &SymbolTable,
+) -> Result<CallGraph> {
+    generate_call_graph_with_arch(path, None, disassembly, symbols)
+}
+
+/// Like [`generate_call_graph`] for a universal (fat) Mach-O: imports are
+/// resolved in the slice named by `arch`.
+#[allow(dead_code)]
+pub fn generate_call_graph_with_arch(
+    path: &Path,
+    arch: Option<&str>,
     disassembly: &DisassemblyResult,
     symbols: &SymbolTable,
 ) -> Result<CallGraph> {
     let mut graph_builder = CallGraphBuilder::new();
 
     // Stubs and table slots of imported functions, by address.
-    let import_targets: HashMap<u64, String> = std::fs::read(_path)
-        .map(|buffer| crate::control_flow::resolve_import_targets(&buffer))
+    let import_targets: HashMap<u64, String> = std::fs::read(path)
+        .map(|buffer| crate::control_flow::resolve_import_targets_with_arch(&buffer, arch))
         .unwrap_or_default();
 
     // Build initial nodes from symbol table
@@ -630,14 +642,21 @@ pub struct CallGraphReport {
 /// only) yields no edges and a note saying so. Mach-O import names keep their
 /// leading underscore. Other files return an error that names the problem.
 pub fn call_graph_for_path(path: &Path) -> Result<CallGraphReport> {
-    let symbols = crate::function_analysis::analyze_symbols(path)?;
-    let disassembly = crate::disassembly::disassemble_binary(path, &symbols)?;
+    call_graph_for_path_with_arch(path, None)
+}
+
+/// Like [`call_graph_for_path`] for a universal (fat) Mach-O: the slice named
+/// by `arch` (for example `"arm64"`) is analyzed; `None` picks the host
+/// architecture if present, else the first slice.
+pub fn call_graph_for_path_with_arch(path: &Path, arch: Option<&str>) -> Result<CallGraphReport> {
+    let symbols = crate::function_analysis::analyze_symbols_with_arch(path, arch)?;
+    let (disassembly, _) = crate::disassembly::disassemble_binary_with_arch(path, arch, &symbols)?;
     let calls = disassembly
         .instructions
         .iter()
         .filter(|i| matches!(i.flow_control, Some(FlowControl::Call { .. })))
         .count();
-    let graph = generate_call_graph(path, &disassembly, &symbols)?;
+    let graph = generate_call_graph_with_arch(path, arch, &disassembly, &symbols)?;
     let no_edges = graph.edges.is_empty();
     let mut report = summarize_call_graph(graph);
     if no_edges && calls > 0 {

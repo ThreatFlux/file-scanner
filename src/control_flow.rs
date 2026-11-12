@@ -159,6 +159,10 @@ pub const MAX_CFG_FUNCTIONS: usize = 2_000;
 pub const MAX_FUNCTION_BYTES: usize = 64 * 1024;
 /// Most bytes decoded across all functions of one analysis.
 pub const MAX_CFG_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+/// Most instructions kept across all functions of one analysis (bounds memory
+/// for code made of one-byte instructions, where the byte budget alone allows
+/// millions of them).
+pub const MAX_CFG_TOTAL_INSTRUCTIONS: usize = 500_000;
 
 pub struct ControlFlowAnalyzer {
     pub capstone: Capstone,
@@ -247,6 +251,7 @@ impl ControlFlowAnalyzer {
         let mut capped_functions = 0usize;
         let mut cut_functions = 0usize;
         let mut budget_hit = false;
+        let mut instruction_budget_hit = false;
 
         for (i, function) in candidates.iter().enumerate() {
             if cfgs.len() + errors.len() >= MAX_CFG_FUNCTIONS {
@@ -278,6 +283,12 @@ impl ControlFlowAnalyzer {
                 size = MAX_FUNCTION_BYTES;
                 cut_functions += 1;
             }
+            if total_instructions >= MAX_CFG_TOTAL_INSTRUCTIONS {
+                budget_hit = true;
+                instruction_budget_hit = true;
+                capped_functions = total_candidates - i;
+                break;
+            }
             if bytes_analyzed.saturating_add(size as u64) > MAX_CFG_TOTAL_BYTES as u64 {
                 budget_hit = true;
                 capped_functions = total_candidates - i;
@@ -305,7 +316,9 @@ impl ControlFlowAnalyzer {
         }
 
         if capped_functions > 0 {
-            let why = if budget_hit {
+            let why = if instruction_budget_hit {
+                format!("the {MAX_CFG_TOTAL_INSTRUCTIONS}-instruction analysis budget was used up")
+            } else if budget_hit {
                 format!("the {MAX_CFG_TOTAL_BYTES}-byte analysis budget was used up")
             } else {
                 format!("the limit of {MAX_CFG_FUNCTIONS} functions was reached")
@@ -930,12 +943,29 @@ pub fn analyze_control_flow(
     path: &Path,
     symbol_table: &SymbolTable,
 ) -> Result<ControlFlowAnalysis> {
+    analyze_control_flow_with_arch(path, None, symbol_table)
+}
+
+/// Like [`analyze_control_flow`] for a universal (fat) Mach-O: the slice named
+/// by `arch` (for example `"x86_64"`) is analyzed; `None` picks the host
+/// architecture if present, else the first slice. `symbol_table` should come
+/// from `function_analysis::analyze_symbols_with_arch` with the same `arch`.
+/// For any other file `arch` is ignored.
+pub fn analyze_control_flow_with_arch(
+    path: &Path,
+    arch_choice: Option<&str>,
+    symbol_table: &SymbolTable,
+) -> Result<ControlFlowAnalysis> {
     // Read the binary file
     let mut file = File::open(path)?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
+    let mut whole = Vec::new();
+    file.read_to_end(&mut whole)?;
+    let buffer: &[u8] = match crate::binary_parser::select_fat_slice(&whole, arch_choice) {
+        Some(selection) => selection.data,
+        None => &whole,
+    };
 
-    let obj = Object::parse(&buffer)?;
+    let obj = Object::parse(buffer)?;
     let format = object_format_name(&obj);
     let rva_base = match &obj {
         Object::PE(pe) => pe.image_base,
@@ -947,7 +977,7 @@ pub fn analyze_control_flow(
         ));
     }
 
-    let (arch, mode, code) = crate::disassembly::detect_architecture_and_code(&buffer)
+    let (arch, mode, code) = crate::disassembly::detect_architecture_and_code(buffer)
         .map_err(|e| anyhow!("Control-flow analysis of this {format} file is not possible: {e}"))?;
 
     let analyzer = match (arch, mode) {
@@ -964,6 +994,9 @@ pub fn analyze_control_flow(
     let candidates = function_candidates(symbol_table, code.address, code.data.len(), rva_base);
     analyzer.analyze_code(&code.data, code.address, candidates)
 }
+
+/// Most indirect-symbol entries read in total across all sections of one file.
+const MAX_INDIRECT_IMPORTS: usize = 200_000;
 
 /// Imports of a Mach-O file read from LC_DYSYMTAB's indirect symbol table: the
 /// stubs (`__stubs`) and pointer sections (`__got`, `__la_symbol_ptr`,
@@ -982,6 +1015,9 @@ fn macho_indirect_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> HashMap
     }) else {
         return map;
     };
+    // The count comes from the file: no more entries than the bytes that exist.
+    let table_len = table_len.min(buffer.len().saturating_sub(table_off) / 4);
+    let mut budget = MAX_INDIRECT_IMPORTS;
     let entry = |index: usize| -> Option<u32> {
         if index >= table_len {
             return None;
@@ -1043,10 +1079,18 @@ fn macho_indirect_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> HashMap
                 _ => continue,
             };
             let base = reserved1 as usize;
-            // Cap the walk: a header can claim an absurd section size.
-            let count = (size / item).min(table_len as u64) as usize;
+            // Cap the walk: a header can claim an absurd section size. The
+            // walk ends at the first entry outside the table.
+            let count = (size / item).min(table_len.saturating_sub(base) as u64) as usize;
             for k in 0..count {
-                let Some(sym) = entry(base.saturating_add(k)).filter(|v| v & SKIP == 0) else {
+                if budget == 0 {
+                    return map;
+                }
+                budget -= 1;
+                let Some(raw) = entry(base.saturating_add(k)) else {
+                    break;
+                };
+                let Some(sym) = Some(raw).filter(|v| v & SKIP == 0) else {
                     continue;
                 };
                 if let Ok((name, _)) = symbols.get(sym as usize) {
@@ -1070,6 +1114,18 @@ fn macho_indirect_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> HashMap
 /// for files that are not ELF, PE or Mach-O or that cannot be parsed. Never panics
 /// on malformed headers.
 pub fn resolve_import_targets(buffer: &[u8]) -> HashMap<u64, String> {
+    resolve_import_targets_with_arch(buffer, None)
+}
+
+/// Like [`resolve_import_targets`]; for a universal Mach-O the imports of the
+/// slice named by `arch` (default: host architecture, else the first) are
+/// resolved.
+pub fn resolve_import_targets_with_arch(
+    buffer: &[u8],
+    arch_choice: Option<&str>,
+) -> HashMap<u64, String> {
+    let buffer = crate::binary_parser::select_fat_slice(buffer, arch_choice)
+        .map_or(buffer, |selection| selection.data);
     let mut map = HashMap::new();
     let Ok(obj) = Object::parse(buffer) else {
         return map;
@@ -1134,15 +1190,17 @@ pub fn resolve_import_targets(buffer: &[u8]) -> HashMap<u64, String> {
             }
         }
         Object::Mach(goblin::mach::Mach::Binary(macho)) => {
-            let imports = macho.imports().unwrap_or_default();
+            // Bounded own interpreter: goblin's imports() allocates one entry per
+            // bind (repeat counts come from the file) and can panic.
+            let imports = macho_bind_imports(&macho, buffer).unwrap_or_default();
             if imports.is_empty() {
                 // Chained fixups carry no bind opcodes: use the indirect symbol table.
                 return macho_indirect_imports(&macho, buffer);
             }
             let slots: HashMap<u64, String> = imports
                 .iter()
-                .filter(|i| i.address != 0)
-                .map(|i| (i.address, i.name.to_string()))
+                .filter(|(address, _)| *address != 0)
+                .map(|(address, name)| (*address, name.clone()))
                 .collect();
             if macho.header.cputype == goblin::mach::cputype::CPU_TYPE_X86_64 {
                 for segment in &macho.segments {
@@ -1161,6 +1219,134 @@ pub fn resolve_import_targets(buffer: &[u8]) -> HashMap<u64, String> {
         _ => {}
     }
     map
+}
+
+/// Imports named by the dyld bind and lazy-bind opcode streams of a Mach-O,
+/// as `(slot address, symbol name)`. This is its own bounded interpreter
+/// (instead of goblin's `imports()`, which expands repeat counts into memory and
+/// panics on a bad segment index): every number is read from the stream only,
+/// work is at most one step per stream byte, and at most `MAX_INDIRECT_IMPORTS`
+/// entries are produced. Only the last `LC_DYLD_INFO(_ONLY)` command is read, as
+/// the loader does. Returns `None` when the cap is exceeded.
+fn macho_bind_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<Vec<(u64, String)>> {
+    use goblin::mach::load_command::CommandVariant;
+    fn uleb(bytes: &[u8], pos: &mut usize) -> u64 {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        while let Some(&b) = bytes.get(*pos) {
+            *pos += 1;
+            if shift < 64 {
+                value |= u64::from(b & 0x7f) << shift;
+            }
+            shift = shift.saturating_add(7);
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        value
+    }
+    let mut out: Vec<(u64, String)> = Vec::new();
+    let Some(info) = macho
+        .load_commands
+        .iter()
+        .rev()
+        .find_map(|lc| match &lc.command {
+            CommandVariant::DyldInfo(c) | CommandVariant::DyldInfoOnly(c) => Some(*c),
+            _ => None,
+        })
+    else {
+        return Some(out);
+    };
+    let ptr: u64 = if macho.is_64 { 8 } else { 4 };
+    for (off, size) in [
+        (info.bind_off, info.bind_size),
+        (info.lazy_bind_off, info.lazy_bind_size),
+    ] {
+        if size == 0 {
+            continue;
+        }
+        let start = off as usize;
+        let end = start.saturating_add(size as usize).min(buffer.len());
+        let Some(stream) = buffer.get(start..end) else {
+            continue;
+        };
+        let (mut segment, mut offset, mut name) = (0usize, 0u64, String::new());
+        let mut pos = 0usize;
+        let push = |segment: usize, offset: u64, name: &str, out: &mut Vec<(u64, String)>| {
+            if out.len() >= MAX_INDIRECT_IMPORTS {
+                return false;
+            }
+            if let Some(seg) = macho.segments.get(segment) {
+                out.push((seg.vmaddr.wrapping_add(offset), name.to_string()));
+            }
+            true
+        };
+        while pos < stream.len() {
+            let byte = stream[pos];
+            pos += 1;
+            let imm = u64::from(byte & 0x0f);
+            match byte & 0xf0 {
+                0x20 | 0x60 => {
+                    uleb(stream, &mut pos);
+                }
+                0x40 => {
+                    let begin = pos;
+                    while pos < stream.len() && stream[pos] != 0 {
+                        pos += 1;
+                    }
+                    name = String::from_utf8_lossy(&stream[begin..pos]).into_owned();
+                    pos = (pos + 1).min(stream.len());
+                }
+                0x70 => {
+                    segment = imm as usize;
+                    offset = uleb(stream, &mut pos);
+                }
+                0x80 => offset = offset.wrapping_add(uleb(stream, &mut pos)),
+                0x90 => {
+                    if !push(segment, offset, &name, &mut out) {
+                        return None;
+                    }
+                    offset = offset.wrapping_add(ptr);
+                }
+                0xa0 => {
+                    if !push(segment, offset, &name, &mut out) {
+                        return None;
+                    }
+                    offset = offset
+                        .wrapping_add(ptr)
+                        .wrapping_add(uleb(stream, &mut pos));
+                }
+                0xb0 => {
+                    if !push(segment, offset, &name, &mut out) {
+                        return None;
+                    }
+                    offset = offset.wrapping_add((imm + 1).wrapping_mul(ptr));
+                }
+                0xc0 => {
+                    let count = uleb(stream, &mut pos);
+                    let skip = uleb(stream, &mut pos);
+                    if count > (MAX_INDIRECT_IMPORTS - out.len()) as u64 {
+                        return None;
+                    }
+                    for _ in 0..count {
+                        if !push(segment, offset, &name, &mut out) {
+                            return None;
+                        }
+                        offset = offset.wrapping_add(ptr).wrapping_add(skip);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Some(out)
+}
+
+/// True when the dyld bind streams of a Mach-O can be expanded within
+/// `MAX_INDIRECT_IMPORTS` entries. Callers that run goblin's `imports()`
+/// themselves should not: use the bounded interpreter's result instead.
+pub fn macho_bind_count_within_cap(macho: &goblin::mach::MachO, buffer: &[u8]) -> bool {
+    macho_bind_imports(macho, buffer).is_some()
 }
 
 /// Walk `entry`-sized stubs of a stub section; a stub that holds `jmp [slot]`

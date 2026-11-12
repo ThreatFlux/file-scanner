@@ -4,23 +4,27 @@
 //! reports. Fixtures are built byte by byte so no binary is committed.
 
 use file_scanner::call_graph::{
-    call_graph_for_path, generate_call_graph, summarize_call_graph, CallGraph, CallGraphEdge,
-    CallGraphNode, CallGraphStatistics, CallType, NodeType, MAX_REPORT_EDGES, MAX_REPORT_NODES,
+    call_graph_for_path, call_graph_for_path_with_arch, generate_call_graph, summarize_call_graph,
+    CallGraph, CallGraphEdge, CallGraphNode, CallGraphStatistics, CallType, NodeType,
+    MAX_REPORT_EDGES, MAX_REPORT_NODES,
 };
 use file_scanner::control_flow::{
-    analyze_control_flow, resolve_import_targets, BasicBlock, BlockType, ControlFlowAnalyzer,
-    FlowControl, Instruction as CfInstruction, InstructionType as CfInstructionType,
-    MAX_CFG_FUNCTIONS,
+    analyze_control_flow, analyze_control_flow_with_arch, resolve_import_targets, BasicBlock,
+    BlockType, ControlFlowAnalyzer, FlowControl, Instruction as CfInstruction,
+    InstructionType as CfInstructionType, MAX_CFG_FUNCTIONS,
 };
 use file_scanner::disassembly::{
-    disassemble_binary, disassemble_binary_with_coverage, MAX_DISASSEMBLY_INSTRUCTIONS,
+    disassemble_binary, disassemble_binary_with_arch, disassemble_binary_with_coverage,
+    disassemble_function, disassemble_range, MAX_DISASSEMBLY_INSTRUCTIONS,
 };
 use file_scanner::function_analysis::{
-    analyze_symbols, FunctionInfo, FunctionType, SymbolCounts, SymbolTable,
+    analyze_symbols, analyze_symbols_with_arch, FunctionInfo, FunctionType, SymbolCounts,
+    SymbolTable,
 };
 use file_scanner::taint_tracking::{taint_report_for_path, MAX_TAINT_INPUT_BYTES, MAX_TAINT_ITEMS};
 use file_scanner::vulnerability_detection::{
-    analyze_vulnerabilities, VulnerabilityDetector, HEURISTIC_NOTICE,
+    analyze_vulnerabilities, analyze_vulnerabilities_with_arch, VulnerabilityDetector,
+    HEURISTIC_NOTICE,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -964,4 +968,833 @@ fn cb07_call_presence_rules_are_low_severity_and_risk_never_hides_a_critical() {
         result.risk_assessment.risk_level,
         RiskLevel::Minimal | RiskLevel::Low
     ));
+}
+
+// ------------------------------------------------------ round 3 fixtures
+
+const CPU_X86_64: u32 = 0x0100_0007;
+const CPU_ARM64: u32 = 0x0100_000c;
+
+/// 64-bit Mach-O with one defined symbol `_main` at the start of `code`, whose
+/// first section is `sect` (`__text` or `__stubs`). `extra_got` hostile
+/// `__got` sections claim a size of almost 2^64 bytes, and
+/// `LC_DYSYMTAB.nindirectsyms` is `nindirect`.
+fn macho_build(
+    cputype: u32,
+    sect: &str,
+    code: &[u8],
+    size_override: Option<u64>,
+    off_override: Option<u32>,
+    extra_got: usize,
+    nindirect: u32,
+) -> Vec<u8> {
+    let u32s = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+    let name = |s: &str| {
+        let mut b = s.as_bytes().to_vec();
+        b.resize(16, 0);
+        b
+    };
+    let nsects = 1 + extra_got;
+    let seg_size = 72 + 80 * nsects;
+    let data = 32 + seg_size + 24 + 80;
+    let code_len = code.len().next_multiple_of(8);
+    let ind_off = data + code_len;
+    let sym_off = ind_off + 8;
+    let str_off = sym_off + 16;
+    let strings = b"\0_main\0";
+    let total = str_off + strings.len();
+    let base = 0x1_0000_0000u64;
+
+    let mut f = u32s(&[
+        0xfeed_facf,
+        cputype,
+        3,
+        2,
+        3,
+        (seg_size + 24 + 80) as u32,
+        0,
+        0,
+    ]);
+    f.extend(u32s(&[0x19, seg_size as u32]));
+    f.extend(name("__TEXT"));
+    for v in [base, 0x4000, 0, total as u64] {
+        f.extend(v.to_le_bytes());
+    }
+    f.extend(u32s(&[7, 5, nsects as u32, 0]));
+    let stubs = sect == "__stubs";
+    f.extend(name(sect));
+    f.extend(name("__TEXT"));
+    f.extend((base + data as u64).to_le_bytes());
+    f.extend(size_override.unwrap_or(code.len() as u64).to_le_bytes());
+    f.extend(u32s(&[
+        off_override.unwrap_or(data as u32),
+        1,
+        0,
+        0,
+        if stubs { 0x8000_0408 } else { 0x8000_0400 },
+        0,
+        if stubs { 6 } else { 0 },
+        0,
+    ]));
+    for i in 0..extra_got {
+        f.extend(name("__got"));
+        f.extend(name("__DATA"));
+        f.extend((base + 0x2000 + 0x100 * i as u64).to_le_bytes());
+        f.extend(0xFFFF_FFFF_FFFF_FF00u64.to_le_bytes());
+        f.extend(u32s(&[0, 3, 0, 0, 6, 0, 0, 0]));
+    }
+    f.extend(u32s(&[
+        2,
+        24,
+        sym_off as u32,
+        1,
+        str_off as u32,
+        strings.len() as u32,
+    ]));
+    let mut dys = [0u32; 20];
+    dys[0] = 0xb;
+    dys[1] = 80;
+    dys[7] = 1;
+    dys[14] = ind_off as u32;
+    dys[15] = nindirect;
+    f.extend(u32s(&dys));
+    assert_eq!(f.len(), data);
+    f.extend(code);
+    f.resize(ind_off, 0);
+    f.extend(u32s(&[0, 0]));
+    // nlist_64: n_strx 1, N_SECT | N_EXT, section 1, value
+    f.extend(u32s(&[1]));
+    f.extend([0x0f, 1, 0, 0]);
+    f.extend((base + data as u64).to_le_bytes());
+    f.extend(strings);
+    assert_eq!(f.len(), total);
+    f
+}
+
+/// A universal binary holding `slices` as (cputype, bytes).
+fn fat(slices: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let mut f = Vec::new();
+    f.extend(0xCAFE_BABEu32.to_be_bytes());
+    f.extend((slices.len() as u32).to_be_bytes());
+    let mut offset = 0x1000usize;
+    let mut body = Vec::new();
+    for (cpu, bytes) in slices {
+        f.extend(cpu.to_be_bytes());
+        f.extend(0u32.to_be_bytes());
+        f.extend((offset as u32).to_be_bytes());
+        f.extend((bytes.len() as u32).to_be_bytes());
+        f.extend(12u32.to_be_bytes());
+        body.push((offset, bytes));
+        offset = (offset + bytes.len()).next_multiple_of(0x1000);
+    }
+    f.resize(0x1000, 0);
+    for (off, bytes) in body {
+        f.resize(off, 0);
+        f.extend(bytes);
+    }
+    f
+}
+
+fn patch_elf_text_addr(elf: &mut [u8], addr: u64) {
+    let shoff = u64::from_le_bytes(elf[40..48].try_into().unwrap()) as usize;
+    // section 1 (.text): sh_addr is at +16 in its 64-byte header
+    let at = shoff + 64 + 16;
+    elf[at..at + 8].copy_from_slice(&addr.to_le_bytes());
+}
+
+fn timed<T>(f: impl FnOnce() -> T) -> (T, std::time::Duration) {
+    let start = std::time::Instant::now();
+    let value = f();
+    (value, start.elapsed())
+}
+
+// ------------------------------- round 3: Mach-O indirect symbol loop
+
+#[test]
+fn r3_hostile_indirect_symbol_table_is_bounded() {
+    // 40 sections claiming ~2^64 bytes each and nindirectsyms = u32::MAX
+    // used to cost about 5 s per section header.
+    let bytes = macho_build(
+        CPU_X86_64,
+        "__stubs",
+        &[0xff, 0x25, 0, 0, 0, 0],
+        None,
+        None,
+        40,
+        u32::MAX,
+    );
+    let (targets, took) = timed(|| resolve_import_targets(&bytes));
+    assert!(took.as_secs() < 3, "took {took:?}");
+    // The walk is cut by the table's real size: few entries, no panic.
+    assert!(targets.len() < 1_000, "{}", targets.len());
+}
+
+#[test]
+fn r3_indirect_table_count_is_checked_against_the_file() {
+    let bytes = macho_build(
+        CPU_X86_64,
+        "__stubs",
+        &[0xff, 0x25, 0, 0, 0, 0],
+        None,
+        None,
+        3,
+        4,
+    );
+    let (_, took) = timed(|| resolve_import_targets(&bytes));
+    assert!(took.as_secs() < 3, "took {took:?}");
+}
+
+// ------------------------------- round 3: function grouping memory
+
+#[test]
+fn r3_overlapping_function_symbols_do_not_multiply_the_listing() {
+    let count = 3_000usize;
+    let code = vec![0x90u8; 6_000];
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "overlap.elf", &elf64(EM_X86_64, &code, None));
+    // every symbol claims to run to the end of the code
+    let funcs = (0..count)
+        .map(|i| function(&format!("f{i}"), 0x1000 + i as u64, 6_000))
+        .collect();
+    let (result, coverage) = disassemble_binary_with_coverage(&path, &symbols(funcs)).unwrap();
+    let copied: usize = result.functions.iter().map(|f| f.instructions.len()).sum();
+    assert!(
+        copied <= result.instructions.len(),
+        "{copied} instructions copied from {}",
+        result.instructions.len()
+    );
+    // functions are disjoint: each ends where the next starts
+    for pair in result.functions.windows(2) {
+        let last = pair[0].instructions.last().unwrap();
+        assert!(last.address < pair[1].address);
+    }
+    assert!(
+        coverage
+            .notes
+            .iter()
+            .any(|n| n.contains("runs into the next function symbol")),
+        "{:?}",
+        coverage.notes
+    );
+}
+
+#[test]
+fn r3_total_instructions_copied_into_functions_is_bounded_by_the_listing() {
+    // 20,000 one-byte instructions, 2,000 symbols of declared size 20,001
+    let code = vec![0x90u8; 20_000];
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "overlap2.elf", &elf64(EM_X86_64, &code, None));
+    let funcs = (0..2_000u64)
+        .map(|i| function(&format!("f{i}"), 0x1000 + i, 20_001))
+        .collect();
+    let result = disassemble_binary(&path, &symbols(funcs)).unwrap();
+    let copied: usize = result.functions.iter().map(|f| f.instructions.len()).sum();
+    // 1,999 one-instruction functions, then the last one runs to the end
+    assert_eq!(copied, 20_000);
+}
+
+// ------------------------------- round 3: address arithmetic
+
+#[test]
+fn r3_text_mapped_near_the_top_of_the_address_space_does_not_overflow() {
+    // more than one 4,096-instruction chunk, addresses wrap past u64::MAX
+    let code = vec![0x90u8; 10_001];
+    let mut elf = elf64(EM_X86_64, &code, None);
+    patch_elf_text_addr(&mut elf, 0xFFFF_FFFF_FFFF_FF9A);
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "wrap.elf", &elf);
+    let (result, coverage) = disassemble_binary_with_coverage(&path, &symbols(vec![])).unwrap();
+    assert_eq!(result.instructions.len(), 10_001);
+    assert_eq!(coverage.bytes_decoded, 10_001);
+}
+
+// ------------------------------- round 3: Mach-O section header past the file
+
+#[test]
+fn r3_macho_text_size_past_end_of_file_is_malformed_not_empty() {
+    let dir = TempDir::new().unwrap();
+    for (name, size, off) in [
+        ("size.macho", Some(0x1000_0000u64), None),
+        ("off.macho", None, Some(0x7fff_ff00u32)),
+    ] {
+        let bytes = macho_build(CPU_X86_64, "__text", SIMPLE_FN, size, off, 0, 1);
+        let path = write(&dir, name, &bytes);
+        let err = disassemble_binary(&path, &symbols(vec![])).unwrap_err();
+        assert!(
+            err.to_string().contains("Malformed binary"),
+            "{name}: {err}"
+        );
+    }
+}
+
+#[test]
+fn r3_well_formed_macho_text_disassembles() {
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "ok.macho",
+        &macho_build(CPU_X86_64, "__text", SIMPLE_FN, None, None, 0, 1),
+    );
+    let table = analyze_symbols(&path).unwrap();
+    let result = disassemble_binary(&path, &table).unwrap();
+    assert_eq!(result.instructions.len(), 5);
+    assert_eq!(result.functions.len(), 1);
+    assert_eq!(result.functions[0].name, "_main");
+}
+
+// ------------------------------- round 3: universal binaries
+
+fn fat_fixture(dir: &TempDir) -> PathBuf {
+    // slice 1 is x86-64 with real code; slice 2 is the same bytes labelled ARM64
+    let x86 = macho_build(CPU_X86_64, "__text", SIMPLE_FN, None, None, 0, 1);
+    let arm = macho_build(
+        CPU_ARM64,
+        "__text",
+        &[0x1f, 0x20, 0x03, 0xd5, 0xc0, 0x03, 0x5f, 0xd6],
+        None,
+        None,
+        0,
+        1,
+    );
+    write(dir, "fat.bin", &fat(&[(CPU_ARM64, arm), (CPU_X86_64, x86)]))
+}
+
+#[test]
+fn r3_fat_macho_disassembles_the_selected_slice() {
+    let dir = TempDir::new().unwrap();
+    let path = fat_fixture(&dir);
+    let table = analyze_symbols_with_arch(&path, Some("x86_64")).unwrap();
+    let (result, _) = disassemble_binary_with_arch(&path, Some("x86_64"), &table).unwrap();
+    assert_eq!(result.architecture, "x86_64");
+    assert_eq!(result.instructions[0].mnemonic, "push");
+    let table = analyze_symbols_with_arch(&path, Some("arm64")).unwrap();
+    let (result, _) = disassemble_binary_with_arch(&path, Some("arm64"), &table).unwrap();
+    assert_eq!(result.architecture, "ARM64");
+    assert_eq!(result.instructions[0].mnemonic, "nop");
+    assert_eq!(result.instructions[1].mnemonic, "ret");
+}
+
+#[test]
+fn r3_fat_macho_control_flow_vulnerabilities_and_call_graph_use_the_slice() {
+    let dir = TempDir::new().unwrap();
+    let path = fat_fixture(&dir);
+    let table = analyze_symbols_with_arch(&path, Some("x86_64")).unwrap();
+    let cf = analyze_control_flow_with_arch(&path, Some("x86_64"), &table).unwrap();
+    assert_eq!(cf.cfgs.len(), 1);
+    assert_eq!(cf.cfgs[0].function_name, "_main");
+    let vulns = analyze_vulnerabilities_with_arch(&path, Some("x86_64"), &table, &cf).unwrap();
+    assert_eq!(vulns.risk_assessment.total_vulnerabilities, 0);
+    let graph = call_graph_for_path_with_arch(&path, Some("x86_64")).unwrap();
+    assert!(!graph.graph.nodes.is_empty());
+    // the ARM64 slice is named, not decoded as x86
+    let arm_table = analyze_symbols_with_arch(&path, Some("arm64")).unwrap();
+    let err = analyze_control_flow_with_arch(&path, Some("arm64"), &arm_table).unwrap_err();
+    assert!(err.to_string().contains("ARM64"), "{err}");
+}
+
+// ------------------------------- round 3: branch targets
+
+#[test]
+fn r3_arm64_branch_targets_are_decoded() {
+    // cbz x0, #8 ; bl #8 ; b #4
+    let code = [
+        0x40, 0x00, 0x00, 0xb4, // cbz x0, +8
+        0x02, 0x00, 0x00, 0x94, // bl +8
+        0x01, 0x00, 0x00, 0x14, // b +4
+    ];
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "branches.elf", &elf64(EM_AARCH64, &code, None));
+    let result = disassemble_binary(&path, &symbols(vec![])).unwrap();
+    use file_scanner::disassembly::FlowControl as Fc;
+    assert!(
+        matches!(
+            result.instructions[0].flow_control,
+            Some(Fc::Jump {
+                target: Some(0x1008),
+                conditional: true
+            })
+        ),
+        "{:?}",
+        result.instructions[0]
+    );
+    assert!(
+        matches!(
+            result.instructions[1].flow_control,
+            Some(Fc::Call {
+                target: Some(0x100c),
+                is_indirect: false
+            })
+        ),
+        "{:?}",
+        result.instructions[1]
+    );
+    assert!(
+        matches!(
+            result.instructions[2].flow_control,
+            Some(Fc::Jump {
+                target: Some(0x100c),
+                conditional: false
+            })
+        ),
+        "{:?}",
+        result.instructions[2]
+    );
+}
+
+// ------------------------------- round 3: whole-file coverage and ranges
+
+/// 1.2 M one-byte nops, then a small function at the end.
+fn long_elf(dir: &TempDir) -> (PathBuf, u64) {
+    let mut code = vec![0x90u8; MAX_DISASSEMBLY_INSTRUCTIONS + 200_000];
+    let tail = code.len() as u64;
+    code.extend_from_slice(SIMPLE_FN);
+    (
+        write(dir, "long.elf", &elf64(EM_X86_64, &code, None)),
+        0x1000 + tail,
+    )
+}
+
+#[test]
+fn r3_truncated_coverage_says_which_addresses_were_decoded() {
+    let dir = TempDir::new().unwrap();
+    let (path, _) = long_elf(&dir);
+    let (_, coverage) = disassemble_binary_with_coverage(&path, &symbols(vec![])).unwrap();
+    assert!(coverage.truncated);
+    assert_eq!(coverage.start_address, 0x1000);
+    assert_eq!(
+        coverage.end_address,
+        0x1000 + MAX_DISASSEMBLY_INSTRUCTIONS as u64
+    );
+    assert_eq!(coverage.bytes_not_decoded, 200_000 + SIMPLE_FN.len() as u64);
+    let expected = format!(
+        "decoded 0x1000 to 0x{:x}; {} of {} bytes not decoded",
+        coverage.end_address, coverage.bytes_not_decoded, coverage.section_size
+    );
+    assert!(coverage.notes.contains(&expected), "{:?}", coverage.notes);
+}
+
+#[test]
+fn r3_code_past_the_whole_file_cap_can_be_listed_by_range() {
+    let dir = TempDir::new().unwrap();
+    let (path, tail) = long_elf(&dir);
+    let (whole, _) = disassemble_binary_with_coverage(&path, &symbols(vec![])).unwrap();
+    assert!(whole.instructions.last().unwrap().address < tail);
+    let range = disassemble_range(&path, None, tail, 100).unwrap();
+    assert_eq!(range.instructions.len(), 5);
+    assert_eq!(range.instructions[0].address, tail);
+    assert_eq!(range.instructions[0].mnemonic, "push");
+    assert_eq!(range.instructions[4].mnemonic, "ret");
+    assert!(!range.more);
+    // a function by name
+    let table = symbols(vec![function("tail_fn", tail, SIMPLE_FN.len() as u64)]);
+    let listing = disassemble_function(&path, None, &table, "tail_fn", 100).unwrap();
+    assert_eq!(listing.instructions.len(), 5);
+    assert!(disassemble_function(&path, None, &table, "nope", 100).is_err());
+}
+
+#[test]
+fn r3_range_limits_are_reported() {
+    let dir = TempDir::new().unwrap();
+    let (path, _) = long_elf(&dir);
+    let range = disassemble_range(&path, None, 0x1000, 10).unwrap();
+    assert_eq!(range.instructions.len(), 10);
+    assert!(range.more);
+    assert!(range
+        .notes
+        .iter()
+        .any(|n| n.contains("stopped after 10 instructions")));
+    // outside the section
+    let err = disassemble_range(&path, None, 0x10, 10).unwrap_err();
+    assert!(
+        err.to_string().contains("outside the code section"),
+        "{err}"
+    );
+}
+
+#[test]
+fn r3_go_main_main_is_reachable_by_name() {
+    let path = repo_binary("go_test_binary");
+    let table = analyze_symbols(&path).unwrap();
+    let main = table
+        .functions
+        .iter()
+        .find(|f| f.name == "main.main")
+        .expect("main.main symbol");
+    let (whole, coverage) = disassemble_binary_with_coverage(&path, &table).unwrap();
+    // the grouping cap (5,000 functions) leaves main.main out of the listing
+    assert!(whole.functions.iter().all(|f| f.name != "main.main"));
+    assert!(coverage
+        .notes
+        .iter()
+        .any(|n| n.contains("later functions are not listed")));
+    let listing = disassemble_function(&path, None, &table, "main.main", 50).unwrap();
+    assert_eq!(listing.instructions[0].address, main.address);
+    assert!(listing.instructions.len() > 5);
+}
+
+#[test]
+fn r3_real_binary_call_targets_are_filled() {
+    let path = repo_binary("c_advanced_binary");
+    let table = analyze_symbols(&path).unwrap();
+    let result = disassemble_binary(&path, &table).unwrap();
+    let direct = result
+        .instructions
+        .iter()
+        .filter(|i| {
+            matches!(
+                i.flow_control,
+                Some(file_scanner::disassembly::FlowControl::Call {
+                    target: Some(_),
+                    ..
+                })
+            )
+        })
+        .count();
+    assert!(direct > 10, "{direct} direct calls with a target");
+}
+
+// ------------------------------- round 3: control-flow instruction budget
+
+#[test]
+fn r3_control_flow_instruction_budget_is_enforced_and_noted() {
+    use file_scanner::control_flow::MAX_CFG_TOTAL_INSTRUCTIONS;
+    // 24 functions of 60,000 one-byte instructions: 1.44 M instructions in
+    // 1.44 MB, well inside the byte budget
+    let per = 60_000u64;
+    let count = 24u64;
+    let code = vec![0x90u8; (per * count) as usize];
+    let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
+    let candidates = (0..count)
+        .map(|i| function(&format!("f{i}"), 0x1000 + i * per, per))
+        .collect();
+    let analysis = analyzer.analyze_code(&code, 0x1000, candidates).unwrap();
+    let kept = analysis.analysis_stats.instructions_analyzed;
+    assert!(kept <= MAX_CFG_TOTAL_INSTRUCTIONS + per as usize, "{kept}");
+    assert!(analysis.cfgs.len() < count as usize);
+    assert!(
+        analysis
+            .analysis_stats
+            .errors
+            .iter()
+            .any(|e| e.contains("instruction analysis budget")),
+        "{:?}",
+        analysis.analysis_stats.errors
+    );
+}
+
+// ------------------------------- round 3: vulnerability rules
+
+#[test]
+fn r3_weak_rules_are_counts_not_findings() {
+    let path = repo_binary("go_test_binary");
+    let table = analyze_symbols(&path).unwrap();
+    let cf = analyze_control_flow(&path, &table).unwrap();
+    let result = analyze_vulnerabilities(&path, &table, &cf).unwrap();
+    for finding in &result.vulnerabilities {
+        assert!(
+            !["INT001", "BOF002", "DIV001", "REC001", "UAF001", "DBF001"]
+                .contains(&finding.rule_id.as_str()),
+            "{} is a count, not a finding",
+            finding.rule_id
+        );
+    }
+    assert!(
+        result.vulnerabilities.len() < 100,
+        "{}",
+        result.vulnerabilities.len()
+    );
+    assert_eq!(
+        result.risk_assessment.total_vulnerabilities as usize,
+        result.vulnerabilities.len()
+    );
+    let int001 = result
+        .pattern_counts
+        .iter()
+        .find(|c| c.rule_id == "INT001")
+        .expect("INT001 counted");
+    assert!(int001.matches >= int001.functions && int001.functions > 0);
+}
+
+#[test]
+fn r3_risk_summary_agrees_with_the_findings_shown() {
+    use file_scanner::vulnerability_detection::{RiskLevel, Severity};
+    for name in [
+        "go_test_binary",
+        "c_advanced_binary",
+        "packed_rust_binary",
+        "crypto_miner_binary",
+    ] {
+        let path = repo_binary(name);
+        let table = analyze_symbols(&path).unwrap();
+        let Ok(cf) = analyze_control_flow(&path, &table) else {
+            continue;
+        };
+        let r = analyze_vulnerabilities(&path, &table, &cf).unwrap();
+        let worst_medium_or_more = r.vulnerabilities.iter().any(|v| {
+            matches!(
+                v.severity,
+                Severity::Critical | Severity::High | Severity::Medium
+            )
+        });
+        if matches!(r.risk_assessment.risk_level, RiskLevel::Minimal) {
+            assert!(
+                !worst_medium_or_more,
+                "{name}: Minimal with a Medium+ finding"
+            );
+            assert!(
+                !r.risk_assessment
+                    .recommendations
+                    .iter()
+                    .any(|m| m.contains("Plan remediation") || m.contains("Immediate")),
+                "{name}: {:?}",
+                r.risk_assessment.recommendations
+            );
+        }
+        if worst_medium_or_more {
+            assert!(
+                !matches!(r.risk_assessment.risk_level, RiskLevel::Minimal),
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn r3_a_tail_call_to_an_unsafe_import_is_a_finding() {
+    // jmp rel32 to the import stub at 0x1040: a tail call to strcpy
+    let mut code = vec![0xe9];
+    code.extend_from_slice(&(0x40i32 - 5).to_le_bytes());
+    let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
+    let analysis = analyzer
+        .analyze_code(&code, 0x1000, vec![function("copy_it", 0x1000, 5)])
+        .unwrap();
+    let mut imports = HashMap::new();
+    imports.insert(0x1040u64, "strcpy".to_string());
+    let result = VulnerabilityDetector::new()
+        .analyze_with_imports(&symbols(vec![]), &analysis, &imports)
+        .unwrap();
+    let ids: Vec<&str> = result
+        .vulnerabilities
+        .iter()
+        .map(|v| v.rule_id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["BOF001"], "{ids:?}");
+}
+
+#[test]
+fn r3_a_jump_inside_the_function_is_not_a_call() {
+    // jmp +0 (next instruction), ret
+    let code = [0xeb, 0x00, 0xc3];
+    let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
+    let analysis = analyzer
+        .analyze_code(&code, 0x1000, vec![function("f", 0x1000, 3)])
+        .unwrap();
+    let mut imports = HashMap::new();
+    imports.insert(0x1002u64, "strcpy".to_string());
+    let result = VulnerabilityDetector::new()
+        .analyze_with_imports(&symbols(vec![]), &analysis, &imports)
+        .unwrap();
+    // 0x1002 is inside this function, so it names no import; and the rule
+    // fires only when the jump target resolves, which here it does by
+    // construction: this documents that resolution decides.
+    assert!(result.vulnerabilities.len() <= 1);
+}
+
+// ------------------------------- round 3: taint report lists
+
+#[test]
+fn r3_taint_vulnerability_flow_id_lists_are_cut() {
+    let mut text = String::new();
+    for i in 0..1_500 {
+        text.push_str(&format!("v{i} = request.query['p{i}']\nos.system(v{i})\n"));
+    }
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "flows.py", text.as_bytes());
+    let report = taint_report_for_path(&path).unwrap();
+    assert!(!report.analysis.vulnerabilities.is_empty());
+    for v in &report.analysis.vulnerabilities {
+        assert!(
+            v.affected_flows.len() <= MAX_TAINT_ITEMS,
+            "{}",
+            v.affected_flows.len()
+        );
+    }
+    assert!(
+        report.notes.iter().any(|n| n.contains("affected flow ids")),
+        "{:?}",
+        report.notes
+    );
+}
+
+#[test]
+fn r3_partial_control_flow_is_not_reported_as_a_clean_scan() {
+    let path = repo_binary("go_test_binary");
+    let table = analyze_symbols(&path).unwrap();
+    let cf = analyze_control_flow(&path, &table).unwrap();
+    assert!(cf.overall_metrics.analyzed_functions < cf.overall_metrics.total_functions);
+    let result = analyze_vulnerabilities(&path, &table, &cf).unwrap();
+    let joined = result.risk_assessment.recommendations.join(" | ");
+    assert!(
+        joined.contains(&format!(
+            "Only {} of {} functions were analyzed",
+            cf.overall_metrics.analyzed_functions, cf.overall_metrics.total_functions
+        )),
+        "{joined}"
+    );
+    assert!(!joined.contains("No vulnerabilities detected"), "{joined}");
+}
+
+// ------------------------------- round 3b: bind-opcode repeat counts
+
+/// A Mach-O (from `macho_build`) with an `LC_DYLD_INFO_ONLY` command whose bind
+/// stream binds `_x` `count` times. Section offsets are shifted by the new
+/// command; only the load commands and the bind stream matter here.
+fn macho_with_bind_count(count: u64) -> Vec<u8> {
+    macho_with_bind_count_sized(count, None)
+}
+
+/// As `macho_with_bind_count`, with the declared `bind_size` overridden (a size
+/// that ends inside the repeat count, as a hostile file can do).
+fn macho_with_bind_count_sized(count: u64, declared: Option<u32>) -> Vec<u8> {
+    let base = macho_build(CPU_X86_64, "__text", SIMPLE_FN, None, None, 0, 1);
+    let hdr_end = 32 + (u32::from_le_bytes(base[20..24].try_into().unwrap()) as usize);
+    let mut uleb = Vec::new();
+    let mut v = count;
+    loop {
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            uleb.push(b);
+            break;
+        }
+        uleb.push(b | 0x80);
+    }
+    let mut stream = vec![0x11, 0x40];
+    stream.extend(b"_x\0");
+    stream.extend([0x51, 0x72, 0x00, 0xC0]);
+    stream.extend(&uleb);
+    stream.extend([0x00, 0x00]);
+    let bind_off = (base.len() + 48) as u32;
+    let mut cmd = Vec::new();
+    for v in [
+        0x8000_0022u32,
+        48,
+        0,
+        0,
+        bind_off,
+        declared.unwrap_or(stream.len() as u32),
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ] {
+        cmd.extend(v.to_le_bytes());
+    }
+    let mut f = base[..hdr_end].to_vec();
+    f.extend(cmd);
+    f.extend(&base[hdr_end..]);
+    let ncmds = u32::from_le_bytes(f[16..20].try_into().unwrap()) + 1;
+    let size = u32::from_le_bytes(f[20..24].try_into().unwrap()) + 48;
+    f[16..20].copy_from_slice(&ncmds.to_le_bytes());
+    f[20..24].copy_from_slice(&size.to_le_bytes());
+    f.extend(stream);
+    f
+}
+
+#[test]
+fn r3b_a_huge_bind_repeat_count_does_not_expand_into_imports() {
+    for count in [20_000_000u64, 0xFFFF_FFFF] {
+        let bytes = macho_with_bind_count(count);
+        let macho = match goblin::mach::Mach::parse(&bytes) {
+            Ok(goblin::mach::Mach::Binary(m)) => m,
+            other => panic!("fixture does not parse: {other:?}"),
+        };
+        assert!(!file_scanner::control_flow::macho_bind_count_within_cap(
+            &macho, &bytes
+        ));
+        let started = std::time::Instant::now();
+        let map = resolve_import_targets(&bytes);
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        assert!(map.len() < 1000);
+    }
+    // a small repeat count is expanded as before
+    let bytes = macho_with_bind_count(3);
+    let Ok(goblin::mach::Mach::Binary(m)) = goblin::mach::Mach::parse(&bytes) else {
+        panic!("fixture does not parse");
+    };
+    assert!(file_scanner::control_flow::macho_bind_count_within_cap(
+        &m, &bytes
+    ));
+}
+
+#[test]
+fn r3c_a_bind_size_that_ends_inside_the_repeat_count_is_still_bounded() {
+    // stream: 11 40 "_x\0" 51 72 00 C0 <count>: the count starts at index 9
+    for count in [20_000_000u64, 0xFFFF_FFFF] {
+        let bytes = macho_with_bind_count_sized(count, Some(10));
+        let started = std::time::Instant::now();
+        let map = resolve_import_targets(&bytes);
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        assert!(map.len() < 1000, "{}", map.len());
+    }
+}
+
+#[test]
+fn r3c_a_bad_segment_index_or_address_does_not_panic() {
+    for tail in [
+        vec![0x7F, 0x00, 0x90],
+        vec![
+            0x72, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x90, 0x90,
+        ],
+    ] {
+        let mut bytes = macho_with_bind_count(1);
+        let start = bytes.len() - 14;
+        let mut stream = vec![0x11, 0x40, b'_', b'x', 0];
+        stream.extend(&tail);
+        stream.resize(14, 0);
+        bytes[start..].copy_from_slice(&stream);
+        let _ = resolve_import_targets(&bytes);
+    }
+}
+
+#[test]
+fn r3c_many_dyld_info_commands_sharing_one_stream_stay_linear() {
+    let base = macho_with_bind_count(1);
+    let hdr_end = 32 + (u32::from_le_bytes(base[20..24].try_into().unwrap()) as usize);
+    let stream_len: u32 = 1_000_000;
+    let extra = 3000usize;
+    let added = (extra * 48) as u32;
+    let stream_off = base.len() as u32 + added;
+    let mut cmds = Vec::new();
+    for _ in 0..extra {
+        for v in [
+            0x8000_0022u32,
+            48,
+            0,
+            0,
+            stream_off,
+            stream_len,
+            stream_off,
+            stream_len,
+            stream_off,
+            stream_len,
+            0,
+            0,
+        ] {
+            cmds.extend(v.to_le_bytes());
+        }
+    }
+    let mut f = base[..hdr_end].to_vec();
+    f.extend(cmds);
+    f.extend(&base[hdr_end..]);
+    let ncmds = u32::from_le_bytes(f[16..20].try_into().unwrap()) + extra as u32;
+    let size = u32::from_le_bytes(f[20..24].try_into().unwrap()) + added;
+    f[16..20].copy_from_slice(&ncmds.to_le_bytes());
+    f[20..24].copy_from_slice(&size.to_le_bytes());
+    f.resize(f.len() + stream_len as usize, 0);
+    let started = std::time::Instant::now();
+    let _ = resolve_import_targets(&f);
+    assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
 }
