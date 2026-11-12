@@ -1,17 +1,17 @@
 use anyhow::{Context, Result};
-use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
-use tar::Archive;
-use zip::ZipArchive;
 
 use crate::dependency_analysis::{KnownVulnerability, VulnerabilitySeverity};
+use crate::package_scan::{
+    self, language_of, scan_source, sort_findings, source_findings_score, AdvisoryDataInfo,
+    ContainerKind, InputInfo, LoadedPackage, Selector, SourceFinding,
+};
 use crate::python_vuln_db::{
-    check_package_vulnerabilities, check_typosquatting_similarity, get_known_malicious_packages,
-    get_malicious_patterns,
+    advisory_data_info, check_dependency_spec, check_package_vulnerabilities,
+    check_typosquatting_similarity, classify_specifier, get_known_malicious_packages,
+    get_known_malicious_versions, normalize_name, SpecKind,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -24,6 +24,12 @@ pub struct PythonPackageAnalysis {
     pub setup_analysis: SetupAnalysis,
     pub maintainer_analysis: MaintainerAnalysis,
     pub quality_metrics: PackageQualityMetrics,
+    /// Suspicious constructs found in source files, worst first, with file and line.
+    #[serde(default)]
+    pub source_findings: Vec<SourceFinding>,
+    /// What was read of the input and how much of it was scanned.
+    #[serde(default)]
+    pub input: InputInfo,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -60,6 +66,24 @@ pub struct PythonDependencyAnalysis {
     pub tests_require: HashMap<String, DependencyDetails>,
     pub dependency_count: usize,
     pub vulnerability_summary: VulnerabilitySummary,
+    /// Packages a lock file (poetry.lock) pins, when there is one.
+    #[serde(default)]
+    pub locked_packages: Vec<LockedPackage>,
+    /// Advisories that apply to the analysed package itself.
+    #[serde(default)]
+    pub package_vulnerabilities: Vec<KnownVulnerability>,
+    /// Where the advisory data comes from; an empty list is not a clean bill of health.
+    #[serde(default)]
+    pub vulnerability_db: AdvisoryDataInfo,
+}
+
+/// One entry of a lock file.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LockedPackage {
+    pub name: String,
+    pub version: String,
+    pub dev: bool,
+    pub vulnerabilities: Vec<KnownVulnerability>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -70,6 +94,13 @@ pub struct DependencyDetails {
     pub is_git: bool,
     pub vulnerabilities: Vec<KnownVulnerability>,
     pub deprecated: bool,
+    /// Version a lock file pins, when there is one.
+    #[serde(default)]
+    pub resolved_version: Option<String>,
+    /// Advisories whose affected range contains the lowest version the
+    /// specifier admits (ids). The installed version may be newer.
+    #[serde(default)]
+    pub range_floor_advisories: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -80,6 +111,9 @@ pub struct VulnerabilitySummary {
     pub low_count: usize,
     pub total_count: usize,
     pub vulnerable_packages: Vec<String>,
+    /// Requirements whose specifier could install an affected version (not counted above).
+    #[serde(default)]
+    pub unresolved_range_hits: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -147,6 +181,9 @@ pub struct MaliciousPackageIndicators {
     pub code_injection_patterns: Vec<CodeInjectionPattern>,
     pub overall_risk_score: f32,
     pub risk_level: RiskLevel,
+    /// What the score is made of.
+    #[serde(default)]
+    pub risk_reasons: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -196,6 +233,9 @@ pub struct PythonFileAnalysis {
     pub suspicious_content: Vec<String>,
     pub imports: Vec<String>,
     pub obfuscation_score: f32,
+    /// The file's content was read and scanned (false for files past the scan limits).
+    #[serde(default)]
+    pub source_scanned: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -265,217 +305,275 @@ pub struct PackageQualityMetrics {
     pub overall_quality_score: f32,
 }
 
-/// Main entry point for Python package analysis
+fn is_manifest(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    let name = parts[parts.len() - 1];
+    if parts.len() == 2 && parts[0].ends_with(".dist-info") && name == "METADATA" {
+        return true;
+    }
+    parts.len() <= 2
+        && matches!(
+            name,
+            "setup.py"
+                | "setup.cfg"
+                | "pyproject.toml"
+                | "PKG-INFO"
+                | "requirements.txt"
+                | "poetry.lock"
+        )
+}
+
+fn is_source(path: &str) -> bool {
+    language_of(path).is_some()
+}
+
+const SELECTOR: Selector = Selector {
+    is_manifest,
+    is_source,
+};
+
+/// Findings and URLs from scanning the source files.
+#[derive(Default)]
+struct SourceScan {
+    findings: Vec<SourceFinding>,
+    /// (url, file, line)
+    urls: Vec<(String, String, usize)>,
+}
+
+const MAX_FINDINGS: usize = 2000;
+
+/// Main entry point for Python package analysis.
+///
+/// `path` is a wheel, an sdist or any zip or tar archive (detected by content,
+/// not by extension), a directory, a `setup.py` / `pyproject.toml` /
+/// `setup.cfg` (its directory), or a dependency list (`requirements.txt`,
+/// `poetry.lock`). Registry names are not supported: nothing is downloaded.
 pub fn analyze_python_package(path: &Path) -> Result<PythonPackageAnalysis> {
-    if path.is_file() {
-        let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        match extension {
-            "whl" => analyze_wheel_package(path),
-            "gz" => analyze_tar_package(path),
-            "zip" => analyze_zip_package(path),
-            _ => anyhow::bail!("Unsupported file type. Expected .whl, .tar.gz, or .zip"),
-        }
-    } else if path.is_dir() {
-        analyze_python_directory(path)
-    } else {
-        anyhow::bail!("Path must be either a Python package file or a directory")
+    if path.is_dir() {
+        return analyze_python_directory(path);
     }
-}
-
-/// Analyze a wheel package
-fn analyze_wheel_package(wheel_path: &Path) -> Result<PythonPackageAnalysis> {
-    let file = File::open(wheel_path).context("Failed to open wheel file")?;
-    let mut zip = ZipArchive::new(file).context("Failed to read wheel as zip")?;
-
-    let mut metadata_content = None;
-    let mut files = Vec::new();
-
-    // Extract metadata and collect files
-    for i in 0..zip.len() {
-        let mut file = zip.by_index(i)?;
-        let name = file.name()?.into_owned();
-
-        if name.ends_with("/METADATA") {
-            let mut content = String::new();
-            file.read_to_string(&mut content)?;
-            metadata_content = Some(content);
-        }
-
-        files.push(PythonFileAnalysis {
-            file_path: name.clone(),
-            file_type: detect_python_file_type(&name),
-            size: file.size(),
-            suspicious_content: vec![],
-            imports: vec![],
-            obfuscation_score: 0.0,
-        });
+    if !path.is_file() {
+        anyhow::bail!("Path must be either a Python package file or a directory");
     }
-
-    let metadata = metadata_content.ok_or_else(|| anyhow::anyhow!("No METADATA found in wheel"))?;
-
-    analyze_package_with_metadata(&metadata, files, PackageFormat::Wheel)
-}
-
-/// Analyze a tar.gz package
-fn analyze_tar_package(tar_path: &Path) -> Result<PythonPackageAnalysis> {
-    let file = File::open(tar_path).context("Failed to open tar.gz file")?;
-    let gz = GzDecoder::new(file);
-    let mut archive = Archive::new(gz);
-
-    let mut setup_py_content = None;
-    let mut setup_cfg_content = None;
-    let mut pyproject_toml_content = None;
-    let mut pkg_info_content = None;
-    let mut files = Vec::new();
-
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.to_string_lossy().to_string();
-
-        if path.ends_with("setup.py") {
-            let mut content = String::new();
-            entry.read_to_string(&mut content)?;
-            setup_py_content = Some(content);
-        } else if path.ends_with("setup.cfg") {
-            let mut content = String::new();
-            entry.read_to_string(&mut content)?;
-            setup_cfg_content = Some(content);
-        } else if path.ends_with("pyproject.toml") {
-            let mut content = String::new();
-            entry.read_to_string(&mut content)?;
-            pyproject_toml_content = Some(content);
-        } else if path.ends_with("PKG-INFO") {
-            let mut content = String::new();
-            entry.read_to_string(&mut content)?;
-            pkg_info_content = Some(content);
-        }
-
-        files.push(PythonFileAnalysis {
-            file_path: path.clone(),
-            file_type: detect_python_file_type(&path),
-            size: entry.size(),
-            suspicious_content: vec![],
-            imports: vec![],
-            obfuscation_score: 0.0,
-        });
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    let lower = file_name.to_ascii_lowercase();
+    if matches!(lower.as_str(), "setup.py" | "setup.cfg" | "pyproject.toml") {
+        let directory = path
+            .parent()
+            .filter(|directory| !directory.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        return analyze_python_directory(directory);
     }
-
-    analyze_package_with_files(
-        setup_py_content,
-        setup_cfg_content,
-        pyproject_toml_content,
-        pkg_info_content,
-        files,
-        PackageFormat::SourceDistribution,
-    )
-}
-
-/// Analyze a zip package
-fn analyze_zip_package(zip_path: &Path) -> Result<PythonPackageAnalysis> {
-    let file = File::open(zip_path).context("Failed to open zip file")?;
-    let mut zip = ZipArchive::new(file).context("Failed to read zip")?;
-
-    let mut setup_py_content = None;
-    let mut files = Vec::new();
-
-    for i in 0..zip.len() {
-        let mut file = zip.by_index(i)?;
-        let name = file.name()?.into_owned();
-
-        if name.ends_with("setup.py") {
-            let mut content = String::new();
-            file.read_to_string(&mut content)?;
-            setup_py_content = Some(content);
-        }
-
-        files.push(PythonFileAnalysis {
-            file_path: name.clone(),
-            file_type: detect_python_file_type(&name),
-            size: file.size(),
-            suspicious_content: vec![],
-            imports: vec![],
-            obfuscation_score: 0.0,
-        });
+    if lower == "poetry.lock" {
+        let text = package_scan::read_dependency_list(path)?;
+        return analyze_poetry_lock(&text);
     }
-
-    analyze_package_with_files(
-        setup_py_content,
-        None,
-        None,
-        None,
-        files,
-        PackageFormat::SourceDistribution,
-    )
+    if lower.starts_with("requirements") && lower.ends_with(".txt") {
+        let text = package_scan::read_dependency_list(path)?;
+        return analyze_requirements_text(&text, &file_name);
+    }
+    match package_scan::sniff(path)? {
+        Some(kind @ (ContainerKind::TarGz | ContainerKind::Tar | ContainerKind::Zip)) => {
+            let loaded = package_scan::load(path, kind, &SELECTOR)?;
+            let label = if kind == ContainerKind::Zip { "zip" } else { "sdist" };
+            analyze_loaded(&loaded, label)
+        }
+        _ => anyhow::bail!(
+            "Unsupported file type: not a wheel, zip, tar or gzip archive, requirements.txt or poetry.lock. Pass a .whl, .tar.gz, .tgz or .zip archive, a source directory, or a dependency list."
+        ),
+    }
 }
 
 /// Analyze a Python directory
 fn analyze_python_directory(dir_path: &Path) -> Result<PythonPackageAnalysis> {
-    let setup_py_path = dir_path.join("setup.py");
-    let setup_cfg_path = dir_path.join("setup.cfg");
-    let pyproject_toml_path = dir_path.join("pyproject.toml");
-
-    let setup_py_content = if setup_py_path.exists() {
-        Some(std::fs::read_to_string(&setup_py_path)?)
-    } else {
-        None
-    };
-
-    let setup_cfg_content = if setup_cfg_path.exists() {
-        Some(std::fs::read_to_string(&setup_cfg_path)?)
-    } else {
-        None
-    };
-
-    let pyproject_toml_content = if pyproject_toml_path.exists() {
-        Some(std::fs::read_to_string(&pyproject_toml_path)?)
-    } else {
-        None
-    };
-
-    if setup_py_content.is_none() && setup_cfg_content.is_none() && pyproject_toml_content.is_none()
-    {
-        anyhow::bail!("No setup.py, setup.cfg, or pyproject.toml found in directory");
-    }
-
-    // Scan directory for Python files
-    let mut files = vec![];
-    if let Ok(entries) = std::fs::read_dir(dir_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                let file_name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                files.push(PythonFileAnalysis {
-                    file_path: file_name,
-                    file_type: detect_python_file_type(&path.to_string_lossy()),
-                    size: entry.metadata().map_or(0, |m| m.len()),
-                    suspicious_content: vec![],
-                    imports: vec![],
-                    obfuscation_score: 0.0,
-                });
-            }
+    let has_metadata = ["setup.py", "setup.cfg", "pyproject.toml"]
+        .iter()
+        .any(|name| dir_path.join(name).is_file());
+    if !has_metadata {
+        if dir_path.join("poetry.lock").is_file() {
+            let text = package_scan::read_dependency_list(&dir_path.join("poetry.lock"))?;
+            return analyze_poetry_lock(&text);
         }
+        if dir_path.join("requirements.txt").is_file() {
+            let text = package_scan::read_dependency_list(&dir_path.join("requirements.txt"))?;
+            return analyze_requirements_text(&text, "requirements.txt");
+        }
+        anyhow::bail!(
+            "No setup.py, setup.cfg, pyproject.toml, requirements.txt or poetry.lock found in {}. Pass the package directory, a wheel or sdist, or a requirements file.",
+            dir_path.display()
+        );
+    }
+    let loaded = package_scan::load(dir_path, ContainerKind::Directory, &SELECTOR)?;
+    analyze_loaded(&loaded, "directory")
+}
 
-        // Also recursively check common subdirectories
-        for subdir in &["tests", ".github", ".circleci"] {
-            let subdir_path = dir_path.join(subdir);
-            if subdir_path.is_dir() {
-                scan_directory_recursive(&subdir_path, &mut files, subdir)?;
-            }
+/// The directory prefix the package metadata lives in: `""` or `top`.
+fn sdist_root(loaded: &LoadedPackage) -> Option<String> {
+    let names = ["setup.py", "pyproject.toml", "setup.cfg", "PKG-INFO"];
+    // When every file sits under one top-level directory, that is the root.
+    let mut tops = loaded
+        .files
+        .iter()
+        .map(|f| f.path.split_once('/').map(|(top, _)| top));
+    let common_top = match tops.next() {
+        Some(Some(first)) if tops.all(|t| t == Some(first)) => Some(first.to_string()),
+        _ => None,
+    };
+    let has = |root: &str| {
+        names.iter().any(|name| {
+            let path = if root.is_empty() {
+                (*name).to_string()
+            } else {
+                format!("{root}/{name}")
+            };
+            loaded.file(&path).is_some_and(|f| f.content.is_some())
+        })
+    };
+    if let Some(top) = &common_top {
+        if has(top) {
+            return Some(top.clone());
         }
     }
+    if has("") {
+        return Some(String::new());
+    }
+    let mut candidates: Vec<String> = loaded
+        .files
+        .iter()
+        .filter_map(|f| {
+            let parts: Vec<&str> = f.path.split('/').collect();
+            (parts.len() == 2 && names.contains(&parts[1])).then(|| parts[0].to_string())
+        })
+        .collect();
+    candidates.sort();
+    candidates.into_iter().next()
+}
 
+fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<PythonPackageAnalysis> {
+    let mut files = Vec::with_capacity(loaded.files.len());
+    let mut scan = SourceScan::default();
+    for file in &loaded.files {
+        let mut analysis = PythonFileAnalysis {
+            file_path: file.path.clone(),
+            file_type: detect_python_file_type(&file.path),
+            size: file.size,
+            suspicious_content: vec![],
+            imports: vec![],
+            obfuscation_score: 0.0,
+            source_scanned: false,
+        };
+        if let (Some(lang), Some(bytes)) = (language_of(&file.path), file.content.as_deref()) {
+            let result = scan_source(lang, &file.path, bytes);
+            analysis.source_scanned = true;
+            analysis.obfuscation_score = result.obfuscation_score;
+            analysis.imports = result.imports;
+            analysis.suspicious_content = result
+                .findings
+                .iter()
+                .map(|f| format!("line {}: {}", f.line, f.rule))
+                .collect();
+            for (url, line) in result.suspicious_urls {
+                scan.urls.push((url, file.path.clone(), line));
+            }
+            if scan.findings.len() < MAX_FINDINGS {
+                scan.findings.extend(result.findings);
+            }
+        }
+        files.push(analysis);
+    }
+    scan.findings.truncate(MAX_FINDINGS);
+    sort_findings(&mut scan.findings);
+
+    // A wheel: <name>-<version>.dist-info/METADATA at the top level.
+    let wheel_metadata = loaded
+        .files
+        .iter()
+        .filter(|f| {
+            let parts: Vec<&str> = f.path.split('/').collect();
+            parts.len() == 2 && parts[0].ends_with(".dist-info") && parts[1] == "METADATA"
+        })
+        .map(|f| f.path.clone())
+        .min();
+    if let Some(path) = wheel_metadata {
+        let metadata = loaded
+            .text(&path)
+            .context("METADATA was not read (larger than the manifest limit)")?;
+        let mut input = InputInfo::from_loaded(
+            if kind == "zip" { "wheel" } else { kind },
+            loaded,
+            Some(&path),
+        );
+        let other_dist_infos: std::collections::BTreeSet<String> = loaded
+            .files
+            .iter()
+            .filter_map(|f| f.path.split_once('/'))
+            .filter(|(dir, name)| dir.ends_with(".dist-info") && *name == "METADATA")
+            .map(|(dir, _)| dir.to_string())
+            .filter(|dir| !path.starts_with(&format!("{dir}/")))
+            .collect();
+        if !other_dist_infos.is_empty() {
+            let list = other_dist_infos.into_iter().collect::<Vec<_>>().join(", ");
+            input.notes.push(format!(
+                "The wheel holds more than one .dist-info directory (also {list}); pip rejects such wheels. Analysed {path}."
+            ));
+            scan.findings.push(SourceFinding {
+                rule: "Several .dist-info directories".to_string(),
+                category: "package-structure".to_string(),
+                severity: "High".to_string(),
+                file: path.clone(),
+                line: 1,
+                evidence: format!(
+                    "also present: {}",
+                    list.chars().take(120).collect::<String>()
+                ),
+            });
+            sort_findings(&mut scan.findings);
+        }
+        return analyze_package_with_metadata(&metadata, files, scan, input);
+    }
+
+    let root = sdist_root(loaded).context(
+        "No package metadata found at the root of the archive (expected setup.py, setup.cfg, pyproject.toml or PKG-INFO next to the top-level directory, or <name>.dist-info/METADATA for a wheel)",
+    )?;
+    let at = |name: &str| {
+        let path = if root.is_empty() {
+            name.to_string()
+        } else {
+            format!("{root}/{name}")
+        };
+        loaded.text(&path).map(|text| (path, text))
+    };
+    let setup_py = at("setup.py");
+    let setup_cfg = at("setup.cfg");
+    let pyproject = at("pyproject.toml");
+    let pkg_info = at("PKG-INFO");
+    let manifest = setup_py
+        .as_ref()
+        .or(pyproject.as_ref())
+        .or(setup_cfg.as_ref())
+        .or(pkg_info.as_ref())
+        .map(|(path, _)| path.clone());
+    let lock = at("poetry.lock").map(|(_, text)| parse_poetry_lock(&text));
+    let input = InputInfo::from_loaded(kind, loaded, manifest.as_deref());
+    let format = if kind == "directory" {
+        PackageFormat::Directory
+    } else {
+        PackageFormat::SourceDistribution
+    };
     analyze_package_with_files(
-        setup_py_content,
-        setup_cfg_content,
-        pyproject_toml_content,
-        None,
+        setup_py.map(|(_, t)| t),
+        setup_cfg.map(|(_, t)| t),
+        pyproject.map(|(_, t)| t),
+        pkg_info.map(|(_, t)| t),
         files,
-        PackageFormat::Directory,
+        format,
+        scan,
+        lock.as_ref(),
+        input,
     )
 }
 
@@ -483,10 +581,12 @@ fn analyze_python_directory(dir_path: &Path) -> Result<PythonPackageAnalysis> {
 fn analyze_package_with_metadata(
     metadata: &str,
     files: Vec<PythonFileAnalysis>,
-    _format: PackageFormat,
+    scan: SourceScan,
+    input: InputInfo,
 ) -> Result<PythonPackageAnalysis> {
     let package_info = parse_wheel_metadata(metadata)?;
-    let dependencies = analyze_dependencies_from_metadata(metadata)?;
+    let mut dependencies = analyze_dependencies_from_metadata(metadata)?;
+    finish_dependencies(&mut dependencies, &package_info, None);
     let setup_analysis = SetupAnalysis {
         setup_type: SetupType::PyProjectToml,
         setup_commands: vec![],
@@ -496,9 +596,14 @@ fn analyze_package_with_metadata(
     };
 
     let security_analysis =
-        perform_security_analysis(&package_info, &dependencies, &files, &setup_analysis)?;
-    let malicious_indicators =
-        detect_malicious_indicators(&package_info, &dependencies, &security_analysis)?;
+        perform_security_analysis(&package_info, &dependencies, &files, &setup_analysis, &scan)?;
+    let malicious_indicators = detect_malicious_indicators(
+        &package_info,
+        &dependencies,
+        &security_analysis,
+        &scan.findings,
+        true,
+    )?;
     let maintainer_analysis = analyze_maintainers(&package_info)?;
     let quality_metrics = calculate_quality_metrics(&files)?;
 
@@ -511,20 +616,26 @@ fn analyze_package_with_metadata(
         setup_analysis,
         maintainer_analysis,
         quality_metrics,
+        source_findings: scan.findings,
+        input,
     })
 }
 
 /// Analyze package with various setup files
+#[allow(clippy::too_many_arguments)]
 fn analyze_package_with_files(
     setup_py: Option<String>,
     setup_cfg: Option<String>,
     pyproject_toml: Option<String>,
     pkg_info: Option<String>,
     files: Vec<PythonFileAnalysis>,
-    _format: PackageFormat,
+    format: PackageFormat,
+    scan: SourceScan,
+    lock: Option<&ParsedLock>,
+    input: InputInfo,
 ) -> Result<PythonPackageAnalysis> {
     // Extract package info from available sources
-    let package_info = if let Some(ref content) = pyproject_toml {
+    let mut package_info = if let Some(ref content) = pyproject_toml {
         parse_pyproject_toml(content)?
     } else if let Some(ref content) = setup_py {
         parse_setup_py(content)?
@@ -535,20 +646,39 @@ fn analyze_package_with_files(
     } else {
         anyhow::bail!("No package metadata found")
     };
+    package_info.package_format = format;
+    // A pyproject.toml without a [project] name (setuptools via setup.py) falls back to setup.py.
+    if package_info.name.is_empty() {
+        if let Some(ref content) = setup_py {
+            let fallback = parse_setup_py(content)?;
+            if !fallback.name.is_empty() {
+                package_info.name = fallback.name;
+                if package_info.version.is_empty() {
+                    package_info.version = fallback.version;
+                }
+            }
+        }
+    }
 
     // Analyze dependencies
-    let dependencies = analyze_dependencies(&setup_py, &setup_cfg, &pyproject_toml)?;
+    let mut dependencies = analyze_dependencies(&setup_py, &setup_cfg, &pyproject_toml, lock)?;
+    finish_dependencies(&mut dependencies, &package_info, lock);
 
     // Analyze setup scripts
     let setup_analysis = analyze_setup_scripts(&setup_py, &setup_cfg, &pyproject_toml)?;
 
     // Perform security analysis
     let security_analysis =
-        perform_security_analysis(&package_info, &dependencies, &files, &setup_analysis)?;
+        perform_security_analysis(&package_info, &dependencies, &files, &setup_analysis, &scan)?;
 
     // Detect malicious indicators
-    let malicious_indicators =
-        detect_malicious_indicators(&package_info, &dependencies, &security_analysis)?;
+    let malicious_indicators = detect_malicious_indicators(
+        &package_info,
+        &dependencies,
+        &security_analysis,
+        &scan.findings,
+        true,
+    )?;
 
     // Analyze maintainers
     let maintainer_analysis = analyze_maintainers(&package_info)?;
@@ -565,7 +695,330 @@ fn analyze_package_with_files(
         setup_analysis,
         maintainer_analysis,
         quality_metrics,
+        source_findings: scan.findings,
+        input,
     })
+}
+
+/// A lock file read as a dependency list.
+struct ParsedLock {
+    packages: Vec<LockedPackage>,
+    /// Version of each package by normalised name.
+    by_name: HashMap<String, String>,
+}
+
+const MAX_LOCKED: usize = 20_000;
+
+fn parse_poetry_lock(text: &str) -> ParsedLock {
+    let mut packages = Vec::new();
+    let mut by_name = HashMap::new();
+    let mut name: Option<String> = None;
+    let mut version: Option<String> = None;
+    let mut dev = false;
+    let mut in_package = false;
+    let mut flush = |name: &mut Option<String>, version: &mut Option<String>, dev: &mut bool| {
+        if let (Some(n), Some(v)) = (name.take(), version.take()) {
+            if packages.len() < MAX_LOCKED {
+                by_name.insert(normalize_name(&n), v.clone());
+                packages.push(LockedPackage {
+                    vulnerabilities: check_package_vulnerabilities(&n, &v),
+                    name: n,
+                    version: v,
+                    dev: *dev,
+                });
+            }
+        }
+        *dev = false;
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "[[package]]" {
+            flush(&mut name, &mut version, &mut dev);
+            in_package = true;
+        } else if line.starts_with('[') {
+            // [package.dependencies] and friends belong to the current package.
+            if !line.starts_with("[package") {
+                in_package = false;
+            }
+        } else if in_package {
+            if let Some(rest) = line.strip_prefix("name = ") {
+                if name.is_none() {
+                    name = Some(rest.trim_matches('"').to_string());
+                }
+            } else if let Some(rest) = line.strip_prefix("version = ") {
+                if version.is_none() {
+                    version = Some(rest.trim_matches('"').to_string());
+                }
+            } else if line.starts_with("category = \"dev\"") {
+                dev = true;
+            } else if let Some(rest) = line.strip_prefix("groups = ") {
+                dev = !rest.contains("\"main\"");
+            }
+        }
+    }
+    flush(&mut name, &mut version, &mut dev);
+    ParsedLock { packages, by_name }
+}
+
+fn dependency_details(
+    name: &str,
+    raw: &str,
+    specifier: &str,
+    resolved: Option<&str>,
+) -> DependencyDetails {
+    let check = check_dependency_spec(name, specifier, resolved);
+    DependencyDetails {
+        version_spec: specifier.to_string(),
+        is_pinned: matches!(classify_specifier(specifier), SpecKind::Pinned(_)),
+        is_url: raw.starts_with("http") || raw.contains(" @ http"),
+        is_git: raw.contains("git+"),
+        vulnerabilities: check.vulnerabilities,
+        deprecated: false,
+        resolved_version: resolved.map(String::from),
+        range_floor_advisories: check
+            .range_floor_matches
+            .into_iter()
+            .map(|v| v.cve_id)
+            .collect(),
+    }
+}
+
+/// Fill in what depends on the whole dependency set: lock file entries, the
+/// package's own advisories, the advisory-data provenance and the summary.
+fn finish_dependencies(
+    dependencies: &mut PythonDependencyAnalysis,
+    package_info: &PackageInfo,
+    lock: Option<&ParsedLock>,
+) {
+    dependencies.package_vulnerabilities =
+        check_package_vulnerabilities(&package_info.name, &package_info.version);
+    dependencies.vulnerability_db = advisory_data_info();
+    if let Some(lock) = lock {
+        dependencies.locked_packages = lock.packages.clone();
+    }
+    let mut summary = calculate_vulnerability_summary(&dependencies.install_requires);
+    for (name, details) in dependencies
+        .setup_requires
+        .iter()
+        .chain(dependencies.tests_require.iter())
+    {
+        tally_dependency(&mut summary, name, details);
+    }
+    let direct: std::collections::HashSet<String> = dependencies
+        .install_requires
+        .keys()
+        .chain(dependencies.setup_requires.keys())
+        .chain(dependencies.tests_require.keys())
+        .map(|n| normalize_name(n))
+        .collect();
+    for package in &dependencies.locked_packages {
+        if !direct.contains(&normalize_name(&package.name)) && !package.vulnerabilities.is_empty() {
+            tally_vulns(
+                &mut summary,
+                &format!("{}=={}", package.name, package.version),
+                &package.vulnerabilities,
+            );
+        }
+    }
+    summary.vulnerable_packages.sort();
+    summary.unresolved_range_hits.sort();
+    summary.unresolved_range_hits.dedup();
+    dependencies.vulnerability_summary = summary;
+}
+
+fn tally_vulns(summary: &mut VulnerabilitySummary, name: &str, vulns: &[KnownVulnerability]) {
+    if vulns.is_empty() {
+        return;
+    }
+    summary.vulnerable_packages.push(name.to_string());
+    summary.total_count += vulns.len();
+    for vuln in vulns {
+        match vuln.severity {
+            VulnerabilitySeverity::Critical => summary.critical_count += 1,
+            VulnerabilitySeverity::High => summary.high_count += 1,
+            VulnerabilitySeverity::Medium => summary.medium_count += 1,
+            VulnerabilitySeverity::Low => summary.low_count += 1,
+            VulnerabilitySeverity::None => {}
+        }
+    }
+}
+
+fn tally_dependency(summary: &mut VulnerabilitySummary, name: &str, details: &DependencyDetails) {
+    tally_vulns(summary, name, &details.vulnerabilities);
+    if !details.range_floor_advisories.is_empty() {
+        summary.unresolved_range_hits.push(name.to_string());
+    }
+}
+
+/// A poetry.lock as the only input: a dependency list, no source to scan.
+fn analyze_poetry_lock(text: &str) -> Result<PythonPackageAnalysis> {
+    let lock = parse_poetry_lock(text);
+    if lock.packages.is_empty() {
+        anyhow::bail!(
+            "poetry.lock has no [[package]] entries; it is not a readable poetry lock file"
+        );
+    }
+    let mut install_requires = HashMap::new();
+    let mut tests_require = HashMap::new();
+    for package in &lock.packages {
+        let spec = format!("=={}", package.version);
+        let details = dependency_details(&package.name, &package.name, &spec, None);
+        if package.dev {
+            tests_require.insert(package.name.clone(), details);
+        } else {
+            install_requires.insert(package.name.clone(), details);
+        }
+    }
+    let input = InputInfo::dependency_list(
+        "lockfile",
+        "poetry.lock is a dependency list: no source files were scanned and the package name was not judged",
+    );
+    dependency_list_analysis(
+        "(poetry.lock)",
+        install_requires,
+        tests_require,
+        Some(&lock),
+        input,
+    )
+}
+
+/// A requirements file as the only input.
+fn analyze_requirements_text(text: &str, file_name: &str) -> Result<PythonPackageAnalysis> {
+    let mut install_requires = HashMap::new();
+    let mut joined = String::new();
+    let mut capped = false;
+    for raw in text.lines() {
+        if install_requires.len() >= package_scan::MAX_DEPENDENCY_ENTRIES {
+            capped = true;
+            break;
+        }
+        let line = raw.trim_end();
+        if let Some(stripped) = line.strip_suffix('\\') {
+            joined.push_str(stripped);
+            joined.push(' ');
+            continue;
+        }
+        joined.push_str(line);
+        let entry = std::mem::take(&mut joined);
+        let entry = entry.split(" #").next().unwrap_or("").trim().to_string();
+        if entry.is_empty() || entry.starts_with('#') || entry.starts_with('-') {
+            continue;
+        }
+        // Drop per-requirement options such as `--hash=sha256:...`.
+        let requirement = entry.split(" --").next().unwrap_or("").trim();
+        if requirement.is_empty() {
+            continue;
+        }
+        let (name, specifier) = parse_dependency_spec(requirement);
+        if name.is_empty() {
+            continue;
+        }
+        let details = dependency_details(&name, requirement, &specifier, None);
+        install_requires.insert(name, details);
+    }
+    if install_requires.is_empty() {
+        anyhow::bail!("{file_name} lists no requirements");
+    }
+    let mut input = InputInfo::dependency_list(
+        "requirements",
+        &format!("{file_name} is a dependency list: no source files were scanned and the package name was not judged"),
+    );
+    if capped {
+        input.notes.push(format!(
+            "Only the first {} requirements were analysed; the rest of {file_name} was not read.",
+            package_scan::MAX_DEPENDENCY_ENTRIES
+        ));
+    }
+    dependency_list_analysis(
+        &format!("({file_name})"),
+        install_requires,
+        HashMap::new(),
+        None,
+        input,
+    )
+}
+
+fn dependency_list_analysis(
+    label: &str,
+    install_requires: HashMap<String, DependencyDetails>,
+    tests_require: HashMap<String, DependencyDetails>,
+    lock: Option<&ParsedLock>,
+    input: InputInfo,
+) -> Result<PythonPackageAnalysis> {
+    let package_info = PackageInfo {
+        name: label.to_string(),
+        version: String::new(),
+        description: None,
+        author: None,
+        author_email: None,
+        maintainer: None,
+        maintainer_email: None,
+        license: None,
+        url: None,
+        project_urls: HashMap::new(),
+        keywords: vec![],
+        classifiers: vec![],
+        python_requires: None,
+        package_format: PackageFormat::Directory,
+    };
+    let dependency_count = install_requires.len() + tests_require.len();
+    let mut dependencies = PythonDependencyAnalysis {
+        install_requires,
+        extras_require: HashMap::new(),
+        setup_requires: HashMap::new(),
+        tests_require,
+        dependency_count,
+        vulnerability_summary: VulnerabilitySummary {
+            critical_count: 0,
+            high_count: 0,
+            medium_count: 0,
+            low_count: 0,
+            total_count: 0,
+            vulnerable_packages: vec![],
+            unresolved_range_hits: vec![],
+        },
+        locked_packages: vec![],
+        package_vulnerabilities: vec![],
+        vulnerability_db: AdvisoryDataInfo::default(),
+    };
+    finish_dependencies(&mut dependencies, &package_info, lock);
+    let setup_analysis = SetupAnalysis {
+        setup_type: SetupType::PyProjectToml,
+        setup_commands: vec![],
+        custom_commands: HashMap::new(),
+        dangerous_operations: vec![],
+        external_downloads: vec![],
+    };
+    let scan = SourceScan::default();
+    let security_analysis =
+        perform_security_analysis(&package_info, &dependencies, &[], &setup_analysis, &scan)?;
+    let malicious_indicators =
+        detect_malicious_indicators(&package_info, &dependencies, &security_analysis, &[], false)?;
+    let maintainer_analysis = analyze_maintainers(&package_info)?;
+    let quality_metrics = calculate_quality_metrics(&[])?;
+    Ok(PythonPackageAnalysis {
+        package_info,
+        dependencies,
+        security_analysis,
+        malicious_indicators,
+        files_analysis: vec![],
+        setup_analysis,
+        maintainer_analysis,
+        quality_metrics,
+        source_findings: vec![],
+        input,
+    })
+}
+
+/// The header block of a METADATA / PKG-INFO file (up to the first blank line).
+fn metadata_headers(metadata: &str) -> &str {
+    let end = metadata
+        .find("\n\n")
+        .into_iter()
+        .chain(metadata.find("\r\n\r\n"))
+        .min()
+        .unwrap_or(metadata.len());
+    &metadata[..end]
 }
 
 /// Parse wheel METADATA file
@@ -584,7 +1037,8 @@ fn parse_wheel_metadata(metadata: &str) -> Result<PackageInfo> {
     let mut python_requires = None;
     let mut project_urls = HashMap::new();
 
-    for line in metadata.lines() {
+    // Only the header block: a long description after the blank line may contain "Name: ...".
+    for line in metadata_headers(metadata).lines() {
         if let Some((key, value)) = line.split_once(": ") {
             match key {
                 "Name" => name = value.to_string(),
@@ -797,7 +1251,7 @@ fn analyze_dependencies_from_metadata(metadata: &str) -> Result<PythonDependency
     let mut install_requires = HashMap::new();
 
     // Parse Requires-Dist entries
-    for line in metadata.lines() {
+    for line in metadata_headers(metadata).lines() {
         if line.starts_with("Requires-Dist: ") {
             let dep_spec = line.trim_start_matches("Requires-Dist: ");
 
@@ -807,20 +1261,11 @@ fn analyze_dependencies_from_metadata(metadata: &str) -> Result<PythonDependency
             }
 
             let (name, version_spec) = parse_dependency_spec(dep_spec);
-
-            let vulnerabilities = check_package_vulnerabilities(&name, &version_spec);
-
-            install_requires.insert(
-                name,
-                DependencyDetails {
-                    version_spec,
-                    is_pinned: false, // TODO: Check if version is pinned
-                    is_url: false,
-                    is_git: false,
-                    vulnerabilities,
-                    deprecated: false,
-                },
-            );
+            if name.is_empty() {
+                continue;
+            }
+            let details = dependency_details(&name, dep_spec, &version_spec, None);
+            install_requires.insert(name, details);
         }
     }
 
@@ -834,6 +1279,9 @@ fn analyze_dependencies_from_metadata(metadata: &str) -> Result<PythonDependency
         tests_require: HashMap::new(),
         dependency_count,
         vulnerability_summary,
+        locked_packages: vec![],
+        package_vulnerabilities: vec![],
+        vulnerability_db: AdvisoryDataInfo::default(),
     })
 }
 
@@ -842,6 +1290,7 @@ fn analyze_dependencies(
     setup_py: &Option<String>,
     setup_cfg: &Option<String>,
     pyproject_toml: &Option<String>,
+    lock: Option<&ParsedLock>,
 ) -> Result<PythonDependencyAnalysis> {
     let mut install_requires = HashMap::new();
     let mut extras_require = HashMap::new();
@@ -863,6 +1312,20 @@ fn analyze_dependencies(
         extract_pyproject_dependencies(content, &mut install_requires)?;
     }
 
+    // A lock file settles which version a requirement resolves to.
+    if let Some(lock) = lock {
+        for (name, details) in &mut install_requires {
+            if let Some(version) = lock.by_name.get(&normalize_name(name)) {
+                *details = dependency_details(
+                    name,
+                    &details.version_spec,
+                    &details.version_spec.clone(),
+                    Some(version),
+                );
+            }
+        }
+    }
+
     let dependency_count = install_requires.len()
         + extras_require
             .values()
@@ -878,6 +1341,9 @@ fn analyze_dependencies(
         tests_require,
         dependency_count,
         vulnerability_summary,
+        locked_packages: vec![],
+        package_vulnerabilities: vec![],
+        vulnerability_db: AdvisoryDataInfo::default(),
     })
 }
 
@@ -891,19 +1357,11 @@ fn extract_setup_py_dependencies(
     if let Some(deps) = extract_list_from_setup_py(content, "install_requires") {
         for dep in deps {
             let (name, version_spec) = parse_dependency_spec(&dep);
-            let vulnerabilities = check_package_vulnerabilities(&name, &version_spec);
-
-            install_requires.insert(
-                name,
-                DependencyDetails {
-                    version_spec: version_spec.clone(),
-                    is_pinned: version_spec.contains("=="),
-                    is_url: dep.starts_with("http"),
-                    is_git: dep.contains("git+"),
-                    vulnerabilities,
-                    deprecated: false,
-                },
-            );
+            if name.is_empty() {
+                continue;
+            }
+            let details = dependency_details(&name, &dep, &version_spec, None);
+            install_requires.insert(name, details);
         }
     }
 
@@ -965,19 +1423,11 @@ fn extract_setup_cfg_dependencies(
         if in_install_requires && !line.trim().is_empty() {
             let dep = line.trim();
             let (name, version_spec) = parse_dependency_spec(dep);
-            let vulnerabilities = check_package_vulnerabilities(&name, &version_spec);
-
-            install_requires.insert(
-                name,
-                DependencyDetails {
-                    version_spec: version_spec.clone(),
-                    is_pinned: version_spec.contains("=="),
-                    is_url: dep.starts_with("http"),
-                    is_git: dep.contains("git+"),
-                    vulnerabilities,
-                    deprecated: false,
-                },
-            );
+            if name.is_empty() {
+                continue;
+            }
+            let details = dependency_details(&name, dep, &version_spec, None);
+            install_requires.insert(name, details);
         }
     }
 
@@ -1033,19 +1483,11 @@ fn extract_pyproject_dependencies(
         if in_deps_list && line.trim().starts_with('"') {
             let dep_spec = line.trim().trim_matches('"').trim_matches(',');
             let (name, version_spec) = parse_dependency_spec(dep_spec);
-            let vulnerabilities = check_package_vulnerabilities(&name, &version_spec);
-
-            install_requires.insert(
-                name,
-                DependencyDetails {
-                    version_spec,
-                    is_pinned: false,
-                    is_url: false,
-                    is_git: false,
-                    vulnerabilities,
-                    deprecated: false,
-                },
-            );
+            if name.is_empty() {
+                continue;
+            }
+            let details = dependency_details(&name, dep_spec, &version_spec, None);
+            install_requires.insert(name, details);
         }
         // Parse dependencies in [tool.poetry.dependencies] format
         else if in_dependencies && line.contains('=') {
@@ -1054,20 +1496,11 @@ fn extract_pyproject_dependencies(
                 if name == "python" {
                     continue; // Skip python version requirement
                 }
-                let version_spec = version.trim().trim_matches('"').trim_matches('^');
-                let vulnerabilities = check_package_vulnerabilities(name, version_spec);
-
-                install_requires.insert(
-                    name.to_string(),
-                    DependencyDetails {
-                        version_spec: version_spec.to_string(),
-                        is_pinned: version_spec.contains("=="),
-                        is_url: false,
-                        is_git: false,
-                        vulnerabilities,
-                        deprecated: false,
-                    },
-                );
+                // Poetry: "^1.2" is a caret range; a bare "1.2.3" is exact.
+                let raw_spec = version.trim().trim_matches('"');
+                let specifier = poetry_specifier(raw_spec);
+                let details = dependency_details(name, raw_spec, &specifier, None);
+                install_requires.insert(name.to_string(), details);
             }
         }
     }
@@ -1075,33 +1508,60 @@ fn extract_pyproject_dependencies(
     Ok(())
 }
 
-/// Parse dependency specification
-fn parse_dependency_spec(spec: &str) -> (String, String) {
-    // Handle various formats: package==1.0, package>=1.0, package[extra]>=1.0
-    let spec = spec.trim();
-
-    // Remove extras
-    let spec_no_extras = if let Some(idx) = spec.find('[') {
-        if let Some(end_idx) = spec.find(']') {
-            format!("{}{}", &spec[..idx], &spec[end_idx + 1..])
-        } else {
-            spec.to_string()
-        }
-    } else {
-        spec.to_string()
-    };
-
-    // Find version specifier
-    for op in &["==", ">=", "<=", ">", "<", "~=", "!="] {
-        if let Some(idx) = spec_no_extras.find(op) {
-            let name = spec_no_extras[..idx].trim();
-            let version = spec_no_extras[idx..].trim();
-            return (name.to_string(), version.to_string());
-        }
+/// Turn a Poetry version constraint into a PEP 440 specifier: `^1.2.3` and
+/// `~1.2.3` become `>=1.2.3`, a bare `1.2.3` becomes `==1.2.3`, `*` stays `*`.
+fn poetry_specifier(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "*" {
+        return "*".to_string();
     }
+    if let Some(rest) = raw.strip_prefix('^').or_else(|| raw.strip_prefix('~')) {
+        if raw.starts_with("~=") {
+            return raw.to_string();
+        }
+        return format!(">={rest}");
+    }
+    if raw.starts_with(['=', '<', '>', '!']) || raw.contains(',') {
+        return raw.replace(' ', "");
+    }
+    if raw.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return format!("=={raw}");
+    }
+    "*".to_string()
+}
 
-    // No version specifier
-    (spec_no_extras.trim().to_string(), "*".to_string())
+/// Parse a requirement into `(name, specifier)`.
+///
+/// Handles `name==1.0`, `name>=1.0,<2`, `name[extra]>=1`, the parenthesised
+/// METADATA form `name (==1.0)`, environment markers after `;` and direct
+/// references `name @ url`. The specifier is `*` when there is none.
+fn parse_dependency_spec(spec: &str) -> (String, String) {
+    let spec = spec.split(';').next().unwrap_or("").trim();
+    if let Some((name, _url)) = spec.split_once(" @ ") {
+        return (strip_extras(name.trim()), "*".to_string());
+    }
+    let cleaned: String = spec.chars().filter(|c| !matches!(c, '(' | ')')).collect();
+    let cleaned = strip_extras(cleaned.trim());
+    match cleaned.find(['=', '<', '>', '!', '~']) {
+        Some(index) => (
+            cleaned[..index].trim().to_string(),
+            cleaned[index..].replace(' ', ""),
+        ),
+        // `name 1.0` is not valid, but `name (1.0)` style leftovers keep the name only.
+        None => (
+            cleaned.split_whitespace().next().unwrap_or("").to_string(),
+            "*".to_string(),
+        ),
+    }
+}
+
+fn strip_extras(spec: &str) -> String {
+    match (spec.find('['), spec.find(']')) {
+        (Some(start), Some(end)) if end > start => {
+            format!("{}{}", &spec[..start], &spec[end + 1..])
+        }
+        _ => spec.to_string(),
+    }
 }
 
 /// Calculate vulnerability summary
@@ -1115,25 +1575,13 @@ fn calculate_vulnerability_summary(
         low_count: 0,
         total_count: 0,
         vulnerable_packages: vec![],
+        unresolved_range_hits: vec![],
     };
-
-    for (name, details) in dependencies {
-        if !details.vulnerabilities.is_empty() {
-            summary.vulnerable_packages.push(name.clone());
-            summary.total_count += details.vulnerabilities.len();
-
-            for vuln in &details.vulnerabilities {
-                match vuln.severity {
-                    VulnerabilitySeverity::Critical => summary.critical_count += 1,
-                    VulnerabilitySeverity::High => summary.high_count += 1,
-                    VulnerabilitySeverity::Medium => summary.medium_count += 1,
-                    VulnerabilitySeverity::Low => summary.low_count += 1,
-                    VulnerabilitySeverity::None => {}
-                }
-            }
-        }
+    let mut names: Vec<&String> = dependencies.keys().collect();
+    names.sort();
+    for name in names {
+        tally_dependency(&mut summary, name, &dependencies[name]);
     }
-
     summary
 }
 
@@ -1216,6 +1664,7 @@ fn perform_security_analysis(
     dependencies: &PythonDependencyAnalysis,
     files: &[PythonFileAnalysis],
     setup_analysis: &SetupAnalysis,
+    scan: &SourceScan,
 ) -> Result<PythonSecurityAnalysis> {
     let has_setup_script = matches!(setup_analysis.setup_type, SetupType::SetupPy);
     let has_install_script = !setup_analysis.setup_commands.is_empty();
@@ -1225,9 +1674,40 @@ fn perform_security_analysis(
         .any(|cmd| cmd.command_name.contains("install"));
 
     let suspicious_imports = detect_suspicious_imports(files, setup_analysis);
-    let network_access_patterns = detect_network_patterns(files, setup_analysis);
+    let mut network_access_patterns = detect_network_patterns(files, setup_analysis);
+    // A URL mentioned in a source file is not evidence of exfiltration.
+    let script_network_patterns = network_access_patterns.clone();
+    for (url, file, line) in &scan.urls {
+        if network_access_patterns.len() >= 100 {
+            break;
+        }
+        network_access_patterns.push(NetworkAccessPattern {
+            url: url.clone(),
+            protocol: if url.starts_with("https") {
+                "https"
+            } else {
+                "http"
+            }
+            .to_string(),
+            is_suspicious: true,
+            found_in: format!("file:{file}:{line}"),
+        });
+    }
     let file_system_access = detect_filesystem_patterns(files, setup_analysis);
-    let process_execution = detect_process_execution(files, setup_analysis);
+    let mut process_execution = detect_process_execution(files, setup_analysis);
+    for finding in scan
+        .findings
+        .iter()
+        .filter(|f| f.category == "process-exec")
+        .take(50)
+    {
+        process_execution.push(ProcessExecution {
+            command: format!("{}:{}", finding.file, finding.line),
+            arguments: vec![finding.evidence.clone()],
+            is_suspicious: true,
+            risk_level: finding.severity.clone(),
+        });
+    }
 
     // Check for obfuscation in files and setup script
     let mut obfuscation_detected = detect_obfuscation(files);
@@ -1246,15 +1726,32 @@ fn perform_security_analysis(
         }
     }
 
-    let crypto_mining_indicators = detect_crypto_mining(files, &suspicious_imports);
-    let data_exfiltration_risk = detect_data_exfiltration(&network_access_patterns);
-    let backdoor_indicators = detect_backdoor_indicators(files, &process_execution);
+    let crypto_mining_indicators = scan.findings.iter().any(|f| f.category == "cryptomining");
+    let data_exfiltration_risk = detect_data_exfiltration(&script_network_patterns)
+        || scan
+            .findings
+            .iter()
+            .any(|f| f.category == "exfiltration" && f.severity != "Medium");
+    let mut backdoor_indicators = detect_backdoor_indicators(files, &process_execution);
+    for finding in scan
+        .findings
+        .iter()
+        .filter(|f| f.category == "backdoor")
+        .take(20)
+    {
+        backdoor_indicators.push(BackdoorIndicator {
+            indicator_type: finding.rule.clone(),
+            description: format!("{} at {}:{}", finding.rule, finding.file, finding.line),
+            evidence: vec![finding.evidence.clone()],
+            confidence: 0.9,
+        });
+    }
 
     let supply_chain_risk_score = calculate_supply_chain_risk(
         package_info,
         dependencies,
         setup_analysis,
-        &network_access_patterns,
+        &script_network_patterns,
     );
 
     Ok(PythonSecurityAnalysis {
@@ -1383,14 +1880,6 @@ fn detect_obfuscation_in_content(content: &str) -> bool {
     false
 }
 
-/// Detect crypto mining
-const fn detect_crypto_mining(
-    _files: &[PythonFileAnalysis],
-    _imports: &[SuspiciousImport],
-) -> bool {
-    false // TODO: Implement
-}
-
 /// Detect data exfiltration
 fn detect_data_exfiltration(network_patterns: &[NetworkAccessPattern]) -> bool {
     network_patterns.iter().any(|p| p.is_suspicious)
@@ -1403,7 +1892,7 @@ fn detect_backdoor_indicators(
 ) -> Vec<BackdoorIndicator> {
     let mut indicators = vec![];
 
-    if !process_execution.is_empty() {
+    if !process_execution.is_empty() && process_execution.iter().any(|p| p.risk_level == "High") {
         indicators.push(BackdoorIndicator {
             indicator_type: "Process execution".to_string(),
             description: "Package executes external processes".to_string(),
@@ -1457,36 +1946,147 @@ fn calculate_supply_chain_risk(
     risk_score.min(100.0)
 }
 
+/// Points the dependency vulnerability counts add to the risk score.
+fn vulnerability_points(critical: usize, high: usize, medium: usize) -> f32 {
+    if critical > 0 {
+        40.0
+    } else if high > 0 {
+        20.0
+    } else if medium > 0 {
+        5.0
+    } else {
+        0.0
+    }
+}
+
 /// Detect malicious indicators
 fn detect_malicious_indicators(
     package_info: &PackageInfo,
-    _dependencies: &PythonDependencyAnalysis,
+    dependencies: &PythonDependencyAnalysis,
     security: &PythonSecurityAnalysis,
+    findings: &[SourceFinding],
+    judge_name: bool,
 ) -> Result<MaliciousPackageIndicators> {
-    let typosquatting_risk = analyze_typosquatting(&package_info.name);
-    let dependency_confusion_risk = check_dependency_confusion(package_info);
-    let known_malicious_patterns = detect_known_malicious_patterns(package_info, security);
-    let suspicious_maintainer_activity = false; // TODO: Implement
-    let code_injection_patterns = detect_code_injection_patterns(security);
+    let typosquatting_risk = if judge_name {
+        analyze_typosquatting(&package_info.name)
+    } else {
+        TyposquattingAnalysis {
+            is_potential_typosquatting: false,
+            similar_packages: vec![],
+            suspicious_name_patterns: vec![],
+        }
+    };
+    let dependency_confusion_risk = judge_name && check_dependency_confusion(package_info);
+    let known_malicious_patterns = if judge_name {
+        detect_known_malicious_patterns(package_info, security, findings)
+    } else {
+        vec![]
+    };
+    let suspicious_maintainer_activity = false; // needs registry data; this tool is offline
+    let code_injection_patterns = detect_code_injection_patterns(security, findings);
 
     let mut overall_risk_score = 0.0;
+    let mut reasons: Vec<String> = vec![];
 
     if typosquatting_risk.is_potential_typosquatting {
         overall_risk_score += 30.0;
+        reasons.push("package name resembles a popular package or a known malicious name".into());
     }
     if dependency_confusion_risk {
         overall_risk_score += 25.0;
+        reasons.push("package name looks like an internal package (dependency confusion)".into());
     }
     if !known_malicious_patterns.is_empty() {
         overall_risk_score += 40.0;
+        reasons.push(format!(
+            "{} known-malicious pattern(s): {}",
+            known_malicious_patterns.len(),
+            known_malicious_patterns
+                .iter()
+                .map(|p| p.pattern_type.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     if !code_injection_patterns.is_empty() {
         overall_risk_score += 35.0;
+        reasons.push("dynamic code execution of decoded content".into());
+    }
+
+    let source_points = source_findings_score(findings);
+    if source_points > 0.0 {
+        overall_risk_score += source_points;
+        reasons.push(format!(
+            "{} finding(s) in source files (see section findings)",
+            findings.len()
+        ));
+    }
+
+    let summary = &dependencies.vulnerability_summary;
+    let dep_points = vulnerability_points(
+        summary.critical_count,
+        summary.high_count,
+        summary.medium_count,
+    );
+    if dep_points > 0.0 {
+        overall_risk_score += dep_points;
+        reasons.push(format!(
+            "{} known vulnerability(ies) in dependencies ({} critical, {} high)",
+            summary.total_count, summary.critical_count, summary.high_count
+        ));
+    }
+    if !dependencies.package_vulnerabilities.is_empty() {
+        let critical = dependencies
+            .package_vulnerabilities
+            .iter()
+            .any(|v| matches!(v.severity, VulnerabilitySeverity::Critical));
+        overall_risk_score += if critical { 40.0 } else { 20.0 };
+        reasons.push(format!(
+            "this package version has {} known advisory(ies)",
+            dependencies.package_vulnerabilities.len()
+        ));
+    }
+    if security.supply_chain_risk_score > 0.0 {
+        let what = if security.has_setup_script || security.has_install_script {
+            "setup script / network use"
+        } else {
+            "advisories in dependencies / network use"
+        };
+        reasons.push(format!(
+            "{what} (supply chain score {:.0})",
+            security.supply_chain_risk_score
+        ));
     }
 
     overall_risk_score = security
         .supply_chain_risk_score
         .mul_add(0.5, overall_risk_score);
+
+    // High and Critical need a High or Critical reason; soft signals alone
+    // (a name that resembles another, Medium findings) stop at Medium.
+    let strong_evidence = !known_malicious_patterns.is_empty()
+        || !code_injection_patterns.is_empty()
+        || !security.backdoor_indicators.is_empty()
+        || findings
+            .iter()
+            .any(|f| package_scan::severity_rank(&f.severity) >= 3)
+        || !dependencies.package_vulnerabilities.is_empty()
+        || summary.critical_count + summary.high_count > 0
+        || security.supply_chain_risk_score >= 50.0;
+    if known_malicious_patterns.iter().any(|p| {
+        matches!(
+            p.pattern_type.as_str(),
+            "Known malicious package" | "Known malicious release"
+        )
+    }) {
+        // A known-bad name or release is Critical on its own.
+        overall_risk_score = overall_risk_score.max(80.0);
+    }
+    if !strong_evidence {
+        overall_risk_score = overall_risk_score.min(59.0);
+    }
 
     let risk_level = match overall_risk_score {
         x if x >= 80.0 => RiskLevel::Critical,
@@ -1504,6 +2104,7 @@ fn detect_malicious_indicators(
         code_injection_patterns,
         overall_risk_score: overall_risk_score.min(100.0),
         risk_level,
+        risk_reasons: reasons,
     })
 }
 
@@ -1581,21 +2182,36 @@ fn check_dependency_confusion(package_info: &PackageInfo) -> bool {
 fn detect_known_malicious_patterns(
     package_info: &PackageInfo,
     security: &PythonSecurityAnalysis,
+    findings: &[SourceFinding],
 ) -> Vec<MaliciousPattern> {
     let mut patterns = vec![];
 
-    // Check for known malicious patterns from database
-    let _db_patterns = get_malicious_patterns();
-
-    // Check if package is in known malicious list
-    if get_known_malicious_packages().contains(&package_info.name.as_str()) {
+    // Check if package is in the known malicious lists (names are PEP 503 normalised).
+    let name = normalize_name(&package_info.name);
+    if get_known_malicious_packages()
+        .iter()
+        .any(|known| normalize_name(known) == name)
+    {
         patterns.push(MaliciousPattern {
             pattern_type: "Known malicious package".to_string(),
-            description: "This package is in the known malicious packages list".to_string(),
+            description: "This package name is in the known malicious packages list".to_string(),
             found_in: "package name".to_string(),
             severity: "Critical".to_string(),
             evidence: package_info.name.clone(),
         });
+    }
+    if let Some(version) = crate::python_vuln_db::Pep440::parse(&package_info.version) {
+        if get_known_malicious_versions().iter().any(|(n, v)| {
+            *n == name && crate::python_vuln_db::Pep440::parse(v).as_ref() == Some(&version)
+        }) {
+            patterns.push(MaliciousPattern {
+                pattern_type: "Known malicious release".to_string(),
+                description: "This exact version is a known compromised release".to_string(),
+                found_in: "package name and version".to_string(),
+                severity: "Critical".to_string(),
+                evidence: format!("{}=={}", package_info.name, package_info.version),
+            });
+        }
     }
 
     // Check for suspicious setup scripts
@@ -1610,12 +2226,36 @@ fn detect_known_malicious_patterns(
     }
 
     if security.crypto_mining_indicators {
+        let hit = findings.iter().find(|f| f.category == "cryptomining");
         patterns.push(MaliciousPattern {
             pattern_type: "Crypto mining".to_string(),
             description: "Package contains crypto mining indicators".to_string(),
-            found_in: "package files".to_string(),
+            found_in: hit.map_or_else(
+                || "package files".to_string(),
+                |f| format!("{}:{}", f.file, f.line),
+            ),
             severity: "Critical".to_string(),
-            evidence: "Mining-related code detected".to_string(),
+            evidence: hit.map_or_else(
+                || "Mining-related code detected".to_string(),
+                |f| f.evidence.clone(),
+            ),
+        });
+    }
+
+    if security.data_exfiltration_risk {
+        let hit = findings.iter().find(|f| f.category == "exfiltration");
+        patterns.push(MaliciousPattern {
+            pattern_type: "Data exfiltration".to_string(),
+            description: "Package may exfiltrate data to external servers".to_string(),
+            found_in: hit.map_or_else(
+                || "package files".to_string(),
+                |f| format!("{}:{}", f.file, f.line),
+            ),
+            severity: "Critical".to_string(),
+            evidence: hit.map_or_else(
+                || "Suspicious network patterns detected".to_string(),
+                |f| f.evidence.clone(),
+            ),
         });
     }
 
@@ -1623,7 +2263,10 @@ fn detect_known_malicious_patterns(
 }
 
 /// Detect code injection patterns
-fn detect_code_injection_patterns(security: &PythonSecurityAnalysis) -> Vec<CodeInjectionPattern> {
+fn detect_code_injection_patterns(
+    security: &PythonSecurityAnalysis,
+    findings: &[SourceFinding],
+) -> Vec<CodeInjectionPattern> {
     let mut patterns = vec![];
 
     for import in &security.suspicious_imports {
@@ -1635,6 +2278,18 @@ fn detect_code_injection_patterns(security: &PythonSecurityAnalysis) -> Vec<Code
                 risk_level: "High".to_string(),
             });
         }
+    }
+    for finding in findings
+        .iter()
+        .filter(|f| f.rule == "Exec of decoded payload")
+        .take(20)
+    {
+        patterns.push(CodeInjectionPattern {
+            injection_type: finding.rule.clone(),
+            location: format!("{}:{}", finding.file, finding.line),
+            code_snippet: finding.evidence.clone(),
+            risk_level: finding.severity.clone(),
+        });
     }
 
     patterns
@@ -1776,38 +2431,4 @@ fn extract_quoted_value(line: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Recursively scan directory for Python files
-fn scan_directory_recursive(
-    dir_path: &Path,
-    files: &mut Vec<PythonFileAnalysis>,
-    prefix: &str,
-) -> Result<()> {
-    if let Ok(entries) = std::fs::read_dir(dir_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                let file_name = format!(
-                    "{}/{}",
-                    prefix,
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("")
-                );
-
-                files.push(PythonFileAnalysis {
-                    file_path: file_name,
-                    file_type: detect_python_file_type(&path.to_string_lossy()),
-                    size: entry.metadata().map_or(0, |m| m.len()),
-                    suspicious_content: vec![],
-                    imports: vec![],
-                    obfuscation_score: 0.0,
-                });
-            } else if path.is_dir() {
-                let subdir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let new_prefix = format!("{prefix}/{subdir_name}");
-                scan_directory_recursive(&path, files, &new_prefix)?;
-            }
-        }
-    }
-    Ok(())
 }

@@ -357,12 +357,14 @@ fn test_known_vulnerable_packages() {
         file_scanner::dependency_analysis::VulnerabilitySeverity::Critical
     ));
 
-    // Node-ipc protestware - test with a version that has special characters to trigger the check
-    let vulns = check_package_vulnerabilities("node-ipc", "10.1.1-rc");
+    // Node-ipc protestware: affected versions are matched by semver range.
+    let vulns = check_package_vulnerabilities("node-ipc", "10.1.1");
     assert!(!vulns.is_empty());
+    // A pre-release sorts below its release, so 10.1.1-rc is outside [10.1.1, 10.1.2].
+    assert!(check_package_vulnerabilities("node-ipc", "10.1.1-rc").is_empty());
 
-    // Colors protestware - test with a version that has special characters to trigger the check
-    let vulns = check_package_vulnerabilities("colors", "1.4.1-beta");
+    // Colors protestware
+    let vulns = check_package_vulnerabilities("colors", "1.4.1");
     assert!(!vulns.is_empty());
 }
 

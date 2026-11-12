@@ -1,17 +1,18 @@
 use anyhow::{Context, Result};
-use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
-use tar::Archive;
 
 use crate::dependency_analysis::{KnownVulnerability, VulnerabilitySeverity};
 use crate::npm_vuln_db::{
-    check_package_vulnerabilities, check_typosquatting_similarity, get_known_malicious_packages,
+    advisory_data_info, check_dependency_spec, check_package_vulnerabilities,
+    check_typosquatting_similarity, get_known_malicious_packages, get_known_malicious_versions,
     get_malicious_patterns,
+};
+use crate::package_scan::{
+    self, language_of, scan_source, sort_findings, source_findings_score, AdvisoryDataInfo,
+    ContainerKind, InputInfo, LoadedPackage, Selector, SourceFinding,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -24,6 +25,12 @@ pub struct NpmPackageAnalysis {
     pub scripts_analysis: ScriptsAnalysis,
     pub maintainer_analysis: MaintainerAnalysis,
     pub quality_metrics: PackageQualityMetrics,
+    /// Suspicious constructs found in source files, worst first, with file and line.
+    #[serde(default)]
+    pub source_findings: Vec<SourceFinding>,
+    /// What was read of the input and how much of it was scanned.
+    #[serde(default)]
+    pub input: InputInfo,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -69,6 +76,24 @@ pub struct NpmDependencyAnalysis {
     pub dependency_count: usize,
     pub total_transitive_count: Option<usize>,
     pub vulnerability_summary: VulnerabilitySummary,
+    /// Every package a lock file pins (direct and transitive), when there is a lock file.
+    #[serde(default)]
+    pub locked_packages: Vec<LockedPackage>,
+    /// Advisories that apply to the analysed package itself.
+    #[serde(default)]
+    pub package_vulnerabilities: Vec<KnownVulnerability>,
+    /// Where the advisory data comes from; an empty list is not a clean bill of health.
+    #[serde(default)]
+    pub vulnerability_db: AdvisoryDataInfo,
+}
+
+/// One entry of a lock file.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LockedPackage {
+    pub name: String,
+    pub version: String,
+    pub dev: bool,
+    pub vulnerabilities: Vec<KnownVulnerability>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -82,6 +107,10 @@ pub struct DependencyDetails {
     pub license: Option<String>,
     pub deprecated: bool,
     pub deprecation_reason: Option<String>,
+    /// Advisories whose affected range contains the lowest version the declared
+    /// range admits (ids). The installed version may be newer; a lock file settles it.
+    #[serde(default)]
+    pub range_floor_advisories: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -92,6 +121,9 @@ pub struct VulnerabilitySummary {
     pub low_count: usize,
     pub total_count: usize,
     pub vulnerable_packages: Vec<String>,
+    /// Dependencies whose declared range could install an affected version (not counted above).
+    #[serde(default)]
+    pub unresolved_range_hits: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -162,6 +194,9 @@ pub struct MaliciousPackageIndicators {
     pub backdoor_indicators: Vec<BackdoorIndicator>,
     pub overall_risk_score: f32,
     pub risk_level: RiskLevel,
+    /// What the score is made of.
+    #[serde(default)]
+    pub risk_reasons: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -222,6 +257,9 @@ pub struct NpmFileAnalysis {
     pub suspicious_content: Vec<String>,
     pub hidden_functionality: bool,
     pub malicious_patterns: Vec<String>,
+    /// The file's content was read and scanned (false for files past the scan limits).
+    #[serde(default)]
+    pub source_scanned: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -286,94 +324,396 @@ pub struct PackageQualityMetrics {
     pub overall_quality_score: f32,
 }
 
-/// Main entry point for npm package analysis
+fn is_manifest(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    parts.len() <= 2
+        && matches!(
+            parts[parts.len() - 1],
+            "package.json" | "package-lock.json" | "npm-shrinkwrap.json"
+        )
+}
+
+fn is_source(path: &str) -> bool {
+    language_of(path).is_some()
+}
+
+const SELECTOR: Selector = Selector {
+    is_manifest,
+    is_source,
+};
+
+/// Findings and URLs from scanning the source files.
+#[derive(Default)]
+struct SourceScan {
+    findings: Vec<SourceFinding>,
+    /// (url, file, line)
+    urls: Vec<(String, String, usize)>,
+}
+
+/// Cap on findings kept per package.
+const MAX_FINDINGS: usize = 2000;
+
+/// Main entry point for npm package analysis.
+///
+/// `path` is a gzip tarball (`.tgz`, `.tar.gz`, detected by content), a
+/// directory, a `package.json`, or a lock file (`package-lock.json`,
+/// `npm-shrinkwrap.json`) used as a dependency list. Registry names are not
+/// supported: nothing is downloaded.
 pub fn analyze_npm_package(path: &Path) -> Result<NpmPackageAnalysis> {
-    if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("tgz") {
-        analyze_npm_tarball(path)
-    } else if path.is_dir() {
-        analyze_npm_directory(path)
-    } else if path.is_file()
-        && path.file_name().and_then(|name| name.to_str()) == Some("package.json")
-    {
+    if path.is_dir() {
+        return analyze_npm_directory(path);
+    }
+    if !path.is_file() {
+        anyhow::bail!("Path must be an npm tarball, package.json, package-lock.json or a directory containing package.json");
+    }
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if file_name == "package.json" {
         let directory = path
             .parent()
             .filter(|directory| !directory.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        analyze_npm_directory(directory)
-    } else {
-        anyhow::bail!(
-            "Path must be a .tgz file, package.json, or a directory containing package.json"
-        )
+        return analyze_npm_directory(directory);
     }
-}
-
-/// Analyze an npm package from a tarball
-fn analyze_npm_tarball(tarball_path: &Path) -> Result<NpmPackageAnalysis> {
-    let file = File::open(tarball_path).context("Failed to open tarball")?;
-    let gz = GzDecoder::new(file);
-    let mut archive = Archive::new(gz);
-
-    let mut package_json_content = None;
-    let mut files = Vec::new();
-
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.to_string_lossy().to_string();
-
-        if path.ends_with("package.json") && package_json_content.is_none() {
-            let mut content = String::new();
-            entry.read_to_string(&mut content)?;
-            package_json_content = Some(content);
+    if file_name == "package-lock.json" || file_name == "npm-shrinkwrap.json" {
+        let text = package_scan::read_dependency_list(path)?;
+        return analyze_lock_text(&text, file_name);
+    }
+    match package_scan::sniff(path)? {
+        Some(kind @ (ContainerKind::TarGz | ContainerKind::Tar)) => {
+            let loaded = package_scan::load(path, kind, &SELECTOR)?;
+            analyze_loaded(&loaded, "tarball")
         }
-
-        // Collect file information
-        files.push(NpmFileAnalysis {
-            file_path: path.clone(),
-            file_type: detect_file_type(&path),
-            size: entry.size(),
-            entropy: 0.0, // TODO: Calculate entropy
-            suspicious_content: vec![],
-            hidden_functionality: false,
-            malicious_patterns: vec![],
-        });
+        Some(ContainerKind::Zip) => anyhow::bail!(
+            "This is a zip archive. npm packages are gzip tarballs: pass the .tgz that `npm pack` produces, an unpacked package directory, or a package.json."
+        ),
+        _ => anyhow::bail!(
+            "Not an npm package: the file is not a gzip tarball (.tgz or .tar.gz), a package.json or a package-lock.json. Pass the .tgz that `npm pack` produces, an unpacked package directory, or a lock file."
+        ),
     }
-
-    let package_json =
-        package_json_content.ok_or_else(|| anyhow::anyhow!("No package.json found in tarball"))?;
-
-    analyze_package_json(&package_json, files)
 }
 
 /// Analyze an npm package from a directory
 fn analyze_npm_directory(dir_path: &Path) -> Result<NpmPackageAnalysis> {
-    let package_json_path = dir_path.join("package.json");
-    if !package_json_path.exists() {
-        anyhow::bail!("No package.json found in directory");
+    let has_manifest = dir_path.join("package.json").is_file();
+    if !has_manifest {
+        for lock in ["package-lock.json", "npm-shrinkwrap.json"] {
+            let lock_path = dir_path.join(lock);
+            if lock_path.is_file() {
+                let text = package_scan::read_dependency_list(&lock_path)?;
+                return analyze_lock_text(&text, lock);
+            }
+        }
+        anyhow::bail!(
+            "No package.json found in {} (and no package-lock.json). Pass the package directory, or the .tgz from `npm pack`.",
+            dir_path.display()
+        );
     }
+    let loaded = package_scan::load(dir_path, ContainerKind::Directory, &SELECTOR)?;
+    analyze_loaded(&loaded, "directory")
+}
 
-    let package_json_content =
-        std::fs::read_to_string(&package_json_path).context("Failed to read package.json")?;
+fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<NpmPackageAnalysis> {
+    let tarball = matches!(loaded.container, ContainerKind::TarGz | ContainerKind::Tar);
+    let Some(manifest) =
+        package_scan::root_manifest(&loaded.files, "package.json", "package", tarball)
+    else {
+        let nested: Vec<&str> = loaded
+            .files
+            .iter()
+            .filter(|f| f.path.ends_with("package.json"))
+            .map(|f| f.path.as_str())
+            .take(3)
+            .collect();
+        let hint = if nested.is_empty() {
+            String::new()
+        } else {
+            format!(" Only nested manifests exist: {}.", nested.join(", "))
+        };
+        anyhow::bail!(
+            "No package.json found at the root of the package (expected package/package.json or package.json).{hint}"
+        );
+    };
+    let manifest_path = manifest.path.clone();
+    let manifest_text = loaded.text(&manifest_path).with_context(|| {
+        if manifest.size > package_scan::MAX_MANIFEST_BYTES as u64 {
+            format!(
+                "{manifest_path} was not read: it is {} bytes, over the {} byte manifest limit",
+                manifest.size,
+                package_scan::MAX_MANIFEST_BYTES
+            )
+        } else {
+            format!("{manifest_path} could not be read from the package (it may have been removed or be unreadable)")
+        }
+    })?;
+    let root_dir = manifest_path
+        .rsplit_once('/')
+        .map_or("", |(dir, _)| dir)
+        .to_string();
+    let join = |name: &str| {
+        if root_dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{root_dir}/{name}")
+        }
+    };
+    let lock = ["package-lock.json", "npm-shrinkwrap.json"]
+        .iter()
+        .find_map(|name| loaded.text(&join(name)))
+        .and_then(|text| parse_lock(&text));
 
-    // TODO: Scan directory for files
-    let files = vec![];
+    let mut files = Vec::with_capacity(loaded.files.len());
+    let mut scan = SourceScan::default();
+    for file in &loaded.files {
+        let mut analysis = NpmFileAnalysis {
+            file_path: file.path.clone(),
+            file_type: detect_file_type(&file.path),
+            size: file.size,
+            entropy: 0.0,
+            suspicious_content: vec![],
+            hidden_functionality: false,
+            malicious_patterns: vec![],
+            source_scanned: false,
+        };
+        if let (Some(lang), Some(bytes)) = (language_of(&file.path), file.content.as_deref()) {
+            let result = scan_source(lang, &file.path, bytes);
+            analysis.source_scanned = true;
+            analysis.entropy = result.entropy;
+            analysis.hidden_functionality = result.obfuscation_score > 0.5
+                || result.findings.iter().any(|f| f.severity == "Critical");
+            analysis.suspicious_content = result
+                .findings
+                .iter()
+                .map(|f| format!("line {}: {}", f.line, f.rule))
+                .collect();
+            let mut patterns: Vec<String> = result
+                .findings
+                .iter()
+                .filter(|f| package_scan::severity_rank(&f.severity) >= 3)
+                .map(|f| f.rule.clone())
+                .collect();
+            patterns.sort();
+            patterns.dedup();
+            analysis.malicious_patterns = patterns;
+            for (url, line) in result.suspicious_urls {
+                scan.urls.push((url, file.path.clone(), line));
+            }
+            if scan.findings.len() < MAX_FINDINGS {
+                scan.findings.extend(result.findings);
+            }
+        }
+        files.push(analysis);
+    }
+    scan.findings.truncate(MAX_FINDINGS);
+    sort_findings(&mut scan.findings);
 
-    analyze_package_json(&package_json_content, files)
+    let mut input = InputInfo::from_loaded(kind, loaded, Some(&manifest_path));
+    let competing = if tarball {
+        package_scan::competing_manifests(&loaded.files, "package.json", &manifest_path)
+    } else {
+        vec![]
+    };
+    if !competing.is_empty() {
+        let list = competing.join(", ");
+        input.notes.push(format!(
+            "The package holds more than one package.json ({list}). Analysed: {manifest_path}, the one npm install would use{}",
+            " (the last entry under a top-level folder wins; root-level files are dropped)"
+        ));
+        scan.findings.push(SourceFinding {
+            rule: "Several package.json files".to_string(),
+            category: "package-structure".to_string(),
+            severity: "High".to_string(),
+            file: manifest_path.clone(),
+            line: 1,
+            evidence: format!(
+                "also present: {}",
+                list.chars().take(120).collect::<String>()
+            ),
+        });
+        sort_findings(&mut scan.findings);
+    }
+    analyze_package_json(&manifest_text, files, scan, lock.as_ref(), input, true)
+}
+
+/// A lock file read as a dependency list.
+struct ParsedLock {
+    name: Option<String>,
+    version: Option<String>,
+    root_dependencies: Option<Value>,
+    root_dev_dependencies: Option<Value>,
+    packages: Vec<LockedPackage>,
+    /// Version of each top-level `node_modules/<name>`.
+    top_level: HashMap<String, String>,
+}
+
+const MAX_LOCKED: usize = 20_000;
+
+fn parse_lock(text: &str) -> Option<ParsedLock> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let mut lock = ParsedLock {
+        name: value.get("name").and_then(Value::as_str).map(String::from),
+        version: value
+            .get("version")
+            .and_then(Value::as_str)
+            .map(String::from),
+        root_dependencies: None,
+        root_dev_dependencies: None,
+        packages: vec![],
+        top_level: HashMap::new(),
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |lock: &mut ParsedLock, name: &str, version: &str, dev: bool| {
+        if lock.packages.len() < MAX_LOCKED && seen.insert((name.to_string(), version.to_string()))
+        {
+            lock.packages.push(LockedPackage {
+                name: name.to_string(),
+                version: version.to_string(),
+                dev,
+                vulnerabilities: check_package_vulnerabilities(name, version),
+            });
+        }
+    };
+    if let Some(packages) = value.get("packages").and_then(Value::as_object) {
+        for (key, entry) in packages {
+            if key.is_empty() {
+                lock.root_dependencies = entry.get("dependencies").cloned();
+                lock.root_dev_dependencies = entry.get("devDependencies").cloned();
+                if lock.name.is_none() {
+                    lock.name = entry.get("name").and_then(Value::as_str).map(String::from);
+                }
+                if lock.version.is_none() {
+                    lock.version = entry
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                }
+                continue;
+            }
+            if entry.get("link").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            let derived = key.rsplit("node_modules/").next().unwrap_or(key);
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(derived)
+                .to_string();
+            let Some(version) = entry.get("version").and_then(Value::as_str) else {
+                continue;
+            };
+            let dev = entry.get("dev").and_then(Value::as_bool).unwrap_or(false);
+            if *key == format!("node_modules/{derived}") && lock.top_level.len() < MAX_LOCKED {
+                lock.top_level
+                    .insert(derived.to_string(), version.to_string());
+            }
+            push(&mut lock, &name, version, dev);
+        }
+    } else {
+        let dependencies = value.get("dependencies").and_then(Value::as_object)?;
+        fn walk(
+            deps: &serde_json::Map<String, Value>,
+            top: bool,
+            lock: &mut ParsedLock,
+            push: &mut dyn FnMut(&mut ParsedLock, &str, &str, bool),
+        ) {
+            for (name, entry) in deps {
+                if let Some(version) = entry.get("version").and_then(Value::as_str) {
+                    let dev = entry.get("dev").and_then(Value::as_bool).unwrap_or(false);
+                    if top && lock.top_level.len() < MAX_LOCKED {
+                        lock.top_level.insert(name.clone(), version.to_string());
+                    }
+                    push(lock, name, version, dev);
+                }
+                if let Some(nested) = entry.get("dependencies").and_then(Value::as_object) {
+                    walk(nested, false, lock, push);
+                }
+            }
+        }
+        walk(dependencies, true, &mut lock, &mut push);
+    }
+    Some(lock)
+}
+
+/// The first [`MAX_LOCKED`] entries of a dependency map.
+fn take_entries(map: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+    map.iter()
+        .take(MAX_LOCKED)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// A lock file as the only input: a dependency list, no source to scan.
+fn analyze_lock_text(text: &str, file_name: &str) -> Result<NpmPackageAnalysis> {
+    let lock = parse_lock(text).with_context(|| {
+        format!("{file_name} is not a readable npm lock file (expected lockfileVersion 1, 2 or 3 JSON with `packages` or `dependencies`)")
+    })?;
+    let mut dependencies = serde_json::Map::new();
+    let mut dev_dependencies = serde_json::Map::new();
+    if let Some(Value::Object(map)) = &lock.root_dependencies {
+        dependencies = take_entries(map);
+    }
+    if let Some(Value::Object(map)) = &lock.root_dev_dependencies {
+        dev_dependencies = take_entries(map);
+    }
+    if dependencies.is_empty() && dev_dependencies.is_empty() {
+        let dev_set: std::collections::HashSet<(&str, &str)> = lock
+            .packages
+            .iter()
+            .filter(|p| p.dev)
+            .map(|p| (p.name.as_str(), p.version.as_str()))
+            .collect();
+        for (name, version) in &lock.top_level {
+            let dev = dev_set.contains(&(name.as_str(), version.as_str()));
+            let target = if dev {
+                &mut dev_dependencies
+            } else {
+                &mut dependencies
+            };
+            target.insert(name.clone(), Value::String(version.clone()));
+        }
+    }
+    let manifest = serde_json::json!({
+        "name": lock.name.clone().unwrap_or_else(|| "(lock file)".to_string()),
+        "version": lock.version.clone().unwrap_or_else(|| "0.0.0".to_string()),
+        "dependencies": dependencies,
+        "devDependencies": dev_dependencies,
+    });
+    let input = InputInfo::dependency_list(
+        "lockfile",
+        &format!("{file_name} is a dependency list: no source files were scanned and the package name was not judged"),
+    );
+    analyze_package_json(
+        &manifest.to_string(),
+        vec![],
+        SourceScan::default(),
+        Some(&lock),
+        input,
+        false,
+    )
 }
 
 /// Parse and analyze package.json content
 fn analyze_package_json(
     package_json: &str,
     files: Vec<NpmFileAnalysis>,
+    scan: SourceScan,
+    lock: Option<&ParsedLock>,
+    input: InputInfo,
+    judge_name: bool,
 ) -> Result<NpmPackageAnalysis> {
     let parsed: Value =
         serde_json::from_str(package_json).context("Failed to parse package.json")?;
 
     let package_info = extract_package_info(&parsed)?;
-    let dependencies = analyze_dependencies(&parsed)?;
+    let dependencies = analyze_dependencies(&parsed, lock, &package_info)?;
     let scripts_analysis = analyze_scripts(&parsed)?;
-    let security_analysis = perform_security_analysis(&parsed, &scripts_analysis, &files)?;
-    let malicious_indicators =
-        detect_malicious_indicators(&package_info, &dependencies, &security_analysis)?;
+    let security_analysis = perform_security_analysis(&parsed, &scripts_analysis, &scan)?;
+    let malicious_indicators = detect_malicious_indicators(
+        &package_info,
+        &dependencies,
+        &security_analysis,
+        &scan.findings,
+        judge_name,
+    )?;
     let maintainer_analysis = analyze_maintainers(&parsed)?;
     let quality_metrics = calculate_quality_metrics(&parsed, &files)?;
 
@@ -386,6 +726,8 @@ fn analyze_package_json(
         scripts_analysis,
         maintainer_analysis,
         quality_metrics,
+        source_findings: scan.findings,
+        input,
     })
 }
 
@@ -511,17 +853,21 @@ fn extract_repository_info(repo_value: Option<&Value>) -> Option<RepositoryInfo>
     })
 }
 
-fn analyze_dependencies(package_json: &Value) -> Result<NpmDependencyAnalysis> {
+fn analyze_dependencies(
+    package_json: &Value,
+    lock: Option<&ParsedLock>,
+    package_info: &PackageJsonInfo,
+) -> Result<NpmDependencyAnalysis> {
     let obj = package_json
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("package.json is not an object"))?;
 
-    let _all_deps: HashMap<String, DependencyDetails> = HashMap::new();
+    let top_level = lock.map(|l| &l.top_level);
     // Extract different dependency types
-    let dependencies = extract_dependency_map(obj.get("dependencies"));
-    let dev_dependencies = extract_dependency_map(obj.get("devDependencies"));
-    let peer_dependencies = extract_dependency_map(obj.get("peerDependencies"));
-    let optional_dependencies = extract_dependency_map(obj.get("optionalDependencies"));
+    let dependencies = extract_dependency_map(obj.get("dependencies"), top_level);
+    let dev_dependencies = extract_dependency_map(obj.get("devDependencies"), top_level);
+    let peer_dependencies = extract_dependency_map(obj.get("peerDependencies"), top_level);
+    let optional_dependencies = extract_dependency_map(obj.get("optionalDependencies"), top_level);
     let bundled_dependencies = extract_bundled_dependencies(
         obj.get("bundledDependencies")
             .or_else(|| obj.get("bundleDependencies")),
@@ -532,7 +878,6 @@ fn analyze_dependencies(package_json: &Value) -> Result<NpmDependencyAnalysis> {
         + peer_dependencies.len()
         + optional_dependencies.len();
 
-    // Calculate vulnerability summary
     let mut vulnerability_summary = VulnerabilitySummary {
         critical_count: 0,
         high_count: 0,
@@ -540,30 +885,60 @@ fn analyze_dependencies(package_json: &Value) -> Result<NpmDependencyAnalysis> {
         low_count: 0,
         total_count: 0,
         vulnerable_packages: vec![],
+        unresolved_range_hits: vec![],
+    };
+    let mut tally = |name: &str, vulns: &[KnownVulnerability]| {
+        if vulns.is_empty() {
+            return;
+        }
+        vulnerability_summary
+            .vulnerable_packages
+            .push(name.to_string());
+        vulnerability_summary.total_count += vulns.len();
+        for vuln in vulns {
+            match vuln.severity {
+                VulnerabilitySeverity::Critical => vulnerability_summary.critical_count += 1,
+                VulnerabilitySeverity::High => vulnerability_summary.high_count += 1,
+                VulnerabilitySeverity::Medium => vulnerability_summary.medium_count += 1,
+                VulnerabilitySeverity::Low => vulnerability_summary.low_count += 1,
+                VulnerabilitySeverity::None => {}
+            }
+        }
     };
 
-    // Count vulnerabilities across all dependency types
-    for (name, details) in dependencies
+    // Direct dependencies of every kind.
+    let mut direct_names = std::collections::HashSet::new();
+    let mut declared: Vec<(&String, &DependencyDetails)> = dependencies
         .iter()
         .chain(dev_dependencies.iter())
         .chain(peer_dependencies.iter())
         .chain(optional_dependencies.iter())
-    {
-        if !details.vulnerabilities.is_empty() {
-            vulnerability_summary.vulnerable_packages.push(name.clone());
-            vulnerability_summary.total_count += details.vulnerabilities.len();
-
-            for vuln in &details.vulnerabilities {
-                match vuln.severity {
-                    VulnerabilitySeverity::Critical => vulnerability_summary.critical_count += 1,
-                    VulnerabilitySeverity::High => vulnerability_summary.high_count += 1,
-                    VulnerabilitySeverity::Medium => vulnerability_summary.medium_count += 1,
-                    VulnerabilitySeverity::Low => vulnerability_summary.low_count += 1,
-                    VulnerabilitySeverity::None => {}
-                }
-            }
+        .collect();
+    declared.sort_by(|a, b| a.0.cmp(b.0));
+    let mut unresolved = vec![];
+    for (name, details) in declared {
+        direct_names.insert(name.clone());
+        tally(name, &details.vulnerabilities);
+        if !details.range_floor_advisories.is_empty() {
+            unresolved.push(name.clone());
         }
     }
+    // Transitive packages a lock file pins.
+    let locked_packages = lock.map(|l| l.packages.clone()).unwrap_or_default();
+    for package in &locked_packages {
+        if !direct_names.contains(&package.name) {
+            tally(
+                &format!("{}@{}", package.name, package.version),
+                &package.vulnerabilities,
+            );
+        }
+    }
+    unresolved.sort();
+    unresolved.dedup();
+    vulnerability_summary.unresolved_range_hits = unresolved;
+
+    let package_vulnerabilities =
+        check_package_vulnerabilities(&package_info.name, &package_info.version);
 
     Ok(NpmDependencyAnalysis {
         dependencies,
@@ -572,57 +947,48 @@ fn analyze_dependencies(package_json: &Value) -> Result<NpmDependencyAnalysis> {
         optional_dependencies,
         bundled_dependencies,
         dependency_count,
-        total_transitive_count: None, // TODO: Calculate from lock file
+        total_transitive_count: lock.map(|l| l.packages.len()),
         vulnerability_summary,
+        locked_packages,
+        package_vulnerabilities,
+        vulnerability_db: advisory_data_info(),
     })
 }
 
-fn extract_dependency_map(deps_value: Option<&Value>) -> HashMap<String, DependencyDetails> {
+fn extract_dependency_map(
+    deps_value: Option<&Value>,
+    resolved: Option<&HashMap<String, String>>,
+) -> HashMap<String, DependencyDetails> {
     deps_value
         .and_then(|v| v.as_object())
         .map(|obj| {
             obj.iter()
                 .map(|(name, version)| {
                     let version_str = version.as_str().unwrap_or("");
-
-                    // Check for vulnerabilities
-                    let vulnerabilities =
-                        if !version_str.starts_with("file:") && !version_str.starts_with("http") {
-                            // Extract version number from version spec (simple approach)
-                            let version_num = extract_version_number(version_str);
-                            check_package_vulnerabilities(name, &version_num)
-                        } else {
-                            vec![]
-                        };
+                    let locked = resolved.and_then(|map| map.get(name)).map(String::as_str);
+                    let check = check_dependency_spec(name, version_str, locked);
 
                     let details = DependencyDetails {
                         version_spec: version_str.to_string(),
-                        resolved_version: None,
+                        resolved_version: locked.map(String::from),
                         is_local: version_str.starts_with("file:"),
                         is_git: version_str.contains("git") || version_str.contains("github"),
                         is_url: version_str.starts_with("http"),
-                        vulnerabilities,
+                        vulnerabilities: check.vulnerabilities,
                         license: None,
                         deprecated: false,
                         deprecation_reason: None,
+                        range_floor_advisories: check
+                            .range_floor_matches
+                            .into_iter()
+                            .map(|v| v.cve_id)
+                            .collect(),
                     };
                     (name.clone(), details)
                 })
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn extract_version_number(version_spec: &str) -> String {
-    // Simple extraction - in production use a proper semver parser
-    version_spec
-        .trim_start_matches('^')
-        .trim_start_matches('~')
-        .trim_start_matches('>')
-        .trim_start_matches('<')
-        .trim_start_matches('=')
-        .trim()
-        .to_string()
 }
 
 fn extract_bundled_dependencies(bundled_value: Option<&Value>) -> Vec<String> {
@@ -753,23 +1119,67 @@ fn check_dangerous_command(command: &str) -> Option<String> {
 fn perform_security_analysis(
     package_json: &Value,
     scripts: &ScriptsAnalysis,
-    _files: &[NpmFileAnalysis],
+    scan: &SourceScan,
 ) -> Result<NpmSecurityAnalysis> {
     let has_preinstall_script = scripts.script_hooks.contains_key("preinstall");
     let has_postinstall_script = scripts.script_hooks.contains_key("postinstall");
     let has_install_script = scripts.script_hooks.contains_key("install");
 
     let suspicious_scripts = analyze_suspicious_scripts(scripts);
-    let network_access_patterns = detect_network_patterns(scripts, _files);
-    let file_system_access = detect_filesystem_patterns(scripts, _files);
-    let process_execution = detect_process_execution(scripts, _files);
+    let mut network_access_patterns = detect_network_patterns(scripts);
+    // A URL mentioned in a source file is not evidence of exfiltration: only
+    // script URLs and High exfiltration findings (below) decide that.
+    let script_network_patterns = network_access_patterns.clone();
+    for (url, file, line) in &scan.urls {
+        if network_access_patterns.len() >= 100 {
+            break;
+        }
+        network_access_patterns.push(NetworkAccessPattern {
+            url: url.clone(),
+            protocol: if url.starts_with("https") {
+                "https"
+            } else {
+                "http"
+            }
+            .to_string(),
+            is_suspicious: true,
+            reputation_score: None,
+            found_in: format!("file:{file}:{line}"),
+        });
+    }
+    let file_system_access = detect_filesystem_patterns(scripts);
+    let mut process_execution = detect_process_execution(scripts);
+    for finding in scan
+        .findings
+        .iter()
+        .filter(|f| f.category == "process-exec")
+        .take(50)
+    {
+        process_execution.push(ProcessExecution {
+            command: format!("{}:{}", finding.file, finding.line),
+            arguments: vec![finding.evidence.clone()],
+            is_suspicious: true,
+            risk_level: finding.severity.to_lowercase(),
+        });
+    }
 
-    let obfuscation_detected = detect_obfuscation(scripts, _files);
-    let crypto_mining_indicators = detect_crypto_mining(scripts, _files);
-    let data_exfiltration_risk = detect_data_exfiltration(&network_access_patterns);
+    let obfuscation_detected = detect_obfuscation(scripts)
+        || scan
+            .findings
+            .iter()
+            .filter(|f| f.category == "obfuscation")
+            .count()
+            >= 2;
+    let crypto_mining_indicators =
+        detect_crypto_mining(scripts) || scan.findings.iter().any(|f| f.category == "cryptomining");
+    let data_exfiltration_risk = detect_data_exfiltration(&script_network_patterns)
+        || scan
+            .findings
+            .iter()
+            .any(|f| f.category == "exfiltration" && f.severity != "Medium");
 
     let supply_chain_risk_score =
-        calculate_supply_chain_risk(package_json, scripts, &network_access_patterns);
+        calculate_supply_chain_risk(package_json, scripts, &script_network_patterns);
 
     Ok(NpmSecurityAnalysis {
         has_preinstall_script,
@@ -882,10 +1292,7 @@ fn extract_external_commands(script: &str) -> Vec<String> {
     commands
 }
 
-fn detect_network_patterns(
-    scripts: &ScriptsAnalysis,
-    _files: &[NpmFileAnalysis],
-) -> Vec<NetworkAccessPattern> {
+fn detect_network_patterns(scripts: &ScriptsAnalysis) -> Vec<NetworkAccessPattern> {
     let mut patterns = vec![];
 
     // URL regex pattern
@@ -910,12 +1317,13 @@ fn detect_network_patterns(
         }
     }
 
-    // TODO: Also check file contents for URLs
-
     patterns
 }
 
 fn is_suspicious_url(url: &str) -> bool {
+    if package_scan::is_suspicious_url(url) {
+        return true;
+    }
     let suspicious_patterns = [
         "pastebin.com",
         "bit.ly",
@@ -933,10 +1341,7 @@ fn is_suspicious_url(url: &str) -> bool {
         .any(|pattern| url.contains(pattern))
 }
 
-fn detect_filesystem_patterns(
-    scripts: &ScriptsAnalysis,
-    _files: &[NpmFileAnalysis],
-) -> Vec<FileSystemAccess> {
+fn detect_filesystem_patterns(scripts: &ScriptsAnalysis) -> Vec<FileSystemAccess> {
     let mut accesses = vec![];
 
     let fs_patterns = [
@@ -968,10 +1373,7 @@ fn detect_filesystem_patterns(
     accesses
 }
 
-fn detect_process_execution(
-    scripts: &ScriptsAnalysis,
-    _files: &[NpmFileAnalysis],
-) -> Vec<ProcessExecution> {
+fn detect_process_execution(scripts: &ScriptsAnalysis) -> Vec<ProcessExecution> {
     let mut executions = vec![];
 
     let exec_patterns = [
@@ -1000,7 +1402,7 @@ fn detect_process_execution(
     executions
 }
 
-fn detect_obfuscation(scripts: &ScriptsAnalysis, _files: &[NpmFileAnalysis]) -> bool {
+fn detect_obfuscation(scripts: &ScriptsAnalysis) -> bool {
     // Check scripts for obfuscation
     for (_, content) in scripts.script_hooks.iter().chain(&scripts.custom_scripts) {
         if matches!(
@@ -1011,11 +1413,10 @@ fn detect_obfuscation(scripts: &ScriptsAnalysis, _files: &[NpmFileAnalysis]) -> 
         }
     }
 
-    // TODO: Check files for obfuscation
     false
 }
 
-fn detect_crypto_mining(scripts: &ScriptsAnalysis, _files: &[NpmFileAnalysis]) -> bool {
+fn detect_crypto_mining(scripts: &ScriptsAnalysis) -> bool {
     let mining_indicators = [
         "stratum+tcp://",
         "cryptonight",
@@ -1092,39 +1493,151 @@ fn calculate_supply_chain_risk(
     risk_score.min(100.0)
 }
 
+/// Points the dependency vulnerability counts add to the risk score.
+fn vulnerability_points(critical: usize, high: usize, medium: usize) -> f32 {
+    if critical > 0 {
+        40.0
+    } else if high > 0 {
+        20.0
+    } else if medium > 0 {
+        5.0
+    } else {
+        0.0
+    }
+}
+
 fn detect_malicious_indicators(
     package_info: &PackageJsonInfo,
     dependencies: &NpmDependencyAnalysis,
     security: &NpmSecurityAnalysis,
+    findings: &[SourceFinding],
+    judge_name: bool,
 ) -> Result<MaliciousPackageIndicators> {
-    let typosquatting_risk = analyze_typosquatting(&package_info.name);
-    let dependency_confusion_risk = check_dependency_confusion(package_info, dependencies);
-    let known_malicious_patterns = detect_known_malicious_patterns(package_info, security);
-    let suspicious_maintainer_activity = false; // TODO: Implement
-    let code_injection_patterns = detect_code_injection_patterns(security);
-    let backdoor_indicators = detect_backdoor_indicators(security);
+    let typosquatting_risk = if judge_name {
+        analyze_typosquatting(&package_info.name)
+    } else {
+        TyposquattingAnalysis {
+            is_potential_typosquatting: false,
+            similar_packages: vec![],
+            name_distance: None,
+            suspicious_name_patterns: vec![],
+        }
+    };
+    let dependency_confusion_risk =
+        judge_name && check_dependency_confusion(package_info, dependencies);
+    let known_malicious_patterns = if judge_name {
+        detect_known_malicious_patterns(package_info, security, findings)
+    } else {
+        vec![]
+    };
+    let suspicious_maintainer_activity = false; // needs registry data; this tool is offline
+    let code_injection_patterns = detect_code_injection_patterns(security, findings);
+    let backdoor_indicators = detect_backdoor_indicators(security, findings);
 
     let mut overall_risk_score = 0.0;
+    let mut reasons: Vec<String> = vec![];
 
     if typosquatting_risk.is_potential_typosquatting {
         overall_risk_score += 30.0;
+        reasons.push("package name resembles a popular package or a known malicious name".into());
     }
     if dependency_confusion_risk {
         overall_risk_score += 25.0;
+        reasons.push("package name looks like an internal package (dependency confusion)".into());
     }
     if !known_malicious_patterns.is_empty() {
         overall_risk_score += 40.0;
+        reasons.push(format!(
+            "{} known-malicious pattern(s): {}",
+            known_malicious_patterns.len(),
+            known_malicious_patterns
+                .iter()
+                .map(|p| p.pattern_type.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     if !code_injection_patterns.is_empty() {
         overall_risk_score += 35.0;
+        reasons.push("dynamic code execution of decoded or dynamic content".into());
     }
     if !backdoor_indicators.is_empty() {
         overall_risk_score += 45.0;
+        reasons.push("backdoor / reverse shell indicators".into());
     }
 
+    let source_points = source_findings_score(findings);
+    if source_points > 0.0 {
+        overall_risk_score += source_points;
+        reasons.push(format!(
+            "{} finding(s) in source files (see section findings)",
+            findings.len()
+        ));
+    }
+
+    let summary = &dependencies.vulnerability_summary;
+    let dep_points = vulnerability_points(
+        summary.critical_count,
+        summary.high_count,
+        summary.medium_count,
+    );
+    if dep_points > 0.0 {
+        overall_risk_score += dep_points;
+        reasons.push(format!(
+            "{} known vulnerability(ies) in dependencies ({} critical, {} high)",
+            summary.total_count, summary.critical_count, summary.high_count
+        ));
+    }
+    let own_critical = dependencies
+        .package_vulnerabilities
+        .iter()
+        .filter(|v| matches!(v.severity, VulnerabilitySeverity::Critical))
+        .count();
+    if !dependencies.package_vulnerabilities.is_empty() {
+        overall_risk_score += if own_critical > 0 { 40.0 } else { 20.0 };
+        reasons.push(format!(
+            "this package version has {} known advisory(ies)",
+            dependencies.package_vulnerabilities.len()
+        ));
+    }
+
+    if security.supply_chain_risk_score > 0.0 {
+        reasons.push(format!(
+            "install scripts / network use in scripts (supply chain score {:.0})",
+            security.supply_chain_risk_score
+        ));
+    }
     overall_risk_score = security
         .supply_chain_risk_score
         .mul_add(0.5, overall_risk_score);
+
+    // High and Critical need a High or Critical reason: a known-bad name or
+    // release, a strong finding, a backdoor, or an advisory on this package or
+    // a dependency. Soft signals alone (a name that resembles another, Medium
+    // findings, install hooks) stop at Medium.
+    let strong_evidence = !known_malicious_patterns.is_empty()
+        || !backdoor_indicators.is_empty()
+        || !code_injection_patterns.is_empty()
+        || findings
+            .iter()
+            .any(|f| package_scan::severity_rank(&f.severity) >= 3)
+        || !dependencies.package_vulnerabilities.is_empty()
+        || summary.critical_count + summary.high_count > 0
+        || security.supply_chain_risk_score >= 50.0;
+    if known_malicious_patterns.iter().any(|p| {
+        matches!(
+            p.pattern_type.as_str(),
+            "Known malicious package" | "Known malicious release"
+        )
+    }) {
+        // A known-bad name or release is Critical on its own.
+        overall_risk_score = overall_risk_score.max(80.0);
+    }
+    if !strong_evidence {
+        overall_risk_score = overall_risk_score.min(59.0);
+    }
 
     let risk_level = match overall_risk_score {
         x if x >= 80.0 => RiskLevel::Critical,
@@ -1143,6 +1656,7 @@ fn detect_malicious_indicators(
         backdoor_indicators,
         overall_risk_score: overall_risk_score.min(100.0),
         risk_level,
+        risk_reasons: reasons,
     })
 }
 
@@ -1225,9 +1739,14 @@ fn check_dependency_confusion(
     false
 }
 
+fn first_finding<'a>(findings: &'a [SourceFinding], category: &str) -> Option<&'a SourceFinding> {
+    findings.iter().find(|f| f.category == category)
+}
+
 fn detect_known_malicious_patterns(
     package_info: &PackageJsonInfo,
     security: &NpmSecurityAnalysis,
+    findings: &[SourceFinding],
 ) -> Vec<MaliciousPattern> {
     let mut patterns = vec![];
 
@@ -1237,6 +1756,14 @@ fn detect_known_malicious_patterns(
     // Check scripts for malicious patterns
     for script in &security.suspicious_scripts {
         for db_pattern in &db_patterns {
+            // Name-shaped patterns (typosquat suffixes, internal prefixes) are
+            // judged against the package name elsewhere, not against script text.
+            if matches!(
+                db_pattern.pattern_name.as_str(),
+                "Typosquatting indicators" | "Dependency confusion"
+            ) {
+                continue;
+            }
             for indicator in &db_pattern.indicators {
                 if let Ok(re) = regex::Regex::new(indicator) {
                     if re.is_match(&script.script_content) {
@@ -1253,14 +1780,27 @@ fn detect_known_malicious_patterns(
         }
     }
 
-    // Check if package is in known malicious list
-    if get_known_malicious_packages().contains(&package_info.name.as_str()) {
+    // Check if package is in the known malicious lists: bare names, or name and version.
+    let name = package_info.name.to_ascii_lowercase();
+    if get_known_malicious_packages().contains(&name.as_str()) {
         patterns.push(MaliciousPattern {
             pattern_type: "Known malicious package".to_string(),
-            description: "This package is in the known malicious packages list".to_string(),
+            description: "This package name is in the known malicious packages list".to_string(),
             found_in: "package name".to_string(),
             severity: "Critical".to_string(),
             evidence: package_info.name.clone(),
+        });
+    }
+    if get_known_malicious_versions()
+        .iter()
+        .any(|(n, v)| *n == name && *v == package_info.version)
+    {
+        patterns.push(MaliciousPattern {
+            pattern_type: "Known malicious release".to_string(),
+            description: "This exact version is a known compromised release".to_string(),
+            found_in: "package name and version".to_string(),
+            severity: "Critical".to_string(),
+            evidence: format!("{}@{}", package_info.name, package_info.version),
         });
     }
 
@@ -1276,29 +1816,46 @@ fn detect_known_malicious_patterns(
     }
 
     if security.crypto_mining_indicators {
+        let hit = first_finding(findings, "cryptomining");
         patterns.push(MaliciousPattern {
             pattern_type: "Crypto mining".to_string(),
             description: "Package contains crypto mining indicators".to_string(),
-            found_in: "scripts".to_string(),
+            found_in: hit.map_or_else(
+                || "scripts".to_string(),
+                |f| format!("{}:{}", f.file, f.line),
+            ),
             severity: "Critical".to_string(),
-            evidence: "Mining-related keywords detected".to_string(),
+            evidence: hit.map_or_else(
+                || "Mining-related keywords detected".to_string(),
+                |f| f.evidence.clone(),
+            ),
         });
     }
 
     if security.data_exfiltration_risk {
+        let hit = first_finding(findings, "exfiltration");
         patterns.push(MaliciousPattern {
             pattern_type: "Data exfiltration".to_string(),
             description: "Package may exfiltrate data to external servers".to_string(),
-            found_in: "scripts".to_string(),
+            found_in: hit.map_or_else(
+                || "scripts".to_string(),
+                |f| format!("{}:{}", f.file, f.line),
+            ),
             severity: "Critical".to_string(),
-            evidence: "Suspicious network patterns detected".to_string(),
+            evidence: hit.map_or_else(
+                || "Suspicious network patterns detected".to_string(),
+                |f| f.evidence.clone(),
+            ),
         });
     }
 
     patterns
 }
 
-fn detect_code_injection_patterns(security: &NpmSecurityAnalysis) -> Vec<CodeInjectionPattern> {
+fn detect_code_injection_patterns(
+    security: &NpmSecurityAnalysis,
+    findings: &[SourceFinding],
+) -> Vec<CodeInjectionPattern> {
     let mut patterns = vec![];
 
     for script in &security.suspicious_scripts {
@@ -1315,11 +1872,27 @@ fn detect_code_injection_patterns(security: &NpmSecurityAnalysis) -> Vec<CodeInj
             });
         }
     }
+    // Only evaluation of decoded payloads counts here; plain eval is a Medium finding.
+    for finding in findings
+        .iter()
+        .filter(|f| f.rule == "Eval of decoded payload")
+        .take(20)
+    {
+        patterns.push(CodeInjectionPattern {
+            injection_type: finding.rule.clone(),
+            location: format!("{}:{}", finding.file, finding.line),
+            code_snippet: finding.evidence.clone(),
+            risk_level: finding.severity.clone(),
+        });
+    }
 
     patterns
 }
 
-fn detect_backdoor_indicators(security: &NpmSecurityAnalysis) -> Vec<BackdoorIndicator> {
+fn detect_backdoor_indicators(
+    security: &NpmSecurityAnalysis,
+    findings: &[SourceFinding],
+) -> Vec<BackdoorIndicator> {
     let mut indicators = vec![];
 
     // Check for reverse shell patterns
@@ -1336,6 +1909,18 @@ fn detect_backdoor_indicators(security: &NpmSecurityAnalysis) -> Vec<BackdoorInd
                 });
             }
         }
+    }
+    for finding in findings
+        .iter()
+        .filter(|f| f.category == "backdoor")
+        .take(20)
+    {
+        indicators.push(BackdoorIndicator {
+            indicator_type: finding.rule.clone(),
+            description: format!("{} at {}:{}", finding.rule, finding.file, finding.line),
+            evidence: vec![finding.evidence.clone()],
+            confidence: 0.9,
+        });
     }
 
     indicators
@@ -1435,8 +2020,10 @@ fn detect_file_type(path: &str) -> String {
         .unwrap_or("");
 
     match extension {
-        "js" => "JavaScript",
-        "ts" => "TypeScript",
+        "js" | "mjs" | "cjs" | "jsx" => "JavaScript",
+        "ts" | "tsx" | "mts" | "cts" => "TypeScript",
+        "sh" | "bash" => "Shell",
+        "py" => "Python",
         "json" => "JSON",
         "md" => "Markdown",
         "txt" => "Text",

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::dependency_analysis::{KnownVulnerability, VulnerabilitySeverity};
+use crate::package_scan::{edit_distance, AdvisoryDataInfo};
 
 /// Python vulnerability database
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -55,12 +57,26 @@ pub fn create_python_vulnerability_database() -> PythonVulnerabilityDatabase {
                 cvss_score: Some(7.5),
                 published_date: Some("2023-10-04".to_string()),
             },
-            affected_version_ranges: vec![VersionRange {
-                min_version: None,
-                max_version: Some("3.2.21".to_string()),
-                includes_min: true,
-                includes_max: true,
-            }],
+            affected_version_ranges: vec![
+                VersionRange {
+                    min_version: None,
+                    max_version: Some("3.2.22".to_string()),
+                    includes_min: true,
+                    includes_max: false,
+                },
+                VersionRange {
+                    min_version: Some("4.0.0".to_string()),
+                    max_version: Some("4.1.12".to_string()),
+                    includes_min: true,
+                    includes_max: false,
+                },
+                VersionRange {
+                    min_version: Some("4.2.0".to_string()),
+                    max_version: Some("4.2.6".to_string()),
+                    includes_min: true,
+                    includes_max: false,
+                },
+            ],
             patched_versions: vec![
                 "3.2.22".to_string(),
                 "4.1.12".to_string(),
@@ -93,10 +109,16 @@ pub fn create_python_vulnerability_database() -> PythonVulnerabilityDatabase {
                 affected_version_ranges: vec![
                     VersionRange {
                         min_version: None,
-                        max_version: Some("2.2.4".to_string()),
+                        max_version: Some("2.2.5".to_string()),
                         includes_min: true,
-                        includes_max: true,
-                    },
+                        includes_max: false,
+                    }
+            ,VersionRange {
+                min_version: Some("2.3.0".to_string()),
+                max_version: Some("2.3.2".to_string()),
+                includes_min: true,
+                includes_max: false,
+            },
                 ],
                 patched_versions: vec!["2.2.5".to_string(), "2.3.2".to_string()],
                 references: vec!["https://github.com/pallets/flask/security/advisories/GHSA-m2qf-hxjv-5gpq".to_string()],
@@ -117,17 +139,17 @@ pub fn create_python_vulnerability_database() -> PythonVulnerabilityDatabase {
                     cve_id: "CVE-2023-32681".to_string(),
                     severity: VulnerabilitySeverity::Medium,
                     description: "Requests vulnerable to leaking Proxy-Authorization headers to destination servers".to_string(),
-                    affected_versions: vec!["< 2.31.0".to_string()],
+                    affected_versions: vec![">= 2.3.0, < 2.31.0".to_string()],
                     fixed_in: Some("2.31.0".to_string()),
                     cvss_score: Some(6.1),
                     published_date: Some("2023-05-26".to_string()),
                 },
                 affected_version_ranges: vec![
                     VersionRange {
-                        min_version: None,
-                        max_version: Some("2.30.0".to_string()),
+                        min_version: Some("2.3.0".to_string()),
+                        max_version: Some("2.31.0".to_string()),
                         includes_min: true,
-                        includes_max: true,
+                        includes_max: false,
                     },
                 ],
                 patched_versions: vec!["2.31.0".to_string()],
@@ -157,9 +179,9 @@ pub fn create_python_vulnerability_database() -> PythonVulnerabilityDatabase {
             },
             affected_version_ranges: vec![VersionRange {
                 min_version: None,
-                max_version: Some("10.0.0".to_string()),
+                max_version: Some("10.0.1".to_string()),
                 includes_min: true,
-                includes_max: true,
+                includes_max: false,
             }],
             patched_versions: vec!["10.0.1".to_string()],
             references: vec![
@@ -190,9 +212,9 @@ pub fn create_python_vulnerability_database() -> PythonVulnerabilityDatabase {
                 affected_version_ranges: vec![
                     VersionRange {
                         min_version: None,
-                        max_version: Some("5.3.1".to_string()),
+                        max_version: Some("5.4".to_string()),
                         includes_min: true,
-                        includes_max: true,
+                        includes_max: false,
                     },
                 ],
                 patched_versions: vec!["5.4".to_string()],
@@ -220,9 +242,9 @@ pub fn create_python_vulnerability_database() -> PythonVulnerabilityDatabase {
             },
             affected_version_ranges: vec![VersionRange {
                 min_version: None,
-                max_version: Some("1.21.5".to_string()),
+                max_version: Some("1.22.0".to_string()),
                 includes_min: true,
-                includes_max: true,
+                includes_max: false,
             }],
             patched_versions: vec!["1.22.0".to_string()],
             references: vec!["https://github.com/numpy/numpy/issues/19000".to_string()],
@@ -246,12 +268,20 @@ pub fn create_python_vulnerability_database() -> PythonVulnerabilityDatabase {
                 cvss_score: Some(8.1),
                 published_date: Some("2023-10-04".to_string()),
             },
-            affected_version_ranges: vec![VersionRange {
-                min_version: None,
-                max_version: Some("1.26.16".to_string()),
-                includes_min: true,
-                includes_max: true,
-            }],
+            affected_version_ranges: vec![
+                VersionRange {
+                    min_version: None,
+                    max_version: Some("1.26.17".to_string()),
+                    includes_min: true,
+                    includes_max: false,
+                },
+                VersionRange {
+                    min_version: Some("2.0.0".to_string()),
+                    max_version: Some("2.0.5".to_string()),
+                    includes_min: true,
+                    includes_max: false,
+                },
+            ],
             patched_versions: vec!["1.26.17".to_string(), "2.0.5".to_string()],
             references: vec![
                 "https://github.com/urllib3/urllib3/security/advisories/GHSA-v845-jxx5-vc9f"
@@ -263,31 +293,6 @@ pub fn create_python_vulnerability_database() -> PythonVulnerabilityDatabase {
         }],
     );
 
-    // Malicious package patterns
-    vulnerabilities.insert(
-        "PATTERN-TYPOSQUATTING".to_string(),
-        vec![PackageVulnerability {
-            package_name: "PATTERN-TYPOSQUATTING".to_string(),
-            vulnerability: KnownVulnerability {
-                cve_id: "PATTERN-001".to_string(),
-                severity: VulnerabilitySeverity::High,
-                description:
-                    "Typosquatting attack pattern - packages with names similar to popular packages"
-                        .to_string(),
-                affected_versions: vec!["*".to_string()],
-                fixed_in: None,
-                cvss_score: Some(8.0),
-                published_date: None,
-            },
-            affected_version_ranges: vec![],
-            patched_versions: vec![],
-            references: vec![],
-            disclosure_date: None,
-            exploit_available: true,
-            malware_indicators: vec!["typosquatting".to_string(), "similar name".to_string()],
-        }],
-    );
-
     PythonVulnerabilityDatabase {
         vulnerabilities,
         last_updated: "2025-01-06".to_string(),
@@ -295,66 +300,394 @@ pub fn create_python_vulnerability_database() -> PythonVulnerabilityDatabase {
     }
 }
 
-/// Check if a package has known vulnerabilities
-pub fn check_package_vulnerabilities(package_name: &str, version: &str) -> Vec<KnownVulnerability> {
-    let db = create_python_vulnerability_database();
-    let mut found_vulnerabilities = vec![];
-
-    if let Some(package_vulns) = db.vulnerabilities.get(package_name) {
-        for vuln in package_vulns {
-            if is_version_affected(version, &vuln.affected_version_ranges) {
-                found_vulnerabilities.push(vuln.vulnerability.clone());
+/// Normalise a PyPI project name (PEP 503): lower case, runs of `-`, `_` and
+/// `.` become one `-`.
+pub fn normalize_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut separator = false;
+    for c in name.trim().chars() {
+        if matches!(c, '-' | '_' | '.') {
+            separator = true;
+        } else {
+            if separator && !out.is_empty() {
+                out.push('-');
             }
+            separator = false;
+            out.extend(c.to_lowercase());
         }
     }
-
-    found_vulnerabilities
+    out
 }
 
-/// Check if a version is within the affected ranges
-fn is_version_affected(version: &str, ranges: &[VersionRange]) -> bool {
-    // Simple version check - in production, use a proper semver library
-
-    // Extract just the version number if it has operators
-    let version_num = if version.starts_with(">=")
-        || version.starts_with("<=")
-        || version.starts_with("~=")
-        || version.starts_with("!=")
-        || version.starts_with("==")
+/// Check if a package has known vulnerabilities at an exact version.
+///
+/// The name is normalised (`PyYAML`, `pyyaml` and `Py_YAML` are one project).
+/// `version` must be a concrete PEP 440 version; a specifier such as `>=2.0` is
+/// not a version, use [`check_dependency_spec`]. Operators in front of a
+/// version (`==2.9.1`) are tolerated.
+pub fn check_package_vulnerabilities(package_name: &str, version: &str) -> Vec<KnownVulnerability> {
+    let version = version
+        .trim()
+        .trim_start_matches("===")
+        .trim_start_matches("==");
+    let Some(parsed) = Pep440::parse(version) else {
+        return vec![];
+    };
+    static DB: OnceLock<PythonVulnerabilityDatabase> = OnceLock::new();
+    let db = DB.get_or_init(create_python_vulnerability_database);
+    let name = normalize_name(package_name);
+    let mut found: Vec<KnownVulnerability> = db
+        .vulnerabilities
+        .get(&name)
+        .into_iter()
+        .flatten()
+        .filter(|vuln| {
+            vuln.affected_version_ranges
+                .iter()
+                .any(|range| range_contains(range, &parsed))
+        })
+        .map(|vuln| vuln.vulnerability.clone())
+        .collect();
+    if get_known_malicious_versions()
+        .iter()
+        .any(|(n, v)| normalize_name(n) == name && Pep440::parse(v).as_ref() == Some(&parsed))
     {
-        &version[2..]
-    } else if version.starts_with('>') || version.starts_with('<') {
-        &version[1..]
-    } else {
-        version
+        found.push(compromised_release(package_name, version));
     }
-    .trim();
+    found
+}
 
-    for range in ranges {
-        // If specific versions are listed, check exact match
-        if let (Some(min), Some(max)) = (&range.min_version, &range.max_version) {
-            if min == max && version_num == min {
-                return true;
-            }
+/// The entry reported for a release that was published with malicious code.
+fn compromised_release(name: &str, version: &str) -> KnownVulnerability {
+    KnownVulnerability {
+        cve_id: "KNOWN-COMPROMISED-RELEASE".to_string(),
+        severity: VulnerabilitySeverity::Critical,
+        description: format!(
+            "{name} {version} is a release that was published with malicious code (hijacked or trojaned). Do not install it."
+        ),
+        affected_versions: vec![version.to_string()],
+        fixed_in: None,
+        cvss_score: None,
+        published_date: None,
+    }
+}
 
-            // Simple comparison for ranges
-            if version_num >= min.as_str() && version_num <= max.as_str() {
-                return true;
-            }
-        } else if let Some(max) = &range.max_version {
-            if version_num <= max.as_str() {
-                return true;
+/// What the offline table says about one requirement.
+#[derive(Debug, Clone, Default)]
+pub struct SpecCheck {
+    /// Advisories that apply to the exact pinned (or resolved) version.
+    pub vulnerabilities: Vec<KnownVulnerability>,
+    /// Advisories whose affected range contains the lowest version the
+    /// specifier admits; the installed version may be newer.
+    pub range_floor_matches: Vec<KnownVulnerability>,
+    /// The exact version the check used, if there was one.
+    pub version_used: Option<String>,
+}
+
+/// Check a requirement's specifier (`==2.9.1`, `>=9.5.0,<10`, `(==2.5.0)`, or
+/// empty). An unpinned requirement is unknown, not vulnerable. `resolved` is a
+/// version a lock file pins and wins over the specifier.
+pub fn check_dependency_spec(name: &str, specifier: &str, resolved: Option<&str>) -> SpecCheck {
+    if let Some(version) = resolved.and_then(Pep440::parse) {
+        return SpecCheck {
+            vulnerabilities: check_package_vulnerabilities(name, resolved.unwrap_or_default()),
+            range_floor_matches: vec![],
+            version_used: Some(version.to_string()),
+        };
+    }
+    match classify_specifier(specifier) {
+        SpecKind::Pinned(version) => {
+            let text = version.to_string();
+            SpecCheck {
+                vulnerabilities: check_package_vulnerabilities(name, &text),
+                range_floor_matches: vec![],
+                version_used: Some(text),
             }
         }
+        SpecKind::Floor(version) => SpecCheck {
+            vulnerabilities: vec![],
+            range_floor_matches: check_package_vulnerabilities(name, &version.to_string()),
+            version_used: None,
+        },
+        SpecKind::Unknown => SpecCheck::default(),
+    }
+}
 
-        // Pre-release versions need special handling
-        if version_num.contains("dev") || version_num.contains("rc") || version_num.contains("beta")
-        {
-            return true; // Conservative approach
+/// What a specifier pins down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecKind {
+    /// `==X` or `===X` without a wildcard.
+    Pinned(Pep440),
+    /// A lower bound (`>=`, `>`, `~=`, `==X.*`) and nothing exact.
+    Floor(Pep440),
+    /// No specifier, or one with no usable lower bound.
+    Unknown,
+}
+
+/// Classify a requirement's version specifier.
+pub fn classify_specifier(specifier: &str) -> SpecKind {
+    let cleaned: String = specifier
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|c| !matches!(c, '(' | ')') && !c.is_whitespace())
+        .collect();
+    if cleaned.is_empty() || cleaned == "*" {
+        return SpecKind::Unknown;
+    }
+    let clauses: Vec<&str> = cleaned.split(',').filter(|c| !c.is_empty()).collect();
+    if let [single] = clauses.as_slice() {
+        for op in ["===", "=="] {
+            if let Some(rest) = single.strip_prefix(op) {
+                if !rest.contains('*') {
+                    return Pep440::parse(rest).map_or(SpecKind::Unknown, SpecKind::Pinned);
+                }
+            }
         }
     }
+    let mut floor: Option<Pep440> = None;
+    for clause in clauses {
+        let lower = ["~=", ">=", "==", ">"].iter().find_map(|op| {
+            clause
+                .strip_prefix(op)
+                .map(|rest| rest.trim_end_matches(".*"))
+        });
+        if let Some(version) = lower.and_then(Pep440::parse) {
+            floor = Some(match floor {
+                Some(current) => current.max(version),
+                None => version,
+            });
+        }
+    }
+    floor.map_or(SpecKind::Unknown, SpecKind::Floor)
+}
 
-    false
+fn range_contains(range: &VersionRange, version: &Pep440) -> bool {
+    if let Some(min) = range.min_version.as_deref() {
+        let Some(min) = Pep440::parse(min) else {
+            return false;
+        };
+        let ok = if range.includes_min {
+            version >= &min
+        } else {
+            version > &min
+        };
+        if !ok {
+            return false;
+        }
+    }
+    if let Some(max) = range.max_version.as_deref() {
+        let Some(max) = Pep440::parse(max) else {
+            return false;
+        };
+        let ok = if range.includes_max {
+            version <= &max
+        } else {
+            version < &max
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// A PEP 440 version with its ordering: epoch, release (trailing zeros
+/// ignored), pre-release (`a`, `b`, `rc`), post-release, dev release and local
+/// label. `1.0.dev1 < 1.0a1 < 1.0rc1 < 1.0 < 1.0.post1`, and `2.30.0 < 2.5.0`
+/// is false.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pep440 {
+    /// Epoch (`1!2.0`), default 0.
+    pub epoch: u64,
+    /// Release numbers, trailing zeros removed.
+    pub release: Vec<u64>,
+    /// Pre-release: rank (0 a, 1 b, 2 rc) and number.
+    pub pre: Option<(u8, u64)>,
+    /// Post-release number.
+    pub post: Option<u64>,
+    /// Dev-release number.
+    pub dev: Option<u64>,
+    /// Local version label (after `+`).
+    pub local: Option<String>,
+}
+
+/// Ordering key of a [`Pep440`].
+type SortKey<'a> = (
+    u64,
+    &'a [u64],
+    (i8, u8, u64),
+    (i8, u64),
+    (i8, u64),
+    Option<&'a str>,
+);
+
+impl Pep440 {
+    /// Parse a version string; `None` for anything PEP 440 does not allow.
+    pub fn parse(text: &str) -> Option<Self> {
+        let lower = text.trim().to_ascii_lowercase();
+        let text = lower.strip_prefix('v').unwrap_or(&lower);
+        let (public, local) = match text.split_once('+') {
+            Some((public, local)) => (public, Some(local.to_string())),
+            None => (text, None),
+        };
+        let (epoch, rest) = match public.split_once('!') {
+            Some((epoch, rest)) => (epoch.parse().ok()?, rest),
+            None => (0, public),
+        };
+        let release_end = rest
+            .char_indices()
+            .find(|&(_, c)| !(c.is_ascii_digit() || c == '.'))
+            .map_or(rest.len(), |(i, _)| i);
+        let (release_text, mut tail) = rest.split_at(release_end);
+        let release_text = release_text.trim_end_matches('.');
+        if release_text.is_empty() {
+            return None;
+        }
+        let mut release = Vec::new();
+        for part in release_text.split('.') {
+            release.push(part.parse::<u64>().ok()?);
+        }
+        while release.len() > 1 && release.last() == Some(&0) {
+            release.pop();
+        }
+        let mut pre = None;
+        let mut post = None;
+        let mut dev = None;
+        // Separators `.`, `-` and `_` are optional between the parts.
+        let strip_sep = |s: &str| s.trim_start_matches(['.', '-', '_']).to_string();
+        let mut tail_owned = strip_sep(tail);
+        tail = &tail_owned;
+        let mut remaining = tail.to_string();
+        while !remaining.is_empty() {
+            let (kind, after) = if let Some(rest) =
+                ["alpha", "beta", "preview", "pre", "rc", "a", "b", "c"]
+                    .iter()
+                    .find_map(|k| remaining.strip_prefix(k).map(|r| (*k, r)))
+            {
+                (rest.0, rest.1.to_string())
+            } else if let Some(r) = remaining.strip_prefix("post") {
+                ("post", r.to_string())
+            } else if let Some(r) = remaining.strip_prefix("rev") {
+                ("post", r.to_string())
+            } else if let Some(r) = remaining.strip_prefix("dev") {
+                ("dev", r.to_string())
+            } else if let Some(r) = remaining.strip_prefix('r') {
+                ("post", r.to_string())
+            } else if remaining.chars().all(|c| c.is_ascii_digit()) {
+                // "1.0-1" is post release 1
+                post = Some(remaining.parse().ok()?);
+                break;
+            } else {
+                return None;
+            };
+            let after = strip_sep(&after);
+            let digits_end = after
+                .char_indices()
+                .find(|&(_, c)| !c.is_ascii_digit())
+                .map_or(after.len(), |(i, _)| i);
+            let number: u64 = if digits_end == 0 {
+                0
+            } else {
+                after[..digits_end].parse().ok()?
+            };
+            match kind {
+                "a" | "alpha" => pre = Some((0, number)),
+                "b" | "beta" => pre = Some((1, number)),
+                "c" | "rc" | "pre" | "preview" => pre = Some((2, number)),
+                "post" => post = Some(number),
+                _ => dev = Some(number),
+            }
+            tail_owned = strip_sep(&after[digits_end..]);
+            remaining = tail_owned.clone();
+        }
+        Some(Self {
+            epoch,
+            release,
+            pre,
+            post,
+            dev,
+            local,
+        })
+    }
+
+    fn sort_key(&self) -> SortKey<'_> {
+        // A dev release of a final or post release sorts before its pre-releases.
+        let pre = match (self.pre, self.post, self.dev) {
+            (None, None, Some(_)) => (-1, 0, 0),
+            (None, _, _) => (1, 0, 0),
+            (Some((rank, n)), _, _) => (0, rank, n),
+        };
+        let post = self.post.map_or((-1, 0), |n| (0, n));
+        let dev = self.dev.map_or((1, 0), |n| (0, n));
+        (
+            self.epoch,
+            self.release.as_slice(),
+            pre,
+            post,
+            dev,
+            self.local.as_deref(),
+        )
+    }
+}
+
+impl PartialOrd for Pep440 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Pep440 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.sort_key().cmp(&other.sort_key())
+    }
+}
+
+impl std::fmt::Display for Pep440 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.epoch != 0 {
+            write!(f, "{}!", self.epoch)?;
+        }
+        let release: Vec<String> = self.release.iter().map(u64::to_string).collect();
+        write!(f, "{}", release.join("."))?;
+        if let Some((rank, n)) = self.pre {
+            write!(f, "{}{n}", ["a", "b", "rc"][rank as usize])?;
+        }
+        if let Some(n) = self.post {
+            write!(f, ".post{n}")?;
+        }
+        if let Some(n) = self.dev {
+            write!(f, ".dev{n}")?;
+        }
+        if let Some(local) = &self.local {
+            write!(f, "+{local}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Where the advisory data behind [`check_package_vulnerabilities`] comes from.
+pub fn advisory_data_info() -> AdvisoryDataInfo {
+    let db = create_python_vulnerability_database();
+    let advisory_count = db.vulnerabilities.values().map(Vec::len).sum();
+    let newest = db
+        .vulnerabilities
+        .values()
+        .flatten()
+        .filter_map(|v| v.vulnerability.published_date.clone())
+        .max()
+        .unwrap_or_default();
+    AdvisoryDataInfo {
+        source: "small built-in table compiled into file-scanner; nothing is fetched".to_string(),
+        last_updated: db.last_updated,
+        newest_advisory: newest,
+        package_count: db.vulnerabilities.len(),
+        advisory_count,
+        offline: true,
+        coverage_note: "An empty vulnerability list means the package is not in this table, not that it has no known vulnerabilities. Run `pip-audit` or query OSV for full coverage."
+            .to_string(),
+    }
 }
 
 /// Get a list of known malicious package patterns
@@ -444,7 +777,10 @@ pub struct MaliciousPackagePattern {
     pub severity: String,
 }
 
-/// Known malicious Python packages list
+/// Names of packages that are malicious at every version.
+///
+/// Legitimate packages never belong here: an entry labels the package Critical.
+/// Compromised releases of legitimate packages go in [`get_known_malicious_versions`].
 pub fn get_known_malicious_packages() -> Vec<&'static str> {
     vec![
         // Known malicious packages from PyPI
@@ -454,34 +790,22 @@ pub fn get_known_malicious_packages() -> Vec<&'static str> {
         "python-sqlite",
         "mock-utils",
         "py-util",
-        "pypistats",
         "setup-tools", // Typosquatting setuptools
         "python-mysql",
         "python-mongo",
         "python-openssl",
         "python-crypt",
         "python-crypto",
-        "python-jwt",
         "python-yaml",
         "urllib", // Should be urllib3
         "requests-hub",
-        "request",       // Should be requests
-        "beautifulsoup", // Should be beautifulsoup4
+        "request", // Should be requests
         "python-pandas",
-        "pytorch", // Should be torch
-        "tensorflow-gpu",
         "opencv",      // Should be opencv-python
         "django-rest", // Should be djangorestframework
         "flask-rest",
         "matplotlib-pyplot",
-        "sklearn", // Should be scikit-learn
-        "python-nmap",
-        "crypto", // Should be pycrypto or cryptography
-        "python-binance",
-        "python-telegram",
-        "python-whatsapp",
         // Malicious packages removed from PyPI
-        "acquisition",
         "apidev-coop",
         "bzip",
         "crypt",
@@ -498,9 +822,53 @@ pub fn get_known_malicious_packages() -> Vec<&'static str> {
     ]
 }
 
-/// Check if a package name is suspiciously similar to a popular package
+/// Compromised releases of otherwise legitimate packages: `(normalised name, version)`.
+pub fn get_known_malicious_versions() -> Vec<(&'static str, &'static str)> {
+    vec![
+        // Hijacked 2022-05 (ctx) and 2024-12 (ultralytics, cryptominer in a release build).
+        ("ctx", "0.1.2"),
+        ("ultralytics", "8.3.41"),
+        ("ultralytics", "8.3.42"),
+        ("ultralytics", "8.3.45"),
+        ("ultralytics", "8.3.46"),
+    ]
+}
+
+/// Check if a package name is suspiciously similar to a popular package.
+///
+/// The name is normalised first (PEP 503: case and `-_.` runs). A name that is
+/// itself on the list is never reported. Names within edit distance 1 (a
+/// transposition counts as 1) are reported; distance 2 only when both names
+/// have at least eight characters.
 pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>> {
+    let package_name = normalize_name(package_name);
+    let package_name = package_name.as_str();
     let popular_packages = vec![
+        "setuptools",
+        "pip",
+        "wheel",
+        "six",
+        "urllib3",
+        "certifi",
+        "idna",
+        "charset-normalizer",
+        "pyyaml",
+        "packaging",
+        "attrs",
+        "aiohttp",
+        "httpx",
+        "uvicorn",
+        "gunicorn",
+        "werkzeug",
+        "markupsafe",
+        "itsdangerous",
+        "psycopg2",
+        "lxml",
+        "openpyxl",
+        "pyjwt",
+        "python-dateutil",
+        "pytz",
+        "oauthlib",
         "numpy",
         "pandas",
         "requests",
@@ -570,12 +938,30 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
         "chameleon",
     ];
 
+    // `attr` and `boto` are real projects one edit away from attrs and boto3.
+    if package_name.is_empty()
+        || package_name.len() > 214
+        || matches!(package_name, "attr" | "boto")
+        || popular_packages.contains(&package_name)
+    {
+        return None;
+    }
     let mut similar_packages = vec![];
 
     for popular in &popular_packages {
-        let distance = levenshtein_distance(package_name, popular);
-        if distance > 0 && distance <= 2 {
-            similar_packages.push(popular.to_string());
+        if package_name.len() >= 4
+            && popular.len() >= 4
+            && package_name.len().abs_diff(popular.len()) <= 2
+        {
+            let distance = edit_distance(package_name, popular);
+            let allowed = if package_name.len().min(popular.len()) >= 8 {
+                2
+            } else {
+                1
+            };
+            if distance > 0 && distance <= allowed {
+                similar_packages.push(popular.to_string());
+            }
         }
 
         // Check for common typosquatting patterns
@@ -599,34 +985,11 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
         }
     }
 
+    similar_packages.sort();
+    similar_packages.dedup();
     if similar_packages.is_empty() {
         None
     } else {
         Some(similar_packages)
     }
-}
-
-fn levenshtein_distance(s1: &str, s2: &str) -> usize {
-    let len1 = s1.chars().count();
-    let len2 = s2.chars().count();
-    let mut matrix = vec![vec![0; len2 + 1]; len1 + 1];
-
-    for (i, row) in matrix.iter_mut().enumerate().take(len1 + 1) {
-        row[0] = i;
-    }
-    for (j, cell) in matrix[0].iter_mut().enumerate().take(len2 + 1) {
-        *cell = j;
-    }
-
-    for (i, c1) in s1.chars().enumerate() {
-        for (j, c2) in s2.chars().enumerate() {
-            let cost = usize::from(c1 != c2);
-            matrix[i + 1][j + 1] = std::cmp::min(
-                std::cmp::min(matrix[i][j + 1] + 1, matrix[i + 1][j] + 1),
-                matrix[i][j] + cost,
-            );
-        }
-    }
-
-    matrix[len1][len2]
 }
