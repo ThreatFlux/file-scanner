@@ -886,6 +886,7 @@ impl FileScannerMcp {
                 if report.skipped > 0 {
                     // Only say the search covered the whole file when it did.
                     let whole_file = index["index_truncated"] != true
+                        && index["values_cut"].as_u64().unwrap_or(0) == 0
                         && index["scanned_bytes"].as_u64() >= index["file_size"].as_u64();
                     out["tracker_note"] = format!(
                         "{} strings of this file are not in the session index (too long, or the \
@@ -1070,6 +1071,13 @@ fn string_details_value(
                 entry.total_occurrences
             )
             .into();
+        }
+        if tracker.totals_may_be_capped(entry.unique_files.len()) {
+            out["total_note"] = "The totals are a lower bound: the session index keeps at most \
+                1024 files per string and 1,000,000 recorded occurrences, and counts past \
+                that were not kept. Use search_strings with file_path and query for the exact \
+                count in one file."
+                .into();
         }
         out["total_occurrences"] = entry.total_occurrences.into();
         out["files_total"] = entry.unique_files.len().into();
@@ -2084,6 +2092,96 @@ mod tests {
             .contains("rest are not searchable"));
         let tracker_note = found["tracker_note"].as_str().expect("a tracker note");
         assert!(!tracker_note.contains("is complete"), "{tracker_note}");
+    }
+
+    #[tokio::test]
+    async fn the_tracker_note_does_not_call_a_search_complete_when_values_were_cut() {
+        let cache = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        // A file that fills the session tracker (100,000 distinct values).
+        let mut filler = Vec::new();
+        for n in 0..100_100 {
+            filler.extend_from_slice(format!("fill_{n:07}\0").as_bytes());
+        }
+        let filler_path = sample_file(files.path(), "filler.bin", &filler);
+        // A second file: one value longer than the index keeps, and a few
+        // others the full tracker refuses.
+        let mut body = b"\0lead_".to_vec();
+        body.extend(std::iter::repeat_n(b'x', MAX_INDEXED_VALUE_CHARS + 500));
+        body.extend_from_slice(b"\0another_one\0");
+        let long_path = sample_file(files.path(), "long.bin", &body);
+        let (_state, client) = connect(cache.path()).await;
+        call(
+            &client,
+            "search_strings",
+            json!({"file_path": filler_path, "query": "fill_0000001"}),
+        )
+        .await;
+        let (error, found) = call(
+            &client,
+            "search_strings",
+            json!({"file_path": long_path, "query": "another"}),
+        )
+        .await;
+        assert!(!error, "{found}");
+        assert!(found["values_note"].is_string(), "{found}");
+        let tracker_note = found["tracker_note"].as_str().expect("a tracker note");
+        assert!(!tracker_note.contains("is complete"), "{tracker_note}");
+
+        // Control: nothing cut, tracker full: the sentence is true and stays.
+        let plain_path = sample_file(files.path(), "plain.bin", b"\0plain_value\0");
+        let (_, plain) = call(
+            &client,
+            "search_strings",
+            json!({"file_path": plain_path, "query": "plain"}),
+        )
+        .await;
+        assert!(plain.get("values_note").is_none(), "{plain}");
+        let note = plain["tracker_note"].as_str().expect("a tracker note");
+        assert!(
+            note.contains("This search of the file is complete."),
+            "{note}"
+        );
+    }
+
+    #[tokio::test]
+    async fn string_details_says_the_total_is_a_lower_bound_when_files_are_capped() {
+        let cache = tempfile::tempdir().unwrap();
+        let (state, client) = connect(cache.path()).await;
+        let tracker = state.string_tracker();
+        for n in 0..1_100 {
+            tracker.track_strings_at(
+                || vec![("capped_value_xyz".to_string(), 0)],
+                &format!("/f/{n}"),
+                &format!("hash{n:04}"),
+                "search_strings",
+                "k",
+            );
+        }
+        let (error, details) = call(
+            &client,
+            "string_details",
+            json!({"value": "capped_value_xyz"}),
+        )
+        .await;
+        assert!(!error, "{details}");
+        let note = details["total_note"].as_str().expect("a total note");
+        assert!(note.contains("lower bound"), "{note}");
+        // A value in a few files carries no such note.
+        tracker.track_strings_at(
+            || vec![("rare_value_xyz".to_string(), 0)],
+            "/f/rare",
+            "hashrare",
+            "search_strings",
+            "k",
+        );
+        let (_, few) = call(
+            &client,
+            "string_details",
+            json!({"value": "rare_value_xyz"}),
+        )
+        .await;
+        assert!(few.get("total_note").is_none(), "{few}");
     }
 
     #[tokio::test]

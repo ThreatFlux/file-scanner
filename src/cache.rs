@@ -970,8 +970,14 @@ fn refresh_changed_slots(state: &mut State, dir: &Path, except: &str, max_file_b
         .collect();
     for hash in hashes {
         let path = dir.join(entry_file_name(&hash));
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Another process cleared this entry file: stop listing it.
+                state.slots.remove(&hash);
+                continue;
+            }
+            Err(_) => continue,
         };
         let unchanged = state
             .slots
@@ -1946,6 +1952,33 @@ mod storage_tests {
             "{rows:?}"
         );
         assert_eq!(rows.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_row_whose_entry_file_another_cache_removed_is_dropped_at_our_next_write() {
+        let dir = TempDir::new().unwrap();
+        let a = AnalysisCache::new(dir.path()).unwrap();
+        let b = AnalysisCache::new(dir.path()).unwrap();
+        a.add_entry(entry("gone", "t1", "/f", Value::Null))
+            .await
+            .unwrap();
+        a.add_entry(entry("gone2", "t2", "/f2", Value::Null))
+            .await
+            .unwrap();
+        // B adopts the rows from disk, then clears the directory.
+        let _ = b.list_summaries(&any_query());
+        b.clear().await.unwrap();
+        a.add_entry(entry("kept", "t3", "/g", Value::Null))
+            .await
+            .unwrap();
+        let hashes: Vec<String> = a
+            .list_summaries(&any_query())
+            .into_iter()
+            .map(|row| row.file_hash)
+            .collect();
+        assert_eq!(hashes, ["kept"], "{hashes:?}");
+        let later = AnalysisCache::new(dir.path()).unwrap();
+        assert_eq!(later.list_summaries(&any_query()).len(), 1);
     }
 
     #[tokio::test]

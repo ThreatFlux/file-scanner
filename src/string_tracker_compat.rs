@@ -295,6 +295,9 @@ const MAX_REMEMBERED_BATCHES: usize = 10_000;
 /// Most values the classifier holds before it starts over.
 const MAX_CLASSIFIED_VALUES: usize = 20_000;
 
+/// Most file identities the upstream tracker keeps for one string.
+pub const MAX_FILE_IDENTITIES: usize = 1_024;
+
 /// What [`StringTracker::track_strings_at`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TrackReport {
@@ -457,6 +460,18 @@ impl StringTracker {
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    /// True when a total for one string may be short: the upstream tracker
+    /// keeps at most [`MAX_FILE_IDENTITIES`] files per string
+    /// (`unique_files` is how many this string shows), or the memory of
+    /// recorded occurrences is full and later occurrences were not counted.
+    pub fn totals_may_be_capped(&self, unique_files: usize) -> bool {
+        if unique_files >= MAX_FILE_IDENTITIES {
+            return true;
+        }
+        let dedup = self.dedup();
+        dedup.with_offset.len() >= MAX_DEDUP_KEYS || dedup.plain_values.len() >= MAX_DEDUP_KEYS
     }
 
     /// True when the tracker cannot take another distinct value.

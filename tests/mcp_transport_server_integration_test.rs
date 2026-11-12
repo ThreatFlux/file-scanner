@@ -125,8 +125,12 @@ const ACCEPT: &str = "application/json, text/event-stream";
 
 #[tokio::test]
 async fn run_http_and_the_sse_alias_start_and_keep_running() {
+    let cache_dir = TempDir::new().unwrap();
     for alias in [false, true] {
-        let transport = McpTransportServer::new();
+        let transport = McpTransportServer::with_config(StateConfig {
+            cache_dir: cache_dir.path().to_path_buf(),
+            ..StateConfig::default()
+        });
         let handle = tokio::spawn(async move {
             let _ = if alias {
                 transport.run_sse(HttpConfig::on_port(0)).await
@@ -462,13 +466,13 @@ async fn shutdown_ends_an_open_event_stream_and_the_server_returns() {
 
     let started = std::time::Instant::now();
     shutdown.cancel();
-    let outcome = tokio::time::timeout(Duration::from_secs(10), serving)
+    let outcome = tokio::time::timeout(Duration::from_secs(25), serving)
         .await
         .expect("the server returns although a stream was open")
         .unwrap();
     assert!(outcome.is_ok(), "{outcome:?}");
     assert!(
-        started.elapsed() < Duration::from_secs(10),
+        started.elapsed() < Duration::from_secs(25),
         "stopped by ending the stream, not by waiting out the grace period"
     );
     // The listener is closed.

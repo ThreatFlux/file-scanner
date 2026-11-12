@@ -78,6 +78,29 @@ impl Server {
         self.stderr.join("\n")
     }
 
+    /// Everything printed so far, after waiting (up to 60 s) until every
+    /// needle has appeared. The banner is several lines and the pipe delivers
+    /// them at its own pace; the caller asserts on the result.
+    fn wait_for(&mut self, needles: &[&str]) -> String {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let text = self.drain();
+            if needles.iter().all(|n| text.contains(n)) {
+                return text;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return text;
+            }
+            if let Ok(line) = self
+                .lines
+                .recv_timeout(left.min(Duration::from_millis(100)))
+            {
+                self.stderr.push(line);
+            }
+        }
+    }
+
     /// A minimal HTTP/1.1 GET; returns (status, body).
     fn get(&self, path: &str, headers: &[(&str, &str)]) -> (u16, String) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
@@ -168,7 +191,7 @@ fn help_lists_the_network_and_scope_flags_for_every_mcp_subcommand() {
 #[test]
 fn the_default_bind_is_loopback_and_the_banner_says_what_is_active() {
     let mut server = Server::start(&["mcp-http"], &[]);
-    let text = server.drain();
+    let text = server.wait_for(&["Host allow-list:", "File access:", "Bearer token:"]);
     assert!(text.contains("listening on http://127.0.0.1:"), "{text}");
     assert!(text.contains("Bearer token: not set"), "{text}");
     assert!(text.contains("File access: unrestricted"), "{text}");
@@ -190,7 +213,9 @@ fn sigterm_and_sigint_stop_the_server_with_exit_code_0() {
         assert_eq!(server.get("/health", &[]).0, 200);
         server.signal(signal);
         assert_eq!(server.wait(Duration::from_secs(10)), Some(0), "SIG{signal}");
-        assert!(server.drain().contains("shutting down"));
+        assert!(server
+            .wait_for(&["shutting down"])
+            .contains("shutting down"));
     }
 }
 
@@ -245,9 +270,11 @@ fn a_signal_with_a_rest_call_in_flight_stops_the_server_promptly() {
     std::thread::sleep(Duration::from_millis(500));
     let started = Instant::now();
     server.signal("INT");
-    assert_eq!(server.wait(Duration::from_secs(8)), Some(0));
+    assert_eq!(server.wait(Duration::from_secs(60)), Some(0));
+    // The grace period is a few seconds; a generous bound (the grace-period
+    // line below is the precise check) keeps a loaded runner from failing.
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(50),
         "took {:?}",
         started.elapsed()
     );
@@ -298,8 +325,12 @@ fn refused_requests_are_logged_on_stderr_without_the_token() {
         403
     );
     // The log lines are written before the answers; give the pipe a moment.
-    std::thread::sleep(Duration::from_millis(200));
-    let text = server.drain();
+    let text = server.wait_for(&[
+        "refused GET \"/api/info\" (401): bearer token does not match",
+        "refused GET \"/health\" (403): Origin \"https://evil.example\" is not allowed",
+        "refused GET \"/health\" (403): Host \"evil.example\" is not allowed",
+        "refused GET \"/api/info\" (401): no bearer token sent",
+    ]);
     for expected in [
         "refused GET \"/api/info\" (401): no bearer token sent",
         "refused GET \"/api/info\" (401): bearer token does not match",
@@ -316,7 +347,7 @@ fn refused_requests_are_logged_on_stderr_without_the_token() {
 #[test]
 fn a_non_loopback_host_without_a_token_warns_on_stderr() {
     let mut server = Server::start(&["mcp-http", "--host", "0.0.0.0"], &[]);
-    let text = server.drain();
+    let text = server.wait_for(&["warning: listening on 0.0.0.0 without a bearer token"]);
     assert!(
         text.contains("warning: listening on 0.0.0.0 without a bearer token"),
         "{text}"
@@ -329,7 +360,7 @@ fn a_non_loopback_host_without_a_token_warns_on_stderr() {
         &["mcp-http", "--host", "0.0.0.0"],
         &[("FILE_SCANNER_AUTH_TOKEN", "env-token-value")],
     );
-    let text = protected.drain();
+    let text = protected.wait_for(&["required on every route except /health"]);
     assert!(!text.contains("without a bearer token"), "{text}");
     assert!(
         text.contains("required on every route except /health"),
@@ -370,7 +401,11 @@ fn the_flags_reach_the_guard() {
         ],
         &[],
     );
-    let text = server.drain();
+    let text = server.wait_for(&[
+        "scanner.internal",
+        "https://app.example",
+        "File access: limited to",
+    ]);
     assert!(text.contains("scanner.internal"), "{text}");
     assert!(text.contains("https://app.example"), "{text}");
     assert!(text.contains("File access: limited to"), "{text}");
@@ -405,7 +440,7 @@ fn allow_root_flag_beats_the_environment_variable() {
         &["mcp-http", "--allow-root", &flag_arg],
         &[("FILE_SCANNER_ALLOWED_ROOTS", &env_value)],
     );
-    let text = server.drain();
+    let text = server.wait_for(&["File access"]);
     let limited = text
         .lines()
         .find(|l| l.contains("File access"))
@@ -418,7 +453,7 @@ fn allow_root_flag_beats_the_environment_variable() {
     drop(server);
 
     let mut from_env = Server::start(&["mcp-http"], &[("FILE_SCANNER_ALLOWED_ROOTS", &env_value)]);
-    let text = from_env.drain();
+    let text = from_env.wait_for(&["File access: limited to"]);
     assert!(
         text.contains("File access: limited to") && text.contains(&env_value),
         "{text}"
@@ -428,7 +463,7 @@ fn allow_root_flag_beats_the_environment_variable() {
 #[test]
 fn mcp_sse_is_a_deprecated_alias_for_the_same_server() {
     let mut server = Server::start(&["mcp-sse"], &[]);
-    let text = server.drain();
+    let text = server.wait_for(&["mcp-sse is deprecated"]);
     assert!(text.contains("mcp-sse is deprecated"), "{text}");
     assert_eq!(
         text.matches("deprecated").count(),
@@ -441,8 +476,10 @@ fn mcp_sse_is_a_deprecated_alias_for_the_same_server() {
 
 #[test]
 fn bad_settings_fail_at_start_up_with_the_fix() {
+    let cache = TempDir::new().unwrap();
     let output = Command::new(BIN)
         .args(["mcp-http", "--port", "0", "--allowed-origin", "example.com"])
+        .env("FILE_SCANNER_CACHE_DIR", cache.path().join("cache"))
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -451,6 +488,7 @@ fn bad_settings_fail_at_start_up_with_the_fix() {
 
     let output = Command::new(BIN)
         .args(["mcp-http", "--port", "0", "--auth-token", ""])
+        .env("FILE_SCANNER_CACHE_DIR", cache.path().join("cache"))
         .output()
         .unwrap();
     assert!(!output.status.success());
