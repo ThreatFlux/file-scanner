@@ -1281,12 +1281,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "edit-distance"
-version = "2.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "324d428080b707bac399325341bd61af5ded1b30f33b7c949792ca464733c2d5"
-
-[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1655,18 +1649,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1033caf0b349c518623b5396bfb2cf0bddf44f0306d543a250e5743297aafd10"
 dependencies = [
  "stable_deref_trait",
-]
-
-[[package]]
-name = "git2"
-version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddddbf932745a6be37109b6112d3ee09696106f848449069d3a57bba937ab82e"
-dependencies = [
- "bitflags",
- "libc",
- "libgit2-sys",
- "log",
 ]
 
 [[package]]
@@ -2279,32 +2261,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
-name = "libgit2-sys"
-version = "0.18.8+1.9.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f7c568b25d7489bc3fb2988ed69ab111d2944d2f5fec3d5c987fe545ea97b50"
-dependencies = [
- "cc",
- "libc",
- "libz-sys",
- "pkg-config",
-]
-
-[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
-
-[[package]]
-name = "libz-sys"
-version = "1.1.31"
-dependencies = [
- "cc",
- "libc",
- "pkg-config",
- "vcpkg",
-]
 
 [[package]]
 name = "linux-raw-sys"
@@ -4418,20 +4378,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "threatflux-cache"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e45c4763784a094fe8a7f208d4132e183c8558f67662880d4a4d1c00a98b9c35"
-dependencies = [
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
 name = "threatflux-file-scanner"
 version = "0.3.9"
 dependencies = [
@@ -4447,11 +4393,9 @@ dependencies = [
  "chrono",
  "clap",
  "criterion",
- "edit-distance",
  "encoding_rs",
  "filetime",
  "flate2",
- "git2",
  "goblin",
  "hyper",
  "libc",
@@ -4477,13 +4421,11 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2 0.11.1",
- "strsim",
  "tar",
  "tempfile",
  "test-case",
  "thiserror 2.0.21",
  "threatflux-binary-analysis",
- "threatflux-cache",
  "threatflux-string-analysis",
  "threatflux-threat-detection",
  "tokio",
@@ -4491,7 +4433,6 @@ dependencies = [
  "tokio-util",
  "tower",
  "tower-http 0.7.1",
- "url",
  "utoipa",
  "uuid",
  "walkdir",
@@ -4940,12 +4881,6 @@ dependencies = [
  "serde_core",
  "wasm-bindgen",
 ]
-
-[[package]]
-name = "vcpkg"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "version_check"
@@ -5919,3 +5854,7 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
+
+[[patch.unused]]
+name = "libz-sys"
+version = "1.1.31"

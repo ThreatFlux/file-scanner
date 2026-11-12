@@ -76,12 +76,8 @@ petgraph = "0.8.3"
 # Threat detection
 yara-x = "1.22.0"
 
-# Network and repository checks
-strsim = "0.11.1"
+# HTTP client (tests only)
 reqwest = { version = "0.13.5", features = ["json", "blocking"] }
-git2 = "0.21.0"
-url = "2.5.8"
-edit-distance = "2.2.2"
 
 # Archive handling
 cfb = "0.16.0"
@@ -167,7 +163,6 @@ path = "src/main.rs"
 [dependencies]
 # ThreatFlux libraries - migrated to crates.io
 threatflux-string-analysis = { version = "0.2.3" }
-threatflux-cache = { version = "0.2.1" } # TODO: Update library to use utoipa 5.4.0 for openapi feature
 threatflux-binary-analysis = { version = "0.3.1", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis
 threatflux-threat-detection = { version = "0.2.3", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
@@ -223,13 +218,6 @@ petgraph = { workspace = true }
 # Threat detection
 yara-x = { workspace = true }
 walkdir = { workspace = true }
-
-# Network and repository analysis
-strsim = { workspace = true }
-reqwest = { workspace = true }
-git2 = { workspace = true }
-url = { workspace = true }
-edit-distance = { workspace = true }
 
 # Archive analysis
 cfb = { workspace = true }
