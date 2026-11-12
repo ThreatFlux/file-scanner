@@ -1040,6 +1040,7 @@ pub fn analyze_control_flow_with_arch(
         None => &whole,
     };
 
+    check_parse_preconditions(buffer)?;
     let obj = Object::parse(buffer)?;
     let format = object_format_name(&obj);
     let rva_base = match &obj {
@@ -1061,13 +1062,23 @@ pub fn analyze_control_flow_with_arch(
         (other, _) => {
             return Err(anyhow!(
                 "Control-flow analysis supports x86 and x86-64 code only; this {format} file contains {other:?} code. \
-                 Use the disassembly tool for this architecture."
+                 Use the `disassemble` tool for this architecture (for a universal Mach-O with an x86_64 slice, `arch: \"x86_64\"` selects it)."
             ))
         }
     };
 
     let candidates = function_candidates(symbol_table, code.address, code.data.len(), rva_base);
     analyzer.analyze_code(&code.data, code.address, candidates)
+}
+
+/// Refuses PE and Mach-O files whose import or load-command tables would make
+/// goblin's parser spend unbounded time or memory.
+pub(crate) fn check_parse_preconditions(buffer: &[u8]) -> Result<()> {
+    crate::binary_parser::check_mach_load_commands(buffer)
+        .map_err(|why| anyhow!("The Mach-O file was not analyzed: {why}"))?;
+    crate::binary_parser::check_pe_imports(buffer)
+        .map_err(|why| anyhow!("The PE file was not analyzed: {why}"))?;
+    Ok(())
 }
 
 /// Most indirect-symbol entries read in total across all sections of one file.
@@ -1259,6 +1270,11 @@ fn resolve_import_targets_inner(
     // or stubs is copied per reference otherwise).
     let mut map_budget = MAX_BIND_NAME_BYTES;
     let mut slot_budget = MAX_BIND_NAME_BYTES;
+    if check_parse_preconditions(buffer).is_err() {
+        // Imports could not be named safely; the note about unnamed imports applies.
+        *cut = true;
+        return map;
+    }
     let Ok(obj) = Object::parse(buffer) else {
         return map;
     };

@@ -577,6 +577,7 @@ pub(crate) fn detect_architecture_and_code_with_arch(
         require_named_slice(&selection, arch_choice)?;
         return detect_architecture_and_code(selection.data);
     }
+    crate::control_flow::check_parse_preconditions(buffer)?;
     match Object::parse(buffer)? {
         Object::Elf(elf) => {
             let (arch, mode) = match elf.header.e_machine {
