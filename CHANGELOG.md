@@ -7,8 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- MCP: `analyze_file` caches each section of a result on its own (by file SHA-256 and the options
+  that change it), so a full run answers later single-section calls, and a repeated identical call
+  is answered from the rendered answer. The cache holds deflate-compressed JSON text (default
+  256 MiB of compressed bytes, `FILE_SCANNER_SECTION_CACHE_MB`) with a small bounded map of
+  parsed values in front, so paging through one section does not parse it again. When it is
+  full, other files' sections go first; a section too big to keep, and any section of the same
+  file dropped to make room, is named in `cache_note`. `cache` is `hit`, `partial` or `miss`;
+  a call that names no analysis returns a `hint` instead. Analysis cache entries over 4 MiB keep the trimmed answer.
+  At most `max(4, CPUs)` analyses run at once across all transports.
+- MCP: the server is now served by the rmcp SDK runtime on stdio and HTTP. Every protocol
+  revision the SDK knows (2024-11-05 through 2026-07-28) is negotiated; `ping`,
+  `notifications/*` and `server/discover` behave per the specification, and the server
+  reports its real name, version, title and usage instructions.
+- MCP: tools carry titles and read-only annotations, input schemas are generated from the
+  request types and reject unknown arguments, and every tool accepts `max_output_bytes`.
+- MCP: results are compact JSON with unset fields omitted and a hard byte budget (default
+  80,000, ceiling 400,000); anything cut is listed under `truncated`.
+- MCP: `FILE_SCANNER_ALLOWED_ROOTS` (`:`-separated) confines every tool path to the listed
+  directories; `~/` is expanded, and FIFOs, sockets and devices are rejected with a message
+  that names the fix. A directory argument is vetted too: with roots set, a symlink inside it
+  that points outside them is refused (`yara_scan_file`, `analyze_npm_package`,
+  `analyze_python_package`), and a FIFO, socket or device inside it is always refused. Without
+  a root, a missing path no longer says whether it exists outside the roots.
+- MCP: a repeated identical `analyze_file` call on an unchanged file is answered from a
+  bounded in-memory section cache (`cache: "hit"`).
+- MCP: `mcp-http` serves the SDK's Streamable HTTP transport at `/mcp` next to the REST
+  helper routes. Sessions (`Mcp-Session-Id`) serve clients older than revision 2026-07-28;
+  2026-07-28 requests are served statelessly.
+- MCP: `mcp-http` and `mcp-sse` take `--host` (default `127.0.0.1`), `--port`,
+  `--allowed-host`, `--allowed-origin` (both repeatable) and `--auth-token` (also
+  `FILE_SCANNER_AUTH_TOKEN`). With a token, every route except `/health` needs
+  `Authorization: Bearer <token>` (401 and `WWW-Authenticate` otherwise).
+- MCP: `--allow-root <dir>` (repeatable, also `FILE_SCANNER_ALLOWED_ROOTS`) on `mcp-stdio`,
+  `mcp-http` and `mcp-sse`; the flag wins over the variable.
+- MCP: the startup banner on stderr states the real bind address and which protections are
+  active; binding a non-loopback `--host` without a token prints a warning.
+- MCP: the HTTP server stops on SIGINT and SIGTERM (open streams are ended, exit code 0);
+  REST routes have a request timeout (120 s, 504) and a concurrency limit (16); a REST call
+  still running at shutdown is answered `503 {"error":"shutting down"}` so the server stops
+  at once. Each refused request (401, 403) is logged on stderr (method, path, reason, never
+  the token).
+- MCP: the cache directory is created with mode 0700 and its files 0600 on Unix.
+- MCP: `mcp_server::output::page` and `PageArgs` (offset, limit, `total`, `returned`,
+  `next_offset`) are the shared paging helper for tools that return lists.
+- `file-scanner --version` prints the package version.
+
 ### Changed
 
+- MCP: HTTP security defaults. The server binds `127.0.0.1` instead of all interfaces; the
+  `Host` header must be a loopback name or an `--allowed-host`; a present `Origin` header
+  must be a loopback origin or an `--allowed-origin` (403 otherwise) on every route, REST
+  routes included. The wildcard `Access-Control-Allow-Origin: *` is gone: CORS preflights are
+  answered for allowed origins only and `Mcp-Session-Id` is exposed. Deployments that
+  publish the port (containers, systemd) must pass `--host 0.0.0.0`, an `--allowed-host`
+  for the name clients use, and should set `--auth-token`.
+- MCP: `hex_dump_size` above 1 MiB and a YARA `max_file_size` above 100 MiB are tool errors
+  that name the limit instead of reading the whole file into memory.
+- MCP: `/api/info` lists exactly the routes that exist (no `/docs` or `/redoc`), reports a
+  real uptime (`uptime`, `uptime_seconds`) and the package version, and `/health` reports
+  `transports: ["streamable-http"]`. The OpenAPI document describes every REST route.
+- MCP: `POST /tools/call` answers success, tool failure and unknown tool with the same body
+  shape (`resultType`, `content`, `isError`); the OpenAPI document says so.
+- MCP: `make docker-run-http` passes `--host 0.0.0.0` so the published port reaches the server.
+- MCP: REST routes answer failures as `{"error": ...}` JSON (400 for a rejected string
+  query or filter) instead of an empty body.
+- MCP: tool failures (missing file, bad or unknown argument, failing YARA rule, unsupported
+  package) are tool errors (`isError: true`) whose text includes the underlying cause,
+  such as the YARA compiler's message. An unknown tool is a JSON-RPC `-32602` error.
+- MCP: a panic inside an analyzer becomes a tool error naming the section instead of ending
+  the server; the release profile no longer uses `panic = "abort"`.
+- MCP: `mcp-stdio` exits 0 when stdin closes before or after a session and writes only
+  JSON-RPC to stdout; requests before `initialize` need the 2026-07-28 request metadata.
+- MCP: `mcp-sse` is a deprecated alias that starts the Streamable HTTP server. The `/sse`
+  route and the SSE event types are removed.
+- MCP: `/health`, `/api/info` and the OpenAPI document report the package version.
+- MCP: a failing cache directory no longer stops the server from starting; the analysis
+  cache degrades to memory-only with one line on stderr.
+- `estimate_technical_debt` uses saturating arithmetic, so extreme metrics no longer
+  overflow and panic.
 - Consolidate dependency updates on Rust 1.99.1, refresh stable crate/tool/container
   pins and migrate archive readers to ZIP 9's fallible filename API.
 - Replace deprecated `serde_yaml`/unmaintained `unsafe-libyaml` with maintained
@@ -22,6 +101,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP: a panic in an analyzer (for example the technical-debt overflow in debug builds)
+  no longer ends the server or leaves a request unanswered.
+- `analyze_file` with `code_quality` or `all: true` completes on binaries with extreme
+  metrics (the Go samples): every debt calculation saturates instead of overflowing.
+- `POST /cache/clear` also empties the in-memory section cache.
+- The non-recursive directory scan of `yara_scan_file` no longer follows symlinks to files
+  outside the directory.
 - Remediate the eleven confirmed runtime findings with a pinned Wolfi glibc 2.44
   runtime and patched static zlib 1.3.2. Backport upstream's nonblocking gzip
   security fix into stable libz-sys; verify it with AddressSanitizer and a source
@@ -30,6 +116,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Preserve complete all-severity container reports, verify exact image identity
   and application inventories, scan both published architectures, and fail the
   security gate on any reported vulnerability.
+
+### Removed
+
+- MCP: the permissive CORS middleware and the `/docs` and `/redoc` entries of `/api/info`.
+- The uncompiled `src/mcp/` tree, `src/hash_wrapper.rs`, `MCP_REFACTORING_GUIDE.md` and
+  `MCP_REFACTORING_SUMMARY.md`, and the dependencies that only they or the hand-written
+  JSON-RPC transport used (`async-trait`, `tokio-stream`, `futures-util`,
+  `threatflux-hashing`), plus `utoipa-redoc` and `utoipa-swagger-ui`, which nothing used
+  after the `/docs` and `/redoc` routes went. `tower` is now a dev-dependency (tests);
+  `tower-http` stays, for the CORS layer.
+- The hand-written JSON-RPC dispatcher and its types (`JsonRpcRequest`, `JsonRpcResponse`,
+  `JsonRpcError`, `ToolCallParams` dispatch, `McpServerState`, `SseEvent`, `SseQuery`).
 
 ## [0.3.7] - 2026-10-07
 

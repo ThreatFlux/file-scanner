@@ -15,6 +15,44 @@ use utoipa::ToSchema;
 //     Cache as ThreatFluxCache, CacheConfig, backends,
 // };
 
+/// Create `dir` (and its parents) for the cache. On Unix the directory is made
+/// readable by its owner only (mode 0700), also when it already exists.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        // An older run (or another tool) may have made it with looser rights.
+        // Failing to tighten a directory that is not ours is not fatal.
+        let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(dir)
+    }
+}
+
+/// Create or truncate a cache file; on Unix it is readable by its owner only (mode 0600).
+async fn create_private_file(path: &Path) -> std::io::Result<File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `mode` applies only to a file that is created; fix older ones too.
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .await?;
+    }
+    Ok(file)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CacheEntry {
     pub file_path: String,
@@ -42,6 +80,8 @@ pub struct AnalysisCache {
     max_entries_per_file: usize,
     max_total_entries: usize,
     save_semaphore: Arc<Semaphore>,
+    /// False for a memory-only cache: nothing is read from or written to `cache_dir`.
+    persist: bool,
     // TODO: Enhanced caching with ThreatFlux backend (prepare for future migration)
     _threatflux_ready: bool,
 }
@@ -51,7 +91,7 @@ impl AnalysisCache {
         let cache_dir = cache_dir.as_ref().to_path_buf();
 
         // Create cache directory if it doesn't exist
-        fs::create_dir_all(&cache_dir)?;
+        create_private_dir(&cache_dir)?;
 
         let cache = Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
@@ -59,6 +99,7 @@ impl AnalysisCache {
             max_entries_per_file: 100,
             max_total_entries: 10000, // Global cache limit
             save_semaphore: Arc::new(Semaphore::new(1)), // Only one save at a time
+            persist: true,
             // Mark that threatflux-cache is available as dependency
             _threatflux_ready: true,
         };
@@ -70,6 +111,20 @@ impl AnalysisCache {
         });
 
         Ok(cache)
+    }
+
+    /// A cache that lives only in memory. Used when the cache directory cannot
+    /// be created or written, so the server can still start.
+    pub fn memory_only() -> Self {
+        Self {
+            entries: Arc::new(RwLock::new(HashMap::new())),
+            cache_dir: PathBuf::new(),
+            max_entries_per_file: 100,
+            max_total_entries: 10000,
+            save_semaphore: Arc::new(Semaphore::new(1)),
+            persist: false,
+            _threatflux_ready: true,
+        }
     }
 
     pub async fn add_entry(&self, entry: CacheEntry) -> Result<()> {
@@ -95,11 +150,13 @@ impl AnalysisCache {
         }
 
         // Batch save operations with semaphore
-        let cache_clone = self.clone();
-        tokio::spawn(async move {
-            let _permit = cache_clone.save_semaphore.acquire().await.unwrap();
-            let _ = cache_clone.save_to_disk().await;
-        });
+        if self.persist {
+            let cache_clone = self.clone();
+            tokio::spawn(async move {
+                let _permit = cache_clone.save_semaphore.acquire().await.unwrap();
+                let _ = cache_clone.save_to_disk().await;
+            });
+        }
 
         Ok(())
     }
@@ -180,7 +237,7 @@ impl AnalysisCache {
         entries.clear();
 
         // Remove cache files
-        if self.cache_dir.exists() {
+        if self.persist && self.cache_dir.exists() {
             for entry in fs::read_dir(&self.cache_dir)? {
                 let entry = entry?;
                 if entry.path().extension().and_then(|s| s.to_str()) == Some("json") {
@@ -243,7 +300,7 @@ impl AnalysisCache {
             let cache_file = self.cache_dir.join(format!("{hash}.json"));
             let json = serde_json::to_string_pretty(file_entries)?;
 
-            let mut file = File::create(&cache_file).await?;
+            let mut file = create_private_file(&cache_file).await?;
             file.write_all(json.as_bytes()).await?;
             file.flush().await?;
         }
@@ -253,7 +310,7 @@ impl AnalysisCache {
         let metadata_file = self.cache_dir.join("metadata.json");
         let json = serde_json::to_string_pretty(&metadata)?;
 
-        let mut file = File::create(&metadata_file).await?;
+        let mut file = create_private_file(&metadata_file).await?;
         file.write_all(json.as_bytes()).await?;
         file.flush().await?;
 
@@ -261,7 +318,7 @@ impl AnalysisCache {
     }
 
     async fn load_from_disk(&self) -> Result<()> {
-        if !self.cache_dir.exists() {
+        if !self.persist || !self.cache_dir.exists() {
             return Ok(());
         }
 

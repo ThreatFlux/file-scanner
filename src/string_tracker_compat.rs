@@ -133,7 +133,7 @@ pub struct StringStatistics {
 }
 
 /// Filter criteria for string queries
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct StringFilter {
     /// Minimum number of occurrences a string must have
     pub min_occurrences: Option<usize>,
@@ -158,6 +158,7 @@ pub struct StringFilter {
     /// Maximum entropy score for strings
     pub max_entropy: Option<f64>,
     /// Date range filter for when strings were discovered
+    #[schema(value_type = Option<Vec<String>>)]
     pub date_range: Option<DateTimeRange>,
 }
 

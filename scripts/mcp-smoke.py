@@ -19,6 +19,8 @@ def requests_for(fixture):
                 "clientInfo": {"name": "file-scanner-ci", "version": "1.0.0"},
             },
         },
+        # The handshake is complete only after this notification; a server must not answer it.
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
         {
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -42,7 +44,11 @@ def exchange(binary, fixture):
         text=True, capture_output=True, timeout=30, check=True, shell=False,
     )
     responses = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
-    return {response["id"]: response for response in responses if response.get("id") is not None}
+    if any(response.get("id") is None for response in responses):
+        raise RuntimeError(f"A notification or malformed input was answered: {responses!r}")
+    if len(responses) != 3:
+        raise RuntimeError(f"Expected exactly three responses, got {len(responses)}")
+    return {response["id"]: response for response in responses}
 
 
 def validate_analysis(result, fixture):

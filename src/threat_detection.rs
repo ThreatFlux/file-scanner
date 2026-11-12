@@ -846,7 +846,9 @@ fn collect_files_to_scan(path: &Path, recursive: bool, max_file_size: u64) -> Re
             if let Ok(entries) = fs::read_dir(path) {
                 for entry in entries.filter_map(std::result::Result::ok) {
                     let path = entry.path();
-                    if path.is_file() {
+                    // `file_type` does not follow symlinks, so a link to a file
+                    // outside the scanned directory is skipped, as when recursing.
+                    if entry.file_type().is_ok_and(|kind| kind.is_file()) {
                         if let Ok(metadata) = entry.metadata() {
                             if metadata.len() <= max_file_size {
                                 files.push(path);
@@ -959,6 +961,28 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(content).unwrap();
         file_path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_recursive_collection_does_not_follow_symlinks_out_of_the_directory() {
+        let outside = tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
+        let scanned = tempdir().unwrap();
+        std::fs::write(scanned.path().join("own.txt"), b"own").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            scanned.path().join("link.txt"),
+        )
+        .unwrap();
+        for recursive in [false, true] {
+            let files = collect_files_to_scan(scanned.path(), recursive, 1 << 20).unwrap();
+            let names: Vec<_> = files
+                .iter()
+                .filter_map(|file| file.file_name()?.to_str().map(str::to_string))
+                .collect();
+            assert_eq!(names, ["own.txt"], "recursive={recursive}");
+        }
     }
 
     // Tests for ThreatLevel enum serialization/deserialization

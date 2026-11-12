@@ -102,6 +102,7 @@ use vulnerability_detection::analyze_vulnerabilities;
 
 #[derive(Parser, Debug)]
 #[command(name = "file-scanner")]
+#[command(version)]
 #[command(about = "A native static file scanner that provides comprehensive file metadata", long_about = None)]
 struct Args {
     #[command(subcommand)]
@@ -169,20 +170,90 @@ struct Args {
     yara_indicators: bool,
 }
 
+/// Which files the MCP tools may read (all three mcp-* subcommands).
+#[derive(clap::Args, Debug)]
+struct ScopeArgs {
+    /// Directory the tools may read; repeatable. When any is set, every tool path
+    /// must resolve (symlinks and `..` included) to a location under one of them.
+    /// Without this option the environment variable FILE_SCANNER_ALLOWED_ROOTS
+    /// (`:`-separated) is used; with neither, every readable path is allowed.
+    #[arg(long = "allow-root", value_name = "DIR")]
+    allow_root: Vec<PathBuf>,
+}
+
+/// Network settings of mcp-http and mcp-sse.
+#[derive(clap::Args, Debug)]
+struct HttpArgs {
+    /// Port to listen on (0 picks a free one)
+    #[arg(short, long, default_value_t = mcp_transport::http::DEFAULT_PORT)]
+    port: u16,
+    /// Address to bind. The default accepts local connections only; use 0.0.0.0 for
+    /// all interfaces together with --auth-token and --allow-root
+    #[arg(long, default_value = mcp_transport::http::DEFAULT_HOST)]
+    host: String,
+    /// Extra Host header value to accept besides localhost, 127.0.0.1 and ::1
+    /// (`name` or `name:port`); repeatable
+    #[arg(long = "allowed-host", value_name = "HOST")]
+    allowed_host: Vec<String>,
+    /// Extra browser Origin to accept besides loopback ones
+    /// (`scheme://host[:port|:*]`); repeatable
+    #[arg(long = "allowed-origin", value_name = "ORIGIN")]
+    allowed_origin: Vec<String>,
+    /// Bearer token every request except /health must present
+    /// (`Authorization: Bearer <token>`). Prefer the environment variable: command
+    /// lines are visible to other users
+    #[arg(
+        long = "auth-token",
+        env = "FILE_SCANNER_AUTH_TOKEN",
+        hide_env_values = true,
+        value_name = "TOKEN"
+    )]
+    auth_token: Option<String>,
+}
+
+impl HttpArgs {
+    fn into_config(self) -> mcp_transport::HttpConfig {
+        mcp_transport::HttpConfig {
+            host: self.host,
+            port: self.port,
+            allowed_hosts: self.allowed_host,
+            allowed_origins: self.allowed_origin,
+            auth_token: self.auth_token,
+            ..mcp_transport::HttpConfig::default()
+        }
+    }
+}
+
+/// The server state for the command line: `--allow-root` wins over the environment.
+fn mcp_server_for(scope: ScopeArgs) -> McpTransportServer {
+    let mut config = mcp_server::StateConfig::from_env();
+    if !scope.allow_root.is_empty() {
+        config.allow_roots = scope.allow_root;
+    }
+    McpTransportServer::with_config(config)
+}
+
 #[derive(Subcommand, Debug)]
 #[allow(clippy::enum_variant_names)]
 enum Commands {
     /// Run as MCP server with stdio transport
-    McpStdio,
-    /// Run as MCP server with HTTP transport
-    McpHttp {
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
+    McpStdio {
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Run as MCP server with SSE transport
+    /// Run as MCP server with Streamable HTTP transport (endpoint /mcp)
+    McpHttp {
+        #[command(flatten)]
+        http: HttpArgs,
+        #[command(flatten)]
+        scope: ScopeArgs,
+    },
+    /// Deprecated alias of mcp-http (the old SSE transport is gone)
     McpSse {
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
+        #[command(flatten)]
+        http: HttpArgs,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
     /// Analyze file with LLM-optimized output
     LlmAnalyze {
@@ -229,23 +300,31 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // An explicit runtime instead of `#[tokio::main]`: dropping a runtime waits
+    // for running `spawn_blocking` closures, which would keep a stdio server
+    // alive for minutes after its client left. Bound that wait.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let outcome = runtime.block_on(run());
+    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+    outcome
+}
+
+async fn run() -> Result<()> {
     let args = Args::parse();
 
     // Handle commands
     match args.command {
-        Some(Commands::McpStdio) => {
-            let server = McpTransportServer::new();
-            return server.run_stdio().await;
+        Some(Commands::McpStdio { scope }) => {
+            return mcp_server_for(scope).run_stdio().await;
         }
-        Some(Commands::McpHttp { port }) => {
-            let server = McpTransportServer::new();
-            return server.run_http(port).await;
+        Some(Commands::McpHttp { http, scope }) => {
+            return mcp_server_for(scope).run_http(http.into_config()).await;
         }
-        Some(Commands::McpSse { port }) => {
-            let server = McpTransportServer::new();
-            return server.run_sse(port).await;
+        Some(Commands::McpSse { http, scope }) => {
+            return mcp_server_for(scope).run_sse(http.into_config()).await;
         }
         Some(Commands::LlmAnalyze {
             file_path,

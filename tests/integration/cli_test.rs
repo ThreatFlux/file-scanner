@@ -264,12 +264,78 @@ fn test_cli_mcp_stdio_command() {
 }
 
 #[test]
+fn test_cli_mcp_stdio_with_no_input_exits_cleanly() {
+    // The Docker workflows run exactly this: stdin closed before any message.
+    let mut cmd = Command::cargo_bin("file-scanner").unwrap();
+    let assertion = cmd
+        .arg("mcp-stdio")
+        .write_stdin("")
+        .timeout(std::time::Duration::from_secs(5))
+        .assert()
+        .success();
+    assert!(assertion.get_output().stdout.is_empty());
+}
+
+#[test]
+fn test_cli_mcp_stdio_stdout_is_only_json_rpc() {
+    let lines = [
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": { "name": "file-scanner-test", "version": "1.0" }
+            }
+        }),
+        serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}),
+    ];
+    let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    let mut cmd = Command::cargo_bin("file-scanner").unwrap();
+    let assertion = cmd
+        .arg("mcp-stdio")
+        .write_stdin(input)
+        .timeout(std::time::Duration::from_secs(10))
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assertion.get_output().stdout.clone()).unwrap();
+    let messages: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("every stdout line is JSON"))
+        .collect();
+    // Three requests, three replies; the notification is not answered.
+    assert_eq!(messages.len(), 3, "{stdout}");
+    assert!(messages
+        .iter()
+        .all(|m| m["jsonrpc"] == "2.0" && m["id"].is_number()));
+    let list = messages.iter().find(|m| m["id"] == 3).unwrap();
+    let tools = list["result"]["tools"].as_array().unwrap();
+    for name in [
+        "analyze_file",
+        "analyze_java_file",
+        "analyze_npm_package",
+        "analyze_python_package",
+        "llm_analyze_file",
+        "yara_scan_file",
+    ] {
+        assert!(tools.iter().any(|t| t["name"] == name), "missing {name}");
+    }
+}
+
+#[test]
 fn test_cli_mcp_reports_partial_string_indexing() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let test_file = temp_dir.path().join("bounded-strings.bin");
     let mut content = vec![b'a'; 1_048_577];
     content.extend_from_slice(b"\0malware_token\0");
     fs::write(&test_file, content)?;
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": { "name": "file-scanner-test", "version": "1.0" }
+        }
+    });
     let call = serde_json::json!({
         "jsonrpc": "2.0", "id": 23, "method": "tools/call",
         "params": {
@@ -280,15 +346,20 @@ fn test_cli_mcp_reports_partial_string_indexing() -> Result<()> {
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
     let assertion = cmd
         .arg("mcp-stdio")
-        .write_stdin(format!("{call}\n"))
-        .timeout(std::time::Duration::from_secs(5))
+        .write_stdin(format!("{initialize}\n{call}\n"))
+        .timeout(std::time::Duration::from_secs(20))
         .assert()
         .success()
         .stderr(predicate::str::contains(
             "String indexing skipped values outside tracker bounds",
         ));
-    let response: serde_json::Value = serde_json::from_slice(&assertion.get_output().stdout)?;
-    assert_eq!(response["id"], 23);
+    let stdout = String::from_utf8(assertion.get_output().stdout.clone())?;
+    let response: serde_json::Value = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|message| message["id"] == 23)
+        .expect("a reply to the tools/call");
+    assert_ne!(response["result"]["isError"], serde_json::json!(true));
     let analysis: serde_json::Value =
         serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())?;
     assert!(analysis["strings"]

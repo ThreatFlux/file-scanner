@@ -302,7 +302,7 @@ async fn test_mcp_tool_registration() {
     // Test the server info to verify it's properly configured
     let info = server.get_info();
     assert_eq!(info.server_info.name, "file-scanner");
-    assert_eq!(info.server_info.version, "0.1.0");
+    assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
     assert!(info.instructions.is_some());
     assert!(info.capabilities.tools.is_some());
 }

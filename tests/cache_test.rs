@@ -115,6 +115,40 @@ mod cache_creation_tests {
         assert!(cache_path.exists());
     }
 
+    /// The cache holds analysis results of arbitrary files: owner-only on Unix.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_cache_directory_and_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        let cache_path = temp_dir.path().join("private_cache");
+        let cache = AnalysisCache::new(&cache_path).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&cache_path), 0o700);
+
+        cache
+            .add_entry(create_test_entry("hash123", "test_tool", "/test/file.bin"))
+            .await
+            .unwrap();
+        let file = cache_path.join("hash123.json");
+        for _ in 0..100 {
+            if file.exists() && cache_path.join("metadata.json").exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(file.exists(), "the entry file is written");
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(&cache_path.join("metadata.json")), 0o600);
+
+        // A directory left over from an older run is tightened.
+        let old = temp_dir.path().join("old_cache");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _cache = AnalysisCache::new(&old).unwrap();
+        assert_eq!(mode(&old), 0o700);
+    }
+
     #[tokio::test]
     async fn test_cache_with_invalid_path() {
         // Test cache creation with a path that cannot be created

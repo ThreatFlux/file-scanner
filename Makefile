@@ -284,7 +284,7 @@ docker-run:
 
 docker-run-http:
 	@echo "Running Docker container in MCP HTTP mode..."
-	docker run --rm -p 3111:3000 threatflux/file-scanner:latest mcp-http --port 3000
+	docker run --rm -p 3111:3000 threatflux/file-scanner:latest mcp-http --host 0.0.0.0 --port 3000
 
 # Code quality
 lint:
