@@ -80,6 +80,15 @@ YARA compile/scan tests, and rereview the CodeQL source-hash guard before remova
 
 # Temporary binary-analysis ZIP security patch
 
+Superseded for repository builds on 2026-11-12 by published
+`threatflux-binary-analysis` 0.3.2 (ZIP 9.5.1). A full source comparison verified
+that its Java parser retains the reviewed fallible ZIP-name bridge. Its only
+additional source changes are formatting, the CP437 archive-name regression,
+the wasmparser range API migration with explicit bounds validation and tests,
+and the equivalent `as_chunks` pattern iteration. The active root patch is
+removed; the historical source and exact diff below remain for provenance.
+Hosted archive, native and security checks validate the registry replacement.
+
 The latest published `threatflux-binary-analysis` 0.3.1 requires ZIP 8.6.0,
 which is reported by RustSec advisories RUSTSEC-2026-0367, RUSTSEC-2026-0368 and
 RUSTSEC-2026-0369. The root patch uses the exact published crate with ZIP 9.0.5
