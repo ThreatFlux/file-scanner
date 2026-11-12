@@ -262,8 +262,16 @@ pub fn analyze_threats(path: &Path) -> Result<ThreatAnalysis> {
     let mut indicators = Vec::new();
 
     for matching_rule in scan_results.matching_rules() {
-        let rule_match =
-            convert_rule_match(&matching_rule, &file_data, true, EVIDENCE_STRINGS_PER_RULE);
+        // The built-in rules are few and small: no detail budget applies.
+        let (mut budget, mut trimmed) = (usize::MAX, false);
+        let rule_match = convert_rule_match(
+            &matching_rule,
+            &file_data,
+            true,
+            EVIDENCE_STRINGS_PER_RULE,
+            &mut budget,
+            &mut trimmed,
+        );
 
         for tag in &rule_match.tags {
             if let Some(classification) = tag_to_classification(tag) {
@@ -650,24 +658,23 @@ fn merge_engine_result(
         .map(|i| format!("{:?}: {}", i.severity, i.description))
         .collect();
     info.engine_evidence = engine_evidence.clone();
-    info.engine_merged = corroborated;
-    info.engine_note = Some(if corroborated {
-        "A built-in rule that is not informational also matched, so the engine's rules that \
-         are not keyword rules and their indicators are added to the result. The engine's \
-         classes are never added and it does not change threat_level."
-            .to_string()
-    } else if engine_rules.is_empty() {
+    info.engine_merged = false;
+    info.engine_note = Some(if engine_rules.is_empty() {
         "The engine matched no rules.".to_string()
+    } else if corroborated {
+        "Corroborated by a built-in rule: only non-keyword engine rules and indicators were \
+         added; engine classes never are."
+            .to_string()
     } else {
-        "The engine's rules are generic keyword rules that ordinary programs also match. No \
-         built-in rule corroborated them, so they are listed here only and do not count \
-         toward threat_level, classifications or indicators."
+        "Only generic keyword rules matched and no built-in rule corroborated them: listed \
+         here, not counted in threat_level."
             .to_string()
     });
 
     if !corroborated {
         return;
     }
+    let (matches_before, indicators_before) = (analysis.matches.len(), analysis.indicators.len());
     for (rule, evidence) in engine_rules.into_iter().zip(engine_evidence) {
         if is_keyword_engine_rule(&rule.rule_identifier) {
             continue;
@@ -703,6 +710,8 @@ fn merge_engine_result(
         }
         analysis.indicators.push(indicator);
     }
+    info.engine_merged =
+        analysis.matches.len() > matches_before || analysis.indicators.len() > indicators_before;
     analysis.scan_stats.patterns_matched = analysis.matches.len();
     analysis.recommendations = generate_recommendations(
         &analysis.threat_level,
@@ -953,6 +962,45 @@ rule backdoor_patterns : backdoor {
         $reverse = "reverse shell" ascii nocase
     condition:
         (all of ($cmd*) or $shell1) or any of ($bind, $reverse)
+}"#,
+        // Rule 11: A hard-coded domain that imitates a vendor's update service
+        r#"
+rule update_lookalike_domain : c2 {
+    meta:
+        description = "Hard-coded domain imitating a software update service"
+        severity = "high"
+        category = "command_and_control"
+    strings:
+        $dom = /\b(msft|msoft|ms|adobe|flash|java|chrome)[-_]?updat(e|er|es)\.(com|net|org|info|biz|xyz|top|ru|cn)/ ascii nocase
+    condition:
+        $dom
+}"#,
+        // Rule 12: Programs that announce their own evasion checks
+        r#"
+rule self_announcing_evasion : anti_debug {
+    meta:
+        description = "Debugger or sandbox detection next to a ptrace call"
+        severity = "high"
+        category = "evasion"
+    strings:
+        $ptrace = "ptrace" ascii
+        $announce = /(debugger|sandbox|virtual machine) (environment )?detected/ ascii nocase
+    condition:
+        $ptrace and $announce
+}"#,
+        // Rule 13: A hard-coded XOR key
+        r#"
+rule hardcoded_xor_key : obfuscation {
+    meta:
+        description = "Hard-coded XOR key constant (payload obfuscation)"
+        severity = "high"
+        category = "obfuscation"
+    strings:
+        // A key literal: the name, then letters and a run of digits. The
+        // standard library's XORKeyStream has no digits after the name.
+        $key = /XOR_?Key[A-Za-z]{0,12}[0-9]{6,}/ ascii nocase
+    condition:
+        $key
 }"#,
     ]
 }
@@ -1329,7 +1377,14 @@ pub fn scan_path_with_rules(
                         continue;
                     }
                     scanner.set_timeout(deadline - now);
-                    let mut outcome = scan_one_file(&mut scanner, file, options);
+                    // Each file may build only what is left of the shared
+                    // detail budget (and at most a worker's share of it), so
+                    // the detail is never built first and thrown away after.
+                    let allowance = MAX_DETAIL_BYTES
+                        .saturating_sub(detail_bytes.load(Ordering::SeqCst))
+                        .min(MAX_DETAIL_BYTES / MAX_SCAN_WORKERS);
+                    let (mut outcome, trimmed) =
+                        scan_one_file(&mut scanner, file, options, allowance);
                     if let FileOutcome::Scanned(Some(file_match)) = &mut outcome {
                         {
                             let mut hits = hits.lock().expect("rule hit lock");
@@ -1337,15 +1392,8 @@ pub fn scan_path_with_rules(
                                 *hits.entry(rule).or_default() += 1;
                             }
                         }
-                        let size = estimate_match_bytes(file_match);
-                        if detail_bytes.fetch_add(size, Ordering::SeqCst) + size > MAX_DETAIL_BYTES
-                        {
-                            file_match.matches.truncate(TRIMMED_RULES_PER_FILE);
-                            for rule in &mut file_match.matches {
-                                rule.strings.clear();
-                                rule.tags.clear();
-                                rule.metadata.clear();
-                            }
+                        detail_bytes.fetch_add(estimate_match_bytes(file_match), Ordering::SeqCst);
+                        if trimmed {
                             trimmed_files.fetch_add(1, Ordering::SeqCst);
                         }
                     }
@@ -1415,15 +1463,18 @@ enum FileOutcome {
     NotScanned,
 }
 
+/// The outcome, and whether the file's detail was cut to fit `allowance`.
 fn scan_one_file(
     scanner: &mut yara_x::Scanner<'_>,
     path: &Path,
     options: &YaraScanOptions,
-) -> FileOutcome {
-    match scan_single_file(scanner, path, options) {
-        Ok(found) => FileOutcome::Scanned(found),
-        Err(ScanFailure::Timeout) => FileOutcome::TimedOut,
-        Err(ScanFailure::Other(message)) => FileOutcome::Error(message),
+    allowance: usize,
+) -> (FileOutcome, bool) {
+    match scan_single_file(scanner, path, options, allowance) {
+        Ok(Some((found, trimmed))) => (FileOutcome::Scanned(Some(found)), trimmed),
+        Ok(None) => (FileOutcome::Scanned(None), false),
+        Err(ScanFailure::Timeout) => (FileOutcome::TimedOut, false),
+        Err(ScanFailure::Other(message)) => (FileOutcome::Error(message), false),
     }
 }
 
@@ -1533,16 +1584,23 @@ impl Candidates {
     }
 }
 
+#[derive(Debug)]
 enum ScanFailure {
     Timeout,
     Other(String),
 }
 
+/// Scan one file. `allowance` is how many estimated bytes of match detail
+/// (see `estimate_match_bytes`) this file may build: tags, metadata, strings
+/// and rules stop being built once it is used up, while the counts
+/// (`rules_total`, `strings_total`) stay exact. The flag is true when detail
+/// was left out for that reason.
 fn scan_single_file(
     scanner: &mut yara_x::Scanner<'_>,
     file_path: &Path,
     options: &YaraScanOptions,
-) -> std::result::Result<Option<YaraFileMatch>, ScanFailure> {
+    allowance: usize,
+) -> std::result::Result<Option<(YaraFileMatch, bool)>, ScanFailure> {
     let file_data = fs::read(file_path).map_err(|e| ScanFailure::Other(e.to_string()))?;
     let file_size = file_data.len() as u64;
 
@@ -1551,63 +1609,97 @@ fn scan_single_file(
         other => ScanFailure::Other(other.to_string()),
     })?;
 
+    let path_text = file_path.display().to_string();
+    let mut budget = allowance.saturating_sub(path_text.len() + 96);
+    let mut trimmed = false;
     let mut rules_total = 0usize;
     let mut matches = Vec::new();
     let mut all_rules = Vec::new();
     for matching_rule in scan_results.matching_rules() {
         rules_total += 1;
         all_rules.push(matching_rule.identifier().to_string());
-        if matches.len() < options.max_rules_per_file {
-            matches.push(convert_rule_match(
-                &matching_rule,
-                &file_data,
-                options.detailed_matches,
-                options.max_matches_per_rule,
-            ));
+        if matches.len() >= options.max_rules_per_file {
+            continue;
         }
+        if matches.len() >= TRIMMED_RULES_PER_FILE && budget == 0 {
+            trimmed = true;
+            continue;
+        }
+        matches.push(convert_rule_match(
+            &matching_rule,
+            &file_data,
+            options.detailed_matches,
+            options.max_matches_per_rule,
+            &mut budget,
+            &mut trimmed,
+        ));
     }
     if rules_total == 0 {
         return Ok(None);
     }
-    Ok(Some(YaraFileMatch {
-        file_path: file_path.display().to_string(),
-        file_size,
-        matches,
-        rules_total,
-        all_rules,
-    }))
+    Ok(Some((
+        YaraFileMatch {
+            file_path: path_text,
+            file_size,
+            matches,
+            rules_total,
+            all_rules,
+        },
+        trimmed,
+    )))
 }
 
 /// One matching rule: tags, metadata, and (when asked) the first
-/// `max_strings` string matches with their bytes.
+/// `max_strings` string matches with their bytes. Everything but the rule's
+/// name is built only while `budget` lasts (costs as in
+/// `estimate_match_bytes`); `trimmed` is set when something was left out.
 fn convert_rule_match(
     matching_rule: &yara_x::Rule<'_, '_>,
     file_data: &[u8],
     detailed: bool,
     max_strings: usize,
+    budget: &mut usize,
+    trimmed: &mut bool,
 ) -> YaraRuleMatch {
+    let identifier = matching_rule.identifier().to_string();
+    *budget = budget.saturating_sub(identifier.len() + 128);
     let mut rule_match = YaraRuleMatch {
-        rule_identifier: matching_rule.identifier().to_string(),
-        tags: matching_rule
-            .tags()
-            .map(|tag| tag.identifier().to_string())
-            .collect(),
+        rule_identifier: identifier,
+        tags: Vec::new(),
         metadata: HashMap::new(),
         strings: Vec::new(),
         strings_total: 0,
     };
 
+    for tag in matching_rule.tags() {
+        let cost = tag.identifier().len() + 24;
+        if cost > *budget {
+            *trimmed = true;
+            break;
+        }
+        *budget -= cost;
+        rule_match.tags.push(tag.identifier().to_string());
+    }
+
     for (key, value) in matching_rule.metadata() {
-        rule_match.metadata.insert(
-            key.to_string(),
-            match value {
-                yara_x::MetaValue::Bool(b) => b.to_string(),
-                yara_x::MetaValue::Integer(i) => i.to_string(),
-                yara_x::MetaValue::Float(f) => f.to_string(),
-                yara_x::MetaValue::String(s) => s.to_string(),
-                yara_x::MetaValue::Bytes(b) => format!("{b:?}"),
-            },
-        );
+        if *budget < key.len() + 64 {
+            *trimmed = true;
+            break;
+        }
+        let text = match value {
+            yara_x::MetaValue::Bool(b) => b.to_string(),
+            yara_x::MetaValue::Integer(i) => i.to_string(),
+            yara_x::MetaValue::Float(f) => f.to_string(),
+            yara_x::MetaValue::String(s) => s.to_string(),
+            yara_x::MetaValue::Bytes(b) => format!("{b:?}"),
+        };
+        let cost = key.len() + text.len() + 64;
+        if cost > *budget {
+            *trimmed = true;
+            break;
+        }
+        *budget -= cost;
+        rule_match.metadata.insert(key.to_string(), text);
     }
 
     for pattern in matching_rule.patterns() {
@@ -1616,12 +1708,26 @@ fn convert_rule_match(
             if !detailed || rule_match.strings.len() >= max_strings {
                 continue;
             }
+            // A string costs at most the identifier, 64 shown bytes (as hex
+            // that is 3 characters each) and the fixed overhead.
             let range = pattern_match.range();
             let end = range.end.min(file_data.len());
             let start = range.start.min(end);
+            let identifier = pattern.identifier();
+            let upper = identifier.len() + 80 + 3 * (end - start).min(MAX_SHOWN_MATCH_BYTES);
+            if upper > *budget {
+                *trimmed = true;
+                continue;
+            }
             let (value, hex) = describe_matched_bytes(&file_data[start..end]);
+            *budget = budget.saturating_sub(
+                identifier.len()
+                    + value.as_ref().map_or(0, String::len)
+                    + hex.as_ref().map_or(0, String::len)
+                    + 80,
+            );
             rule_match.strings.push(YaraStringMatch {
-                identifier: pattern.identifier().to_string(),
+                identifier: identifier.to_string(),
                 offset: range.start as u64,
                 length: range.len(),
                 value,
@@ -1652,11 +1758,18 @@ fn describe_matched_bytes(bytes: &[u8]) -> (Option<String>, Option<String>) {
             }
         }
     }
-    let hex = shown
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut hex = String::with_capacity(shown.len() * 3);
+    for (i, byte) in shown.iter().enumerate() {
+        if i > 0 {
+            hex.push(' ');
+        }
+        hex.push(
+            char::from_digit(u32::from(byte >> 4), 16).map_or('0', |c| c.to_ascii_uppercase()),
+        );
+        hex.push(
+            char::from_digit(u32::from(byte & 15), 16).map_or('0', |c| c.to_ascii_uppercase()),
+        );
+    }
     (None, Some(hex))
 }
 
@@ -2323,7 +2436,7 @@ mod tests {
     fn test_get_builtin_rules() {
         let rules = get_builtin_rules();
         assert!(!rules.is_empty());
-        assert_eq!(rules.len(), 10); // We have 10 builtin rules
+        assert_eq!(rules.len(), 13); // We have 13 builtin rules
 
         // Check that each rule contains expected elements
         for rule in &rules {
@@ -2387,7 +2500,7 @@ mod tests {
         {
             // Verify the analysis completed successfully
             // Check that scan statistics are populated (duration is always non-negative)
-            assert_eq!(analysis.scan_stats.rules_evaluated, 10); // Number of builtin rules
+            assert_eq!(analysis.scan_stats.rules_evaluated, 13); // Number of builtin rules
             assert_eq!(
                 analysis.scan_stats.file_size_scanned,
                 suspicious_content.len() as u64
@@ -2426,7 +2539,7 @@ mod tests {
     #[test]
     fn test_compile_rules() {
         let rules = compile_rules().expect("the built-in rules compile");
-        assert_eq!(rules.iter().count(), 10);
+        assert_eq!(rules.iter().count(), 13);
     }
 
     // Test all severity levels
@@ -2860,5 +2973,96 @@ mod tests {
         assert_eq!(sources.len(), 2);
         assert!(sources[0].0.ends_with("a.YARA") && sources[1].0.ends_with("b.yar"));
         assert!(load_rule_sources(&dir.path().join("missing")).is_err());
+    }
+
+    /// The detail a file builds is held to its allowance while it is built,
+    /// not cut afterwards: 1,000 rules of 64-byte hex patterns over one file.
+    #[test]
+    fn a_file_builds_no_more_detail_than_its_allowance() {
+        let hex = vec!["FF"; 64].join(" ");
+        let text: String = (0..1000)
+            .map(|i| format!("rule q{i} {{ strings: $p = {{ {hex} }} condition: $p }}\n"))
+            .collect();
+        let rules = compile_rule_sources(&[("t".to_string(), text)]).unwrap();
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("ff.bin");
+        std::fs::write(&file, vec![0xFFu8; 2000]).unwrap();
+        let options = YaraScanOptions {
+            max_matches_per_rule: 1000,
+            max_rules_per_file: 1000,
+            ..YaraScanOptions::default()
+        };
+        let mut scanner = yara_x::Scanner::new(&rules);
+
+        let allowance = 100_000;
+        let (found, trimmed) = scan_single_file(&mut scanner, &file, &options, allowance)
+            .unwrap()
+            .unwrap();
+        assert!(trimmed);
+        assert_eq!(found.rules_total, 1000, "counts stay exact");
+        assert!(estimate_match_bytes(&found) <= allowance + 2_000);
+        assert!(
+            found.matches.iter().any(|m| !m.strings.is_empty()),
+            "the first rules keep their strings"
+        );
+        assert!(found.matches[0].strings_total > 0);
+
+        let (found, trimmed) = scan_single_file(&mut scanner, &file, &options, 0)
+            .unwrap()
+            .unwrap();
+        assert!(trimmed);
+        assert_eq!(found.rules_total, 1000);
+        assert!(found.matches.len() <= TRIMMED_RULES_PER_FILE);
+        assert!(found.matches.iter().all(|m| m.strings.is_empty()));
+
+        let (found, trimmed) = scan_single_file(&mut scanner, &file, &options, usize::MAX)
+            .unwrap()
+            .unwrap();
+        assert!(!trimmed);
+        assert_eq!(found.matches.len(), 1000);
+    }
+
+    /// Both sides of the three rules added for the simulated malware: the
+    /// lookalike domain, the self-announcing evasion check and the XOR key.
+    #[test]
+    fn the_added_rules_flag_their_pattern_and_not_ordinary_text() {
+        let flagged = [
+            ("update_lookalike_domain", "http://msftupdater.com/x"),
+            ("self_announcing_evasion", "ptrace\0Debugger detected!"),
+            ("hardcoded_xor_key", "key=ThisIsASecretXORKey123456789012"),
+        ];
+        let ordinary = [
+            "see https://windowsupdate.com and https://update.microsoft.com",
+            "debugger detected in the list of options (no system call named)",
+            "ptrace is a system call; sandbox settings",
+            "crypto/cipher XORKeyStream and xorKeyStreamBlocks",
+        ];
+        let dir = tempdir().unwrap();
+        for (i, (rule, text)) in flagged.iter().enumerate() {
+            let path = dir.path().join(format!("f{i}.bin"));
+            std::fs::write(&path, text).unwrap();
+            let analysis = analyze_threats(&path).unwrap();
+            assert!(
+                analysis.matches.iter().any(|m| m.rule_identifier == *rule),
+                "{rule}: {:?}",
+                analysis.matches
+            );
+            assert!(analysis.threat_level >= ThreatLevel::Suspicious, "{rule}");
+        }
+        for (i, text) in ordinary.iter().enumerate() {
+            let path = dir.path().join(format!("o{i}.txt"));
+            std::fs::write(&path, text).unwrap();
+            let analysis = analyze_threats(&path).unwrap();
+            for rule in [
+                "update_lookalike_domain",
+                "self_announcing_evasion",
+                "hardcoded_xor_key",
+            ] {
+                assert!(
+                    analysis.matches.iter().all(|m| m.rule_identifier != rule),
+                    "{rule} on {text}"
+                );
+            }
+        }
     }
 }

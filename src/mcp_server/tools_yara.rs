@@ -539,6 +539,19 @@ fn reply_value(
     fit_rows(&mut value, "matches", budget, offset, result.matches.len());
     if let Some(map) = value.as_object_mut() {
         if let Some(returned) = map.remove("returned") {
+            let sent = returned.as_u64().unwrap_or(0) as usize;
+            let wanted = limit.min(result.matches.len().saturating_sub(offset));
+            if sent < wanted {
+                map.insert(
+                    "hint".into(),
+                    format!(
+                        "The page holds {sent} of the {wanted} rows asked for, to fit \
+                         max_output_bytes; continue at offset {}.",
+                        offset + sent
+                    )
+                    .into(),
+                );
+            }
             map.insert("matches_returned".into(), returned);
         }
     }
@@ -676,9 +689,9 @@ fn summarize(
     }
     if scan.detail_trimmed_files > 0 {
         limits.push(format!(
-            "The scan kept all the match detail it may hold in memory; {} files list only their \
-             first few rule names without strings, tags or metadata (`rules_total` and \
-             `rule_hits` are exact). Narrow `path`, lower `max_files`, or turn \
+            "The scan kept all the match detail it may hold in memory; {} files have part of their \
+             detail (strings, tags, metadata, rules) left out (`rules_total`, `strings_total` \
+             and `rule_hits` are exact). Narrow `path`, lower `max_files`, or turn \
              `detailed_matches` off.",
             scan.detail_trimmed_files
         ));
@@ -687,7 +700,9 @@ fn summarize(
         .matches
         .iter()
         .flat_map(|file| &file.matches)
-        .filter(|rule| options.detailed_matches && rule.strings_total > rule.strings.len())
+        .filter(|rule| {
+            options.detailed_matches && rule.strings_total > options.max_matches_per_rule
+        })
         .count();
     if strings_cut > 0 {
         limits.push(format!(
@@ -699,7 +714,7 @@ fn summarize(
     let rules_cut = scan
         .matches
         .iter()
-        .filter(|file| file.rules_total > file.matches.len())
+        .filter(|file| file.rules_total > options.max_rules_per_file)
         .count();
     if rules_cut > 0 {
         limits.push(format!(

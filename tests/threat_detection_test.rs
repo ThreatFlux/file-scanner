@@ -677,11 +677,20 @@ fn test_serialization_deserialization() {
 #[tokio::test]
 async fn enhanced_analysis_keeps_ordinary_files_clean() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    // rust_test_binary is not here: it is one of the simulated-malware
+    // programs (it beacons to msftupdater.com) and is a positive control below.
     let mut files: Vec<std::path::PathBuf> = vec![
         root.join("README.md"),
-        root.join("test_programs/rust_test_binary"),
+        root.join("Cargo.lock"),
+        root.join("CHANGELOG.md"),
     ];
-    for system in ["/bin/bash", "/usr/bin/ssh", "/bin/ls"] {
+    for system in [
+        "/bin/bash",
+        "/usr/bin/ssh",
+        "/bin/ls",
+        "/usr/bin/curl",
+        "/usr/bin/python3",
+    ] {
         if std::path::Path::new(system).exists() {
             files.push(system.into());
         }
@@ -715,6 +724,10 @@ async fn enhanced_analysis_still_flags_the_simulated_malware() {
         "c_advanced_binary",
         "d_test_binary",
         "fortran_test_binary",
+        "rust_test_binary",
+        "cpp_test_binary",
+        "go_test_binary",
+        "packed_rust_binary",
     ] {
         let analysis = analyze_threats_enhanced(&root.join(name)).await.unwrap();
         assert!(
@@ -723,6 +736,15 @@ async fn enhanced_analysis_still_flags_the_simulated_malware() {
             analysis.threat_level
         );
         assert!(!analysis.matches.is_empty(), "{name}");
+        // The plain built-in analysis rates them too, with evidence.
+        let plain = analyze_threats(&root.join(name)).unwrap();
+        if matches!(
+            name,
+            "cpp_test_binary" | "go_test_binary" | "packed_rust_binary"
+        ) {
+            assert!(plain.threat_level >= ThreatLevel::Suspicious, "{name}");
+            assert!(plain.evidence.iter().any(|e| e.strings_total > 0), "{name}");
+        }
     }
 }
 
@@ -770,4 +792,11 @@ async fn enhanced_analysis_adds_no_classes_beyond_the_builtin_ones() {
         .indicators
         .iter()
         .all(|i| !matches!(i.severity, Severity::Critical)));
+    assert!(enhanced
+        .indicators
+        .iter()
+        .all(|i| !i.description.contains("string_pattern_")
+            && !i.description.contains("regex_pattern_")));
+    let info = enhanced.enhanced_analysis.expect("enhanced info");
+    assert!(info.engine_note.is_some_and(|n| n.len() < 160));
 }
