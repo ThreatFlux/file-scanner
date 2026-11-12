@@ -50,7 +50,6 @@ use file_scanner::cache::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
-use tokio::time::sleep;
 
 // Helper function to create test cache entries
 fn create_test_entry(file_hash: &str, tool_name: &str, file_path: &str) -> CacheEntry {
@@ -131,12 +130,6 @@ mod cache_creation_tests {
             .await
             .unwrap();
         let file = cache_path.join("hash123.json");
-        for _ in 0..100 {
-            if file.exists() && cache_path.join("metadata.json").exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
         assert!(file.exists(), "the entry file is written");
         assert_eq!(mode(&file), 0o600);
         assert_eq!(mode(&cache_path.join("metadata.json")), 0o600);
@@ -602,15 +595,11 @@ mod persistence_tests {
                 cache.add_entry(entry).await.unwrap();
             }
 
-            // Wait for async save to complete
-            sleep(tokio::time::Duration::from_millis(500)).await;
+            // add_entry returns only once the entry is on disk: no waiting.
         }
 
         // Create new cache instance and verify data was loaded
         let cache2 = AnalysisCache::new(temp_dir.path()).unwrap();
-
-        // Wait a bit for the async load to complete
-        sleep(tokio::time::Duration::from_millis(200)).await;
 
         let all_entries = cache2.get_all_entries().await;
         assert_eq!(all_entries.len(), 3);
@@ -631,9 +620,6 @@ mod persistence_tests {
             let entry = create_test_entry(&format!("hash{i}"), "tool", "/file.bin");
             cache.add_entry(entry).await.unwrap();
         }
-
-        // Wait for save
-        sleep(tokio::time::Duration::from_millis(200)).await;
 
         // Verify files exist
         let cache_files: Vec<_> = std::fs::read_dir(temp_dir.path())
@@ -667,7 +653,6 @@ mod persistence_tests {
         // Add entry and wait for save
         let entry = create_test_entry("hash1", "tool", "/file.bin");
         cache.add_entry(entry).await.unwrap();
-        sleep(tokio::time::Duration::from_millis(500)).await;
 
         // Check metadata file exists
         let metadata_path = temp_dir.path().join("metadata.json");

@@ -12,8 +12,8 @@ use std::{
     collections::HashMap,
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
-    time::Instant,
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use chrono::Utc;
@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use super::paths::{Expect, PathPolicy};
 use crate::{
-    cache::{AnalysisCache, CacheEntry},
+    cache::{AnalysisCache, CacheDir, CacheEntry, DEFAULT_MAX_TOTAL_BYTES},
     string_tracker_compat::StringTracker,
 };
 
@@ -33,6 +33,10 @@ pub const ALLOWED_ROOTS_ENV: &str = "FILE_SCANNER_ALLOWED_ROOTS";
 pub const SECTION_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// Environment variable that sets the section cache budget, in MiB.
 pub const SECTION_CACHE_MB_ENV: &str = "FILE_SCANNER_SECTION_CACHE_MB";
+/// Environment variable naming the cache directory (`--cache-dir` wins).
+pub const CACHE_DIR_ENV: &str = "FILE_SCANNER_CACHE_DIR";
+/// Environment variable that sets the on-disk cache budget, in MiB.
+pub const CACHE_DISK_MB_ENV: &str = "FILE_SCANNER_CACHE_DISK_MB";
 /// Largest `analyze_file` result (compact JSON bytes) the analysis cache keeps
 /// whole; bigger ones are kept as the trimmed result the caller received.
 pub const ENTRY_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -42,8 +46,16 @@ pub const SECTION_CACHE_MAX_ENTRIES: usize = 256;
 /// Configuration of a [`ServerState`].
 #[derive(Debug, Clone)]
 pub struct StateConfig {
-    /// Where the analysis cache persists (`<tmp>/file-scanner-cache`).
+    /// Where the caches persist. `from_env` puts it under the user's cache
+    /// directory; `Default` uses a per-user directory under the system temp
+    /// directory (never a shared, predictable name).
     pub cache_dir: PathBuf,
+    /// False (`--no-cache`) turns caching off: nothing is stored or served.
+    pub cache_enabled: bool,
+    /// Byte bound of the analysis history on disk.
+    pub cache_max_bytes: u64,
+    /// Byte bound of the section files on disk (0: sections stay in memory).
+    pub section_disk_max_bytes: u64,
     /// Directories every tool path must be under (empty: no limit).
     pub allow_roots: Vec<PathBuf>,
     /// Byte bound of the section cache.
@@ -57,7 +69,10 @@ pub struct StateConfig {
 impl Default for StateConfig {
     fn default() -> Self {
         Self {
-            cache_dir: std::env::temp_dir().join("file-scanner-cache"),
+            cache_dir: private_temp_cache_dir(),
+            cache_enabled: true,
+            cache_max_bytes: DEFAULT_MAX_TOTAL_BYTES,
+            section_disk_max_bytes: 0,
             allow_roots: Vec::new(),
             section_cache_max_bytes: SECTION_CACHE_MAX_BYTES,
             section_cache_max_entries: SECTION_CACHE_MAX_ENTRIES,
@@ -83,8 +98,51 @@ impl StateConfig {
         {
             config.section_cache_max_bytes = mb.saturating_mul(1024 * 1024);
         }
+        config.cache_dir = std::env::var_os(CACHE_DIR_ENV)
+            .filter(|dir| !dir.is_empty())
+            .map_or_else(user_cache_dir, PathBuf::from);
+        config.section_disk_max_bytes = SECTION_DISK_MAX_BYTES;
+        if let Some(mb) = std::env::var(CACHE_DISK_MB_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
+            config.cache_max_bytes = mb.saturating_mul(1024 * 1024) / 4;
+            config.section_disk_max_bytes = mb.saturating_mul(1024 * 1024);
+        }
         config
     }
+}
+
+/// A per-user directory under the system temp directory.
+fn private_temp_cache_dir() -> PathBuf {
+    let user: String = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "user".to_string())
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    std::env::temp_dir().join(format!("file-scanner-cache-{user}"))
+}
+
+/// The default cache directory: under the user's cache directory (not a
+/// shared temp path), falling back to a per-user temp directory.
+pub fn user_cache_dir() -> PathBuf {
+    let absolute = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    if let Some(xdg) = absolute("XDG_CACHE_HOME") {
+        return xdg.join("file-scanner");
+    }
+    if let Some(home) = absolute("HOME") {
+        return if cfg!(target_os = "macos") {
+            home.join("Library/Caches/file-scanner")
+        } else {
+            home.join(".cache/file-scanner")
+        };
+    }
+    private_temp_cache_dir()
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +152,12 @@ impl StateConfig {
 /// Default bound, in bytes of source JSON text, of the parsed "hot" values
 /// kept in front of the compressed store.
 pub const SECTION_CACHE_HOT_BYTES: usize = 64 * 1024 * 1024;
+/// Default bound, in bytes, of the section files kept on disk.
+pub const SECTION_DISK_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+/// Name of the section directory inside the cache directory.
+const SECTION_SUBDIR: &str = "sections";
+/// Extension of a section file.
+const SECTION_EXT: &str = "sec";
 
 type CacheKey = (String, String);
 
@@ -104,6 +168,8 @@ struct Slot {
     /// Length of the JSON text before compression.
     text_bytes: usize,
     last_used: u64,
+    /// True when a copy of this value is also on disk.
+    on_disk: bool,
 }
 
 /// A parsed value kept in front of the compressed store, so paging through
@@ -139,20 +205,239 @@ impl Inner {
     }
 }
 
-/// A bounded in-memory cache of analysis results, keyed by a file's SHA-256
-/// and a section key (the section name plus the options that change its
-/// content, for example `strings:min=4`).
+/// What a section file holds in its first line.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SectionHeader {
+    sha: String,
+    key: String,
+    text_bytes: usize,
+}
+
+struct DiskFile {
+    bytes: u64,
+    last_used: u64,
+    sha: String,
+    /// Empty for a file found at start-up (only its name is known).
+    key: String,
+}
+
+#[derive(Default)]
+struct DiskState {
+    files: HashMap<String, DiskFile>,
+    total: u64,
+    clock: u64,
+}
+
+/// The on-disk tier of a [`SectionCache`]: one file per (file, section) under
+/// `<cache dir>/sections`, written atomically, looked up by name, so
+/// start-up lists the directory and reads no values.
+struct DiskTier {
+    dir: Arc<CacheDir>,
+    max_bytes: u64,
+    state: OnceLock<Option<(PathBuf, Mutex<DiskState>)>>,
+}
+
+fn plain_name_part(text: &str) -> String {
+    let plain = !text.is_empty()
+        && text.len() <= 100
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if plain {
+        text.to_string()
+    } else {
+        format!(
+            "h{}",
+            &blake3::hash(text.as_bytes()).to_hex().as_str()[..32]
+        )
+    }
+}
+
+fn section_file_name(sha256: &str, key: &str) -> String {
+    format!(
+        "{}.{}.{SECTION_EXT}",
+        plain_name_part(sha256),
+        &blake3::hash(key.as_bytes()).to_hex().as_str()[..16]
+    )
+}
+
+impl DiskTier {
+    fn state(&self) -> Option<(&Path, MutexGuard<'_, DiskState>)> {
+        let (root, state) = self
+            .state
+            .get_or_init(|| {
+                let root = self.dir.ready()?.join(SECTION_SUBDIR);
+                crate::cache::create_private_dir(&root).ok()?;
+                let mut state = DiskState::default();
+                if let Ok(listing) = std::fs::read_dir(&root) {
+                    for item in listing.flatten() {
+                        let name = item.file_name().to_string_lossy().into_owned();
+                        let Ok(meta) = item.metadata() else { continue };
+                        if !meta.is_file() || !name.ends_with(&format!(".{SECTION_EXT}")) {
+                            continue;
+                        }
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(0));
+                        state.clock = state.clock.max(modified);
+                        state.total += meta.len();
+                        state.files.insert(
+                            name.clone(),
+                            DiskFile {
+                                bytes: meta.len(),
+                                last_used: modified,
+                                sha: name.split('.').next().unwrap_or("").to_string(),
+                                key: String::new(),
+                            },
+                        );
+                    }
+                }
+                Some((root, Mutex::new(state)))
+            })
+            .as_ref()?;
+        Some((
+            root,
+            state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        ))
+    }
+
+    /// The compressed bytes and text length stored for `(sha256, key)`.
+    fn get(&self, sha256: &str, key: &str) -> Option<(Vec<u8>, usize)> {
+        let (root, mut state) = self.state()?;
+        let name = section_file_name(sha256, key);
+        state.files.get(&name)?;
+        let bytes = crate::cache::read_private(&root.join(&name), self.max_bytes).ok();
+        let parsed = bytes.and_then(|bytes| {
+            let newline = bytes.iter().position(|b| *b == b'\n')?;
+            let header: SectionHeader = serde_json::from_slice(&bytes[..newline]).ok()?;
+            (header.sha == sha256 && header.key == key)
+                .then(|| (bytes[newline + 1..].to_vec(), header.text_bytes))
+        });
+        state.clock += 1;
+        let clock = state.clock;
+        match parsed {
+            Some(found) => {
+                if let Some(file) = state.files.get_mut(&name) {
+                    file.last_used = clock;
+                    file.key = key.to_string();
+                }
+                Some(found)
+            }
+            None => {
+                // Unreadable or not what its name says: forget it.
+                if let Some(file) = state.files.remove(&name) {
+                    state.total -= file.bytes;
+                }
+                let _ = std::fs::remove_file(root.join(&name));
+                None
+            }
+        }
+    }
+
+    /// Write a value; returns whether it was stored and the section keys of
+    /// the same file that were dropped to make room.
+    fn put(
+        &self,
+        sha256: &str,
+        key: &str,
+        packed: &[u8],
+        text_bytes: usize,
+    ) -> (bool, Vec<String>) {
+        let Some((root, mut state)) = self.state() else {
+            return (false, Vec::new());
+        };
+        let header = SectionHeader {
+            sha: sha256.to_string(),
+            key: key.to_string(),
+            text_bytes,
+        };
+        let mut content = serde_json::to_vec(&header).unwrap_or_default();
+        content.push(b'\n');
+        content.extend_from_slice(packed);
+        if content.len() as u64 > self.max_bytes {
+            return (false, Vec::new());
+        }
+        let name = section_file_name(sha256, key);
+        if crate::cache::write_private_atomic(&root.join(&name), &content).is_err() {
+            return (false, Vec::new());
+        }
+        state.clock += 1;
+        let clock = state.clock;
+        if let Some(old) = state.files.insert(
+            name.clone(),
+            DiskFile {
+                bytes: content.len() as u64,
+                last_used: clock,
+                sha: sha256.to_string(),
+                key: key.to_string(),
+            },
+        ) {
+            state.total -= old.bytes;
+        }
+        state.total += content.len() as u64;
+        let mut evicted_same_file = Vec::new();
+        while state.total > self.max_bytes {
+            let victim = state
+                .files
+                .iter()
+                .filter(|(n, _)| **n != name)
+                .min_by_key(|(_, f)| (f.sha == sha256, f.last_used))
+                .map(|(n, _)| n.clone());
+            let Some(victim) = victim else { break };
+            if let Some(file) = state.files.remove(&victim) {
+                state.total -= file.bytes;
+                if file.sha == sha256 {
+                    evicted_same_file.push(if file.key.is_empty() {
+                        "(section from an earlier run)".to_string()
+                    } else {
+                        file.key
+                    });
+                }
+            }
+            let _ = std::fs::remove_file(root.join(&victim));
+        }
+        (true, evicted_same_file)
+    }
+
+    fn clear(&self) {
+        let Some((root, mut state)) = self.state() else {
+            return;
+        };
+        for name in state.files.keys() {
+            let _ = std::fs::remove_file(root.join(name));
+        }
+        state.files.clear();
+        state.total = 0;
+    }
+
+    fn stats(&self) -> (usize, u64) {
+        self.state()
+            .map_or((0, 0), |(_, state)| (state.files.len(), state.total))
+    }
+}
+
+/// A bounded cache of analysis results, keyed by a file's SHA-256 and a
+/// section key (the section name plus the options that change its content,
+/// for example `strings:min=4`).
 ///
 /// Values are stored as deflate-compressed JSON text and the byte bound counts
 /// the compressed size. When the cache is full, other files' values go first
 /// (least recently used first); only then are older values of the file being
 /// inserted dropped, and [`PutOutcome::evicted_same_file`] names them. A small
-/// bounded map of parsed values (the "hot" map) sits in front of the store.
+/// bounded map of parsed values (the "hot" map) sits in front of the store; a
+/// value bigger than the hot bound is parsed for the caller and not kept
+/// parsed. With [`SectionCache::with_disk`] every value is also written under
+/// the cache directory and survives restarts.
 pub struct SectionCache {
     inner: Mutex<Inner>,
     max_bytes: usize,
     max_entries: usize,
     hot_max_bytes: usize,
+    disk: Option<DiskTier>,
 }
 
 /// What [`SectionCache::put`] did with a value.
@@ -164,6 +449,21 @@ pub struct PutOutcome {
     pub bytes: usize,
     /// Section keys of the same file (same SHA-256) dropped to make room.
     pub evicted_same_file: Vec<String>,
+}
+
+/// A snapshot of a [`SectionCache`] for `cache_status`.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SectionStats {
+    pub entries: usize,
+    pub bytes: usize,
+    pub max_bytes: usize,
+    pub max_entries: usize,
+    pub hot_entries: usize,
+    pub hot_bytes: usize,
+    pub disk_enabled: bool,
+    pub disk_files: usize,
+    pub disk_bytes: u64,
+    pub disk_max_bytes: u64,
 }
 
 impl Default for SectionCache {
@@ -191,13 +491,25 @@ fn compress(text: &str) -> Option<Vec<u8>> {
     encoder.finish().ok()
 }
 
+/// Largest text one cached value may inflate to. A header claiming more is
+/// treated as a corrupt file.
+const MAX_INFLATED_BYTES: usize = 1 << 30;
+/// Most bytes reserved up front for an inflated value; the buffer grows with
+/// the data actually read, so a corrupt header cannot reserve gigabytes.
+const MAX_INFLATE_RESERVE: usize = 64 << 20;
+
 fn inflate(data: &[u8], text_bytes: usize) -> Option<String> {
     use std::io::Read;
-    let mut out = String::with_capacity(text_bytes);
+    if text_bytes > MAX_INFLATED_BYTES {
+        return None;
+    }
+    let mut out = String::with_capacity(text_bytes.min(MAX_INFLATE_RESERVE));
+    // One byte more than declared: a stream longer than its header says is corrupt.
     flate2::read::DeflateDecoder::new(data)
+        .take(text_bytes as u64 + 1)
         .read_to_string(&mut out)
         .ok()?;
-    Some(out)
+    (out.len() <= text_bytes).then_some(out)
 }
 
 impl SectionCache {
@@ -208,7 +520,7 @@ impl SectionCache {
     }
 
     /// Like [`Self::new`], with the bound (source text bytes) of the parsed
-    /// hot map. The most recently read value is always kept, whatever its size.
+    /// hot map. A value bigger than the bound is never kept parsed.
     pub fn with_hot_limit(max_bytes: usize, max_entries: usize, hot_max_bytes: usize) -> Self {
         Self {
             inner: Mutex::new(Inner {
@@ -221,10 +533,26 @@ impl SectionCache {
             max_bytes,
             max_entries,
             hot_max_bytes,
+            disk: None,
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+    /// Also keep every value on disk under `dir`, at most `max_disk_bytes`
+    /// of files. The directory is prepared on first use; if it is unusable
+    /// the cache stays in memory.
+    #[must_use]
+    pub fn with_disk(mut self, dir: Arc<CacheDir>, max_disk_bytes: u64) -> Self {
+        if max_disk_bytes > 0 {
+            self.disk = Some(DiskTier {
+                dir,
+                max_bytes: max_disk_bytes,
+                state: OnceLock::new(),
+            });
+        }
+        self
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Inner> {
         // A poisoned lock only means another thread panicked mid-update; the map
         // is still structurally valid, and a cache can always be cleared.
         self.inner
@@ -238,18 +566,33 @@ impl SectionCache {
         inflate(&data, text_bytes).map(Arc::from)
     }
 
-    /// Mark a stored value as used and hand out its compressed bytes.
+    /// Mark a stored value as used and hand out its compressed bytes. A value
+    /// that is only on disk is brought back into memory first.
     fn touch(&self, sha256: &str, section_key: &str) -> Option<(Arc<[u8]>, usize)> {
-        let mut inner = self.lock();
-        inner.tick += 1;
-        let tick = inner.tick;
         let key = (sha256.to_string(), section_key.to_string());
-        if let Some(hot) = inner.hot.get_mut(&key) {
-            hot.last_used = tick;
+        {
+            let mut inner = self.lock();
+            inner.tick += 1;
+            let tick = inner.tick;
+            if let Some(hot) = inner.hot.get_mut(&key) {
+                hot.last_used = tick;
+            }
+            if let Some(slot) = inner.map.get_mut(&key) {
+                slot.last_used = tick;
+                return Some((Arc::clone(&slot.data), slot.text_bytes));
+            }
         }
-        let slot = inner.map.get_mut(&key)?;
-        slot.last_used = tick;
-        Some((Arc::clone(&slot.data), slot.text_bytes))
+        let (packed, text_bytes) = self.disk.as_ref()?.get(sha256, section_key)?;
+        let data: Arc<[u8]> = Arc::from(packed);
+        if data.len() <= self.max_bytes {
+            let mut inner = self.lock();
+            inner.tick += 1;
+            let tick = inner.tick;
+            if !inner.map.contains_key(&key) {
+                self.insert_slot(&mut inner, &key, Arc::clone(&data), text_bytes, tick, true);
+            }
+        }
+        Some((data, text_bytes))
     }
 
     /// The stored value for `(sha256, section_key)`. Repeated calls return the
@@ -271,6 +614,11 @@ impl SectionCache {
         }
         let (data, text_bytes) = self.touch(sha256, section_key)?;
         let parsed: Arc<Value> = Arc::new(serde_json::from_str(&inflate(&data, text_bytes)?).ok()?);
+        if text_bytes > self.hot_max_bytes {
+            // Too big to keep parsed: one drill-down on a huge section must not
+            // leave many times its size resident.
+            return Some(parsed);
+        }
         let mut inner = self.lock();
         if !inner.map.contains_key(&key) {
             // Evicted or replaced while parsing: still a valid answer for this call.
@@ -289,7 +637,6 @@ impl SectionCache {
                 last_used: tick,
             },
         );
-        // Bounded by source bytes; the value just read always stays.
         while inner.hot_bytes > self.hot_max_bytes && inner.hot.len() > 1 {
             let Some(oldest) = inner
                 .hot
@@ -313,6 +660,48 @@ impl SectionCache {
         }
     }
 
+    /// Insert a slot and evict until the bounds hold. Returns the keys of the
+    /// same file whose values are gone from memory and have no disk copy.
+    fn insert_slot(
+        &self,
+        inner: &mut Inner,
+        key: &CacheKey,
+        data: Arc<[u8]>,
+        text_bytes: usize,
+        tick: u64,
+        on_disk: bool,
+    ) -> Vec<String> {
+        inner.remove(key);
+        inner.bytes += data.len();
+        inner.map.insert(
+            key.clone(),
+            Slot {
+                data,
+                text_bytes,
+                last_used: tick,
+                on_disk,
+            },
+        );
+        let mut lost_same_file = Vec::new();
+        while inner.bytes > self.max_bytes || inner.map.len() > self.max_entries {
+            // Other files' values first, then older values of this file; the
+            // value just stored is never the victim.
+            let victim = inner
+                .map
+                .iter()
+                .filter(|(k, _)| *k != key)
+                .min_by_key(|(k, slot)| (k.0 == key.0, slot.last_used))
+                .map(|(k, _)| k.clone());
+            let Some(victim) = victim else { break };
+            if let Some(slot) = inner.remove(&victim) {
+                if victim.0 == key.0 && !slot.on_disk {
+                    lost_same_file.push(victim.1);
+                }
+            }
+        }
+        lost_same_file
+    }
+
     /// Store JSON text as it is (compressed).
     pub fn put_text(&self, sha256: &str, section_key: &str, text: String) -> PutOutcome {
         let text_bytes = text.len();
@@ -321,43 +710,37 @@ impl SectionCache {
             bytes: text_bytes,
             evicted_same_file: Vec::new(),
         };
+        if text_bytes > MAX_INFLATED_BYTES {
+            return not_kept;
+        }
         let Some(packed) = compress(&text) else {
             return not_kept;
         };
         drop(text);
+        let (on_disk, mut evicted_same_file) = match &self.disk {
+            Some(disk) => disk.put(sha256, section_key, &packed, text_bytes),
+            None => (false, Vec::new()),
+        };
         if packed.len() > self.max_bytes {
-            return not_kept;
+            // Too big for memory: kept only if the disk took it.
+            return PutOutcome {
+                kept: on_disk,
+                bytes: text_bytes,
+                evicted_same_file,
+            };
         }
         let mut inner = self.lock();
         inner.tick += 1;
         let tick = inner.tick;
         let key = (sha256.to_string(), section_key.to_string());
-        inner.remove(&key);
-        inner.bytes += packed.len();
-        inner.map.insert(
-            key.clone(),
-            Slot {
-                data: Arc::from(packed),
-                text_bytes,
-                last_used: tick,
-            },
-        );
-        let mut evicted_same_file = Vec::new();
-        while inner.bytes > self.max_bytes || inner.map.len() > self.max_entries {
-            // Other files' values first, then older values of this file; the
-            // value just stored is never the victim.
-            let victim = inner
-                .map
-                .iter()
-                .filter(|(k, _)| **k != key)
-                .min_by_key(|(k, slot)| (k.0 == sha256, slot.last_used))
-                .map(|(k, _)| k.clone());
-            let Some(victim) = victim else { break };
-            inner.remove(&victim);
-            if victim.0 == sha256 {
-                evicted_same_file.push(victim.1);
-            }
-        }
+        evicted_same_file.extend(self.insert_slot(
+            &mut inner,
+            &key,
+            Arc::from(packed),
+            text_bytes,
+            tick,
+            on_disk,
+        ));
         PutOutcome {
             kept: true,
             bytes: text_bytes,
@@ -365,28 +748,51 @@ impl SectionCache {
         }
     }
 
-    /// Number of stored values.
+    /// Number of values held in memory.
     pub fn len(&self) -> usize {
         self.lock().map.len()
     }
 
-    /// True when nothing is stored.
+    /// True when nothing is held in memory.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Compressed bytes held.
+    /// Compressed bytes held in memory.
     pub fn bytes(&self) -> usize {
         self.lock().bytes
     }
 
-    /// Drop everything.
+    /// A snapshot of the sizes and bounds.
+    pub fn stats(&self) -> SectionStats {
+        let (disk_files, disk_bytes) = self.disk.as_ref().map_or((0, 0), DiskTier::stats);
+        let inner = self.lock();
+        SectionStats {
+            entries: inner.map.len(),
+            bytes: inner.bytes,
+            max_bytes: self.max_bytes,
+            max_entries: self.max_entries,
+            hot_entries: inner.hot.len(),
+            hot_bytes: inner.hot_bytes,
+            disk_enabled: self.disk.as_ref().is_some_and(|d| d.dir.ready().is_some()),
+            disk_files,
+            disk_bytes,
+            disk_max_bytes: self.disk.as_ref().map_or(0, |d| d.max_bytes),
+        }
+    }
+
+    /// Drop everything, on disk too.
     pub fn clear(&self) {
-        let mut inner = self.lock();
-        inner.map.clear();
-        inner.bytes = 0;
-        inner.hot.clear();
-        inner.hot_bytes = 0;
+        {
+            let mut inner = self.lock();
+            inner.map.clear();
+            inner.bytes = 0;
+            inner.hot.clear();
+            inner.hot_bytes = 0;
+        }
+        if let Some(disk) = &self.disk {
+            disk.clear();
+        }
     }
 }
 
@@ -433,9 +839,12 @@ fn crash_text(name: &str, message: &str, section: Option<&str>) -> String {
 pub struct ServerState {
     config: StateConfig,
     policy: PathPolicy,
+    cache_dir: Arc<CacheDir>,
     analysis_cache: OnceLock<Arc<AnalysisCache>>,
     string_tracker: OnceLock<Arc<StringTracker>>,
     section_cache: SectionCache,
+    /// Hashes already computed, keyed by path (see [`Self::file_sha256`]).
+    file_identities: Mutex<HashMap<PathBuf, FileIdentity>>,
     /// Permits for [`Self::run_blocking`]: one per analysis allowed to run.
     slots: Arc<tokio::sync::Semaphore>,
 }
@@ -462,15 +871,24 @@ impl ServerState {
     pub fn new(config: StateConfig) -> Self {
         let policy = PathPolicy::new(config.allow_roots.clone());
         let config_slots = config.max_concurrent_analyses.max(1);
-        let section_cache = SectionCache::new(
-            config.section_cache_max_bytes,
-            config.section_cache_max_entries,
-        );
+        let cache_dir = Arc::new(CacheDir::new(config.cache_dir.clone()));
+        let section_cache = if config.cache_enabled {
+            SectionCache::new(
+                config.section_cache_max_bytes,
+                config.section_cache_max_entries,
+            )
+            .with_disk(Arc::clone(&cache_dir), config.section_disk_max_bytes)
+        } else {
+            // Caching is off: nothing is kept, every call recomputes.
+            SectionCache::new(0, 0)
+        };
         Self {
             config,
             policy,
+            cache_dir,
             analysis_cache: OnceLock::new(),
             string_tracker: OnceLock::new(),
+            file_identities: Mutex::new(HashMap::new()),
             section_cache,
             slots: Arc::new(tokio::sync::Semaphore::new(config_slots)),
         }
@@ -481,22 +899,83 @@ impl ServerState {
         &self.config
     }
 
-    /// Build the analysis cache and string tracker now. Call inside the Tokio
-    /// runtime before serving, so the cache loads from disk at start-up.
+    /// Build the analysis cache and string tracker now and prepare the cache
+    /// directory, so an unusable one is reported at start-up (one stderr
+    /// line) and not in the middle of a call. Reads no cached results.
     pub fn warm_up(&self) {
         let _ = self.analysis_cache();
         let _ = self.string_tracker();
+        if self.config.cache_enabled {
+            let _ = self.cache_dir.ready();
+        }
+    }
+
+    /// True unless caching was switched off (`--no-cache`).
+    pub const fn cache_enabled(&self) -> bool {
+        self.config.cache_enabled
     }
 
     /// The process-wide analysis cache (the one `/cache/*` reads).
     ///
-    /// If the cache directory cannot be created or written, or no Tokio runtime
-    /// is running, the cache is memory-only and one line is printed to stderr.
+    /// If the cache directory cannot be created or written the cache is
+    /// memory-only and one line is printed to stderr; with caching off it is
+    /// memory-only and nothing is recorded in it.
     pub fn analysis_cache(&self) -> Arc<AnalysisCache> {
-        Arc::clone(
-            self.analysis_cache
-                .get_or_init(|| Arc::new(build_cache(&self.config.cache_dir))),
-        )
+        Arc::clone(self.analysis_cache.get_or_init(|| {
+            Arc::new(if self.config.cache_enabled {
+                AnalysisCache::lazy(Arc::clone(&self.cache_dir)).with_limits(
+                    self.config.cache_max_bytes,
+                    crate::cache::DEFAULT_MAX_TOTAL_ENTRIES,
+                )
+            } else {
+                AnalysisCache::memory_only()
+            })
+        }))
+    }
+
+    /// Forget cached analyses (history, sections, files on disk).
+    pub async fn clear_analysis_caches(&self) -> anyhow::Result<()> {
+        self.section_cache.clear();
+        self.analysis_cache().clear().await
+    }
+
+    /// The SHA-256 of a file, computed once per unchanged file.
+    ///
+    /// A repeat call for a file whose size, modification time and inode are
+    /// as they were when it was hashed returns the remembered hash without
+    /// reading the file. A file modified in the last two seconds before it was
+    /// hashed is hashed again (a later edit could keep its timestamp). Any
+    /// difference means the file is hashed again, and the same content still
+    /// finds its cached sections because they are keyed by the hash.
+    pub async fn file_sha256(&self, path: &Path) -> Result<String, String> {
+        let stamp = FileIdentity::stat(path);
+        if let Some(stamp) = &stamp {
+            let known = self.identities().get(path).cloned();
+            if let Some(known) = known {
+                if known.matches(stamp) {
+                    return Ok(known.sha256);
+                }
+            }
+        }
+        let sha256 = crate::hash::calculate_sha256_only(path)
+            .await
+            .map_err(|error| format!("Cannot read {}: {error:#}", path.display()))?;
+        if let Some(mut stamp) = stamp {
+            stamp.sha256 = sha256.clone();
+            stamp.hashed_at = SystemTime::now();
+            let mut known = self.identities();
+            if known.len() >= FILE_IDENTITY_LIMIT {
+                known.clear();
+            }
+            known.insert(path.to_path_buf(), stamp);
+        }
+        Ok(sha256)
+    }
+
+    fn identities(&self) -> MutexGuard<'_, HashMap<PathBuf, FileIdentity>> {
+        self.file_identities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The process-wide string tracker (the one `/strings/*` reads).
@@ -592,6 +1071,9 @@ impl ServerState {
             }
         }
 
+        if !self.config.cache_enabled {
+            return;
+        }
         let entry = CacheEntry {
             file_path: raw_path.to_string(),
             file_hash: sha256.to_string(),
@@ -602,7 +1084,14 @@ impl ServerState {
             file_size,
             execution_time_ms: elapsed_ms(started),
         };
-        let _ = self.analysis_cache().add_entry(entry).await;
+        let mtime = super::paths::expand_tilde(raw_path)
+            .ok()
+            .and_then(|path| FileIdentity::stat(&path))
+            .map(|stamp| stamp.mtime_ms());
+        let _ = self
+            .analysis_cache()
+            .add_entry_with_mtime(entry, mtime)
+            .await;
     }
 
     /// What a successful `yara_scan_file` call leaves behind: one cache entry.
@@ -613,9 +1102,24 @@ impl ServerState {
         result: &Value,
         started: Instant,
     ) {
+        if !self.config.cache_enabled {
+            return;
+        }
+        // One key per path, rule and options: scans with different rules no
+        // longer share (and overwrite) one slot.
+        let scan_key = format!(
+            "yara-{}",
+            &blake3::hash(
+                serde_json::to_string(raw_args)
+                    .unwrap_or_default()
+                    .as_bytes()
+            )
+            .to_hex()
+            .as_str()[..32]
+        );
         let entry = CacheEntry {
             file_path: raw_path.to_string(),
-            file_hash: "yara_scan".to_string(),
+            file_hash: scan_key,
             tool_name: "yara_scan_file".to_string(),
             tool_args: to_args_map(raw_args),
             result: result.clone(),
@@ -637,41 +1141,80 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Build the analysis cache, degrading to memory-only (with one stderr line)
-/// when the directory cannot be used.
-fn build_cache(dir: &Path) -> AnalysisCache {
-    if tokio::runtime::Handle::try_current().is_err() {
-        eprintln!(
-            "file-scanner: no async runtime when the analysis cache was created; \
-             the cache is memory-only"
-        );
-        return AnalysisCache::memory_only();
+/// Files whose hash is remembered at once (the table is emptied when full).
+const FILE_IDENTITY_LIMIT: usize = 4096;
+/// A file modified this recently when hashed is not trusted by timestamp.
+const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What identifies an unchanged file without reading it.
+#[derive(Debug, Clone)]
+struct FileIdentity {
+    len: u64,
+    modified: SystemTime,
+    inode: u64,
+    sha256: String,
+    hashed_at: SystemTime,
+}
+
+impl FileIdentity {
+    fn stat(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        #[cfg(unix)]
+        let inode = {
+            use std::os::unix::fs::MetadataExt;
+            meta.ino()
+        };
+        #[cfg(not(unix))]
+        let inode = 0;
+        Some(Self {
+            len: meta.len(),
+            modified: meta.modified().ok()?,
+            inode,
+            sha256: String::new(),
+            hashed_at: UNIX_EPOCH,
+        })
     }
-    match probe_writable(dir).and_then(|()| AnalysisCache::new(dir).map_err(|e| e.to_string())) {
-        Ok(cache) => cache,
-        Err(error) => {
-            eprintln!(
-                "file-scanner: cache directory {} is not usable ({error}); the analysis cache is \
-                 memory-only",
-                dir.display()
-            );
-            AnalysisCache::memory_only()
-        }
+
+    fn matches(&self, now: &Self) -> bool {
+        self.len == now.len
+            && self.modified == now.modified
+            && self.inode == now.inode
+            && self
+                .modified
+                .checked_add(RACY_WINDOW)
+                .is_some_and(|stable| stable <= self.hashed_at)
+    }
+
+    /// Modification time as Unix milliseconds.
+    fn mtime_ms(&self) -> i64 {
+        self.modified
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
     }
 }
 
-fn probe_writable(dir: &Path) -> Result<(), String> {
-    crate::cache::create_private_dir(dir).map_err(|e| e.to_string())?;
-    let probe = dir.join(format!(".write-probe-{}", std::process::id()));
-    std::fs::write(&probe, b"").map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_file(&probe);
-    Ok(())
+/// The size and modification time (Unix milliseconds) of a file, as recorded
+/// with analysis entries and checked by `AnalysisCache::find_valid`.
+pub fn file_stamp(path: &Path) -> Option<(u64, i64)> {
+    FileIdentity::stat(path).map(|stamp| (stamp.len, stamp.mtime_ms()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn inflate_rejects_a_lying_header_without_reserving_or_inflating_it() {
+        let packed = compress(&"x".repeat(1000)).unwrap();
+        assert_eq!(inflate(&packed, 1000).unwrap().len(), 1000);
+        // A header far bigger than any legal value: refused before any allocation.
+        assert!(inflate(&packed, 1 << 60).is_none());
+        // A header smaller than the stream: the stream is cut and refused.
+        assert!(inflate(&packed, 10).is_none());
+        // A big header within bounds still reserves only a bounded buffer.
+        assert!(inflate(&packed, MAX_INFLATED_BYTES).is_some());
+    }
 
     #[test]
     fn section_cache_round_trip_and_miss() {
@@ -792,19 +1335,86 @@ mod tests {
     }
 
     #[test]
-    fn the_hot_map_is_bounded_but_always_holds_the_latest_value() {
-        // A hot limit smaller than any one value.
+    fn a_value_over_the_hot_limit_is_returned_but_not_kept_parsed() {
+        // A hot limit smaller than any one value: nothing is kept parsed, so a
+        // big section read once does not stay resident many times over.
         let cache = SectionCache::with_hot_limit(usize::MAX, 100, 10);
+        cache.put("h", "a", &json!(noisy(100, 1)));
+        let first = cache.get("h", "a").unwrap();
+        let second = cache.get("h", "a").unwrap();
+        assert_eq!(*first, *second);
+        assert!(!Arc::ptr_eq(&first, &second), "parsed again, not retained");
+        assert_eq!(cache.stats().hot_entries, 0);
+        assert_eq!(cache.stats().hot_bytes, 0);
+    }
+
+    #[test]
+    fn the_hot_map_keeps_small_values_within_its_bound() {
+        // Room for about one 102-byte value.
+        let cache = SectionCache::with_hot_limit(usize::MAX, 100, 150);
         cache.put("h", "a", &json!(noisy(100, 1)));
         cache.put("h", "b", &json!(noisy(100, 2)));
         let b1 = cache.get("h", "b").unwrap();
         assert!(Arc::ptr_eq(&b1, &cache.get("h", "b").unwrap()));
         let a1 = cache.get("h", "a").unwrap();
         assert!(Arc::ptr_eq(&a1, &cache.get("h", "a").unwrap()));
+        assert!(cache.stats().hot_bytes <= 150);
         // `b` was pushed out of the hot map by `a`; it parses again, correctly.
         let b2 = cache.get("h", "b").unwrap();
         assert!(!Arc::ptr_eq(&b1, &b2));
         assert_eq!(*b1, *b2);
+    }
+
+    #[test]
+    fn sections_on_disk_survive_a_restart_and_are_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = Arc::new(CacheDir::new(dir.path().join("c")));
+        let first = SectionCache::default().with_disk(Arc::clone(&cache_dir), 1 << 20);
+        first.put("sha1", "strings:min=4", &json!({"a": [1, 2, 3]}));
+        drop(first);
+        // A new process: nothing in memory, the value comes from the file.
+        let second = SectionCache::default()
+            .with_disk(Arc::new(CacheDir::new(dir.path().join("c"))), 1 << 20);
+        assert!(second.is_empty());
+        assert_eq!(
+            *second.get("sha1", "strings:min=4").unwrap(),
+            json!({"a": [1, 2, 3]})
+        );
+        assert_eq!(second.len(), 1, "now also in memory");
+        assert!(second.get("sha1", "strings:min=8").is_none());
+        assert!(second.get("sha2", "strings:min=4").is_none());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            let sections = dir.path().join("c/sections");
+            assert_eq!(mode(&sections), 0o700);
+            for file in std::fs::read_dir(&sections).unwrap().flatten() {
+                assert_eq!(mode(&file.path()), 0o600);
+            }
+        }
+        second.clear();
+        assert!(second.get("sha1", "strings:min=4").is_none());
+        assert_eq!(second.stats().disk_files, 0);
+    }
+
+    #[test]
+    fn the_disk_tier_is_bounded_and_evicts_other_files_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = SectionCache::new(usize::MAX, 100)
+            .with_disk(Arc::new(CacheDir::new(dir.path().join("c"))), 4_000);
+        cache.put("other", "a", &json!(noisy(1_500, 1)));
+        cache.put("mine", "s1", &json!(noisy(1_500, 2)));
+        let outcome = cache.put("mine", "s2", &json!(noisy(1_500, 3)));
+        assert!(outcome.kept);
+        assert!(outcome.evicted_same_file.is_empty(), "{outcome:?}");
+        assert!(cache.stats().disk_bytes <= 4_000, "{:?}", cache.stats());
+        // After a restart only what is on disk is left: `other` went first.
+        let fresh = SectionCache::new(usize::MAX, 100)
+            .with_disk(Arc::new(CacheDir::new(dir.path().join("c"))), 4_000);
+        assert!(fresh.get("other", "a").is_none());
+        assert!(fresh.get("mine", "s1").is_some());
+        assert!(fresh.get("mine", "s2").is_some());
     }
 
     #[tokio::test]
@@ -888,6 +1498,44 @@ mod tests {
         };
         cache.add_entry(entry).await.unwrap();
         assert_eq!(cache.get_metadata().await.total_entries, 1);
+        // The section cache says its disk tier is off, not merely unconfigured.
+        let sections = state.section_cache();
+        sections.put("h", "k", &json!([1]));
+        assert!(!sections.stats().disk_enabled);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unchanged_file_is_hashed_once_and_a_changed_one_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.bin");
+        std::fs::write(&path, b"first content").unwrap();
+        // Old enough that its timestamp can be trusted.
+        let old = filetime::FileTime::from_unix_time(1_000_000, 0);
+        filetime::set_file_mtime(&path, old).unwrap();
+        let state = ServerState::default();
+        let first = state.file_sha256(&path).await.unwrap();
+        assert_eq!(first.len(), 64);
+
+        // Unchanged: answered without reading the file (it is unreadable now).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::File::open(&path).is_ok();
+        if !readable {
+            assert_eq!(state.file_sha256(&path).await.unwrap(), first);
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // Changed (size and time): hashed again, to the new content's hash.
+        std::fs::write(&path, b"second, longer content").unwrap();
+        let second = state.file_sha256(&path).await.unwrap();
+        assert_ne!(second, first);
+        // A file that does not exist is an error naming it.
+        let error = state
+            .file_sha256(&dir.path().join("gone"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("gone"), "{error}");
     }
 
     #[test]

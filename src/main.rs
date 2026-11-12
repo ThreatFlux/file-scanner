@@ -179,6 +179,13 @@ struct ScopeArgs {
     /// (`:`-separated) is used; with neither, every readable path is allowed.
     #[arg(long = "allow-root", value_name = "DIR")]
     allow_root: Vec<PathBuf>,
+    /// Directory for cached results (private, mode 0700). Default: the user's cache
+    /// directory; environment variable FILE_SCANNER_CACHE_DIR
+    #[arg(long = "cache-dir", value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
+    /// Turn result caching off: nothing is stored or served from a cache
+    #[arg(long = "no-cache")]
+    no_cache: bool,
 }
 
 /// Network settings of mcp-http and mcp-sse.
@@ -230,6 +237,10 @@ fn mcp_server_for(scope: ScopeArgs) -> McpTransportServer {
     if !scope.allow_root.is_empty() {
         config.allow_roots = scope.allow_root;
     }
+    if let Some(dir) = scope.cache_dir {
+        config.cache_dir = dir;
+    }
+    config.cache_enabled = !scope.no_cache;
     McpTransportServer::with_config(config)
 }
 

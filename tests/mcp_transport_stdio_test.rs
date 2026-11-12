@@ -74,16 +74,20 @@ type Client = RunningService<RoleClient, TestClient>;
 
 /// The exact inventory lives in this one list (checked by the annotations test);
 /// every other test only checks that these names are present.
-const TOOLS: [&str; 10] = [
+const TOOLS: [&str; 14] = [
     "analyze_file",
     "analyze_java_file",
     "analyze_npm_package",
     "analyze_python_package",
+    "cache_clear",
+    "cache_status",
     "compare_files",
     "disassemble",
     "llm_analyze_file",
     "query_analysis",
     "read_hex",
+    "search_strings",
+    "string_details",
     "yara_scan_file",
 ];
 
@@ -360,8 +364,20 @@ async fn tools_list_has_every_tool_with_annotations_and_strict_schemas() {
 
     for tool in &tools {
         let annotations = tool.annotations.as_ref().expect("annotations");
-        assert_eq!(annotations.read_only_hint, Some(true), "{}", tool.name);
-        assert_eq!(annotations.destructive_hint, Some(false), "{}", tool.name);
+        // cache_clear is the one destructive tool.
+        let destructive = tool.name == "cache_clear";
+        assert_eq!(
+            annotations.read_only_hint,
+            Some(!destructive),
+            "{}",
+            tool.name
+        );
+        assert_eq!(
+            annotations.destructive_hint,
+            Some(destructive),
+            "{}",
+            tool.name
+        );
         assert_eq!(annotations.idempotent_hint, Some(true), "{}", tool.name);
         assert_eq!(annotations.open_world_hint, Some(false), "{}", tool.name);
         assert!(tool.title.is_some(), "{}", tool.name);
@@ -498,7 +514,8 @@ async fn yara_scan_file_succeeds_and_caches_the_scan() {
     let entries = harness.state.analysis_cache().get_all_entries().await;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].tool_name, "yara_scan_file");
-    assert_eq!(entries[0].file_hash, "yara_scan");
+    // Keyed by path, rule and options, not one shared slot for every scan.
+    assert!(entries[0].file_hash.starts_with("yara-"));
     assert_eq!(entries[0].file_size, 0);
     client.cancel().await.unwrap();
 }
