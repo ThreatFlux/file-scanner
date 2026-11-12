@@ -195,8 +195,8 @@ pub fn input_schema_with_budget<T: JsonSchema + 'static>() -> Arc<JsonObject> {
         "maximum": MAX_OUTPUT_BYTES,
         "description": format!(
             "Hard cap on the size of this result in bytes (default {DEFAULT_OUTPUT_BYTES}, \
-             ceiling {MAX_OUTPUT_BYTES}). Larger results are cut and the cut is listed \
-             under 'truncated'."
+             ceiling {MAX_OUTPUT_BYTES}). Larger results are cut and the answer names what was cut \
+             ('truncated', 'hint' or 'note')."
         ),
     });
     match schema

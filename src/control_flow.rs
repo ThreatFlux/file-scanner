@@ -296,7 +296,7 @@ impl ControlFlowAnalyzer {
             return Err(anyhow!(
                 "No function boundaries were found: the binary has no function symbols inside its code section \
                  (it is probably stripped), so no control-flow graphs can be built. \
-                 Use the disassembly tool to read the code instead."
+                 Use the `disassemble` tool to read the code instead."
             ));
         }
 

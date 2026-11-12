@@ -98,7 +98,7 @@ pub struct YaraScanArgs {
     pub yara_rule: Option<String>,
 
     #[schemars(
-        description = "Absolute path of a rule file (.yar/.yara) or of a directory whose \
+        description = "Absolute path of a rule file (any extension) or of a directory whose \
                        .yar/.yara files are all loaded. `include` is not supported."
     )]
     pub rule_path: Option<String>,
@@ -167,7 +167,7 @@ pub struct YaraScanRequest {
     pub yara_rule: String,
 
     #[schemars(
-        description = "A rule file (.yar/.yara) or a directory of them, instead of or with `yara_rule`"
+        description = "A rule file (any extension) or a directory of .yar/.yara files, instead of or with `yara_rule`"
     )]
     #[serde(default)]
     pub rule_path: Option<String>,

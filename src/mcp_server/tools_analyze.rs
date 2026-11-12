@@ -78,7 +78,7 @@ the specialist tool for the file's kind (analyze_document, analyze_script, inspe
 analyze_java_file, analyze_npm_package, analyze_python_package). `arch` picks the slice of a \
 universal Mach-O. A directory path returns a paged triage table, one row per file (`recursive`, \
 `max_files`, `offset`, `limit`). Pass an absolute path. Results are compact JSON capped at `max_output_bytes` \
-(default 80000, ceiling 400000); anything cut is listed under `truncated`. Sections that fail or do \
+(default 80000, ceiling 400000); anything cut is named in the answer (`truncated`, `hint` or `note`). Sections that fail or do \
 not apply to the file's format are listed under `errors` or `notes` with the reason. Then use \
 query_analysis to dig in, llm_analyze_file for a YARA-oriented digest, or yara_scan_file to test a rule.";
 
