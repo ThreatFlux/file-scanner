@@ -843,3 +843,49 @@ fn a_script_object_without_endobj_inside_the_window_is_listed_and_counted() {
     assert_eq!(scan.scripts_total, 1, "{:?}", scan.notes);
     assert!(scan.scripts.iter().any(|s| s.preview.contains("hidden")));
 }
+
+#[test]
+fn a_header_with_no_readable_body_is_never_low_risk() {
+    let dir = TempDir::new().unwrap();
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    pdf.extend((0..600u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8 | 0x80));
+    let scan = scan_pdf(write_pdf(&dir, "broken.pdf", &pdf)).unwrap();
+    assert_eq!(scan.object_count, 0);
+    assert!(
+        !matches!(scan.overall_risk, RiskLevel::Low),
+        "{:?} {:?}",
+        scan.overall_risk,
+        scan.risk_reasons
+    );
+    assert!(scan.risk_score >= 10);
+    assert!(
+        scan.risk_reasons
+            .iter()
+            .any(|r| r.contains("Nothing could be read")),
+        "{:?}",
+        scan.risk_reasons
+    );
+    // An ordinary small document stays low.
+    let ok = scan_pdf(write_pdf(&dir, "ok.pdf", BENIGN)).unwrap();
+    assert!(
+        matches!(ok.overall_risk, RiskLevel::Low),
+        "{:?}",
+        ok.risk_reasons
+    );
+}
+
+#[test]
+fn links_beyond_the_old_cap_are_kept_and_launch_targets_are_not_crowded_out() {
+    let mut pdf = b"%PDF-1.4\n1 0 obj\n<<".to_vec();
+    for n in 0..3000 {
+        pdf.extend_from_slice(format!(" /A << /S /URI /URI (http://e.test/{n}) >>").as_bytes());
+    }
+    pdf.extend_from_slice(b" /A << /S /Launch /F (calc.exe) >>");
+    pdf.extend_from_slice(b" >>\nendobj\ntrailer\n<< >>\n");
+    let dir = TempDir::new().unwrap();
+    let scan = scan_pdf(write_pdf(&dir, "links3000.pdf", &pdf)).unwrap();
+    assert_eq!(scan.links_total, 3000);
+    let uris = scan.targets.iter().filter(|t| t.kind == "URI").count();
+    assert_eq!(uris, 3000);
+    assert!(scan.targets.iter().any(|t| t.kind == "Launch"));
+}

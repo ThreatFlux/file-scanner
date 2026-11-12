@@ -305,6 +305,8 @@ const MAX_OBJECT_STREAM_ROWS: usize = 10_000;
 const MAX_EVIDENCE: usize = 25;
 /// Most URLs, JavaScript items, launch actions and embedded files kept.
 const MAX_ITEMS: usize = 200;
+/// Most link targets (`/URI`) kept; launch and submit targets keep [`MAX_ITEMS`] of their own.
+const MAX_LINK_TARGETS: usize = 5_000;
 /// Characters of JavaScript kept as a preview.
 const JS_PREVIEW_CHARS: usize = 400;
 /// Longest string token the lexer will read before giving up on it.
@@ -754,6 +756,8 @@ struct ScanState {
     scripts_total: usize,
     links_total: usize,
     targets_total: usize,
+    /// Launch and submit targets kept (they are capped apart from links).
+    action_targets_kept: usize,
     attachments_total: usize,
     /// Objects whose script was already resolved (a second reference adds nothing).
     resolved_scripts: std::collections::HashSet<u32>,
@@ -1270,7 +1274,7 @@ fn handle_name(name: &str, site: &NameSite<'_>, state: &mut ScanState, ctx: &mut
             if let Some(Tok::Str(_, bytes)) = look.next_token() {
                 state.links_total += 1;
                 state.targets_total += 1;
-                if state.targets.len() < MAX_ITEMS {
+                if state.targets.len() - state.action_targets_kept < MAX_LINK_TARGETS {
                     state.targets.push(PdfTarget {
                         kind: "URI".to_string(),
                         value: cut_text(&pdf_text(&bytes), 300),
@@ -1281,7 +1285,7 @@ fn handle_name(name: &str, site: &NameSite<'_>, state: &mut ScanState, ctx: &mut
         }
         "Launch" | "SubmitForm" => {
             state.targets_total += 1;
-            if state.targets.len() >= MAX_ITEMS {
+            if state.action_targets_kept >= MAX_ITEMS {
                 return;
             }
             // The target sits in the same action dictionary, before or after this name.
@@ -1300,6 +1304,7 @@ fn handle_name(name: &str, site: &NameSite<'_>, state: &mut ScanState, ctx: &mut
                 value = format!("{value} {params}").trim().to_string();
             }
             {
+                state.action_targets_kept += 1;
                 state.targets.push(PdfTarget {
                     kind: name.to_string(),
                     value: cut_text(&value, 300),
@@ -1648,8 +1653,11 @@ pub fn scan_pdf<P: AsRef<Path>>(path: P) -> Result<PdfScan> {
     }
     if state.targets_total > state.targets.len() {
         notes.push(format!(
-            "{} link, launch and submit target(s) found; only the first {MAX_ITEMS} are listed.",
-            state.targets_total
+            "{} link, launch and submit target(s) found; {} are listed (the first {MAX_LINK_TARGETS} \
+             links, and only the first {MAX_ITEMS} launch and submit targets). The rest cannot \
+             be retrieved; search_strings finds a specific URL in the file.",
+            state.targets_total,
+            state.targets.len()
         ));
     }
     if state.attachments_total > state.attachments.len() {
@@ -2180,6 +2188,13 @@ fn score_scan(scan: &mut PdfScan) {
         score += points;
         reasons.push(reason);
     };
+    if scan.object_count == 0 {
+        add(
+            15,
+            "Nothing could be read: no PDF object was found, so hidden content cannot be ruled out"
+                .to_string(),
+        );
+    }
     let js = feature_count(scan, "JavaScript").max(feature_count(scan, "JS"));
     if js > 0 {
         add(30, format!("JavaScript present ({js} reference(s))"));

