@@ -450,7 +450,7 @@ impl FileScannerMcp {
                 .unwrap_or(sections::DEFAULT_MIN_STRING),
             hex_size,
             hex_offset: absolute_offset(request.hex_dump_offset.unwrap_or(0), file_size),
-            arch: sections::arch_option(request.arch.as_deref()),
+            arch: sections::resolve_arch(&path, sections::arch_option(request.arch.as_deref())),
         };
         if names.contains(&"hex_dump") && file_size > 0 && options.hex_offset >= file_size {
             return tool_error(format!(
@@ -506,8 +506,12 @@ impl FileScannerMcp {
                         match engine.load(&planned) {
                             Ok(section) => {
                                 out.insert((*name).into(), sections::summarize(name, &section));
-                                if let Some(step) = sections::drill_down(name, &file_path, &section)
-                                {
+                                if let Some(step) = sections::drill_down(
+                                    name,
+                                    &file_path,
+                                    &section,
+                                    options.arch.as_deref(),
+                                ) {
                                     steps.push(step);
                                 }
                                 if *name == "strings" {
@@ -650,7 +654,7 @@ impl FileScannerMcp {
             min: request
                 .min_string_length
                 .unwrap_or(sections::DEFAULT_MIN_STRING),
-            arch: sections::arch_option(request.arch.as_deref()),
+            arch: sections::resolve_arch(&path, sections::arch_option(request.arch.as_deref())),
             ..Options::default()
         };
         let state = Arc::clone(&self.state);
@@ -723,6 +727,11 @@ impl FileScannerMcp {
                             .into();
                         }
                     }
+                    if rescanned {
+                        // `total` counts the matches; the file has this many strings.
+                        value["unfiltered_total"] = section["total_count"].clone();
+                        value["strings_in_file"] = section["total_count"].clone();
+                    }
                     if name == "strings"
                         && !rescanned
                         && section.get("truncated").and_then(Value::as_bool) == Some(true)
@@ -768,23 +777,16 @@ impl FileScannerMcp {
                             .into();
                         }
                     }
-                    if name == "control_flow" {
-                        let limits: Vec<&str> = section
-                            .get("notes")
-                            .and_then(Value::as_array)
-                            .map_or(&[][..], Vec::as_slice)
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .filter(|n| n.starts_with("Limit"))
-                            .collect();
-                        if !limits.is_empty() {
-                            let cut = limits.join(" ");
-                            value["note"] = match value.get("note").and_then(Value::as_str) {
-                                Some(first) => format!("{first} {cut}"),
-                                None => cut,
-                            }
-                            .into();
+                    // What the analyzer says about its own cuts (kept and real
+                    // counts) goes with every page, not only the summary.
+                    let limits = sections::limit_notes(name, &section);
+                    if !limits.is_empty() {
+                        let cut = limits.join(" ");
+                        value["note"] = match value.get("note").and_then(Value::as_str) {
+                            Some(first) => format!("{first} {cut}"),
+                            None => cut,
                         }
+                        .into();
                     }
                     value["file_path"] = file_path.clone().into();
                     value["cache"] = cache_state.into();
@@ -1122,7 +1124,7 @@ pub struct AnalyzeFileArgs {
     #[schemars(description = "Directory only: rows to return (default 50, at most 200)")]
     pub limit: Option<usize>,
     #[schemars(
-        description = "Universal (fat) Mach-O only: the architecture slice every code section (binary_info, symbols, control_flow, vulnerabilities, code_quality, disassembly, call_graph) reads, one of binary_info.universal_slices (for example arm64, arm64e, x86_64). Default: the host's, else the first. A name the file does not have is an error that lists its slices"
+        description = "Universal (fat) Mach-O only: the architecture slice every code section (binary_info, symbols, control_flow, vulnerabilities, code_quality, disassembly, call_graph) reads, one of the slice names the overview's `type` lists (for example x86_64, arm64e, arm64-subtype-12; `arm64` works when exactly one slice is ARM64-family). Default: the host's, else the first. A name the file does not have is an error that lists its slices"
     )]
     pub arch: Option<String>,
 }
@@ -1162,7 +1164,7 @@ pub struct QueryAnalysisRequest {
     #[schemars(description = "Return the raw rows instead of compact ones (default false)")]
     pub detail: Option<bool>,
     #[schemars(
-        description = "Universal (fat) Mach-O only: the architecture slice every code section (binary_info, symbols, control_flow, vulnerabilities, code_quality, disassembly, call_graph) reads, one of binary_info.universal_slices (for example arm64, arm64e, x86_64). Default: the host's, else the first. A name the file does not have is an error that lists its slices"
+        description = "Universal (fat) Mach-O only: the architecture slice every code section (binary_info, symbols, control_flow, vulnerabilities, code_quality, disassembly, call_graph) reads, one of the slice names the overview's `type` lists (for example x86_64, arm64e, arm64-subtype-12; `arm64` works when exactly one slice is ARM64-family). Default: the host's, else the first. A name the file does not have is an error that lists its slices"
     )]
     pub arch: Option<String>,
 }

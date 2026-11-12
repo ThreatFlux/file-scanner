@@ -139,12 +139,17 @@ fn haystack(item: &Value) -> String {
     }
 }
 
+/// The category-like values of a row: its own fields, and the `category` of its
+/// `metadata` (a threat match carries its rule's category there).
+fn category_values(item: &Value) -> impl Iterator<Item = &str> {
+    CATEGORY_FIELDS
+        .iter()
+        .filter_map(|field| item.get(*field).and_then(Value::as_str))
+        .chain(item.pointer("/metadata/category").and_then(Value::as_str))
+}
+
 fn category_matches(item: &Value, wanted: &str) -> bool {
-    CATEGORY_FIELDS.iter().any(|field| {
-        item.get(*field)
-            .and_then(Value::as_str)
-            .is_some_and(|v| v.eq_ignore_ascii_case(wanted))
-    })
+    category_values(item).any(|v| v.eq_ignore_ascii_case(wanted))
 }
 
 /// The rows of one list, each with the group it came from (behaviors only).
@@ -299,22 +304,38 @@ pub(super) fn answer(
         if matched.is_empty() {
             let mut present: Vec<String> = all
                 .iter()
-                .flat_map(|(_, item)| {
-                    CATEGORY_FIELDS
-                        .iter()
-                        .filter_map(|f| item.get(*f).and_then(Value::as_str))
-                })
+                .flat_map(|(_, item)| category_values(item))
                 .map(str::to_string)
                 .collect();
             present.sort();
             present.dedup();
             present.truncate(30);
+            // A string scan counted every category in the file, also the ones
+            // a cut list or a filtered re-scan does not hold.
+            let counted: Vec<String> = section
+                .get("category_counts")
+                .and_then(Value::as_object)
+                .filter(|_| is_strings)
+                .map(|counts| {
+                    counts
+                        .iter()
+                        .filter(|(_, n)| n.as_u64().unwrap_or(0) > 0)
+                        .take(30)
+                        .map(|(name, n)| format!("{name} ({n})"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let (where_, names) = if counted.is_empty() {
+                ("list", present)
+            } else {
+                ("file", counted)
+            };
             paged["note"] = format!(
-                "No row has category '{wanted}'. Categories in this list: {}.",
-                if present.is_empty() {
+                "No row has category '{wanted}'. Categories in this {where_}: {}.",
+                if names.is_empty() {
                     "none".to_string()
                 } else {
-                    present.join(", ")
+                    names.join(", ")
                 }
             )
             .into();
@@ -452,4 +473,42 @@ fn clip_around(s: &str, hit: Option<usize>) -> String {
         &s[start..end],
         if end < s.len() { "…" } else { "" }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// A threat match carries its category in `metadata`: `category` finds it,
+    /// and the note of a miss names the categories that exist.
+    #[test]
+    fn category_matches_the_metadata_category_of_a_row() {
+        let section = json!({"matches": [
+            {"rule_identifier": "a", "metadata": {"category": "evasion"}},
+            {"rule_identifier": "b", "metadata": {"category": "network"}},
+            {"rule_identifier": "c", "metadata": {"description": "none"}},
+        ]});
+        let params = |category| Params {
+            list: None,
+            filter: None,
+            regex: false,
+            category: Some(category),
+            encoding: None,
+            offset: 0,
+            limit: 50,
+            detail: false,
+        };
+        let hit = answer("threats", &section, &params("EVASION"), 80_000).unwrap();
+        assert_eq!(hit["total"], 1, "{hit}");
+        assert_eq!(hit["unfiltered_total"], 3);
+        let miss = answer("threats", &section, &params("persistence"), 80_000).unwrap();
+        assert_eq!(miss["total"], 0);
+        let note = miss["note"].as_str().unwrap();
+        assert!(
+            note.contains("evasion") && note.contains("network"),
+            "{note}"
+        );
+    }
 }

@@ -118,11 +118,14 @@ fn special_reason(file_type: std::fs::FileType) -> Option<&'static str> {
     None
 }
 
-/// `vet` checks the path policy on one entry that is a symlink, as the walk
+/// `vet` checks the path policy on one entry of an unusual type, as the walk
 /// reaches it, so a huge tree is not read to the end before the first row (an
-/// `Err` fails the whole table, naming the entry). A FIFO, socket or device in
-/// the tree is not an error: it is skipped without being opened, and the table
-/// lists it under `skipped` with the reason.
+/// `Err` fails the whole table, naming the entry). A symbolic link is never
+/// vetted: it is neither followed nor listed (it is counted under
+/// `links_skipped`), so whatever it points at is not read and cannot fail the
+/// table. A FIFO, socket or device in the tree is not an error either: it is
+/// skipped without being opened, and the table lists it under `skipped` with
+/// the reason.
 pub(super) fn table(
     root: &Path,
     file_path: &str,
@@ -169,7 +172,8 @@ pub(super) fn table(
                 continue;
             }
         }
-        if entry.path_is_symlink() || !(entry.file_type().is_file() || entry.file_type().is_dir()) {
+        if !entry.path_is_symlink() && !(entry.file_type().is_file() || entry.file_type().is_dir())
+        {
             vet(entry.path()).map_err(|reason| {
                 let shown = entry.path().strip_prefix(root).unwrap_or(entry.path());
                 format!(
@@ -293,11 +297,15 @@ pub(super) fn table(
                 "why": "this directory is a Python package: install hooks, dependencies, findings",
             }));
         }
-        steps.push(json!({
-            "tool": "analyze_file",
-            "arguments": {"file_path": "<directory>/<path of a row>"},
-            "gives": "the overview of one file, with the sections it offers",
-        }));
+        // The first file of this page, as a path that works as it is.
+        if let Some(first) = files.get(start) {
+            steps.push(json!({
+                "tool": "analyze_file",
+                "arguments": {"file_path": first.to_string_lossy()},
+                "gives": "the overview of one file, with the sections it offers (any row of \
+                          the table: its path under this directory)",
+            }));
+        }
         if end < files.len() {
             steps.push(json!({
                 "tool": "analyze_file",
@@ -366,12 +374,28 @@ mod tests {
         assert_eq!(calls.get(), 0, "regular files need no policy check");
         assert!(value["truncated_listing"].is_string());
 
+        // A link is never followed or listed, so the policy is not asked about
+        // where it points: a link to a file outside the allowed roots is
+        // counted and skipped like any other, and the table still comes back.
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink("/etc/hosts", dir.path().join("a-link")).unwrap();
             let refusing = |p: &Path| Err(format!("no: {}", p.display()));
-            let error = table_of(&refusing).unwrap_err();
-            assert!(error.contains("a-link"), "{error}");
+            let value = table_of(&refusing).unwrap();
+            assert_eq!(value["total"], 5, "{value}");
+            assert!(
+                value["links_skipped"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("1 symbolic link")),
+                "{value}"
+            );
+            assert!(!value.to_string().contains("hosts"), "{value}");
+            // The next step names a file of the table, callable as it is.
+            let step = &value["next_steps"][0]["arguments"]["file_path"];
+            assert!(
+                step.as_str().is_some_and(|p| Path::new(p).is_file()),
+                "{value}"
+            );
         }
     }
 }

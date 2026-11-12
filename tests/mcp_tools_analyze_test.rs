@@ -1379,13 +1379,27 @@ async fn a_triage_walk_checks_each_entry_against_the_allowed_roots() {
 
     std::os::unix::fs::symlink(outside.path().join("secret.txt"), root.path().join("link"))
         .unwrap();
-    let message = harness
-        .err("analyze_file", json!({"file_path": allowed}))
+    // A link is never followed or listed, so one that points outside the roots
+    // is skipped and counted like any other: the table still comes back.
+    let (table, _) = harness
+        .ok("analyze_file", json!({"file_path": allowed}))
         .await;
+    assert_eq!(table["total"], 1, "{table}");
     assert!(
-        message.contains("link") && message.contains("outside"),
-        "{message}"
+        table["links_skipped"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("1 symbolic link")),
+        "{table}"
     );
+    assert!(!table.to_string().contains("secret"), "{table}");
+    // The path the caller names itself keeps the rule.
+    let message = harness
+        .err(
+            "analyze_file",
+            json!({"file_path": root.path().join("link")}),
+        )
+        .await;
+    assert!(message.contains("outside"), "{message}");
 }
 
 /// The fields around a page (a long path, the cache fields, a note) count
@@ -1631,11 +1645,8 @@ async fn unreachable_functions_are_named_and_compare_says_when_strings_were_cut(
     );
 }
 
-/// A fat Mach-O built here (two empty thin slices): `arch` picks the slice.
-#[tokio::test]
-async fn arch_picks_the_slice_of_a_fat_macho_built_in_the_test() {
-    let harness = Harness::new().await;
-    let dir = TempDir::new().unwrap();
+/// A fat Mach-O of empty thin slices, one per `(cpu type, cpu subtype)`.
+fn fat_macho(slices: &[(u32, u32)]) -> Vec<u8> {
     let thin = |cpu: u32, sub: u32| -> Vec<u8> {
         let mut b = Vec::new();
         for v in [0xfeed_facf_u32, cpu, sub, 2, 0, 0, 0, 0] {
@@ -1644,13 +1655,12 @@ async fn arch_picks_the_slice_of_a_fat_macho_built_in_the_test() {
         b.extend_from_slice(&[0u8; 32]);
         b
     };
-    let slices = [(0x0100_0007_u32, 3_u32), (0x0100_000c, 0)];
     let mut fat = Vec::new();
     fat.extend_from_slice(&0xcafe_babe_u32.to_be_bytes());
-    fat.extend_from_slice(&2u32.to_be_bytes());
+    fat.extend_from_slice(&(slices.len() as u32).to_be_bytes());
     let mut offset = 4096u32;
     let mut body = Vec::new();
-    for (cpu, sub) in slices {
+    for &(cpu, sub) in slices {
         let data = thin(cpu, sub);
         for v in [cpu, sub, offset, data.len() as u32, 12] {
             fat.extend_from_slice(&v.to_be_bytes());
@@ -1663,8 +1673,16 @@ async fn arch_picks_the_slice_of_a_fat_macho_built_in_the_test() {
         fat.resize(at, 0);
         fat.extend_from_slice(&data);
     }
+    fat
+}
+
+/// A fat Mach-O built here (two empty thin slices): `arch` picks the slice.
+#[tokio::test]
+async fn arch_picks_the_slice_of_a_fat_macho_built_in_the_test() {
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
     let path = dir.path().join("fat.bin");
-    std::fs::write(&path, fat).unwrap();
+    std::fs::write(&path, fat_macho(&[(0x0100_0007, 3), (0x0100_000c, 0)])).unwrap();
     for (arch, expected) in [("x86_64", "x86_64"), ("arm64", "ARM64")] {
         let (info, _) = harness
             .ok(
@@ -1674,4 +1692,359 @@ async fn arch_picks_the_slice_of_a_fat_macho_built_in_the_test() {
             .await;
         assert_eq!(info["binary_info"]["analyzed_slice"], expected, "{info}");
     }
+}
+
+/// The overview prints the slices the way `arch` accepts them, `arm64` names the
+/// one ARM64-family slice when there is exactly one, the third kind of slice
+/// has a name without spaces or parentheses (the old spelling still works), and
+/// an ambiguous or unknown name is an error that lists the names.
+#[tokio::test]
+async fn slice_names_in_the_overview_are_the_names_arch_accepts() {
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    // x86_64, ARM64E and "ARM64 (subtype 12)", as /bin/ls has them.
+    let three = dir.path().join("three.bin");
+    std::fs::write(
+        &three,
+        fat_macho(&[(0x0100_0007, 3), (0x0100_000c, 2), (0x0100_000c, 12)]),
+    )
+    .unwrap();
+    let (overview, _) = harness
+        .ok("analyze_file", json!({"file_path": three}))
+        .await;
+    assert_eq!(
+        overview["type"], "Mach-O universal binary (3 slices: x86_64, arm64e, arm64-subtype-12)",
+        "{overview}"
+    );
+    let named = |arch: &'static str| {
+        let (harness, three) = (&harness, &three);
+        async move {
+            harness
+                .ok(
+                    "analyze_file",
+                    json!({"file_path": three, "sections": ["binary_info"], "arch": arch}),
+                )
+                .await
+                .0["binary_info"]["analyzed_slice"]
+                .clone()
+        }
+    };
+    for arch in ["arm64-subtype-12", "ARM64 (subtype 12)", "arm64_subtype_12"] {
+        assert_eq!(named(arch).await, "ARM64 (subtype 12)", "{arch}");
+    }
+    assert_eq!(named("arm64e").await, "ARM64E");
+    // Two slices are ARM64 family here: `arm64` does not say which.
+    let message = harness
+        .err(
+            "analyze_file",
+            json!({"file_path": three, "sections": ["binary_info"], "arch": "arm64"}),
+        )
+        .await;
+    assert!(
+        message.contains("x86_64, arm64e, arm64-subtype-12"),
+        "{message}"
+    );
+    // With one ARM64-family slice, `arm64` names it.
+    let two = dir.path().join("two.bin");
+    std::fs::write(&two, fat_macho(&[(0x0100_0007, 3), (0x0100_000c, 2)])).unwrap();
+    for tool_args in [
+        json!({"file_path": two, "sections": ["binary_info"], "arch": "arm64"}),
+        json!({"file_path": two, "sections": ["binary_info"], "arch": "aarch64"}),
+    ] {
+        let (info, _) = harness.ok("analyze_file", tool_args).await;
+        assert_eq!(info["binary_info"]["analyzed_slice"], "ARM64E", "{info}");
+    }
+    let (rows, _) = harness
+        .ok(
+            "query_analysis",
+            json!({"file_path": two, "section": "binary_info", "arch": "arm64"}),
+        )
+        .await;
+    assert_eq!(rows["section"], "binary_info", "{rows}");
+}
+
+/// The overview of a universal binary whose default slice is ARM64 says the
+/// control-flow sections cannot run, why, and which `arch` reaches the x86
+/// slice; every next step carries the `arch` the call named.
+#[tokio::test]
+async fn an_arm64_slice_does_not_offer_the_x86_only_sections_and_next_steps_keep_arch() {
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("fat.bin");
+    std::fs::write(&path, fat_macho(&[(0x0100_0007, 3), (0x0100_000c, 2)])).unwrap();
+    let (arm, _) = harness
+        .ok("analyze_file", json!({"file_path": path, "arch": "arm64e"}))
+        .await;
+    let available: Vec<&str> = arm["available_sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for name in ["control_flow", "vulnerabilities", "code_quality"] {
+        assert!(!available.contains(&name), "{name}: {available:?}");
+        let why = arm["not_applicable"][name].as_str().unwrap_or_default();
+        assert!(
+            why.contains("x86") && why.contains("disassemble") && why.contains("arch: \"x86_64\""),
+            "{name}: {why}"
+        );
+    }
+    assert!(available.contains(&"disassembly"), "{available:?}");
+    for step in arm["next_steps"].as_array().unwrap() {
+        if step["tool"] != "read_hex" {
+            assert_eq!(step["arguments"]["arch"], "arm64e", "{step}");
+        }
+    }
+    let (x86, _) = harness
+        .ok("analyze_file", json!({"file_path": path, "arch": "x86_64"}))
+        .await;
+    assert!(x86["available_sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| s == "control_flow"));
+    assert!(x86["not_applicable"].get("control_flow").is_none(), "{x86}");
+}
+
+/// Every step of the overview is callable as written, with the real values
+/// already in `arguments`; so is the first step of the function list.
+#[tokio::test]
+async fn overview_next_steps_run_as_written() {
+    let harness = Harness::new().await;
+    let file = sample("c_advanced_binary");
+    let (overview, _) = harness.ok("analyze_file", json!({"file_path": file})).await;
+    let text = overview["next_steps"].to_string();
+    assert!(!text.contains('<'), "no placeholder in the steps: {text}");
+    for step in overview["next_steps"].as_array().unwrap() {
+        let tool = step["tool"].as_str().unwrap();
+        let (answer, _) = harness.ok(tool, step["arguments"].clone()).await;
+        if tool == "disassemble" {
+            // The function list: its own first step lists that function.
+            let next = &answer["next_steps"][0];
+            assert_eq!(next["tool"], "disassemble", "{answer}");
+            assert!(!next.to_string().contains('<'), "{next}");
+            let (listing, _) = harness.ok("disassemble", next["arguments"].clone()).await;
+            assert_eq!(listing["view"], "listing", "{listing}");
+        }
+        if tool == "analyze_file" {
+            assert!(
+                answer["symbols"].is_object() || answer["threats"].is_object(),
+                "{answer}"
+            );
+        }
+    }
+    // The imports step points at the list that holds the rows the count names.
+    let imports = overview["counts"]["imported_symbols"].as_u64().unwrap();
+    assert_eq!(
+        imports,
+        overview["format"]["imports_count"].as_u64().unwrap(),
+        "{overview}"
+    );
+    let step = overview["next_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["gives"] == "page the imported symbols")
+        .expect("an imports step");
+    let (rows, _) = harness
+        .ok("query_analysis", step["arguments"].clone())
+        .await;
+    assert_eq!(rows["total"].as_u64().unwrap(), imports, "{rows}");
+}
+
+/// A Java class file and a gzip stream that is not a tar get no step that
+/// cannot work for them.
+#[tokio::test]
+async fn the_overview_offers_only_what_runs_for_the_kind_of_file() {
+    use std::io::Write as _;
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    let class = dir.path().join("Loader.class");
+    std::fs::write(&class, [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 0x34, 0, 1]).unwrap();
+    let (overview, _) = harness
+        .ok("analyze_file", json!({"file_path": class}))
+        .await;
+    assert_eq!(overview["kind"], "java-class", "{overview}");
+    let tools: Vec<&str> = overview["next_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["tool"].as_str())
+        .collect();
+    assert_eq!(tools[0], "analyze_java_file", "{tools:?}");
+    assert!(!tools.contains(&"disassemble"), "{tools:?}");
+    assert!(
+        !overview["next_steps"].to_string().contains("\"imports\""),
+        "{overview}"
+    );
+    let available = overview["available_sections"].to_string();
+    for native in ["disassembly", "control_flow", "call_graph", "symbols"] {
+        assert!(!available.contains(native), "{native} in {available}");
+        assert!(overview["not_applicable"][native].is_string(), "{native}");
+    }
+
+    let gz = dir.path().join("notes.txt.gz");
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(b"just some notes, not a tar archive\n")
+        .unwrap();
+    std::fs::write(&gz, encoder.finish().unwrap()).unwrap();
+    let (overview, _) = harness.ok("analyze_file", json!({"file_path": gz})).await;
+    let tools: Vec<&str> = overview["next_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["tool"].as_str())
+        .collect();
+    assert!(!tools.contains(&"inspect_archive"), "{tools:?}");
+}
+
+/// `category` on a threats list matches the rule's `metadata.category`, the
+/// field that names the category in those rows.
+#[tokio::test]
+async fn category_on_threats_matches_the_rows_metadata_category() {
+    let harness = Harness::new().await;
+    let file = sample("c_advanced_binary");
+    let (all, _) = harness
+        .ok(
+            "query_analysis",
+            json!({"file_path": file, "section": "threats"}),
+        )
+        .await;
+    let rows = all["items"].as_array().unwrap();
+    let wanted = rows
+        .iter()
+        .find_map(|r| r["metadata"]["category"].as_str())
+        .expect("a threat match with a category")
+        .to_string();
+    let (hit, _) = harness
+        .ok(
+            "query_analysis",
+            json!({"file_path": file, "section": "threats", "category": wanted}),
+        )
+        .await;
+    let expected = rows
+        .iter()
+        .filter(|r| r["metadata"]["category"] == json!(wanted))
+        .count();
+    assert!(expected > 0);
+    assert_eq!(hit["total"], json!(expected), "{hit}");
+    let (miss, _) = harness
+        .ok(
+            "query_analysis",
+            json!({"file_path": file, "section": "threats", "category": "no-such-category"}),
+        )
+        .await;
+    assert!(
+        miss["note"].as_str().unwrap().contains(&wanted),
+        "the categories that exist are named: {miss}"
+    );
+}
+
+/// A Go binary has more function symbols than the analyzer groups (5,000):
+/// `main.main`, which comes after them, is reachable by name and by filter, the
+/// list says it holds part of the symbols, and the cut lists of the other
+/// sections say so on every page.
+#[tokio::test]
+async fn functions_beyond_the_grouped_table_are_reachable_and_cuts_are_named() {
+    let harness = Harness::new().await;
+    let file = sample("go_test_binary");
+    let (listing, _) = harness
+        .ok(
+            "disassemble",
+            json!({"file_path": file, "function": "main.main", "max_instructions": 20}),
+        )
+        .await;
+    assert_eq!(listing["view"], "listing", "{listing}");
+    assert_eq!(listing["function"]["name"], "main.main", "{listing}");
+    assert!(listing["function"]["size"].as_u64().unwrap() > 0);
+    assert!(
+        listing["function"]["listed_from"]
+            .as_str()
+            .unwrap()
+            .contains("symbol table"),
+        "{listing}"
+    );
+    // The range is the function's own: all of it, and nothing after it.
+    let (whole, _) = harness
+        .ok(
+            "disassemble",
+            json!({"file_path": file, "function": "main.main", "max_instructions": 1000}),
+        )
+        .await;
+    assert_eq!(
+        whole["returned"], whole["function"]["instructions"],
+        "{whole}"
+    );
+    assert!(whole.get("more").is_none(), "{whole}");
+    assert!(listing["more"] == true && listing["remaining"].as_u64().unwrap() > 0);
+    // Code decoded again for this call is not a cache hit.
+    assert_eq!(whole["cache"], "partial", "{whole}");
+
+    let (found, _) = harness
+        .ok(
+            "disassemble",
+            json!({"file_path": file, "filter": "main.main"}),
+        )
+        .await;
+    let row = &found["items"][0];
+    assert_eq!(row["name"], "main.main", "{found}");
+    assert!(row["listed_from"].is_string(), "{row}");
+    let note = found["note"].as_str().unwrap();
+    assert!(
+        note.contains("5000 of the") && note.contains("symbols"),
+        "{note}"
+    );
+    // The unfiltered list says the same, and its first step runs as written.
+    let (table, _) = harness.ok("disassemble", json!({"file_path": file})).await;
+    assert!(
+        table["note"].as_str().unwrap().contains("5000 of the"),
+        "{table}"
+    );
+    let step = &table["next_steps"][0]["arguments"];
+    assert!(step["function"].is_string(), "{step}");
+    harness.ok("disassemble", step.clone()).await;
+
+    // Cut lists carry the analyzer's counts on every page.
+    for (section, list, needle) in [
+        ("call_graph", "edges", "25061"),
+        ("call_graph", "functions", "7864"),
+        ("code_quality", "functions", "5817"),
+        ("disassembly", "functions", "817"),
+    ] {
+        let (page, _) = harness
+            .ok(
+                "query_analysis",
+                json!({"file_path": file, "section": section, "list": list, "limit": 1,
+                       "offset": 1}),
+            )
+            .await;
+        let note = page["note"].as_str().unwrap_or_default();
+        assert!(note.contains(needle), "{section} {list}: {page}");
+    }
+
+    // A string list that was cut keeps the true unfiltered count, and a
+    // category with no match names the categories the file has.
+    let (summary, _) = harness
+        .ok(
+            "analyze_file",
+            json!({"file_path": file, "sections": ["strings"]}),
+        )
+        .await;
+    let in_file = summary["strings"]["total_count"].as_u64().unwrap();
+    for args in [
+        json!({"file_path": file, "section": "strings", "category": "Email"}),
+        json!({"file_path": file, "section": "strings", "filter": "msftupdater"}),
+    ] {
+        let (page, _) = harness.ok("query_analysis", args).await;
+        assert_eq!(page["unfiltered_total"], json!(in_file), "{page}");
+    }
+    let (none, _) = harness
+        .ok(
+            "query_analysis",
+            json!({"file_path": file, "section": "strings", "category": "Email"}),
+        )
+        .await;
+    let note = none["note"].as_str().unwrap();
+    assert!(note.contains("URL") && !note.contains("none"), "{note}");
 }

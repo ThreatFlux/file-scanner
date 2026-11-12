@@ -130,6 +130,73 @@ pub(super) fn arch_option(raw: Option<&str>) -> Option<String> {
         .filter(|a| !a.is_empty())
 }
 
+/// A slice's architecture as `arch` accepts it and the overview prints it:
+/// lowercase and without spaces or parentheses (`ARM64 (subtype 12)` is
+/// `arm64-subtype-12`). The old spelling is still accepted.
+pub(super) fn slice_name(architecture: &str) -> String {
+    let lower = architecture.to_ascii_lowercase();
+    match lower
+        .strip_prefix("arm64 (subtype ")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        Some(n) => format!("arm64-subtype-{n}"),
+        None => lower.replace(' ', "-"),
+    }
+}
+
+/// `arch` or a slice name with the characters that do not matter removed.
+fn arch_key(name: &str) -> String {
+    name.to_ascii_lowercase()
+        .replace(['-', '_', ' ', '(', ')'], "")
+}
+
+/// The slice of a universal Mach-O that `arch` names, as the name the parser
+/// matches. Beyond the exact names (see [`slice_name`]) `arm64` names the one
+/// ARM64-family slice when the file has exactly one. A file that is not
+/// universal, or a name that matches nothing (or several slices), is returned
+/// as it is: [`check_arch`] answers for it.
+pub(super) fn resolve_arch(path: &Path, arch: Option<String>) -> Option<String> {
+    let wanted = arch?;
+    let resolved = (|| {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).ok()?;
+        let len = file.metadata().ok()?.len();
+        let mut header = Vec::new();
+        file.by_ref().take(4096).read_to_end(&mut header).ok()?;
+        let slices = crate::binary_parser::fat_slice_table(&header, len, |_| false)?;
+        let key = arch_key(&wanted);
+        let exact = slices.iter().find(|s| {
+            let have = arch_key(&s.architecture);
+            have == key
+                || (key == "aarch64" && have == "arm64")
+                || (key == "amd64" && have == "x8664")
+        });
+        let chosen = exact.or_else(|| {
+            if !matches!(key.as_str(), "arm64" | "aarch64") {
+                return None;
+            }
+            let mut family = slices
+                .iter()
+                .filter(|s| s.architecture.to_ascii_lowercase().starts_with("arm64"));
+            match (family.next(), family.next()) {
+                (Some(one), None) => Some(one),
+                _ => None,
+            }
+        })?;
+        Some(chosen.architecture.to_ascii_lowercase())
+    })();
+    Some(resolved.unwrap_or(wanted))
+}
+
+/// `arguments` with the caller's `arch` carried over, so a next step lands on
+/// the slice the call was about.
+pub(super) fn with_arch(mut arguments: Value, arch: Option<&str>) -> Value {
+    if let (Some(arch), Some(map)) = (arch.filter(|a| !a.is_empty()), arguments.as_object_mut()) {
+        map.insert("arch".into(), arch.into());
+    }
+    arguments
+}
+
 /// One section to produce and the key it is cached under.
 #[derive(Debug, Clone)]
 pub(super) struct Planned {
@@ -1188,6 +1255,56 @@ pub(super) fn lists(section: &str) -> &'static [ListSpec] {
     }
 }
 
+/// What the analyzer said about a cut or a limit in section `name` (kept and
+/// real counts), which `query_analysis` carries on every page: a client that
+/// pages a list to its end must learn that the list is partial.
+pub(super) fn limit_notes(name: &str, section: &Value) -> Vec<String> {
+    let lines = |pointer: &str| -> Vec<String> {
+        section
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    };
+    // Each note is a sentence of its own, as the notes are joined into one.
+    let sentence = |note: String| -> String {
+        let mut chars = note.chars();
+        let mut text: String = chars
+            .next()
+            .map(|c| c.to_uppercase().chain(chars).collect())
+            .unwrap_or_default();
+        if !text.ends_with(['.', '!', '?']) {
+            text.push('.');
+        }
+        text
+    };
+    let notes: Vec<String> = match name {
+        "control_flow" => lines("/notes")
+            .into_iter()
+            .filter(|n| n.starts_with("Limit"))
+            .collect(),
+        "call_graph" | "code_quality" => lines("/notes"),
+        "disassembly" => {
+            // The instruction cap has its own note beside the page.
+            let mut notes: Vec<String> = lines("/notes")
+                .into_iter()
+                .filter(|n| !n.contains("flat instruction list"))
+                .collect();
+            notes.extend(
+                lines("/coverage/notes")
+                    .into_iter()
+                    .filter(|n| n.contains("not listed")),
+            );
+            notes
+        }
+        _ => Vec::new(),
+    };
+    notes.into_iter().map(sentence).collect()
+}
+
 /// Number of items in a list of `section`, when the list is a plain array.
 fn list_total(section: &str, spec: &ListSpec, value: &Value) -> Option<usize> {
     if spec.pointer == "@behaviors" {
@@ -1748,7 +1865,12 @@ fn digest_or_whole(section: &Value) -> Value {
 }
 
 /// The hint that points from a summary to the call that pages its lists.
-pub(super) fn drill_down(name: &str, file_path: &str, section: &Value) -> Option<Value> {
+pub(super) fn drill_down(
+    name: &str,
+    file_path: &str,
+    section: &Value,
+    arch: Option<&str>,
+) -> Option<Value> {
     let specs = lists(name);
     let first = specs.first()?;
     let total = list_total(name, first, section);
@@ -1761,7 +1883,7 @@ pub(super) fn drill_down(name: &str, file_path: &str, section: &Value) -> Option
     }
     let mut step = json!({
         "tool": "query_analysis",
-        "arguments": arguments,
+        "arguments": with_arch(arguments, arch),
         "why": format!(
             "page{} the {} {} (offset, limit, filter, category)",
             if name == "strings" { " and filter" } else { "" },
@@ -1773,11 +1895,29 @@ pub(super) fn drill_down(name: &str, file_path: &str, section: &Value) -> Option
         step["other_lists"] = others.into();
     }
     if name == "disassembly" {
-        step["then"] = json!({
-            "tool": "disassemble",
-            "arguments": {"file_path": file_path, "function": "<name from the functions list>"},
-            "gives": "the instruction listing of one function (200 instructions by default)",
-        });
+        // The first function the section lists, else the first instruction.
+        let target = section
+            .pointer("/functions/0/name")
+            .and_then(Value::as_str)
+            .map(|n| json!({"function": n}))
+            .or_else(|| {
+                section
+                    .get("instructions_first_address")
+                    .and_then(Value::as_u64)
+                    .map(|a| json!({"address": format!("0x{a:x}")}))
+            });
+        if let Some(Value::Object(target)) = target {
+            let mut arguments = Map::new();
+            arguments.insert("file_path".into(), file_path.into());
+            arguments.extend(target);
+            let arguments = Value::Object(arguments);
+            step["then"] = json!({
+                "tool": "disassemble",
+                "arguments": with_arch(arguments, arch),
+                "gives": "the instruction listing of one function (200 instructions by default); \
+                          name another from the functions list",
+            });
+        }
     }
     Some(step)
 }
@@ -1913,6 +2053,10 @@ pub(super) fn overview(
     // Format facts.
     let mut available: Vec<&str> = vec!["metadata", "hashes", "strings", "hex_dump"];
     let mut binary_ok = false;
+    // What the code analyses need to know about the file's architecture.
+    let mut code_arch: Option<String> = None;
+    let mut x86_slice: Option<String> = None;
+    let mut imports_in_info: Option<usize> = None;
     let binary_info = if heavy {
         Err(Failure::NotApplicable(String::new()))
     } else {
@@ -1941,6 +2085,40 @@ pub(super) fn overview(
             for key in ["sections", "imports", "exports"] {
                 if let Some(items) = info.get(key).and_then(Value::as_array) {
                     format[format!("{key}_count")] = items.len().into();
+                }
+            }
+            imports_in_info = info.get("imports").and_then(Value::as_array).map(Vec::len);
+            code_arch = info
+                .get("architecture")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if let Some(slices) = info.get("universal_slices").and_then(Value::as_array) {
+                let names: Vec<&str> = slices
+                    .iter()
+                    .filter_map(|s| s.get("architecture").and_then(Value::as_str))
+                    .collect();
+                x86_slice = names
+                    .iter()
+                    .find(|n| n.to_ascii_lowercase().contains("x86"))
+                    .map(|n| slice_name(n));
+                // The slices as `arch` accepts them (the detected type names
+                // the CPU types only, so two ARM64 slices read alike there).
+                out.insert(
+                    "type".into(),
+                    format!(
+                        "Mach-O universal binary ({} slice{}: {})",
+                        names.len(),
+                        if names.len() == 1 { "" } else { "s" },
+                        names
+                            .iter()
+                            .map(|n| slice_name(n))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                    .into(),
+                );
+                if let Some(selected) = info.get("analyzed_slice").and_then(Value::as_str) {
+                    format["analyzed_slice"] = slice_name(selected).into();
                 }
             }
             out.insert("format".into(), format);
@@ -2026,8 +2204,16 @@ pub(super) fn overview(
                 if let Some(items) = symbols.get("functions").and_then(Value::as_array) {
                     counts.insert("functions".into(), items.len().into());
                 }
-                if let Some(imports) = symbols.get("imports").and_then(Value::as_array) {
-                    counts.insert("imported_symbols".into(), imports.len().into());
+                // One count of the imports: the one `format.imports_count`
+                // carries (the symbol table lists fewer on an ELF).
+                let imported = imports_in_info.or_else(|| {
+                    symbols
+                        .get("imports")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                });
+                if let Some(imported) = imported {
+                    counts.insert("imported_symbols".into(), imported.into());
                 }
                 if let Some(exports) = symbols.get("exports").and_then(Value::as_array) {
                     counts.insert("exported_symbols".into(), exports.len().into());
@@ -2054,8 +2240,9 @@ pub(super) fn overview(
     // What can be asked next.
     let mut not_available = Map::new();
     let kind_name = kind.as_ref().map_or("", |k| k.kind.as_str());
-    // A Java archive has no native code to analyze, whatever the parser made of it.
-    if matches!(kind_name, "jar" | "apk") {
+    // A Java archive or class file has no native code to analyze, whatever the
+    // parser made of it.
+    if matches!(kind_name, "jar" | "apk" | "java-class") {
         binary_ok = false;
     }
     if binary_ok {
@@ -2065,15 +2252,39 @@ pub(super) fn overview(
             "symbols",
             "dependencies",
             "entropy",
-            "control_flow",
-            "vulnerabilities",
-            "code_quality",
-            "disassembly",
-            "call_graph",
         ]);
+        // The control-flow analyses read x86 and x86-64 code only.
+        let non_x86 = code_arch.as_deref().filter(|a| is_non_x86(a));
+        for name in ["control_flow", "vulnerabilities", "code_quality"] {
+            match non_x86 {
+                Some(arch) => {
+                    not_available.insert(
+                        name.to_string(),
+                        format!(
+                            "control-flow analysis and the analyses built on it read x86 and \
+                             x86-64 code only; this file's code is {arch}. `disassemble` reads \
+                             it{}",
+                            x86_slice
+                                .as_deref()
+                                .map_or_else(String::new, |slice| format!(
+                                    ", and the x86 slice of this universal binary is analyzable: \
+                                 pass `arch: \"{slice}\"`"
+                                ))
+                        )
+                        .into(),
+                    );
+                }
+                None => available.push(name),
+            }
+        }
+        available.extend(["disassembly", "call_graph"]);
     } else {
         available.extend(["signatures", "entropy"]);
-        let why = "this file is not a recognized executable (PE, ELF, Mach-O, Java class)";
+        let why = if kind_name == "java-class" {
+            "a Java class file has no native code; analyze_java_file reads it"
+        } else {
+            "this file is not a recognized executable (PE, ELF, Mach-O, Java class)"
+        };
         for name in [
             "binary_info",
             "symbols",
@@ -2110,11 +2321,23 @@ pub(super) fn overview(
         .filter(|_| kind_is_known)
         .map(|k| specialist_steps(k, path, file_path))
         .unwrap_or_default();
+    // Sections that suit this kind of file, all of them in `available_sections`.
+    let suggested: Vec<&str> = if binary_ok {
+        ["symbols", "threats"]
+    } else {
+        ["threats", "behavioral"]
+    }
+    .into_iter()
+    .filter(|name| available.contains(name))
+    .collect();
     steps.push(json!({
         "tool": "analyze_file",
-        "arguments": {"file_path": file_path, "sections": ["<one or more of available_sections>"]},
+        "arguments": with_arch(
+            json!({"file_path": file_path, "sections": suggested}),
+            options.arch.as_deref(),
+        ),
         "gives": "a summary of each named section (headline numbers, top few items, totals); \
-                  the full section is cached for query_analysis",
+                  swap in any of available_sections; the full section is cached for query_analysis",
     }));
     let mut string_arguments = json!({"file_path": file_path, "section": "strings"});
     if let Some(category) = strings.as_deref().and_then(top_category) {
@@ -2122,20 +2345,24 @@ pub(super) fn overview(
     }
     steps.push(json!({
         "tool": "query_analysis",
-        "arguments": string_arguments,
+        "arguments": with_arch(string_arguments, options.arch.as_deref()),
         "gives": "page and filter every string (filter, category, encoding, offset, limit)",
     }));
-    if binary_ok {
+    if binary_ok && imports_in_info != Some(0) {
+        // The list the count above is taken from.
         steps.push(json!({
             "tool": "query_analysis",
-            "arguments": {"file_path": file_path, "section": "symbols", "list": "imports"},
+            "arguments": with_arch(
+                json!({"file_path": file_path, "section": "binary_info", "list": "imports"}),
+                options.arch.as_deref(),
+            ),
             "gives": "page the imported symbols",
         }));
     }
     if binary_ok {
         steps.push(json!({
             "tool": "disassemble",
-            "arguments": {"file_path": file_path},
+            "arguments": with_arch(json!({"file_path": file_path}), options.arch.as_deref()),
             "gives": "the function list, then pass `function` or `address` for one function's instructions",
         }));
     }
@@ -2160,8 +2387,7 @@ pub(super) fn overview(
 /// Whether slice or architecture name `have` is what `wanted` names (case and
 /// `- _ space` do not matter; `aarch64` is `arm64`, `amd64` is `x86_64`).
 fn arch_matches(have: &str, wanted: &str) -> bool {
-    let norm = |s: &str| s.to_ascii_lowercase().replace(['-', '_', ' '], "");
-    let (have, wanted) = (norm(have), norm(wanted));
+    let (have, wanted) = (arch_key(have), arch_key(wanted));
     have == wanted
         || (wanted == "aarch64" && have == "arm64")
         || (wanted == "amd64" && have == "x8664")
@@ -2191,10 +2417,12 @@ pub(super) fn check_arch(
         if names.iter().any(|n| arch_matches(n, arch)) {
             return Ok(());
         }
+        let shown: Vec<String> = names.iter().map(|n| slice_name(n)).collect();
         return Err(format!(
-            "arch '{arch}' is not a slice of this universal (fat) Mach-O. Its slices: {}. Pass \
-             one of them, or leave `arch` out for the host's slice (else the first).",
-            names.join(", ")
+            "arch '{arch}' is not a slice of this universal (fat) Mach-O, or names more than one \
+             of them. Its slices: {}. Pass one of them, or leave `arch` out for the host's slice \
+             (else the first).",
+            shown.join(", ")
         ));
     }
     // Only a native executable with a named architecture can contradict `arch`;
@@ -2288,6 +2516,17 @@ fn clip_to(text: &str, max: usize) -> String {
     out
 }
 
+/// Whether `architecture` is one the control-flow analyses cannot read.
+fn is_non_x86(architecture: &str) -> bool {
+    let a = architecture.to_ascii_lowercase();
+    !a.contains("x86")
+        && [
+            "arm", "aarch", "riscv", "mips", "powerpc", "ppc", "sparc", "s390", "loong",
+        ]
+        .iter()
+        .any(|family| a.contains(family))
+}
+
 /// The tool that specializes in this kind of file, as overview `next_steps`
 /// (first, before the generic drill-down).
 fn specialist_steps(
@@ -2351,6 +2590,8 @@ fn specialist_steps(
                 "classes, manifest and risky API use",
             ));
         }
+        // A gzip stream that holds no tar is compressed data, not a listable archive.
+        "gzip" if !kind.label.contains("tar") => {}
         "zip" | "gzip" | "tar" | "rar" | "7z" | "bzip2" | "xz" => {
             steps.push(call(
                 "inspect_archive",
@@ -2786,6 +3027,11 @@ mod tests {
             assert_ne!(x86, key(name, Some("arm64e")), "{name}");
             assert_ne!(x86, key(name, None), "{name}");
         }
+        assert_eq!(slice_name("ARM64 (subtype 12)"), "arm64-subtype-12");
+        assert_eq!(slice_name("ARM64E"), "arm64e");
+        assert_eq!(slice_name("x86_64"), "x86_64");
+        assert!(arch_matches("ARM64 (subtype 12)", "arm64-subtype-12"));
+        assert!(arch_matches("ARM64 (subtype 12)", "arm64 (subtype 12)"));
         assert!(arch_matches("x86_64", "X86-64"));
         assert!(arch_matches("ARM64", "aarch64"));
         assert!(arch_matches("x86_64", "amd64"));

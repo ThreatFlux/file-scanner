@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use super::{
     identify,
-    sections::{plan, Ctx, Engine, Failure, Options},
+    sections::{plan, with_arch, Ctx, Engine, Failure, Options},
 };
 use crate::{
     hexdump::{generate_hex_dump, HexDumpOptions},
@@ -44,7 +44,8 @@ number); the listing is capped at `max_instructions` (default 200, at most 1000)
 continue (`next_address`). With neither, it lists the functions (name, address, size, complexity) \
 paged with `offset`/`limit`/`filter`, so you can pick one. A bounded part of the \
 disassembly is cached by the file's SHA-256 (`cache: hit`); a range outside that part is decoded \
-again for the call, which takes a moment on a large file. Call analyze_file first to see whether \
+again for the call (`cache: partial`), which takes a moment on a large file. A function the \
+analyzer's table lacks (it groups the first 5000) is found by name through the symbol table. Call analyze_file first to see whether \
 the file is an executable; use query_analysis for suspicious patterns and read_hex for raw bytes.";
 
 pub(super) const READ_HEX_DESCRIPTION: &str = "Read raw bytes of a file as a hex dump: `offset` \
@@ -145,7 +146,7 @@ pub struct DisassembleRequest {
     )]
     pub limit: Option<usize>,
     #[schemars(
-        description = "Universal (fat) Mach-O only: the slice to disassemble, one of binary_info.universal_slices (for example arm64, arm64e, x86_64). Default: the host's, else the first. A name the file does not have is an error that lists its slices"
+        description = "Universal (fat) Mach-O only: the slice to disassemble, one of the slice names the overview's `type` lists (for example x86_64, arm64e, arm64-subtype-12; `arm64` works when exactly one slice is ARM64-family). Default: the host's, else the first. A name the file does not have is an error that lists its slices"
     )]
     pub arch: Option<String>,
 }
@@ -364,8 +365,11 @@ fn with_window(
                     last_stored.is_some_and(|last| last >= end)
                 }))
     };
-    let need_function = function
-        .filter(|f| instruction_count(f).unwrap_or(0) > stored_count(f) && !function_in_flat(f));
+    let from_symbols = |f: &Value| f.get("from_symbols").and_then(Value::as_bool) == Some(true);
+    let need_function = function.filter(|f| {
+        (instruction_count(f).unwrap_or(0) > stored_count(f) || from_symbols(f))
+            && !function_in_flat(f)
+    });
     let need_flat = function.is_none() && address.is_some_and(|a| !flat_covers_page(a));
     if need_function.is_none() && !need_flat {
         return Ok((std::sync::Arc::clone(section), None));
@@ -408,6 +412,37 @@ fn with_window(
             {
                 entry["instructions"] = instructions.into();
                 entry["window_from"] = window_from.into();
+            }
+        } else if let (Some(start), Some(size), true) = (
+            at,
+            wanted.get("size").and_then(Value::as_u64),
+            wanted.get("from_symbols").and_then(Value::as_bool) == Some(true),
+        ) {
+            // A function the analyzer did not group (it is only in the symbol
+            // table): its range of the decoded instructions.
+            let end = start.saturating_add(size);
+            let from = result.instructions.partition_point(|i| i.address < start);
+            let in_range = result.instructions[from..]
+                .iter()
+                .take_while(|i| i.address < end)
+                .count();
+            let instructions: Vec<Value> = result.instructions[from..from + in_range]
+                .iter()
+                .take(WINDOW_INSTRUCTIONS)
+                .map(super::sections::instruction_value)
+                .collect();
+            if let Some(entry) = patched
+                .get_mut("functions")
+                .and_then(Value::as_array_mut)
+                .and_then(|list| {
+                    list.iter_mut().find(|f| {
+                        address_of(f) == at && f.get("name").and_then(Value::as_str) == name
+                    })
+                })
+            {
+                entry["instructions"] = instructions.into();
+                entry["window_from"] = 0.into();
+                entry["instruction_count"] = in_range.into();
             }
         }
     } else if let Some(a) = address {
@@ -639,28 +674,166 @@ fn decoded_bounds(section: &Value) -> Option<(u64, u64)> {
     Some((first, last))
 }
 
-/// The function table of a `disassemble` call with no target.
+/// Whether the grouped function table has a function named `query` (exactly,
+/// or apart from case): what `find_function` settles without a candidate list.
+fn grouped_has(functions: &[Value], query: &str) -> bool {
+    let query = query.trim();
+    let lower = query.to_lowercase();
+    functions.iter().any(|f| {
+        f.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n == query || n.to_lowercase() == lower)
+    })
+}
+
+/// The function symbols the analyzer's function table does not hold (it
+/// groups the first few thousand only), as `{name, address, size}` rows. The
+/// range of a symbol with no size runs to the next symbol, and a declared size
+/// is cut at the next symbol, as the analyzer does for the functions it groups.
+fn ungrouped_functions(section: &Value, symbols: &Value) -> Vec<Value> {
+    let grouped: std::collections::HashSet<u64> = section
+        .get("functions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(address_of)
+        .collect();
+    let (low, high) = decoded_bounds(section).unwrap_or((0, u64::MAX));
+    let mut candidates: Vec<(u64, u64, &str)> = symbols
+        .get("functions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|f| f.get("is_imported").and_then(Value::as_bool) != Some(true))
+        .filter_map(|f| {
+            let address = address_of(f)?;
+            let name = f
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|n| !n.is_empty())?;
+            (low..=high).contains(&address).then(|| {
+                (
+                    address,
+                    f.get("size").and_then(Value::as_u64).unwrap_or(0),
+                    name,
+                )
+            })
+        })
+        .collect();
+    candidates.sort_by_key(|(address, size, _)| (*address, std::cmp::Reverse(*size)));
+    candidates.dedup_by_key(|(address, _, _)| *address);
+    let code_end = high.saturating_add(1);
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, (address, _, _))| !grouped.contains(address))
+        .map(|(i, (address, declared, name))| {
+            let next = candidates.get(i + 1).map_or(code_end, |(next, _, _)| *next);
+            let size = if *declared > 0 {
+                address.saturating_add(*declared).min(next) - address
+            } else {
+                next.saturating_sub(*address)
+            };
+            json!({"name": name, "address": address, "size": size})
+        })
+        .collect()
+}
+
+/// A `function` name that is not in the grouped table, resolved through the
+/// function symbols outside it: the function as a table row, marked
+/// `from_symbols`. `Ok(None)` leaves the lookup to the grouped table (a name
+/// it has, or one that nothing has). A name that several symbols share is an
+/// error that lists them.
+fn symbol_target(
+    functions: &[Value],
+    ungrouped: &[Value],
+    query: &str,
+) -> Result<Option<Value>, String> {
+    if grouped_has(functions, query) {
+        return Ok(None);
+    }
+    let query = query.trim();
+    let lower = query.to_lowercase();
+    let named = |matches: &dyn Fn(&str) -> bool| -> Vec<&Value> {
+        ungrouped
+            .iter()
+            .filter(|f| f.get("name").and_then(Value::as_str).is_some_and(matches))
+            .collect()
+    };
+    let mut found = named(&|n| n == query);
+    if found.is_empty() {
+        found = named(&|n| n.to_lowercase() == lower);
+    }
+    // A part of a name is looked up here only when the grouped table has no
+    // name containing it (that table answers first, as it always did).
+    if found.is_empty()
+        && !functions.iter().any(|f| {
+            f.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.to_lowercase().contains(&lower))
+        })
+    {
+        found = named(&|n| n.to_lowercase().contains(&lower));
+    }
+    match found.as_slice() {
+        [] => Ok(None),
+        [one] => {
+            let mut target = (*one).clone();
+            target["from_symbols"] = true.into();
+            target["instructions"] = json!([]);
+            Ok(Some(target))
+        }
+        many => Err(format!(
+            "'{query}' matches {} function symbols that are not in the function table: {}{}. \
+             Pass the exact name or an `address`.",
+            many.len(),
+            many.iter()
+                .take(CANDIDATES)
+                .map(|f| describe(f))
+                .collect::<Vec<_>>()
+                .join("; "),
+            if many.len() > CANDIDATES {
+                format!(" (and {} more)", many.len() - CANDIDATES)
+            } else {
+                String::new()
+            }
+        )),
+    }
+}
+
+/// `text` appended to the answer's `note`.
+fn add_note(value: &mut Value, text: &str) {
+    value["note"] = match value.get("note").and_then(Value::as_str) {
+        Some(first) => format!("{first} {text}"),
+        None => text.to_string(),
+    }
+    .into();
+}
+
+/// The function table of a `disassemble` call with no target. `ungrouped`
+/// holds the function symbols the analyzer's table lacks (see
+/// [`ungrouped_functions`]): `filter` searches them too.
 fn function_table(
     section: &Value,
     request: &DisassembleRequest,
     file_path: &str,
     budget: usize,
     extras: &Value,
+    ungrouped: &[Value],
 ) -> Value {
     let functions = section
         .get("functions")
         .and_then(Value::as_array)
         .map_or(&[][..], Vec::as_slice);
     let filter = request.filter.as_deref().map(str::to_lowercase);
-    let rows: Vec<Value> = functions
+    let named = |f: &Value, needle: &String| {
+        f.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|n| n.to_lowercase().contains(needle))
+    };
+    let mut rows: Vec<Value> = functions
         .iter()
-        .filter(|f| {
-            filter.as_ref().is_none_or(|needle| {
-                f.get("name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|n| n.to_lowercase().contains(needle))
-            })
-        })
+        .filter(|f| filter.as_ref().is_none_or(|needle| named(f, needle)))
         .map(|f| {
             json!({
                 "name": f.get("name"),
@@ -671,6 +844,20 @@ fn function_table(
             })
         })
         .collect();
+    // A filter also searches the symbols the table does not hold; their rows
+    // say where they come from. `function` takes their names.
+    if let Some(needle) = &filter {
+        rows.extend(ungrouped.iter().filter(|f| named(f, needle)).map(|f| {
+            json!({
+                "name": f.get("name"),
+                "address": format!("0x{:x}", address_of(f).unwrap_or(0)),
+                "size": f.get("size"),
+                "instructions": null,
+                "complexity": null,
+                "listed_from": "symbol table (not in the grouped function table)",
+            })
+        }));
+    }
     let mut value = page(
         &rows,
         request.offset.unwrap_or(0),
@@ -691,7 +878,10 @@ fn function_table(
         // No function names to pass: start from an address instead.
         let step = json!({
             "tool": "disassemble",
-            "arguments": {"file_path": file_path, "address": first.map(|a| format!("0x{a:x}"))},
+            "arguments": with_arch(
+                json!({"file_path": file_path, "address": first.map(|a| format!("0x{a:x}"))}),
+                request.arch.as_deref(),
+            ),
             "gives": "the first decoded instructions; follow next_address for the rest",
         });
         value["note"] = if filter.is_some() {
@@ -703,11 +893,34 @@ fn function_table(
         .into();
         value["next_steps"] = json!([step]);
     } else {
+        // The first function of this page, callable as it is.
+        let first_name = rows
+            .get(request.offset.unwrap_or(0).min(rows.len() - 1))
+            .and_then(|row| row.get("name"))
+            .cloned()
+            .unwrap_or(Value::Null);
         value["next_steps"] = json!([{
             "tool": "disassemble",
-            "arguments": {"file_path": file_path, "function": "<name from items>"},
-            "gives": "the instruction listing of that function (or pass `address`)",
+            "arguments": with_arch(
+                json!({"file_path": file_path, "function": first_name}),
+                request.arch.as_deref(),
+            ),
+            "gives": "the instruction listing of that function (any name from items works; or \
+                      pass `address`)",
         }]);
+    }
+    if !ungrouped.is_empty() {
+        let kept = functions.len();
+        let real = kept + ungrouped.len();
+        add_note(
+            &mut value,
+            &format!(
+                "This list holds {kept} of the {real} function symbols: the analyzer groups only \
+                 the first {kept}. `filter` also searches the other {}, `function` takes their \
+                 names, and query_analysis section symbols (list functions) pages all {real}.",
+                ungrouped.len()
+            ),
+        );
     }
     if let (Some(first), Some(last)) = (first, last) {
         value["decoded_range"] = format!("0x{first:x}..0x{last:x}").into();
@@ -895,6 +1108,12 @@ fn listing(
                 "complexity": f.get("complexity"),
                 "instructions": instruction_count(f).unwrap_or(pool.len()),
             });
+            if f.get("from_symbols").and_then(Value::as_bool) == Some(true) {
+                value["function"]["listed_from"] =
+                    "symbol table (not in the grouped function table); the range is the \
+                     symbol's size"
+                        .into();
+            }
         }
         if requested > max {
             value["note"] = format!(
@@ -928,7 +1147,10 @@ fn listing(
             value["next_address"] = format!("0x{next:x}").into();
             value["next_steps"] = json!([{
                 "tool": "disassemble",
-                "arguments": {"file_path": file_path, "address": format!("0x{next:x}")},
+                "arguments": with_arch(
+                    json!({"file_path": file_path, "address": format!("0x{next:x}")}),
+                    request.arch.as_deref(),
+                ),
                 "gives": "the next instructions",
             }]);
         }
@@ -977,7 +1199,10 @@ impl FileScannerMcp {
         let state = std::sync::Arc::clone(&self.state);
         let runtime = tokio::runtime::Handle::current();
         let file_path = path.to_string_lossy().into_owned();
-        let arch = super::sections::arch_option(request.arch.as_deref());
+        let arch = super::sections::resolve_arch(
+            &path,
+            super::sections::arch_option(request.arch.as_deref()),
+        );
         let outcome = self
             .state
             .run_blocking("disassemble", move || {
@@ -997,10 +1222,69 @@ impl FileScannerMcp {
                          only file_path to see what kind of file it is."
                     ),
                 })?;
+                // A name the grouped function table lacks is looked up in the
+                // symbol table (the table groups the first few thousand only).
+                let function_name = request
+                    .function
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|f| !f.starts_with("0x") && request.address.is_none());
+                let table_view = request.function.is_none() && request.address.is_none();
+                let capped = section
+                    .pointer("/coverage/notes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|notes| {
+                        notes
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|n| n.contains("not listed"))
+                    });
+                let grouped = section
+                    .get("functions")
+                    .and_then(Value::as_array)
+                    .map_or(&[][..], Vec::as_slice);
+                let symbols_wanted = (table_view && capped)
+                    || function_name.is_some_and(|name| !grouped_has(grouped, name));
+                let mut ungrouped: Vec<Value> = Vec::new();
+                if symbols_wanted {
+                    if let Ok(symbols) =
+                        engine.load(&plan("symbols", &options, &file_path, mtime_ns))
+                    {
+                        ungrouped = ungrouped_functions(&section, &symbols);
+                    }
+                }
+                let target = match function_name {
+                    Some(name) => symbol_target(grouped, &ungrouped, name)?,
+                    None => None,
+                };
+                let mut section = section;
+                if let Some(target) = target {
+                    let mut patched = (*section).clone();
+                    if let Some(list) = patched.get_mut("functions").and_then(Value::as_array_mut) {
+                        list.push(target);
+                    }
+                    section = std::sync::Arc::new(patched);
+                }
                 let (section, window_note) =
-                    with_window(&section, &request, &mut || engine.typed_disassembly())
-                        .map_err(|m| format!("The disassembly failed: {m}"))?;
-                let mut extras = json!({"cache": engine.cache_state()});
+                    with_window(&section, &request, &mut || engine.typed_disassembly()).map_err(
+                        |m| {
+                            format!(
+                                "The disassembly failed: {m}{}",
+                                if symbols_wanted && m.starts_with("No function named") {
+                                    " The file's symbol table has no such function either."
+                                } else {
+                                    ""
+                                }
+                            )
+                        },
+                    )?;
+                // Code the stored part does not hold was decoded again for this
+                // call: that is not a cache hit.
+                let cache = match (engine.cache_state(), &window_note) {
+                    ("hit", Some(_)) => "partial",
+                    (state, _) => state,
+                };
+                let mut extras = json!({"cache": cache});
                 if let Some(note) = engine.cache_note() {
                     extras["cache_note"] = note.into();
                 }
@@ -1008,7 +1292,7 @@ impl FileScannerMcp {
                     extras["window_note"] = note.into();
                 }
                 let value = if request.function.is_none() && request.address.is_none() {
-                    function_table(&section, &request, &file_path, budget, &extras)
+                    function_table(&section, &request, &file_path, budget, &extras, &ungrouped)
                 } else {
                     listing(&section, &request, &file_path, budget, &extras)?
                 };
@@ -1079,7 +1363,7 @@ mod tests {
                 {"address": 0x1001, "size": 1, "bytes": [0xc3], "mnemonic": "ret", "operands": ""},
             ],
         });
-        let table = function_table(&section, &request(), "/x", 80_000, &json!({}));
+        let table = function_table(&section, &request(), "/x", 80_000, &json!({}), &[]);
         assert!(table["note"]
             .as_str()
             .unwrap()
@@ -1200,7 +1484,7 @@ mod tests {
         assert_eq!(section["instructions"].as_array().unwrap().len(), 20_000);
         assert_eq!(walk(&section, &typed, None), 45_000);
         assert_eq!(walk(&section, &typed, Some("big")), 45_000);
-        let table = function_table(&section, &request(), "/x", 80_000, &json!({}));
+        let table = function_table(&section, &request(), "/x", 80_000, &json!({}), &[]);
         assert_eq!(table["decoded_range"], "0x1000..0xbfc7");
         let err = listing(
             &section,
@@ -1214,5 +1498,83 @@ mod tests {
             err.contains("45000 instructions in 0x1000..0xbfc7"),
             "{err}"
         );
+    }
+
+    /// A function that is only in the symbol table (the analyzer groups the
+    /// first few thousand) is found by name and by filter, its range is its
+    /// symbol's, and the list says it holds part of the symbols.
+    #[test]
+    fn functions_outside_the_grouped_table_come_from_the_symbol_table() {
+        let instruction = |address: u64| {
+            json!({"address": address, "size": 1, "bytes": "90", "mnemonic": "nop",
+                   "operands": ""})
+        };
+        let section = json!({
+            "architecture": "x86_64",
+            "functions": [{"name": "grouped", "address": 0x1000, "size": 16,
+                           "instruction_count": 16, "instructions": []}],
+            "instructions": (0x1000..0x1060).map(instruction).collect::<Vec<_>>(),
+            "instructions_total": 0x60,
+            "instructions_first_address": 0x1000,
+            "instructions_last_address": 0x105f,
+            "coverage": {"notes": ["functions are grouped for the first 1 function symbols \
+                                    only; 2 later functions are not listed"]},
+        });
+        let symbols = json!({"functions": [
+            {"name": "grouped", "address": 0x1000, "size": 16, "is_imported": false},
+            {"name": "main.main", "address": 0x1020, "size": 0x20, "is_imported": false},
+            {"name": "main.other", "address": 0x1040, "size": 0, "is_imported": false},
+            {"name": "puts", "address": 0x5000, "size": 0, "is_imported": true},
+        ]});
+        let ungrouped = ungrouped_functions(&section, &symbols);
+        assert_eq!(ungrouped.len(), 2, "{ungrouped:?}");
+        assert_eq!(ungrouped[0]["size"], 0x20);
+        // No size: the range runs to the end of the decoded code.
+        assert_eq!(ungrouped[1]["size"], 0x20);
+        let grouped = section["functions"].as_array().unwrap();
+        let target = |name: &str| symbol_target(grouped, &ungrouped, name);
+        assert_eq!(target("main.main").unwrap().unwrap()["address"], 0x1020);
+        assert_eq!(target("MAIN.MAIN").unwrap().unwrap()["name"], "main.main");
+        assert_eq!(target("other").unwrap().unwrap()["name"], "main.other");
+        assert!(target("grouped").unwrap().is_none(), "the table answers");
+        assert!(target("absent").unwrap().is_none());
+        let ambiguous = target("main").unwrap_err();
+        assert!(
+            ambiguous.contains("matches 2 function symbols"),
+            "{ambiguous}"
+        );
+
+        // The listing of the symbol's range, and only that.
+        let mut patched = section.clone();
+        patched["functions"]
+            .as_array_mut()
+            .unwrap()
+            .push(target("main.main").unwrap().unwrap());
+        let request: DisassembleRequest =
+            serde_json::from_value(json!({"file_path": "/x", "function": "main.main"})).unwrap();
+        let answer = listing(&patched, &request, "/x", 80_000, &json!({})).unwrap();
+        assert_eq!(answer["returned"], 0x20, "{answer}");
+        assert!(answer.get("more").is_none(), "{answer}");
+        assert_eq!(answer["function"]["name"], "main.main");
+        assert!(answer["function"]["listed_from"].is_string());
+
+        // The list: `filter` searches the symbols too and marks those rows.
+        let mut request: DisassembleRequest =
+            serde_json::from_value(json!({"file_path": "/x", "filter": "main", "arch": "x86_64"}))
+                .unwrap();
+        let table = function_table(&section, &request, "/x", 80_000, &json!({}), &ungrouped);
+        assert_eq!(table["total"], 2, "{table}");
+        assert!(table["items"][1]["listed_from"].is_string(), "{table}");
+        // The step names a function the list shows and keeps the slice.
+        let step = &table["next_steps"][0]["arguments"];
+        assert_eq!(step["function"], "main.main", "{table}");
+        assert_eq!(step["arch"], "x86_64");
+        // Unfiltered: the grouped rows, and the note says it is part of the symbols.
+        request.filter = None;
+        let table = function_table(&section, &request, "/x", 80_000, &json!({}), &ungrouped);
+        assert_eq!(table["total"], 1);
+        let note = table["note"].as_str().unwrap();
+        assert!(note.contains("1 of the 3 function symbols"), "{note}");
+        assert!(note.contains("query_analysis section symbols"), "{note}");
     }
 }

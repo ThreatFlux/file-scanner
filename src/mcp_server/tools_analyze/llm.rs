@@ -91,8 +91,9 @@ impl Counts {
         }
     }
 
-    /// The `truncated` object for `now`, or `None` when nothing was cut.
-    fn report(&self, now: &LlmFileAnalysisResult, limit: usize) -> Option<Value> {
+    /// The `truncated` object for `now`, or `None` when nothing was cut. `how`
+    /// names the limit that was hit.
+    fn report(&self, now: &LlmFileAnalysisResult, how: &str) -> Option<Value> {
         let mut cut = serde_json::Map::new();
         for (name, before, after) in [
             ("key_strings", self.key_strings, now.key_strings.len()),
@@ -113,10 +114,167 @@ impl Counts {
         if cut.is_empty() {
             return None;
         }
-        Some(json!({
-            "cut": cut,
-            "how": format!("over token_limit {limit}: raise it or lower max_strings, max_imports, max_opcodes; query_analysis has the full lists"),
-        }))
+        Some(json!({"cut": cut, "how": how}))
+    }
+}
+
+/// The limit a digest is fitted to and what it is called: `token_limit`, or
+/// `max_output_bytes` when that is the smaller of the two (the one the answer
+/// actually ran into).
+pub(super) fn limit_of(token_limit: Option<usize>, budget: usize) -> (usize, &'static str) {
+    let token = token_limit.unwrap_or(DEFAULT_TOKEN_LIMIT);
+    if budget < token {
+        (budget, "max_output_bytes")
+    } else {
+        (token, "token_limit")
+    }
+}
+
+/// The text of `truncated.how` for a digest cut at `limit` (called `name`).
+fn how_text(limit: usize, name: &str) -> String {
+    if name == "max_output_bytes" {
+        format!(
+            "over max_output_bytes {limit}: raise it (at most {}), or lower max_strings, \
+             max_imports, max_opcodes, hex_pattern_size; query_analysis has the full lists",
+            crate::mcp_server::output::MAX_OUTPUT_BYTES
+        )
+    } else {
+        format!(
+            "over token_limit {limit}: raise it or lower max_strings, max_imports, max_opcodes; \
+             query_analysis has the full lists"
+        )
+    }
+}
+
+/// The lists of a result before trimming, to put back what the trim took
+/// beyond what the limit required.
+struct Full {
+    key_strings: Vec<String>,
+    imports: Vec<String>,
+    opcodes: Vec<String>,
+    hex_patterns: Vec<String>,
+    rule: Option<String>,
+}
+
+impl Full {
+    fn of(result: &LlmFileAnalysisResult) -> Self {
+        Self {
+            key_strings: result.key_strings.clone(),
+            imports: result.imports.clone(),
+            opcodes: result.opcodes.clone(),
+            hex_patterns: result.hex_patterns.clone(),
+            rule: result.yara_rule_suggestion.clone(),
+        }
+    }
+}
+
+/// Which list an item put back belongs to.
+#[derive(Clone, Copy)]
+enum Slot {
+    Imports,
+    KeyStrings,
+    Opcodes,
+    HexPatterns,
+    Rule,
+}
+
+/// Entries a result holds, for comparing two fits of the same limit.
+fn kept_entries(result: &LlmFileAnalysisResult) -> usize {
+    result.key_strings.len()
+        + result.imports.len()
+        + result.opcodes.len()
+        + result.hex_patterns.len()
+        + usize::from(result.yara_rule_suggestion.is_some())
+}
+
+/// After the trim: fill the limit again from the identity, in this order, with
+/// what fits: the first few key strings, the imports, the opcodes, each hex
+/// pattern that fits, the rule, then more key strings. The trim drops the small
+/// lists first, so one large member (a 1 KB hex pattern) could leave an answer
+/// of a few strings; this uses the room that is there. The trimmed result is
+/// kept when it holds more entries.
+fn regrow(digest: &mut LlmDigest, full: &Full, before: &Counts, limit: usize, how: &str) {
+    // Room for the cut report to name larger numbers.
+    const SLACK: usize = 64;
+    const FIRST_STRINGS: usize = 5;
+    let trimmed = Full::of(&digest.result);
+    let trimmed_entries = kept_entries(&digest.result);
+    digest.result.key_strings.clear();
+    digest.result.imports.clear();
+    digest.result.opcodes.clear();
+    digest.result.hex_patterns.clear();
+    digest.result.yara_rule_suggestion = None;
+    digest.truncated = before.report(&digest.result, how);
+    let mut running = size_of(digest);
+    let mut put_back: Vec<Slot> = Vec::new();
+    let cost = |text: &String| serde_json::to_string(text).map_or(usize::MAX, |t| t.len() + 1);
+    let fits =
+        |running: usize, add: usize| running.saturating_add(add).saturating_add(SLACK) <= limit;
+    // The next entries of a list, in order, until one does not fit.
+    macro_rules! refill {
+        ($list:ident, $slot:expr, $upto:expr) => {
+            while digest.result.$list.len() < full.$list.len().min($upto) {
+                let next = &full.$list[digest.result.$list.len()];
+                let add = cost(next);
+                if !fits(running, add) {
+                    break;
+                }
+                digest.result.$list.push(next.clone());
+                running += add;
+                put_back.push($slot);
+            }
+        };
+    }
+    refill!(key_strings, Slot::KeyStrings, FIRST_STRINGS);
+    refill!(imports, Slot::Imports, usize::MAX);
+    refill!(opcodes, Slot::Opcodes, usize::MAX);
+    for pattern in &full.hex_patterns {
+        let add = cost(pattern);
+        if fits(running, add) {
+            digest.result.hex_patterns.push(pattern.clone());
+            running += add;
+            put_back.push(Slot::HexPatterns);
+        }
+    }
+    if let Some(rule) = &full.rule {
+        let add = cost(rule) + 32;
+        if fits(running, add) {
+            digest.result.yara_rule_suggestion = Some(rule.clone());
+            running += add;
+            put_back.push(Slot::Rule);
+        }
+    }
+    refill!(key_strings, Slot::KeyStrings, usize::MAX);
+    // The estimate is close, not exact: take entries back until it fits.
+    loop {
+        digest.truncated = before.report(&digest.result, how);
+        if size_of(digest) <= limit {
+            break;
+        }
+        match put_back.pop() {
+            Some(Slot::Imports) => {
+                digest.result.imports.pop();
+            }
+            Some(Slot::KeyStrings) => {
+                digest.result.key_strings.pop();
+            }
+            Some(Slot::Opcodes) => {
+                digest.result.opcodes.pop();
+            }
+            Some(Slot::HexPatterns) => {
+                digest.result.hex_patterns.pop();
+            }
+            Some(Slot::Rule) => digest.result.yara_rule_suggestion = None,
+            None => break,
+        }
+    }
+    if kept_entries(&digest.result) < trimmed_entries {
+        digest.result.key_strings = trimmed.key_strings;
+        digest.result.imports = trimmed.imports;
+        digest.result.opcodes = trimmed.opcodes;
+        digest.result.hex_patterns = trimmed.hex_patterns;
+        digest.result.yara_rule_suggestion = trimmed.rule;
+        digest.truncated = before.report(&digest.result, how);
     }
 }
 
@@ -150,11 +308,21 @@ fn trim_step(result: &mut LlmFileAnalysisResult) -> bool {
 /// Trim `digest` until its compact JSON is at most `limit` characters, and say
 /// what was cut. `Err` when even the bare identity does not fit.
 fn fit(digest: &mut LlmDigest, limit: usize) -> Result<(), String> {
+    fit_named(digest, limit, "token_limit")
+}
+
+/// [`fit`] for a limit called `name` (`token_limit` or `max_output_bytes`).
+fn fit_named(digest: &mut LlmDigest, limit: usize, name: &str) -> Result<(), String> {
     let before = Counts::of(&digest.result);
+    let full = Full::of(&digest.result);
+    let how = how_text(limit, name);
     loop {
-        digest.truncated = before.report(&digest.result, limit);
+        digest.truncated = before.report(&digest.result, &how);
         let size = size_of(digest);
         if size <= limit {
+            if digest.truncated.is_some() {
+                regrow(digest, &full, &before, limit, &how);
+            }
             return Ok(());
         }
         if !trim_step(&mut digest.result) {
@@ -165,8 +333,8 @@ fn fit(digest: &mut LlmDigest, limit: usize) -> Result<(), String> {
                 continue;
             }
             return Err(format!(
-                "token_limit {limit} is smaller than the smallest digest ({size} characters: \
-                 identity, entropy and sizes). Use a token_limit of at least {size}, or call \
+                "{name} {limit} is smaller than the smallest digest ({size} characters: \
+                 identity, entropy and sizes). Use a {name} of at least {size}, or call \
                  analyze_file for the overview."
             ));
         }
@@ -177,6 +345,10 @@ fn fit(digest: &mut LlmDigest, limit: usize) -> Result<(), String> {
 
 /// The architecture, file offset and address of the entry point of `buffer`.
 fn entry_of(buffer: &[u8]) -> Result<(Arch, Mode, usize, u64), String> {
+    // goblin's own parse of a crafted Mach-O or PE can take very long: ask the
+    // guards first, and report a refusal as the reason there are no opcodes.
+    crate::binary_parser::check_mach_load_commands(buffer)?;
+    crate::binary_parser::check_pe_imports(buffer)?;
     match Object::parse(buffer).map_err(|e| format!("not a recognized executable ({e})"))? {
         Object::Elf(elf) => {
             let (arch, mode) = match elf.header.e_machine {
@@ -403,11 +575,8 @@ impl FileScannerMcp {
         budget: usize,
     ) -> Result<LlmDigest, String> {
         let mut digest = self.llm_digest(request).await?;
-        let limit = request
-            .token_limit
-            .unwrap_or(DEFAULT_TOKEN_LIMIT)
-            .min(budget);
-        fit(&mut digest, limit)?;
+        let (limit, name) = limit_of(request.token_limit, budget);
+        fit_named(&mut digest, limit, name)?;
         Ok(digest)
     }
 
@@ -626,5 +795,90 @@ mod tests {
                 .is_err_and(|e| e.contains("outside the file")),
             "{crafted:?}"
         );
+    }
+
+    fn digest_with(result: LlmFileAnalysisResult) -> LlmDigest {
+        LlmDigest {
+            sha256: "00".repeat(32),
+            file_type: Some("ELF 64-bit executable".into()),
+            architecture: Some("x86_64".into()),
+            is_packed: Some(false),
+            result,
+            notes: Vec::new(),
+            yara_rule_note: None,
+            truncated: None,
+        }
+    }
+
+    /// The limit that is named is the one that was hit, and the answer uses the
+    /// bytes it has: two large hex patterns do not empty it.
+    #[test]
+    fn a_cut_names_its_limit_and_keeps_what_fits() {
+        assert_eq!(
+            limit_of(Some(1_000_000), 4_000),
+            (4_000, "max_output_bytes")
+        );
+        assert_eq!(limit_of(Some(1_000), 4_000), (1_000, "token_limit"));
+        assert_eq!(
+            limit_of(None, 400_000),
+            (DEFAULT_TOKEN_LIMIT, "token_limit")
+        );
+        let result = LlmFileAnalysisResult {
+            md5: "0".repeat(32),
+            file_size: 1,
+            key_strings: (0..3_000)
+                .map(|i| format!("a key string number {i}"))
+                .collect(),
+            hex_patterns: vec!["AA ".repeat(1024), "BB ".repeat(1024)],
+            imports: (0..38).map(|i| format!("import_{i}")).collect(),
+            opcodes: vec!["F3 0F 1E FA".into()],
+            entropy: Some(6.5),
+            yara_rule_suggestion: Some("rule x { condition: true }".into()),
+        };
+        let mut digest = digest_with(result);
+        fit_named(&mut digest, 4_000, "max_output_bytes").unwrap();
+        let size = size_of(&digest);
+        assert!(size <= 4_000, "{size}");
+        assert!(size > 3_500, "the bytes available are used: {size}");
+        assert_eq!(digest.result.imports.len(), 38);
+        assert_eq!(digest.result.opcodes.len(), 1);
+        assert!(digest.result.key_strings.len() > 20);
+        assert!(digest.result.hex_patterns.is_empty(), "too big to fit");
+        let how = digest.truncated.as_ref().unwrap()["how"].as_str().unwrap();
+        assert!(how.contains("max_output_bytes 4000"), "{how}");
+        assert!(!how.contains("token_limit"), "{how}");
+
+        // Nothing is dropped when everything fits; the same call under
+        // `token_limit` names that limit.
+        let mut small = digest_with(LlmFileAnalysisResult {
+            md5: String::new(),
+            file_size: 1,
+            key_strings: (0..400).map(|i| format!("string {i}")).collect(),
+            hex_patterns: Vec::new(),
+            imports: Vec::new(),
+            opcodes: Vec::new(),
+            entropy: None,
+            yara_rule_suggestion: None,
+        });
+        fit_named(&mut small, 2_000, "token_limit").unwrap();
+        assert!(size_of(&small) <= 2_000);
+        let how = small.truncated.as_ref().unwrap()["how"].as_str().unwrap();
+        assert!(how.contains("token_limit 2000"), "{how}");
+    }
+
+    /// A Mach-O whose load commands would make goblin's parse slow is refused
+    /// by the guard before goblin sees it.
+    #[test]
+    fn the_entry_point_lookup_asks_the_parse_guards_first() {
+        let mut macho: Vec<u8> = Vec::new();
+        for v in [0xfeed_facf_u32, 0x0100_0007, 3, 2, 1, 24, 0, 0] {
+            macho.extend_from_slice(&v.to_le_bytes());
+        }
+        // LC_LOAD_DYLIB whose name offset points outside its command.
+        for v in [0xc_u32, 24, 0x1000, 0, 0, 0] {
+            macho.extend_from_slice(&v.to_le_bytes());
+        }
+        let refused = entry_of(&macho).unwrap_err();
+        assert!(refused.contains("outside its command"), "{refused}");
     }
 }
