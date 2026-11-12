@@ -109,14 +109,27 @@ fn analyze_sections(buffer: &[u8], _path: &Path) -> Result<Vec<SectionEntropy>> 
     let mut sections = Vec::new();
 
     // Try to parse as different binary formats
-    if let Ok(elf) = goblin::elf::Elf::parse(buffer) {
+    if let Some(selection) = crate::binary_parser::select_fat_slice(buffer, None) {
+        // Universal Mach-O: measure the chosen slice; offsets stay file offsets
+        if let Ok(mach) = goblin::mach::Mach::parse(selection.data) {
+            let base = selection.slices[selection.selected].offset;
+            let mut found = analyze_mach_sections(&mach, selection.data)?;
+            for section in &mut found {
+                section.offset += base;
+            }
+            sections.extend(found);
+        }
+    } else if let Ok(elf) = goblin::elf::Elf::parse(buffer) {
         sections.extend(analyze_elf_sections(&elf, buffer)?);
     } else if let Ok(pe) = goblin::pe::PE::parse(buffer) {
         sections.extend(analyze_pe_sections(&pe, buffer)?);
     } else if let Ok(mach) = goblin::mach::Mach::parse(buffer) {
         sections.extend(analyze_mach_sections(&mach, buffer)?);
-    } else {
-        // Fallback: analyze the whole file as one section
+    }
+
+    if sections.is_empty() {
+        // Fallback (unknown format, or a known one without measurable
+        // sections): analyze the whole file as one section
         let entropy = calculate_entropy(buffer);
         sections.push(SectionEntropy {
             name: "entire_file".to_string(),
@@ -135,7 +148,8 @@ fn analyze_elf_sections(elf: &Elf, buffer: &[u8]) -> Result<Vec<SectionEntropy>>
     let mut sections = Vec::new();
 
     for section in &elf.section_headers {
-        if section.sh_size == 0 {
+        // SHT_NOBITS sections (.bss, .tbss) occupy no bytes in the file
+        if section.sh_size == 0 || section.sh_type == goblin::elf::section_header::SHT_NOBITS {
             continue;
         }
 
@@ -153,6 +167,10 @@ fn analyze_elf_sections(elf: &Elf, buffer: &[u8]) -> Result<Vec<SectionEntropy>>
             }
             if section.is_writable() {
                 characteristics.push("writable".to_string());
+            }
+            // SHF_COMPRESSED
+            if section.sh_flags & 0x800 != 0 {
+                characteristics.push("compressed".to_string());
             }
 
             let is_suspicious = determine_suspicious_entropy(name, entropy, &characteristics);
@@ -220,7 +238,9 @@ fn analyze_mach_sections(mach: &Mach, buffer: &[u8]) -> Result<Vec<SectionEntrop
                     let offset = section.offset as usize;
                     let size = section.size as usize;
 
-                    if offset + size <= buffer.len() {
+                    // Zero-fill sections (__bss, __common) have no file content
+                    let zerofill = matches!(section.flags & 0xff, 0x01 | 0x0c | 0x12);
+                    if !zerofill && size > 0 && offset.saturating_add(size) <= buffer.len() {
                         let section_data = &buffer[offset..offset + size];
                         let entropy = calculate_entropy(section_data);
 
@@ -242,15 +262,24 @@ fn analyze_mach_sections(mach: &Mach, buffer: &[u8]) -> Result<Vec<SectionEntrop
             }
         }
         Mach::Fat(_) => {
-            // For fat binaries, we'd need to handle multiple architectures
-            // For now, we'll skip this case
+            // analyze_sections hands over the selected slice, never the fat image
         }
     }
 
     Ok(sections)
 }
 
+/// Compressed debug sections (DWARF) look like random data by design.
+fn is_compressed_section(name: &str, characteristics: &[String]) -> bool {
+    name.starts_with(".debug_")
+        || name.starts_with(".zdebug_")
+        || characteristics.iter().any(|c| c == "compressed")
+}
+
 fn determine_suspicious_entropy(name: &str, entropy: f64, characteristics: &[String]) -> bool {
+    if is_compressed_section(name, characteristics) {
+        return false;
+    }
     // Text sections should have moderate entropy (4-6)
     if name == ".text" || name == "__text" {
         return !(4.0..=6.5).contains(&entropy);
@@ -396,7 +425,9 @@ fn detect_encryption(buffer: &[u8], sections: &[SectionEntropy]) -> EncryptionIn
 
     // Look for regions with very high entropy
     for section in sections {
-        if section.entropy > ENTROPY_THRESHOLD_ENCRYPTED {
+        if section.entropy > ENTROPY_THRESHOLD_ENCRYPTED
+            && !is_compressed_section(&section.name, &section.characteristics)
+        {
             high_entropy_regions.push(HighEntropyRegion {
                 offset: section.offset,
                 size: section.size,
@@ -414,11 +445,23 @@ fn detect_encryption(buffer: &[u8], sections: &[SectionEntropy]) -> EncryptionIn
         .iter()
         .filter(|&&b| (32..=126).contains(&b)) // Printable ASCII
         .count();
-    let random_data_percentage = 1.0 - (random_bytes as f64 / buffer.len() as f64);
+    let random_data_percentage = if buffer.is_empty() {
+        0.0
+    } else {
+        1.0 - (random_bytes as f64 / buffer.len() as f64)
+    };
 
-    let likely_encrypted = !high_entropy_regions.is_empty()
-        || !crypto_constants.is_empty()
-        || random_data_percentage > 0.8;
+    // Non-printable bytes are normal in any executable, so the share of
+    // "random-looking" data is reported but never decides on its own. One
+    // short constant (eight counting bytes, say) turns up in ordinary code;
+    // it takes two different constants to suggest crypto routines.
+    // The RC4 init pattern (eight counting bytes) is ordinary code, so it
+    // does not count toward the two-constant rule.
+    let strong_constants = crypto_constants
+        .iter()
+        .filter(|c| c.as_str() != "Possible RC4 init")
+        .count();
+    let likely_encrypted = !high_entropy_regions.is_empty() || strong_constants >= 2;
 
     EncryptionIndicators {
         likely_encrypted,
@@ -467,6 +510,11 @@ fn calculate_obfuscation_score(
     encrypted: &EncryptionIndicators,
 ) -> f64 {
     let mut score = 0.0;
+
+    // Nothing was measured, so nothing can be scored
+    if sections.is_empty() {
+        return 0.0;
+    }
 
     // Base score from entropy
     let avg_entropy = sections.iter().map(|s| s.entropy).sum::<f64>() / sections.len() as f64;
@@ -518,10 +566,14 @@ fn generate_recommendations(
     }
 
     if encrypted.likely_encrypted {
-        recommendations.push("Binary contains encrypted/obfuscated regions.".to_string());
-        if encrypted.random_data_percentage > 0.9 {
+        if encrypted.high_entropy_regions.is_empty() {
+            recommendations.push(format!(
+                "Binary contains several crypto constants ({}) but no high-entropy region.",
+                encrypted.crypto_constants_found.join(", ")
+            ));
+        } else {
             recommendations.push(
-                "Very high percentage of non-printable data suggests strong encryption."
+                "Binary contains encrypted/obfuscated regions (encryption-level entropy)."
                     .to_string(),
             );
         }
@@ -571,5 +623,77 @@ mod tests {
         let data3 = b"Hello, world! This is a test string with normal text entropy.";
         let entropy3 = calculate_entropy(data3);
         assert!(entropy3 > 3.0 && entropy3 < 6.0);
+    }
+
+    /// ELF64 with a NOBITS `.bss` whose offset happens to land on random bytes
+    fn elf_with_bss_over_random_bytes() -> Vec<u8> {
+        let shstrtab = b"\0.bss\0.shstrtab\0";
+        let data_off = 64 + 3 * 64 + shstrtab.len();
+        let mut b = vec![0u8; 64];
+        b[0..4].copy_from_slice(b"\x7fELF");
+        b[4] = 2; // 64-bit
+        b[5] = 1; // little endian
+        b[6] = 1;
+        b[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+        b[18..20].copy_from_slice(&0x3eu16.to_le_bytes()); // x86_64
+        b[20..24].copy_from_slice(&1u32.to_le_bytes());
+        b[40..48].copy_from_slice(&64u64.to_le_bytes()); // e_shoff
+        b[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+        b[58..60].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+        b[60..62].copy_from_slice(&3u16.to_le_bytes()); // e_shnum
+        b[62..64].copy_from_slice(&2u16.to_le_bytes()); // e_shstrndx
+        let shdr = |name: u32, kind: u32, off: usize, size: usize| {
+            let mut h = vec![0u8; 64];
+            h[0..4].copy_from_slice(&name.to_le_bytes());
+            h[4..8].copy_from_slice(&kind.to_le_bytes());
+            h[24..32].copy_from_slice(&(off as u64).to_le_bytes());
+            h[32..40].copy_from_slice(&(size as u64).to_le_bytes());
+            h
+        };
+        b.extend(shdr(0, 0, 0, 0));
+        b.extend(shdr(1, 8, data_off, 4096)); // .bss, SHT_NOBITS
+        b.extend(shdr(6, 3, 64 + 3 * 64, shstrtab.len()));
+        b.extend_from_slice(shstrtab);
+        let mut x = 0x1234_5678u32;
+        for _ in 0..4096 {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            b.push((x >> 24) as u8);
+        }
+        b
+    }
+
+    #[test]
+    fn nobits_sections_are_not_measured() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&elf_with_bss_over_random_bytes()).unwrap();
+        file.flush().unwrap();
+        let result = analyze_entropy(file.path()).unwrap();
+        assert!(
+            result.sections.iter().all(|s| s.name != ".bss"),
+            "{:?}",
+            result.sections
+        );
+        assert!(result.sections.iter().any(|s| s.name == ".shstrtab"));
+    }
+
+    #[test]
+    fn obfuscation_score_without_sections_is_zero() {
+        let packed = PackedIndicators {
+            likely_packed: false,
+            packer_signatures: vec![],
+            compression_ratio_estimate: 0.0,
+            import_table_anomalies: vec![],
+            section_anomalies: vec![],
+            entry_point_suspicious: false,
+        };
+        let encrypted = EncryptionIndicators {
+            likely_encrypted: false,
+            high_entropy_regions: vec![],
+            crypto_constants_found: vec![],
+            random_data_percentage: 0.9,
+        };
+        let score = calculate_obfuscation_score(&[], &packed, &encrypted);
+        assert_eq!(score, 0.0);
     }
 }

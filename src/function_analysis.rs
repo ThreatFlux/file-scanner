@@ -122,9 +122,26 @@ pub struct SymbolCounts {
 }
 
 pub fn analyze_symbols(path: &Path) -> Result<SymbolTable> {
+    analyze_symbols_with_arch(path, None)
+}
+
+/// Like [`analyze_symbols`], but for a universal Mach-O analyzes the slice
+/// named by `arch` (default: the host architecture if present, else the first).
+pub fn analyze_symbols_with_arch(path: &Path, arch: Option<&str>) -> Result<SymbolTable> {
     let mut file = File::open(path)?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
+
+    if let Some(selection) = crate::binary_parser::select_fat_slice(&buffer, arch) {
+        return match Object::parse(selection.data)? {
+            Object::Mach(mach @ mach::Mach::Binary(_)) => {
+                analyze_mach_symbols(mach, selection.data)
+            }
+            _ => Err(anyhow::anyhow!(
+                "The selected slice of the universal binary is not a Mach-O image"
+            )),
+        };
+    }
 
     match Object::parse(&buffer)? {
         Object::Elf(elf) => analyze_elf_symbols(elf, &buffer),
@@ -133,6 +150,14 @@ pub fn analyze_symbols(path: &Path) -> Result<SymbolTable> {
         _ => Err(anyhow::anyhow!(
             "Unsupported binary format for symbol analysis"
         )),
+    }
+}
+
+/// `strcpy@GLIBC_2.2.5` / `strcpy@@GLIBC_2.2.5` -> `strcpy`.
+fn strip_symbol_version(name: &str) -> &str {
+    match name.find('@') {
+        Some(0) | None => name,
+        Some(i) => &name[..i],
     }
 }
 
@@ -145,10 +170,16 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
 
     // Analyze ELF symbols
     for sym in &elf.syms {
-        let name = elf.strtab.get_at(sym.st_name).unwrap_or("").to_string();
+        let mut name = elf.strtab.get_at(sym.st_name).unwrap_or("").to_string();
 
         if name.is_empty() || name.starts_with('$') {
             continue;
+        }
+
+        // .symtab spells imports with their version (`strcpy@GLIBC_2.2.5`);
+        // keep the plain name so the same import is not listed twice.
+        if sym.st_shndx == 0 {
+            name = strip_symbol_version(&name).to_string();
         }
 
         let sym_type = sym.st_type();
@@ -226,9 +257,44 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
         }
     }
 
+    // Which library provides an imported dynamic symbol: the version-needs
+    // table names the file for every version index (GLIBC_2.2.5 -> libc.so.6).
+    let mut version_files: std::collections::HashMap<u16, String> =
+        std::collections::HashMap::new();
+    if let Some(verneed) = &elf.verneed {
+        for need in verneed.iter() {
+            let file = elf.dynstrtab.get_at(need.vn_file).unwrap_or("");
+            if file.is_empty() {
+                continue;
+            }
+            for aux in need.iter() {
+                version_files.insert(aux.vna_other, file.to_string());
+            }
+        }
+    }
+    let mut import_library: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if !version_files.is_empty() {
+        for (index, sym) in elf.dynsyms.iter().enumerate() {
+            if sym.st_shndx != 0 {
+                continue;
+            }
+            let Some(version) = elf.versym.as_ref().and_then(|v| v.get_at(index)) else {
+                continue;
+            };
+            if let (Some(file), Some(name)) = (
+                version_files.get(&version.version()),
+                elf.dynstrtab.get_at(sym.st_name),
+            ) {
+                import_library.insert(strip_symbol_version(name).to_string(), file.clone());
+            }
+        }
+    }
+
     // Analyze dynamic symbols if available
     for sym in &elf.dynsyms {
-        let name = elf.dynstrtab.get_at(sym.st_name).unwrap_or("").to_string();
+        let name =
+            strip_symbol_version(elf.dynstrtab.get_at(sym.st_name).unwrap_or("")).to_string();
 
         if name.is_empty() || functions.iter().any(|f| f.name == name) {
             continue;
@@ -259,6 +325,12 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
                 ordinal: None,
                 is_delayed: false,
             });
+        }
+    }
+
+    for import in &mut imports {
+        if import.library.is_none() {
+            import.library = import_library.get(&import.name).cloned();
         }
     }
 
@@ -373,7 +445,20 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
     })
 }
 
-fn mach_import_library<'a>(
+fn is_mach_linker_symbol(name: &str) -> bool {
+    matches!(
+        name,
+        "__mh_execute_header"
+            | "__mh_dylib_header"
+            | "__mh_bundle_header"
+            | "__mh_object_header"
+            | "__mh_preload_header"
+            | "__mh_dylinker_header"
+            | "dyld_stub_binder"
+    )
+}
+
+pub(crate) fn mach_import_library<'a>(
     macho: &mach::MachO<'a>,
     symbol: &mach::symbols::Nlist,
 ) -> Option<&'a str> {
@@ -390,7 +475,7 @@ fn mach_import_library<'a>(
     macho.libs.get(ordinal).copied()
 }
 
-pub fn analyze_mach_symbols(mach: mach::Mach, _buffer: &[u8]) -> Result<SymbolTable> {
+pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTable> {
     let mut functions = Vec::new();
     let mut global_variables = Vec::new();
     let mut imports = Vec::new();
@@ -399,8 +484,17 @@ pub fn analyze_mach_symbols(mach: mach::Mach, _buffer: &[u8]) -> Result<SymbolTa
 
     match mach {
         mach::Mach::Fat(_) => {
-            // For fat binaries, we'd need to choose an architecture
-            // For now, return empty symbol table
+            // analyze_symbols_with_arch picks a slice first; a caller that
+            // hands over a fat Mach directly gets the slice chosen the same way.
+            if let Some(selection) = crate::binary_parser::select_fat_slice(buffer, None) {
+                // Only a thin image is accepted: a slice that is itself
+                // universal must never recurse.
+                if let Ok(Object::Mach(inner @ mach::Mach::Binary(_))) =
+                    Object::parse(selection.data)
+                {
+                    return analyze_mach_symbols(inner, selection.data);
+                }
+            }
         }
         mach::Mach::Binary(macho) => {
             // Analyze Mach-O symbols
@@ -408,7 +502,10 @@ pub fn analyze_mach_symbols(mach: mach::Mach, _buffer: &[u8]) -> Result<SymbolTa
                 let name = sym.0.to_string();
                 let nlist = sym.1;
 
-                if name.is_empty() || name.starts_with("__") {
+                // Linker-provided markers are not functions. Everything else with
+                // a leading double underscore (Itanium C++ and Rust names such
+                // as `__ZN3foo3barEv`) is a real function.
+                if name.is_empty() || is_mach_linker_symbol(&name) {
                     continue;
                 }
 
@@ -1283,5 +1380,20 @@ mod tests {
             exported_func.function_type,
             FunctionType::Exported
         ));
+    }
+
+    #[test]
+    fn symbol_versions_are_stripped_for_comparison() {
+        assert_eq!(strip_symbol_version("strcpy@GLIBC_2.2.5"), "strcpy");
+        assert_eq!(strip_symbol_version("strcpy@@GLIBC_2.2.5"), "strcpy");
+        assert_eq!(strip_symbol_version("strcpy"), "strcpy");
+        assert_eq!(strip_symbol_version("@odd"), "@odd");
+    }
+
+    #[test]
+    fn only_linker_markers_are_skipped_on_macho() {
+        assert!(is_mach_linker_symbol("__mh_execute_header"));
+        assert!(!is_mach_linker_symbol("__ZN7Counter4bumpEi"));
+        assert!(!is_mach_linker_symbol("__Z7cpp_addii"));
     }
 }

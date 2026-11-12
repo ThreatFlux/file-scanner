@@ -206,6 +206,7 @@ fn test_binary_info_structure() {
         is_stripped: false,
         has_debug_info: true,
         java_analysis: None,
+        ..Default::default()
     };
 
     assert_eq!(info.format, "ELF");
@@ -252,6 +253,7 @@ fn test_binary_info_serialization() {
         is_stripped: true,
         has_debug_info: false,
         java_analysis: None,
+        ..Default::default()
     };
 
     // Test JSON serialization
@@ -282,6 +284,7 @@ fn test_binary_info_defaults() {
         is_stripped: false,
         has_debug_info: false,
         java_analysis: None,
+        ..Default::default()
     };
 
     assert_eq!(info.format, "Unknown");
@@ -310,6 +313,7 @@ fn test_binary_info_debug_format() {
         is_stripped: false,
         has_debug_info: true,
         java_analysis: None,
+        ..Default::default()
     };
 
     let debug_string = format!("{info:?}");
@@ -352,6 +356,7 @@ fn test_binary_info_with_multiple_sections() {
         is_stripped: false,
         has_debug_info: true,
         java_analysis: None,
+        ..Default::default()
     };
 
     assert_eq!(info.sections.len(), 3);
@@ -382,6 +387,7 @@ fn test_binary_info_edge_cases() {
         is_stripped: true,
         has_debug_info: false,
         java_analysis: None,
+        ..Default::default()
     };
 
     assert_eq!(info.sections[0].size, u64::MAX);
@@ -408,6 +414,7 @@ fn test_binary_info_empty_strings() {
         is_stripped: false,
         has_debug_info: false,
         java_analysis: None,
+        ..Default::default()
     };
 
     assert!(info.format.is_empty());
@@ -439,6 +446,7 @@ fn test_binary_info_unicode_strings() {
         is_stripped: false,
         has_debug_info: true,
         java_analysis: None,
+        ..Default::default()
     };
 
     assert!(info.compiler.unwrap().contains("🦀"));
@@ -469,6 +477,7 @@ fn test_binary_info_long_strings() {
         is_stripped: false,
         has_debug_info: true,
         java_analysis: None,
+        ..Default::default()
     };
 
     assert_eq!(info.format.len(), 1000);
@@ -501,6 +510,7 @@ fn test_binary_info_many_sections() {
         is_stripped: false,
         has_debug_info: false,
         java_analysis: None,
+        ..Default::default()
     };
 
     assert_eq!(info.sections.len(), 1000);
@@ -532,6 +542,7 @@ fn test_binary_info_many_imports_exports() {
         is_stripped: false,
         has_debug_info: true,
         java_analysis: None,
+        ..Default::default()
     };
 
     assert_eq!(info.imports.len(), 500);
@@ -580,6 +591,7 @@ fn test_binary_info_clone() {
         is_stripped: true,
         has_debug_info: false,
         java_analysis: None,
+        ..Default::default()
     };
 
     // This test verifies that BinaryInfo derives Debug and Clone (if it does)
@@ -601,6 +613,7 @@ fn test_binary_info_partial_eq() {
         is_stripped: false,
         has_debug_info: true,
         java_analysis: None,
+        ..Default::default()
     };
 
     let info2 = BinaryInfo {
@@ -615,6 +628,7 @@ fn test_binary_info_partial_eq() {
         is_stripped: false,
         has_debug_info: true,
         java_analysis: None,
+        ..Default::default()
     };
 
     let info3 = BinaryInfo {
@@ -629,6 +643,7 @@ fn test_binary_info_partial_eq() {
         is_stripped: false,
         has_debug_info: true,
         java_analysis: None,
+        ..Default::default()
     };
 
     // Test serialization equality

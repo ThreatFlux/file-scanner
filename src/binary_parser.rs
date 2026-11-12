@@ -12,7 +12,7 @@ use threatflux_binary_analysis::{
     Architecture as TfArch, BinaryAnalyzer, BinaryFormat as TfFormat,
 };
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BinaryInfo {
     pub format: String,
     pub architecture: String,
@@ -25,9 +25,20 @@ pub struct BinaryInfo {
     pub is_stripped: bool,
     pub has_debug_info: bool,
     pub java_analysis: Option<JavaAnalysisResult>,
+    /// Shared libraries the binary needs at load time (ELF `DT_NEEDED`, PE
+    /// imported DLLs, Mach-O `LC_LOAD_DYLIB` family), kept apart from `imports`
+    /// (the imported functions).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needed_libraries: Vec<String>,
+    /// For a universal (fat) Mach-O: every architecture slice in the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub universal_slices: Option<Vec<UniversalSlice>>,
+    /// For a universal Mach-O: the architecture that this analysis describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyzed_slice: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SectionInfo {
     pub name: String,
     pub size: u64,
@@ -96,10 +107,190 @@ fn convert_threatflux_to_binary_info(
         is_stripped: analysis.symbols.is_empty(),
         has_debug_info: analysis.sections.iter().any(|s| s.name.contains("debug")),
         java_analysis,
+        ..Default::default()
     }
 }
 
+/// One architecture slice of a universal (fat) Mach-O file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UniversalSlice {
+    pub architecture: String,
+    pub cpu_type: u32,
+    pub cpu_subtype: u32,
+    /// Byte offset of the slice inside the file.
+    pub offset: u64,
+    pub size: u64,
+    /// True for the slice every analysis of this file describes.
+    pub analyzed: bool,
+}
+
+/// The slice of a universal Mach-O chosen for analysis.
+#[derive(Debug, Clone)]
+pub struct FatSelection<'a> {
+    pub slices: Vec<UniversalSlice>,
+    /// Index into `slices` of the chosen slice.
+    pub selected: usize,
+    /// The bytes of the chosen slice (a complete thin Mach-O image).
+    pub data: &'a [u8],
+}
+
+const FAT_MAGIC: u32 = 0xCAFE_BABE;
+const FAT_MAGIC_64: u32 = 0xCAFE_BABF;
+/// Lowest class-file major version (JDK 1.1). A fat header keeps its
+/// architecture count in the same four bytes, always far below this.
+const MIN_CLASS_MAJOR_VERSION: u32 = 45;
+const CPU_ARCH_ABI64: u32 = 0x0100_0000;
+const CPU_TYPE_X86: u32 = 7;
+const CPU_TYPE_ARM: u32 = 12;
+const CPU_TYPE_POWERPC: u32 = 18;
+
+/// True when `buffer` starts with a universal Mach-O header (and not with a
+/// Java class file, which shares the `CAFEBABE` magic).
+#[must_use]
+pub fn is_fat_macho(buffer: &[u8]) -> bool {
+    let Some(head) = buffer.get(0..8) else {
+        return false;
+    };
+    let magic = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+    let second = u32::from_be_bytes([head[4], head[5], head[6], head[7]]);
+    match magic {
+        FAT_MAGIC_64 => true,
+        // Class file: minor(2) major(2); fat file: architecture count(4).
+        FAT_MAGIC => second < MIN_CLASS_MAJOR_VERSION,
+        _ => false,
+    }
+}
+
+/// True for a Java class file header (`CAFEBABE` followed by a class version).
+#[must_use]
+pub fn is_java_class_header(buffer: &[u8]) -> bool {
+    buffer.len() >= 8 && buffer[0..4] == [0xCA, 0xFE, 0xBA, 0xBE] && !is_fat_macho(buffer)
+}
+
+/// Human name for a Mach-O CPU type/subtype pair.
+#[must_use]
+pub fn mach_architecture_name(cpu_type: u32, cpu_subtype: u32) -> String {
+    let base = cpu_type & !CPU_ARCH_ABI64;
+    let is_64 = cpu_type & CPU_ARCH_ABI64 != 0;
+    match (base, is_64) {
+        (CPU_TYPE_X86, true) => "x86_64".to_string(),
+        (CPU_TYPE_X86, false) => "x86".to_string(),
+        (CPU_TYPE_ARM, true) => match cpu_subtype & 0x00ff_ffff {
+            0 | 1 => "ARM64".to_string(),
+            2 => "ARM64E".to_string(),
+            n => format!("ARM64 (subtype {n})"),
+        },
+        (CPU_TYPE_ARM, false) => "ARM".to_string(),
+        (CPU_TYPE_POWERPC, true) => "PowerPC64".to_string(),
+        (CPU_TYPE_POWERPC, false) => "PowerPC".to_string(),
+        _ => format!("cpu_type 0x{cpu_type:x}"),
+    }
+}
+
+/// The CPU type of the machine this process runs on, as a Mach-O cputype.
+fn host_cpu_type() -> Option<u32> {
+    if cfg!(target_arch = "aarch64") {
+        Some(CPU_TYPE_ARM | CPU_ARCH_ABI64)
+    } else if cfg!(target_arch = "x86_64") {
+        Some(CPU_TYPE_X86 | CPU_ARCH_ABI64)
+    } else {
+        None
+    }
+}
+
+fn name_matches(slice_name: &str, wanted: &str) -> bool {
+    let norm = |s: &str| s.to_ascii_lowercase().replace(['-', '_', ' '], "");
+    let (a, w) = (norm(slice_name), norm(wanted));
+    a == w || (w == "aarch64" && a == "arm64") || (w == "amd64" && a == "x8664")
+}
+
+/// List the slices of a universal Mach-O and pick one to analyze: the slice
+/// named by `preferred` (for example `"arm64"` or `"x86_64"`) if given and
+/// present, else the host architecture if present, else the first slice.
+/// Returns `None` when `buffer` is not a universal Mach-O or the header is
+/// damaged; an unknown `preferred` name falls back to the default choice.
+#[must_use]
+pub fn select_fat_slice<'a>(buffer: &'a [u8], preferred: Option<&str>) -> Option<FatSelection<'a>> {
+    if !is_fat_macho(buffer) {
+        return None;
+    }
+    let be32 = |o: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(buffer.get(o..o + 4)?.try_into().ok()?))
+    };
+    let be64 = |o: usize| -> Option<u64> {
+        Some(u64::from_be_bytes(buffer.get(o..o + 8)?.try_into().ok()?))
+    };
+    let is_64 = be32(0)? == FAT_MAGIC_64;
+    let count = be32(4)? as usize;
+    let entry_len = if is_64 { 32 } else { 20 };
+    if count == 0 || count > 64 {
+        return None;
+    }
+    let mut slices = Vec::new();
+    for i in 0..count {
+        let base = 8 + i * entry_len;
+        let cpu_type = be32(base)?;
+        let cpu_subtype = be32(base + 4)?;
+        let (offset, size) = if is_64 {
+            (be64(base + 8)?, be64(base + 16)?)
+        } else {
+            (u64::from(be32(base + 8)?), u64::from(be32(base + 12)?))
+        };
+        let end = offset.checked_add(size)?;
+        let header_end = (8 + count * entry_len) as u64;
+        let start_is_fat = usize::try_from(offset)
+            .ok()
+            .and_then(|o| buffer.get(o..))
+            .is_some_and(is_fat_macho);
+        if size == 0 || end > buffer.len() as u64 || offset < header_end || start_is_fat {
+            // Truncated or damaged entry: skip it rather than fail the file
+            continue;
+        }
+        slices.push(UniversalSlice {
+            architecture: mach_architecture_name(cpu_type, cpu_subtype),
+            cpu_type,
+            cpu_subtype,
+            offset,
+            size,
+            analyzed: false,
+        });
+    }
+    if slices.is_empty() {
+        return None;
+    }
+    let selected = preferred
+        .and_then(|w| slices.iter().position(|s| name_matches(&s.architecture, w)))
+        .or_else(|| host_cpu_type().and_then(|h| slices.iter().position(|s| s.cpu_type == h)))
+        .unwrap_or(0);
+    slices[selected].analyzed = true;
+    let start = usize::try_from(slices[selected].offset).ok()?;
+    let end = start.checked_add(usize::try_from(slices[selected].size).ok()?)?;
+    Some(FatSelection {
+        data: buffer.get(start..end)?,
+        slices,
+        selected,
+    })
+}
+
+/// Like [`parse_binary`], but for a universal Mach-O analyzes the slice named
+/// by `arch` (default: the host architecture if present, else the first).
+pub fn parse_binary_with_arch(path: &Path, arch: Option<&str>) -> Result<BinaryInfo> {
+    let buffer = fs::read(path)?;
+    if let Some(selection) = select_fat_slice(&buffer, arch) {
+        let mut info = parse_native_buffer(selection.data)?;
+        info.architecture = selection.slices[selection.selected].architecture.clone();
+        info.analyzed_slice = Some(selection.slices[selection.selected].architecture.clone());
+        info.universal_slices = Some(selection.slices);
+        return Ok(info);
+    }
+    parse_binary_buffer(path, buffer)
+}
+
 pub fn parse_binary(path: &Path) -> Result<BinaryInfo> {
+    parse_binary_with_arch(path, None)
+}
+
+fn parse_binary_buffer(path: &Path, buffer: Vec<u8>) -> Result<BinaryInfo> {
     // First check if it's a Java-related file
     if let Some(extension) = path.extension() {
         match extension.to_str().unwrap_or("").to_lowercase().as_str() {
@@ -114,7 +305,6 @@ pub fn parse_binary(path: &Path) -> Result<BinaryInfo> {
     }
 
     // Check magic bytes for ZIP files that might be Java archives
-    let buffer = fs::read(path)?;
     if buffer.len() >= 4 && &buffer[0..4] == b"PK\x03\x04" {
         // This is a ZIP file, check if it's a Java archive
         if is_java_archive(path) {
@@ -122,33 +312,116 @@ pub fn parse_binary(path: &Path) -> Result<BinaryInfo> {
         }
     }
 
-    // Check for Java class file magic
-    if buffer.len() >= 4 && buffer[0..4] == [0xCA, 0xFE, 0xBA, 0xBE] {
+    // Java class file magic (CAFEBABE is shared with universal Mach-O, which
+    // parse_binary_with_arch has already handled)
+    if is_java_class_header(&buffer) {
         return parse_java_class(path);
     }
 
+    parse_native_buffer(&buffer)
+}
+
+/// Parse a thin native image (ELF, PE or Mach-O).
+fn parse_native_buffer(buffer: &[u8]) -> Result<BinaryInfo> {
     // Try ThreatFlux first (enhanced analysis), fallback to goblin if needed
     if let Ok(analyzer) = try_create_threatflux_analyzer() {
-        if let Ok(analysis) = analyzer.analyze(&buffer) {
+        if let Ok(analysis) = analyzer.analyze(buffer) {
             // Extract compiler/linker info using legacy methods for enhanced detection
-            if let Ok((compiler_info, linker_info)) = extract_legacy_compiler_info(&buffer) {
-                return Ok(convert_threatflux_to_binary_info(
+            if let Ok((compiler_info, linker_info)) = extract_legacy_compiler_info(buffer) {
+                let mut info = convert_threatflux_to_binary_info(
                     &analysis,
                     compiler_info,
                     linker_info,
                     None, // No Java analysis for native binaries
-                ));
+                );
+                complete_from_goblin(&mut info, buffer);
+                return Ok(info);
             }
         }
     }
 
     // Parse native binaries using goblin (original implementation)
-    match Object::parse(&buffer)? {
-        Object::Elf(elf) => parse_elf(elf, &buffer),
-        Object::PE(pe) => parse_pe(pe, &buffer),
+    match Object::parse(buffer)? {
+        Object::Elf(elf) => parse_elf(elf, buffer),
+        Object::PE(pe) => parse_pe(pe, buffer),
         Object::Mach(mach) => parse_mach(mach),
         _ => anyhow::bail!("Unsupported binary format"),
     }
+}
+
+/// Fill what the ThreatFlux result lacks: the needed-library list, and for
+/// Mach-O the imports of chained-fixup binaries (which have no bind opcodes).
+fn complete_from_goblin(info: &mut BinaryInfo, buffer: &[u8]) {
+    match Object::parse(buffer) {
+        Ok(Object::Elf(elf)) => {
+            info.needed_libraries = unique_strings(elf.libraries.iter().map(|l| (*l).to_string()));
+        }
+        Ok(Object::PE(pe)) => {
+            info.needed_libraries = unique_strings(pe.libraries.iter().map(|l| (*l).to_string()));
+        }
+        Ok(Object::Mach(goblin::mach::Mach::Binary(macho))) => {
+            info.needed_libraries = mach_needed_libraries(&macho);
+            if info.imports.is_empty() {
+                info.imports = mach_undefined_imports(&macho);
+            }
+            let name = mach_architecture_name(macho.header.cputype, macho.header.cpusubtype);
+            if info.architecture == "Unknown" {
+                info.architecture = name;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Shared libraries a native binary needs at load time (ELF `DT_NEEDED`, PE
+/// imported DLLs, Mach-O load commands; for a universal Mach-O, the analyzed
+/// slice). Empty for anything else or when the file cannot be read.
+#[must_use]
+pub fn needed_libraries(path: &Path) -> Vec<String> {
+    let Ok(buffer) = fs::read(path) else {
+        return Vec::new();
+    };
+    let data = select_fat_slice(&buffer, None).map_or(&buffer[..], |s| s.data);
+    match Object::parse(data) {
+        Ok(Object::Elf(elf)) => unique_strings(elf.libraries.iter().map(|l| (*l).to_string())),
+        Ok(Object::PE(pe)) => unique_strings(pe.libraries.iter().map(|l| (*l).to_string())),
+        Ok(Object::Mach(goblin::mach::Mach::Binary(m))) => mach_needed_libraries(&m),
+        _ => Vec::new(),
+    }
+}
+
+fn unique_strings(items: impl Iterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items.filter(|s| seen.insert(s.clone())).collect()
+}
+
+/// Dependent libraries of a Mach-O (`LC_LOAD_DYLIB` and friends; goblin keeps
+/// the image itself in slot 0, which is not a dependency).
+fn mach_needed_libraries(macho: &goblin::mach::MachO) -> Vec<String> {
+    unique_strings(
+        macho
+            .libs
+            .iter()
+            .skip(1)
+            .filter(|l| !l.is_empty() && **l != "self")
+            .map(|l| (*l).to_string()),
+    )
+}
+
+/// Imports as `name (library)` taken from the undefined symbols, for binaries
+/// whose bind info is absent.
+fn mach_undefined_imports(macho: &goblin::mach::MachO) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, nlist) in macho.symbols().flatten() {
+        if !nlist.is_undefined() || name.is_empty() {
+            continue;
+        }
+        match crate::function_analysis::mach_import_library(macho, &nlist) {
+            Some(lib) => out.push(format!("{name} ({lib})")),
+            None => out.push(name.to_string()),
+        }
+    }
+    out
 }
 
 /// Try to create `ThreatFlux` analyzer, return error if library has compilation issues
@@ -230,6 +503,8 @@ fn parse_elf(elf: elf::Elf, _buffer: &[u8]) -> Result<BinaryInfo> {
         is_stripped: elf.syms.is_empty(),
         has_debug_info: false,
         java_analysis: None,
+        needed_libraries: unique_strings(elf.libraries.iter().map(|l| (*l).to_string())),
+        ..Default::default()
     };
 
     for section in &elf.section_headers {
@@ -292,6 +567,8 @@ fn parse_pe(pe: pe::PE, _buffer: &[u8]) -> Result<BinaryInfo> {
         is_stripped: pe.debug_data.is_none(),
         has_debug_info: pe.debug_data.is_some(),
         java_analysis: None,
+        needed_libraries: unique_strings(pe.libraries.iter().map(|l| (*l).to_string())),
+        ..Default::default()
     };
 
     for section in &pe.sections {
@@ -356,11 +633,14 @@ fn parse_mach(mach: goblin::mach::Mach) -> Result<BinaryInfo> {
         is_stripped: false,
         has_debug_info: false,
         java_analysis: None,
+        ..Default::default()
     };
 
     match mach {
         Mach::Binary(mach_o) => {
-            info.architecture = if mach_o.is_64 { "x86_64" } else { "x86" }.to_string();
+            info.architecture =
+                mach_architecture_name(mach_o.header.cputype, mach_o.header.cpusubtype);
+            info.needed_libraries = mach_needed_libraries(&mach_o);
             info.entry_point = Some(mach_o.entry);
             for segment in &mach_o.segments {
                 for (section, _) in &segment.sections()? {
@@ -377,6 +657,9 @@ fn parse_mach(mach: goblin::mach::Mach) -> Result<BinaryInfo> {
 
             for import in &mach_o.imports()? {
                 info.imports.push(import.name.to_string());
+            }
+            if info.imports.is_empty() {
+                info.imports = mach_undefined_imports(&mach_o);
             }
 
             let exports = mach_o.exports()?;
@@ -437,6 +720,7 @@ fn parse_java_archive(path: &Path) -> Result<BinaryInfo> {
             .iter()
             .any(|c| c.source_file.is_some()),
         java_analysis: Some(java_analysis),
+        ..Default::default()
     })
 }
 
@@ -467,6 +751,7 @@ fn parse_java_class(path: &Path) -> Result<BinaryInfo> {
             .first()
             .is_some_and(|c| c.source_file.is_some()),
         java_analysis: Some(java_analysis),
+        ..Default::default()
     })
 }
 
@@ -675,6 +960,7 @@ mod tests {
             is_stripped: false,
             has_debug_info: true,
             java_analysis: None,
+            ..Default::default()
         };
 
         // Test JSON serialization
@@ -744,6 +1030,7 @@ mod tests {
             is_stripped: true,
             has_debug_info: false,
             java_analysis: None,
+            ..Default::default()
         };
 
         assert!(info.compiler.is_none());

@@ -1,5 +1,4 @@
 use anyhow::Result;
-use goblin::Object;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -26,6 +25,9 @@ pub struct CertificateInfo {
 
 pub fn verify_signature(path: &Path) -> Result<SignatureInfo> {
     // Try different signature verification methods based on the platform and file type
+    // Checks that could not run (missing external tool) are remembered so the
+    // final answer can say "not checked" instead of "no signature found".
+    let mut not_checked: Vec<String> = Vec::new();
 
     // First, check if it's a PE file with Authenticode signature
     if let Ok(authenticode_info) = check_authenticode_signature(path) {
@@ -36,19 +38,46 @@ pub fn verify_signature(path: &Path) -> Result<SignatureInfo> {
     if let Ok(gpg_info) = check_gpg_signature(path) {
         return Ok(gpg_info);
     }
+    if detached_signature_candidates(path)
+        .iter()
+        .any(|p| p.exists())
+        && !tool_available("gpg")
+    {
+        not_checked.push("a detached .sig/.asc file exists but gpg is not installed".to_string());
+    }
 
     // Check for macOS code signatures (only for Mach-O binaries)
-    if cfg!(target_os = "macos") {
-        // Only check codesign for Mach-O binaries
-        if let Ok(buffer) = fs::read(path) {
-            if let Ok(Object::Mach(_)) = Object::parse(&buffer) {
+    if let Ok(buffer) = fs::read(path) {
+        if let Some(has_code_signature) = macho_has_code_signature(&buffer) {
+            if cfg!(target_os = "macos") && tool_available("codesign") {
                 if let Ok(codesign_info) = check_macos_codesign(path) {
                     return Ok(codesign_info);
                 }
-            } else {
-                // Not a Mach-O binary, skip macOS codesign check
+            } else if has_code_signature {
+                // The load commands prove a signature blob exists even when we
+                // cannot run the verifier.
+                return Ok(SignatureInfo {
+                    is_signed: true,
+                    signature_type: Some("Mach-O code signature".to_string()),
+                    signer: None,
+                    timestamp: None,
+                    certificate_chain: Vec::new(),
+                    verification_status: "Present, not verified (codesign is not available)"
+                        .to_string(),
+                });
             }
         }
+    }
+
+    if !not_checked.is_empty() {
+        return Ok(SignatureInfo {
+            is_signed: false,
+            signature_type: None,
+            signer: None,
+            timestamp: None,
+            certificate_chain: Vec::new(),
+            verification_status: format!("Not checked: {}", not_checked.join("; ")),
+        });
     }
 
     // No signature found
@@ -62,68 +91,203 @@ pub fn verify_signature(path: &Path) -> Result<SignatureInfo> {
     })
 }
 
-fn check_authenticode_signature(path: &Path) -> Result<SignatureInfo> {
-    // This is a simplified version. In production, you'd use Windows APIs
-    // or a library like authenticode-parser
+/// True when `name` can be started (found on PATH and runnable).
+fn tool_available(name: &str) -> bool {
+    // Spawning is the only portable test; a missing program fails with NotFound.
+    match Command::new(name)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
 
+/// Location of the PE security (certificate table) data directory, read from
+/// the headers: `Some(Some((file_offset, size)))` when the entry is populated,
+/// `Some(None)` for a PE with an empty entry, `None` when the bytes are not a PE.
+fn pe_certificate_table(buffer: &[u8]) -> Option<Option<(usize, usize)>> {
+    fn u16_at(b: &[u8], o: usize) -> Option<u16> {
+        Some(u16::from_le_bytes(b.get(o..o + 2)?.try_into().ok()?))
+    }
+    fn u32_at(b: &[u8], o: usize) -> Option<u32> {
+        Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?))
+    }
+    if buffer.len() < 64 || &buffer[0..2] != b"MZ" {
+        return None;
+    }
+    let pe_off = u32_at(buffer, 0x3c)? as usize;
+    if buffer.get(pe_off..pe_off + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let opt = pe_off + 24;
+    let dd = match u16_at(buffer, opt)? {
+        0x10b => opt + 96,
+        0x20b => opt + 112,
+        _ => return None,
+    };
+    let count = u32_at(buffer, dd - 4)? as usize;
+    if count <= 4 {
+        return Some(None);
+    }
+    let offset = u32_at(buffer, dd + 32)? as usize;
+    let size = u32_at(buffer, dd + 36)? as usize;
+    if offset == 0 && size == 0 {
+        return Some(None);
+    }
+    Some(Some((offset, size)))
+}
+
+/// For Mach-O (thin or universal) bytes: `Some(true)` when an `LC_CODE_SIGNATURE`
+/// load command is present, `Some(false)` for an unsigned Mach-O, `None` otherwise.
+fn macho_has_code_signature(buffer: &[u8]) -> Option<bool> {
+    use goblin::mach::{load_command::CommandVariant, Mach};
+    fn signed(m: &goblin::mach::MachO) -> bool {
+        m.load_commands
+            .iter()
+            .any(|lc| matches!(lc.command, CommandVariant::CodeSignature(_)))
+    }
+    // Universal files go through the bounded slice reader; goblin never sees
+    // a file-controlled architecture count.
+    if let Some(selection) = crate::binary_parser::select_fat_slice(buffer, None) {
+        let mut parsed_any = false;
+        let mut any = false;
+        for slice in &selection.slices {
+            let (Ok(start), Ok(len)) = (usize::try_from(slice.offset), usize::try_from(slice.size))
+            else {
+                continue;
+            };
+            let Some(bytes) = start
+                .checked_add(len)
+                .and_then(|end| buffer.get(start..end))
+            else {
+                continue;
+            };
+            if let Ok(m) = goblin::mach::MachO::parse(bytes, 0) {
+                parsed_any = true;
+                any |= signed(&m);
+            }
+        }
+        return parsed_any.then_some(any);
+    }
+    if buffer.len() < 4 || buffer[0..3] == [0xCA, 0xFE, 0xBA] {
+        // Java class file or damaged universal header: not a Mach-O to inspect
+        return None;
+    }
+    match Mach::parse(buffer).ok()? {
+        Mach::Binary(m) => Some(signed(&m)),
+        Mach::Fat(_) => None,
+    }
+}
+
+fn check_authenticode_signature(path: &Path) -> Result<SignatureInfo> {
     let buffer = std::fs::read(path)?;
 
     // Check for PE signature
-    if buffer.len() < 64 || &buffer[0..2] != b"MZ" {
+    let Some(table) = pe_certificate_table(&buffer) else {
         anyhow::bail!("Not a PE file");
+    };
+    let Some((offset, size)) = table else {
+        anyhow::bail!("No Authenticode signature found");
+    };
+
+    if size < 8
+        || offset
+            .checked_add(size)
+            .is_none_or(|end| end > buffer.len())
+    {
+        return Ok(SignatureInfo {
+            is_signed: false,
+            signature_type: Some("Authenticode".to_string()),
+            signer: None,
+            timestamp: None,
+            certificate_chain: Vec::new(),
+            verification_status: format!(
+                "Malformed: the PE security directory (offset {offset}, size {size}) {}",
+                if size < 8 {
+                    "is too small to hold a certificate entry"
+                } else {
+                    "lies outside the file"
+                }
+            ),
+        });
     }
 
-    // In a real implementation, you would:
-    // 1. Parse the PE headers
-    // 2. Find the security directory
-    // 3. Parse the PKCS#7 signature
-    // 4. Verify the certificate chain
-
-    // For now, we'll use osslsigncode if available
-    if let Ok(output) = Command::new("osslsigncode")
+    // The headers show a populated certificate table. Ask an external verifier
+    // when one is installed; otherwise report presence only.
+    match Command::new("osslsigncode")
         .arg("verify")
         .arg(path)
+        .stdin(std::process::Stdio::null())
         .output()
     {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let _stderr = String::from_utf8_lossy(&output.stderr);
-
-        if output.status.success() && stdout.contains("Signature verification: ok") {
-            return Ok(SignatureInfo {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let valid = output.status.success() && stdout.contains("Signature verification: ok");
+            Ok(SignatureInfo {
                 is_signed: true,
                 signature_type: Some("Authenticode".to_string()),
-                signer: extract_signer_from_output(&stdout),
-                timestamp: extract_timestamp_from_output(&stdout),
-                certificate_chain: Vec::new(), // Would parse from output
-                verification_status: "Valid".to_string(),
-            });
+                signer: if valid {
+                    extract_signer_from_output(&stdout)
+                } else {
+                    None
+                },
+                timestamp: if valid {
+                    extract_timestamp_from_output(&stdout)
+                } else {
+                    None
+                },
+                certificate_chain: Vec::new(),
+                verification_status: if valid {
+                    "Valid".to_string()
+                } else {
+                    "Present, verification failed (osslsigncode did not report a valid signature)"
+                        .to_string()
+                },
+            })
         }
+        Err(_) => Ok(SignatureInfo {
+            is_signed: true,
+            signature_type: Some("Authenticode".to_string()),
+            signer: None,
+            timestamp: None,
+            certificate_chain: Vec::new(),
+            verification_status: format!(
+                "Present, not verified (certificate table of {size} bytes found in the PE headers; osslsigncode is not installed, so the signature was not checked)"
+            ),
+        }),
     }
+}
 
-    anyhow::bail!("No Authenticode signature found")
+/// Candidate detached-signature paths: the full file name plus `.sig` / `.asc`
+/// (`app` -> `app.sig`, `app.bin` -> `app.bin.sig`).
+fn detached_signature_candidates(path: &Path) -> Vec<std::path::PathBuf> {
+    ["sig", "asc"]
+        .iter()
+        .map(|suffix| {
+            let mut name = path.as_os_str().to_os_string();
+            name.push(".");
+            name.push(suffix);
+            std::path::PathBuf::from(name)
+        })
+        .collect()
 }
 
 fn check_gpg_signature(path: &Path) -> Result<SignatureInfo> {
-    // Check for detached GPG signature
-    let sig_path = path.with_extension(format!(
-        "{}.sig",
-        path.extension().unwrap_or_default().to_str().unwrap_or("")
-    ));
-    let asc_path = path.with_extension(format!(
-        "{}.asc",
-        path.extension().unwrap_or_default().to_str().unwrap_or("")
-    ));
+    check_gpg_signature_with(path, "gpg")
+}
 
-    let sig_file = if sig_path.exists() {
-        Some(sig_path)
-    } else if asc_path.exists() {
-        Some(asc_path)
-    } else {
-        None
-    };
+fn check_gpg_signature_with(path: &Path, program: &str) -> Result<SignatureInfo> {
+    // Check for detached GPG signature
+    let sig_file = detached_signature_candidates(path)
+        .into_iter()
+        .find(|p| p.exists());
 
     if let Some(sig_file) = sig_file {
-        if let Ok(output) = Command::new("gpg")
+        if let Ok(output) = Command::new(program)
             .arg("--verify")
             .arg(sig_file)
             .arg(path)
@@ -141,6 +305,15 @@ fn check_gpg_signature(path: &Path) -> Result<SignatureInfo> {
                     verification_status: "Valid".to_string(),
                 });
             }
+            let first = stderr.lines().next().unwrap_or("no output").trim();
+            return Ok(SignatureInfo {
+                is_signed: false,
+                signature_type: Some("GPG".to_string()),
+                signer: None,
+                timestamp: None,
+                certificate_chain: Vec::new(),
+                verification_status: format!("Detached signature present, not verified ({first})"),
+            });
         }
     }
 
@@ -166,9 +339,28 @@ fn check_macos_codesign(path: &Path) -> Result<SignatureInfo> {
                 verification_status: "Unknown".to_string(),
             };
 
-            // Parse authority
-            if let Some(auth_line) = stderr.lines().find(|l| l.starts_with("Authority=")) {
-                info.signer = Some(auth_line.replace("Authority=", ""));
+            // Parse authorities: the first is the leaf signer, the rest the chain
+            let authorities: Vec<&str> = stderr
+                .lines()
+                .filter_map(|l| l.strip_prefix("Authority="))
+                .collect();
+            info.signer = authorities.first().map(|a| (*a).to_string());
+            // codesign prints only subject names, so the other fields stay empty
+            info.certificate_chain = authorities
+                .iter()
+                .map(|a| CertificateInfo {
+                    subject: (*a).to_string(),
+                    issuer: String::new(),
+                    serial_number: String::new(),
+                    not_before: String::new(),
+                    not_after: String::new(),
+                })
+                .collect();
+
+            // Ad-hoc signatures carry no identity: they prove integrity only
+            let adhoc = stderr.lines().any(|l| l.trim() == "Signature=adhoc");
+            if adhoc {
+                info.signature_type = Some("Apple ad-hoc signature".to_string());
             }
 
             // Parse timestamp
@@ -185,7 +377,11 @@ fn check_macos_codesign(path: &Path) -> Result<SignatureInfo> {
                 .output()
             {
                 info.verification_status = if verify_output.status.success() {
-                    "Valid".to_string()
+                    if adhoc {
+                        "Valid (ad-hoc: no signing identity, not a trusted publisher)".to_string()
+                    } else {
+                        "Valid".to_string()
+                    }
                 } else {
                     "Invalid".to_string()
                 };
@@ -361,9 +557,10 @@ mod tests {
         let sig_path = file_path.with_extension("sig");
         fs::write(&sig_path, b"dummy signature").unwrap();
 
-        let result = check_gpg_signature(&file_path);
-        // Should fail because gpg command will fail on dummy signature
-        assert!(result.is_err());
+        // Whatever gpg does with a dummy signature, it is never reported as valid
+        if let Ok(info) = check_gpg_signature(&file_path) {
+            assert!(!info.is_signed);
+        }
     }
 
     #[test]
@@ -375,9 +572,62 @@ mod tests {
         let asc_path = file_path.with_extension("asc");
         fs::write(&asc_path, b"dummy ascii signature").unwrap();
 
-        let result = check_gpg_signature(&file_path);
-        // Should fail because gpg command will fail on dummy signature
-        assert!(result.is_err());
+        // Whatever gpg does with a dummy signature, it is never reported as valid
+        if let Ok(info) = check_gpg_signature(&file_path) {
+            assert!(!info.is_signed);
+        }
+    }
+
+    #[cfg(unix)]
+    fn stub_gpg(dir: &Path, stderr_line: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let stub = dir.join("stub-gpg.sh");
+        fs::write(
+            &stub,
+            format!("#!/bin/sh\necho '{stderr_line}' >&2\nexit 0\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        stub
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn detached_sig_next_to_extensionless_file_is_verified() {
+        let (temp_dir, file_path) = create_test_file(b"payload").unwrap();
+        let bare = temp_dir.path().join("sample");
+        fs::write(&bare, b"payload").unwrap();
+        fs::write(temp_dir.path().join("sample.sig"), b"sig").unwrap();
+        let stub = stub_gpg(temp_dir.path(), "gpg: Good signature from \"A <a@b.c>\"");
+        let info = check_gpg_signature_with(&bare, stub.to_str().unwrap()).unwrap();
+        assert!(info.is_signed);
+        assert_eq!(info.signature_type.as_deref(), Some("GPG"));
+        assert_eq!(info.verification_status, "Valid");
+        drop(file_path);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejected_detached_sig_is_reported_as_present_not_verified() {
+        let (temp_dir, _f) = create_test_file(b"x").unwrap();
+        let bare = temp_dir.path().join("sample.bin");
+        fs::write(&bare, b"payload").unwrap();
+        fs::write(temp_dir.path().join("sample.bin.asc"), b"sig").unwrap();
+        let stub = stub_gpg(temp_dir.path(), "gpg: BAD signature");
+        let info = check_gpg_signature_with(&bare, stub.to_str().unwrap()).unwrap();
+        assert!(!info.is_signed);
+        assert!(info
+            .verification_status
+            .starts_with("Detached signature present, not verified (gpg: BAD"));
+    }
+
+    #[test]
+    fn fat_header_with_huge_count_is_not_walked() {
+        let mut buf = vec![0xCA, 0xFE, 0xBA, 0xBE, 0xFF, 0xFF, 0xFF, 0xFF];
+        buf.resize(4096, 0);
+        let start = std::time::Instant::now();
+        assert_eq!(macho_has_code_signature(&buf), None);
+        assert!(start.elapsed().as_secs() < 2);
     }
 
     #[test]
@@ -658,7 +908,10 @@ gpg: WARNING: This key is not certified with a trusted signature!
             fs::write(&sig_path, b"dummy sig").unwrap();
 
             let result = check_gpg_signature(&file_path);
-            assert!(result.is_err()); // GPG will fail on dummy signature
+            // GPG rejects the dummy signature (or is missing): never valid
+            if let Ok(info) = result {
+                assert!(!info.is_signed);
+            }
         }
     }
 
@@ -1032,5 +1285,19 @@ Number of signatures  : 1
             assert!(!result.is_signed);
             assert_eq!(result.verification_status, "No signature found");
         }
+    }
+
+    #[test]
+    fn detached_signature_names_append_to_the_full_file_name() {
+        let names: Vec<String> = detached_signature_candidates(Path::new("/x/sample"))
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["/x/sample.sig", "/x/sample.asc"]);
+        let names: Vec<String> = detached_signature_candidates(Path::new("/x/sample.bin"))
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["/x/sample.bin.sig", "/x/sample.bin.asc"]);
     }
 }
