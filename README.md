@@ -120,6 +120,10 @@ Setup for Claude Code, Claude Desktop, Cursor and VS Code, the tool reference, w
 and the limits are in [docs/MCP.md](docs/MCP.md). The HTTP server has no token by default: if you expose it, set
 `--auth-token` and `--allow-root` (see [Docker](#docker) and the guide).
 
+The MCP Registry name of this server, which the registry checks in this README:
+
+mcp-name: io.github.threatflux/file-scanner
+
 ## MCP tools
 
 The server has 17 tools. Start with `analyze_file` and a path: it returns an overview and says which call to make next.
@@ -278,6 +282,8 @@ Clients then send `/data/...` paths and the header `Authorization: Bearer <token
 under a name other than `localhost`, add `--allowed-host <name>`. The tools return file contents, so never publish the
 port without a token. More in [docs/MCP.md](docs/MCP.md#docker).
 
+These MCP recipes were not run for this change: no image with these flags exists until the next release.
+
 The runtime image is based on Chainguard's `glibc-dynamic` (Wolfi): it runs as the unprivileged user 65532 and has no
 shell or package manager.
 
@@ -294,5 +300,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-Made by [ThreatFlux](https://github.com/ThreatFlux). [Report a bug](https://github.com/ThreatFlux/file-scanner/issues) or
+Made by [ThreatFlux](https://github.com/ThreatFlux).
+[Report a bug](https://github.com/ThreatFlux/file-scanner/issues) or
 [request a feature](https://github.com/ThreatFlux/file-scanner/issues).

@@ -97,7 +97,8 @@ always accepted on any port. A bare name such as `scanner.example.com` matches t
 flag for every name clients use (`file-scanner`, `file-scanner.default.svc`, and so on); a short name does
 not match its fully qualified form.
 
-Check it:
+Check it from a second terminal in which the same token is exported. The server holds the first terminal, so
+print the token there with `echo "$FILE_SCANNER_AUTH_TOKEN"` before you start it:
 
 ```bash
 curl -s http://127.0.0.1:3000/health
@@ -119,6 +120,15 @@ initialized session.
 A client sends `Authorization: Bearer <token>` on every request. Stop the server with Ctrl-C or SIGTERM.
 
 ### systemd
+
+Create the user and the token file first:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin file-scanner
+echo "FILE_SCANNER_AUTH_TOKEN=$(openssl rand -hex 32)" | sudo install -m 600 /dev/stdin /etc/file-scanner.env
+```
+
+The unit file, `/etc/systemd/system/file-scanner.service`:
 
 ```ini
 [Unit]
@@ -199,19 +209,30 @@ claude mcp add file-scanner -- docker run -i --rm -v "$PWD:$PWD:ro" -w "$PWD" \
 MCP over HTTP, published on loopback only, with a token and a read-only mount:
 
 ```bash
-docker run --rm -p 127.0.0.1:3000:3000 \
-  -e FILE_SCANNER_AUTH_TOKEN="$(openssl rand -hex 32)" \
+export FILE_SCANNER_AUTH_TOKEN="$(openssl rand -hex 32)"
+docker run -d --name file-scanner --rm -p 127.0.0.1:3000:3000 \
+  -e FILE_SCANNER_AUTH_TOKEN \
   -v /srv/samples:/data:ro \
   ghcr.io/threatflux/file-scanner \
   mcp-http --host 0.0.0.0 --port 3000 --allow-root /data
 ```
 
+`-e FILE_SCANNER_AUTH_TOKEN` with no value passes the variable from your shell, so the container and your
+client use the same token. The container runs detached; check it from the same shell, and end it with
+`docker stop file-scanner`:
+
+```bash
+curl -s http://127.0.0.1:3000/health
+curl -s -X POST http://127.0.0.1:3000/tools/list \
+  -H "Authorization: Bearer $FILE_SCANNER_AUTH_TOKEN" | head -c 200
+```
+
 Inside the container the server must bind `0.0.0.0` so that Docker can forward to it. Publishing the
 port on `127.0.0.1` on the host is what keeps it private. Clients that connect as `localhost` or
-`127.0.0.1` are always allowed, so this command needs no `--allowed-host`; add one for any other name.
-`--allowed-host` must list every host name
-clients use (see the matching rule above). Clients pass `/data/...` paths. To reach it from other hosts, publish on a
-non-loopback address and add the proxy in front of it as above.
+`127.0.0.1` are always allowed, so this command needs no `--allowed-host`; for any other name, add one
+`--allowed-host` for every host name clients use (see the matching rule above). Clients pass `/data/...`
+paths. To reach it from other hosts, publish on a non-loopback address and add the proxy in front of it as
+above.
 
 Notes:
 
@@ -236,7 +257,20 @@ native binary.
 ## Kubernetes
 
 The image has no default command, so set `args`. A Deployment that serves HTTP with a token from a
-Secret, a read-only volume of files, and a writable `/tmp`:
+Secret, a read-only volume of files, and a writable `/tmp`. The manifest refers to a Secret named
+`file-scanner` with the key `token`, a PersistentVolumeClaim named `samples`, and a Service named
+`file-scanner`. Create the Secret first:
+
+```bash
+kubectl create secret generic file-scanner --from-literal=token="$(openssl rand -hex 32)"
+```
+
+To read the token back for a client, run
+`kubectl get secret file-scanner -o jsonpath='{.data.token}' | base64 -d`.
+
+The image is `:latest`, which at the time of writing is the 0.3.9 release. It does not have `--allow-root`,
+`--host`, `--allowed-host` or token support, so this manifest needs an image from a later release or one you
+build yourself.
 
 ```yaml
 apiVersion: apps/v1
@@ -300,19 +334,43 @@ the list and gets `403`, so the probes above set `Host: localhost`, which is alw
 header the pod is restarted and never becomes ready. List every name clients use for the Service: the
 short name and the `.default.svc.cluster.local` form are different entries.
 
-Expose it with a ClusterIP Service. If you add an Ingress, terminate TLS and rate-limit there, and add its
+Expose it with a ClusterIP Service named `file-scanner`, added to the same file after a line containing `---`:
+
+```yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: file-scanner
+spec:
+  selector: { app: file-scanner }
+  ports:
+    - port: 8080
+      targetPort: 8080
+```
+
+If you add an Ingress, terminate TLS and rate-limit there, and add its
 public name with another `--allowed-host`. Do not expose the Service to the internet without the token.
 This manifest was not applied to a cluster for this guide. Use one replica: the cache and the string
 index live in the process, and MCP sessions are held by the process that opened them.
 
 ## MCP registry file
 
-`server.json` at the repository root describes the server for the MCP registry. Its three version strings
-(`version`, the cargo package `version` and the tag in the OCI `identifier`) say 0.3.9 and nothing in the
-release automation updates them. They must be set to the released version in the same change that bumps
-`Cargo.toml`, before the file is published. Because 0.3.9 does not accept `--allow-root`, the file passes
-only `mcp-stdio`; add `--allow-root` back to the arguments once the versions name a release that has it. The
-file was checked by hand against the registry schema, not validated online.
+`server.json` at the repository root describes the server for the MCP registry. It cannot be published as it
+stands. These must be true first:
+
+- The three version strings (`version`, the cargo package `version` and the tag in the OCI `identifier`) say
+  0.3.9 and nothing in the release automation updates them. Set them by hand to a release that has these
+  features, in the same change that bumps `Cargo.toml`. Because 0.3.9 does not accept `--allow-root`, the file
+  passes only `mcp-stdio`; add `--allow-root` back to the arguments once the versions name a release that has it.
+- `README.md` must contain an `mcp-name: io.github.threatflux/file-scanner` line, which the registry is expected
+  to use to check ownership of the cargo package.
+- The OCI image must carry the `io.modelcontextprotocol.server.name` label. The Dockerfile now sets it, but the
+  0.3.9 image does not have it.
+- Not confirmed: whether the registry accepts `registryType` `cargo`, and whether it accepts the lower-case
+  `io.github.threatflux` namespace. Check both when publishing.
+
+The file was checked by hand against the registry schema, not validated online.
 
 ## Building a custom image
 

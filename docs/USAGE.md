@@ -67,17 +67,21 @@ output.
 file-scanner sample.txt --strings --min-string-len 4 --format yaml
 ```
 
-The output below is shortened: only the strings-related keys are shown, and the other keys, all
-`null`, are left out.
+The output below is shortened. The lines before `extracted_strings` (path, size, times, permissions, MIME type,
+`hashes` and `binary_info`) and, after `hex_dump`, `owner_uid`, `group_gid` and the analysis keys
+(all `null` here) are left out.
 
 ```yaml
-ascii_strings:
-- hello scanner http://example.com/x
-unicode_strings: []
-interesting_strings:
-- category: URL
-  value: hello scanner http://example.com/x
-  offset: 0
+extracted_strings:
+  total_count: 1
+  unique_count: 1
+  ascii_strings:
+  - hello scanner http://example.com/x
+  unicode_strings: []
+  interesting_strings:
+  - category: URL
+    value: hello scanner http://example.com/x
+    offset: 0
 signature_info: null
 hex_dump: null
 ```

@@ -43,7 +43,7 @@ Treat the scanner as a program that opens hostile files, because that is what it
 | Package analysis (npm, Python) | at most 400 files scanned, 1 MiB per file, 16 MiB in total, 50000 listed entries |
 | `analyze_file` hex dump | `hex_dump_size` at most 4096 bytes per call (default 256), an error above that |
 | `read_hex` | `length` at most 4096 per call |
-| `yara_scan_file` | `max_file_size` (default 100 MB), optional `max_files` and `timeout_seconds` |
+| `yara_scan_file` | default/max: `max_file_size` 100/100 MB, `max_files` 10000/100000, `timeout_seconds` 60/600 |
 | Concurrent MCP analyses | bounded; further calls wait |
 | REST routes | 16 at a time, 120 second timeout |
 
@@ -64,7 +64,10 @@ file-scanner mcp-stdio --allow-root ~/samples
 With a root set, every tool path must resolve to a place under a root. The check resolves symlinks and
 `..` first, so a link that points outside the root is refused. A refused call returns an error that
 names the allowed directories. Without `--allow-root` (and without `FILE_SCANNER_ALLOWED_ROOTS`), every
-readable path is allowed.
+readable path is allowed. The server expands a leading `~/` in `--allow-root` and in
+`FILE_SCANNER_ALLOWED_ROOTS` to the home directory, so a JSON client config may use it. On this build the
+startup banner prints the text unexpanded and warns that it does not exist; a full path (for example
+`/Users/you/samples`) avoids that warning.
 
 ### HTTP
 

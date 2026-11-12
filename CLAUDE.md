@@ -15,7 +15,6 @@ with modern async capabilities and multiple output formats.
 - **Digital Signature Verification**: Support for Authenticode, GPG, and macOS code signatures
 - **Hex Dumping**: Flexible hex dump capabilities for headers, footers, or custom offsets
 - **Multiple Output Formats**: JSON, YAML, and pretty-printed JSON support
-- **Performance Optimized**: Concurrent hash calculation and efficient memory usage
 - **MCP Server Support**: Model Context Protocol server with 17 tools over stdio and Streamable HTTP (see
   `docs/MCP.md`)
 - **Analysis Caching**: Section results are cached by file SHA-256 (memory and a per-user directory on disk) so
@@ -134,7 +133,7 @@ The scanner has been tested on various file types:
 
 ### Test Program Suite
 
-The project includes test programs in 9 compiled languages to validate detection
+The project includes test programs in 7 compiled languages to validate detection
 capabilities:
 
 - **C** (`c_advanced_binary`): Buffer overflows, format strings, anti-debugging
@@ -160,7 +159,6 @@ All test binaries simulate malicious behaviors including:
 - Built with the project Rust 1.99.1 toolchain
 - Uses async processing for hash calculations to improve performance on large files
 - Modular design allows easy extension for new file formats or analysis types
-- Thorough error handling with descriptive messages
 - Memory-efficient processing with configurable limits for large files
 
 ## Common Use Cases
@@ -246,8 +244,8 @@ Design rules every tool follows:
 - Location: `--cache-dir`, else `FILE_SCANNER_CACHE_DIR`, else `$XDG_CACHE_HOME/file-scanner`, else
   `~/.cache/file-scanner` (Linux) or `~/Library/Caches/file-scanner` (macOS). Mode 0700 directory, 0600 files. An
   unusable directory degrades to memory-only with one line on stderr.
-- `FILE_SCANNER_CACHE_DISK_MB` and `FILE_SCANNER_SECTION_CACHE_MB` set the budgets. No other `FILE_SCANNER_*`
-  variable exists.
+- `FILE_SCANNER_CACHE_DISK_MB` and `FILE_SCANNER_SECTION_CACHE_MB` set the budgets. The only `FILE_SCANNER_*`
+  variables are these two plus `FILE_SCANNER_CACHE_DIR`, `FILE_SCANNER_ALLOWED_ROOTS` and `FILE_SCANNER_AUTH_TOKEN`.
 
 ### Client configuration
 
@@ -316,7 +314,7 @@ The same design for Python: a local `.whl`, `.tar.gz`/`.tgz`, `.zip`, a source d
 `pyproject.toml`, `requirements.txt` or `poetry.lock`. A PyPI name is rejected with a message that says to run
 `pip download`.
 
-- Source scan of `.py`, `.pth` and `.sh` files with the same limits as npm; `setup.py` is checked for install-time
+- Source scan of the same extensions and with the same limits as the npm tool; `setup.py` is checked for install-time
   behaviour.
 - Advisories: `src/python_vuln_db.rs` holds a small table (7 packages: Django, Flask, requests, Pillow, PyYAML, NumPy,
   urllib3) matched with PEP 440 and normalized names. An unpinned requirement is unknown, not vulnerable.

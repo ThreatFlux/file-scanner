@@ -20,13 +20,15 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   the most telling strings) and `next_steps` that name the next call. A directory path returns a paged triage table
   (`recursive`, `max_files`, `offset`, `limit`). Sections, flags and `all: true` return per-section summaries; each
   full section is cached by SHA-256 for later drill-down. New sections `call_graph` and `taint`, and an `arch`
-  argument to pick a slice of a universal Mach-O.
+  argument that picks the slice of a universal Mach-O for every per-slice section; an unknown slice name is an error
+  that lists the slices present.
 - 11 new tools (the server had six: `analyze_file`, `llm_analyze_file`, `yara_scan_file`, `analyze_java_file`,
   `analyze_npm_package` and `analyze_python_package`):
   - `query_analysis` pages and filters the lists of any section (strings by text, regex, category or encoding;
     symbols, imports, functions, findings, call-graph edges, taint flows, and more).
-  - `disassemble` lists one function or address range of an ELF or thin Mach-O binary; `read_hex` reads raw bytes at
-    any offset (negative counts from the end); `compare_files` compares two files.
+  - `disassemble` lists one function or address range (it works on an ELF, a thin Mach-O, or one slice of a
+    universal Mach-O); `read_hex` reads raw bytes at any offset (negative counts from the end); `compare_files`
+    compares two files.
   - `search_strings` and `string_details` search strings in one file or across every file indexed in the session.
   - `analyze_document` (PDF structure, JavaScript, launch actions, embedded files; Office macros, auto-exec entry
     points, keywords), `analyze_script` (shell, PowerShell, JavaScript, Python, batch, VBScript), `inspect_archive`
@@ -52,7 +54,7 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 - `--allow-root <dir>` (repeatable; also `FILE_SCANNER_ALLOWED_ROOTS`, `:`-separated) on `mcp-stdio`, `mcp-http` and
   `mcp-sse` confines every tool path to the listed directories. Symlinks and `..` are resolved before the check, and
   a symlink inside a scanned directory that points outside the roots is refused. FIFOs, sockets and devices are
-  always refused. A leading `~/` is expanded.
+  always refused as a path; inside a directory they are skipped and listed as skipped. A leading `~/` is expanded.
 - `--cache-dir <dir>` (also `FILE_SCANNER_CACHE_DIR`) and `--no-cache` on the MCP commands;
   `FILE_SCANNER_CACHE_DISK_MB` and `FILE_SCANNER_SECTION_CACHE_MB` set cache budgets. Section results are also
   cached on disk, so drill-down survives a server restart. At most `max(4, CPUs)` analyses run at once.

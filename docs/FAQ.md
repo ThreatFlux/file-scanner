@@ -28,16 +28,16 @@ File Scanner is a static file analysis tool written in Rust. It provides:
 
 ### How does File Scanner compare to other tools?
 
-It combines things that are usually separate tools. It does not replace them.
+File Scanner provides, in one program:
 
-| Feature | File Scanner | file | strings | binwalk | YARA |
-|---------|--------------|------|---------|---------|------|
-| Hashes | Yes | No | No | No | No |
-| Strings | Categorized | No | Basic | Yes | No |
-| Binary format analysis | Yes | Basic | No | Yes | No |
-| Signature checks | Yes | No | No | No | No |
-| Custom rule matching | Yes (YARA-X) | No | No | No | Yes |
-| MCP server | Yes | No | No | No | No |
+- Hashes (MD5, SHA-256, SHA-512, BLAKE3).
+- Extracted strings, grouped into categories.
+- Binary format analysis.
+- Signature checks.
+- Matching against YARA-X rules you supply, or the scanner's built-in rules.
+- An MCP server over stdio and HTTP.
+
+It does not claim to replace dedicated tools for any of these.
 
 ### Is File Scanner suitable for production use?
 
