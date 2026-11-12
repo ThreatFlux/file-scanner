@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -386,8 +386,9 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
     }
     if listing_truncated {
         notes.push(format!(
-            "listing stopped at a limit ({MAX_LISTED_ENTRIES} files listed, {MAX_VISITED_ENTRIES} entries visited or {} MiB declared); the rest of the package was not examined",
-            MAX_DECLARED_BYTES / (1024 * 1024)
+            "listing stopped at a limit ({MAX_LISTED_ENTRIES} files listed, {MAX_VISITED_ENTRIES} entries visited, {} MiB declared or {} MiB of long-name and PAX headers); the rest of the package was not examined",
+            MAX_DECLARED_BYTES / (1024 * 1024),
+            MAX_TAR_EXTENSION_TOTAL / (1024 * 1024)
         ));
     }
 
@@ -593,17 +594,56 @@ fn read_dir_files(
     Ok(out)
 }
 
-fn tar_archive(
-    path: &Path,
-    container: ContainerKind,
-) -> Result<tar::Archive<Box<dyn Read + Send>>> {
+/// Most bytes of the (decompressed) stream one tar walk reads: the declared
+/// data, the extension headers and an allowance for the 512-byte headers.
+/// Zero blocks are not entries, so no entry budget counts them; this does.
+const MAX_TAR_STREAM_BYTES: u64 = MAX_DECLARED_BYTES + MAX_TAR_EXTENSION_TOTAL + 64 * 1024 * 1024;
+
+/// Reader that reports end of stream once `left` bytes are read, and says so.
+struct BudgetReader {
+    inner: Box<dyn Read + Send>,
+    left: u64,
+    exhausted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Read for BudgetReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.left == 0 {
+            self.exhausted
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Ok(0);
+        }
+        let take = (buf.len() as u64).min(self.left) as usize;
+        let n = self.inner.read(&mut buf[..take])?;
+        self.left -= n as u64;
+        Ok(n)
+    }
+}
+
+type BudgetedTar = (
+    tar::Archive<Box<dyn Read + Send>>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+);
+
+fn tar_archive_budget(path: &Path, container: ContainerKind, budget: u64) -> Result<BudgetedTar> {
     let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
     let reader: Box<dyn Read + Send> = if container == ContainerKind::TarGz {
-        Box::new(GzDecoder::new(file))
+        // npm and pip read every gzip member (`cat a.tgz b.tgz`), not only the first.
+        Box::new(MultiGzDecoder::new(file))
     } else {
         Box::new(file)
     };
-    Ok(tar::Archive::new(reader))
+    let exhausted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader: Box<dyn Read + Send> = Box::new(BudgetReader {
+        inner: reader,
+        left: budget,
+        exhausted: exhausted.clone(),
+    });
+    let mut archive = tar::Archive::new(reader);
+    // npm's tar needs two zero blocks to end an archive and Python and bsdtar read
+    // on past one; read on to the end of the stream so no entry stays hidden.
+    archive.set_ignore_zeros(true);
+    Ok((archive, exhausted))
 }
 
 /// What a tar walk sees of one logical entry (extension headers are folded in).
@@ -617,48 +657,84 @@ struct TarItem<'a> {
     reader: &'a mut dyn Read,
 }
 
-/// Pull the `path` and `size` records out of a PAX extended header.
-fn pax_records(data: &[u8]) -> (Option<Vec<u8>>, Option<u64>) {
+/// Pull the `path` and `size` records out of a PAX extended header. `Err` when
+/// the data is not made only of well-formed `len key=value\n` records, or a
+/// `size` is not plain decimal digits: other tar readers parse such data
+/// differently, so the archive is refused instead of guessed at.
+fn pax_records(data: &[u8]) -> Result<(Option<Vec<u8>>, Option<u64>), ()> {
     let mut path = None;
     let mut size = None;
     let mut rest = data;
     while !rest.is_empty() {
-        let Some(space) = rest.iter().position(|&b| b == b' ') else {
-            break;
-        };
-        let Some(len) = std::str::from_utf8(&rest[..space])
-            .ok()
-            .and_then(|n| n.parse::<usize>().ok())
-        else {
-            break;
-        };
-        if len <= space + 1 || len > rest.len() {
+        // Padding after the last record.
+        if rest.iter().all(|&b| b == 0) {
             break;
         }
-        let record = &rest[space + 1..len];
-        let record = record.strip_suffix(b"\n").unwrap_or(record);
+        let space = rest.iter().position(|&b| b == b' ').ok_or(())?;
+        let len = std::str::from_utf8(&rest[..space])
+            .ok()
+            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|n| n.parse::<usize>().ok())
+            .ok_or(())?;
+        if len <= space + 1 || len > rest.len() {
+            return Err(());
+        }
+        let record = rest[space + 1..len].strip_suffix(b"\n").ok_or(())?;
+        if !record.contains(&b'=') {
+            return Err(());
+        }
         if let Some(value) = record.strip_prefix(b"path=") {
             path = Some(value.to_vec());
         } else if let Some(value) = record.strip_prefix(b"size=") {
-            size = std::str::from_utf8(value)
-                .ok()
-                .and_then(|v| v.trim().parse::<u64>().ok());
+            if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+                return Err(());
+            }
+            size = Some(
+                std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .ok_or(())?,
+            );
         }
         rest = &rest[len..];
     }
-    (path, size)
+    Ok((path, size))
 }
+
+/// Cut a name at its first NUL, as npm's tar, Python and bsdtar do.
+fn cut_at_nul(mut name: Vec<u8>) -> Vec<u8> {
+    if let Some(at) = name.iter().position(|&b| b == 0) {
+        name.truncate(at);
+    }
+    name
+}
+
+/// Most bytes of long-name and PAX header data read from one tar. Ordinary
+/// archives hold a few KiB; a bomb of 64 KiB headers is decompressed for
+/// seconds, so past this the listing stops with a note.
+const MAX_TAR_EXTENSION_TOTAL: u64 = 64 * 1024 * 1024;
 
 /// Visit the logical entries of a tar. GNU long-name and PAX headers are read
 /// here, with a hard cap, instead of by the tar library (which reads a whole
 /// extension entry into memory whatever size the header declares). Returns the
-/// number of PAX header entries seen. `visit` returns `false` to stop.
+/// number of PAX header entries seen and whether the walk stopped at the budget
+/// for extension headers. `visit` returns `false` to stop.
 fn walk_tar(
     path: &Path,
     container: ContainerKind,
     visit: &mut dyn FnMut(TarItem<'_>) -> Result<bool>,
-) -> Result<usize> {
-    let mut archive = tar_archive(path, container)?;
+) -> Result<(usize, bool)> {
+    walk_tar_budget(path, container, MAX_TAR_STREAM_BYTES, visit)
+}
+
+fn walk_tar_budget(
+    path: &Path,
+    container: ContainerKind,
+    budget: u64,
+    visit: &mut dyn FnMut(TarItem<'_>) -> Result<bool>,
+) -> Result<(usize, bool)> {
+    let (mut archive, exhausted) = tar_archive_budget(path, container, budget)?;
+    let was_cut = || exhausted.load(std::sync::atomic::Ordering::Relaxed);
     let entries = archive
         .entries()
         .map_err(|_| anyhow::anyhow!("The file is not a readable tar archive"))?
@@ -668,9 +744,14 @@ fn walk_tar(
     let mut pax_size: Option<u64> = None;
     let mut pax_headers = 0usize;
     let mut extensions = 0usize;
+    let mut extension_bytes = 0u64;
     let mut ordinal = 0usize;
     for entry in entries {
-        let mut entry = entry.map_err(|_| anyhow::anyhow!(TAR_DAMAGED))?;
+        let mut entry = match entry {
+            Ok(entry) => entry,
+            Err(_) if was_cut() => return Ok((pax_headers, true)),
+            Err(_) => anyhow::bail!(TAR_DAMAGED),
+        };
         let kind = entry.header().entry_type();
         let size = entry.size();
         if matches!(
@@ -691,6 +772,10 @@ fn walk_tar(
                     "The tar archive has a long-name or PAX header that declares {size} bytes (limit {MAX_TAR_EXTENSION_BYTES}); it was refused instead of being read into memory."
                 );
             }
+            extension_bytes = extension_bytes.saturating_add(size);
+            if extension_bytes > MAX_TAR_EXTENSION_TOTAL {
+                return Ok((pax_headers, true));
+            }
             let mut data = Vec::new();
             (&mut entry)
                 .take(size)
@@ -698,18 +783,24 @@ fn walk_tar(
                 .map_err(|_| anyhow::anyhow!(TAR_DAMAGED))?;
             match kind {
                 tar::EntryType::GNULongName => {
-                    while data.last() == Some(&0) {
-                        data.pop();
+                    if long_name.is_some() {
+                        anyhow::bail!(
+                            "The tar archive has two GNU long-name headers in a row; other tar readers pick different names, so it was refused."
+                        );
                     }
-                    long_name = Some(data);
+                    long_name = Some(cut_at_nul(data));
                 }
                 tar::EntryType::XHeader => {
                     pax_headers += 1;
                     // Consecutive PAX headers add up: a later one replaces only the
                     // keys it carries, as other tar readers do.
-                    let (name, declared) = pax_records(&data);
+                    let (name, declared) = pax_records(&data).map_err(|()| {
+                        anyhow::anyhow!(
+                            "The tar archive has a PAX header that is not made of well-formed records; other tar readers parse it differently, so it was refused."
+                        )
+                    })?;
                     if name.is_some() {
-                        pax_name = name;
+                        pax_name = name.map(cut_at_nul);
                     }
                     if declared.is_some() {
                         pax_size = declared;
@@ -717,7 +808,17 @@ fn walk_tar(
                 }
                 tar::EntryType::XGlobalHeader => {
                     pax_headers += 1;
-                    if pax_records(&data).1.is_some() {
+                    let declared = pax_records(&data).map_err(|()| {
+                        anyhow::anyhow!(
+                            "The tar archive has a global PAX header that is not made of well-formed records; other tar readers parse it differently, so it was refused."
+                        )
+                    })?;
+                    if declared.0.is_some() {
+                        anyhow::bail!(
+                            "The tar archive has a global PAX header that sets a path for every entry; other tar readers name files differently from it, so it was refused."
+                        );
+                    }
+                    if declared.1.is_some() {
                         anyhow::bail!(
                             "The tar archive has a global PAX header that sets a size for every entry; other tar readers extract different files from it, so it was refused."
                         );
@@ -737,20 +838,29 @@ fn walk_tar(
                 );
             }
         }
+        // A PAX path and a GNU long name on one entry: which one wins differs
+        // between readers, and no packer writes both.
+        if pax_name.is_some() && long_name.is_some() {
+            anyhow::bail!(
+                "The tar archive has an entry with both a PAX path and a GNU long name; other tar readers pick different names, so it was refused."
+            );
+        }
+        let raw_name = cut_at_nul(
+            pax_name
+                .take()
+                .or_else(|| long_name.take())
+                .unwrap_or_else(|| entry.path_bytes().into_owned()),
+        );
+        long_name = None;
         // Directories, links and devices have no data in npm's tar, bsdtar and
         // Python, but this raw reader would skip `size` bytes and so hide the
-        // entries inside them. A regular entry named like a directory is the same.
-        let named_dir = entry.path_bytes().ends_with(b"/") && pax_name.is_none();
-        if size > 0 && (!kind.is_file() || named_dir) {
+        // entries inside them. A regular entry whose resolved name ends in a slash
+        // is a directory to them and the same.
+        if size > 0 && (!kind.is_file() || raw_name.ends_with(b"/")) {
             anyhow::bail!(
                 "The tar archive has a directory, link or device entry that declares {size} bytes of data; other tar readers extract different files from it, so it was refused."
             );
         }
-        let raw_name = pax_name
-            .take()
-            .or_else(|| long_name.take())
-            .unwrap_or_else(|| entry.path_bytes().into_owned());
-        long_name = None;
         let item = TarItem {
             ordinal,
             path: String::from_utf8_lossy(&raw_name).into_owned(),
@@ -763,7 +873,7 @@ fn walk_tar(
             break;
         }
     }
-    Ok(pax_headers)
+    Ok((pax_headers, was_cut()))
 }
 
 fn list_tar(path: &Path, container: ContainerKind) -> Result<Listing> {
@@ -772,7 +882,7 @@ fn list_tar(path: &Path, container: ContainerKind) -> Result<Listing> {
     let mut ignored = 0usize;
     let mut declared = 0u64;
     let mut visited = 0usize;
-    ignored += walk_tar(path, container, &mut |item| {
+    let (pax_ignored, stopped) = walk_tar(path, container, &mut |item| {
         visited += 1;
         if visited > MAX_VISITED_ENTRIES {
             truncated = true;
@@ -808,6 +918,9 @@ fn list_tar(path: &Path, container: ContainerKind) -> Result<Listing> {
         });
         Ok(true)
     })?;
+    ignored += pax_ignored;
+    // The long-name and PAX header budget ran out: the rest was not listed.
+    truncated |= stopped;
     Ok((listed, truncated, ignored))
 }
 
@@ -990,6 +1103,11 @@ pub struct SourceFinding {
     pub line: usize,
     /// The matching text with a little context, at most 160 characters.
     pub evidence: String,
+    /// Found on a line that looks like a comment or docstring. The severity is
+    /// already lowered one step; such a finding never lifts a package to High
+    /// on its own (a usage example in documentation is not an attack).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_comment: bool,
 }
 
 /// What scanning one file produced.
@@ -1291,6 +1409,78 @@ fn import_regex() -> &'static Regex {
     })
 }
 
+/// Split source text into lines the way the language does: JavaScript ends a
+/// line at LF, CRLF, a lone CR, U+2028 and U+2029; Python and shell at LF, CRLF
+/// and a lone CR (shell does not, but reading more lines only finds more). A
+/// `//` or `#` comment ends at any of them, and the text after is code.
+fn source_lines(text: &str, lang: Lang) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\n' => {
+                out.push(&text[start..i]);
+                i += 1;
+                start = i;
+            }
+            b'\r' => {
+                out.push(&text[start..i]);
+                i += 1;
+                if bytes.get(i) == Some(&b'\n') {
+                    i += 1;
+                }
+                start = i;
+            }
+            0xE2 if lang == Lang::Js
+                && matches!(bytes.get(i + 1..i + 3), Some([0x80, 0xA8 | 0xA9])) =>
+            {
+                out.push(&text[start..i]);
+                i += 3;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < bytes.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// True when one of the first two lines of a Python file declares a source
+/// encoding other than the ordinary ones (PEP 263), such as `unicode_escape`,
+/// which makes the interpreter read `\u000a` inside a comment as a newline.
+fn declares_exotic_encoding(text: &str) -> bool {
+    text.lines().take(2).any(|line| {
+        let line = line.trim_start();
+        if !line.starts_with('#') {
+            return false;
+        }
+        // PEP 263: the first `coding` that is followed at once by `:` or `=`.
+        let Some(rest) = line.match_indices("coding").find_map(|(at, _)| {
+            let after = &line[at + 6..];
+            after
+                .strip_prefix([':', '='])
+                .map(|r| r.trim_start_matches([' ', '\t']))
+        }) else {
+            return false;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect::<String>()
+            .to_ascii_lowercase()
+            .replace('_', "-");
+        !name.is_empty()
+            && !matches!(
+                name.as_str(),
+                "utf-8" | "utf8" | "ascii" | "us-ascii" | "latin-1" | "latin1" | "iso-8859-1"
+            )
+    })
+}
+
 /// Scan one source file.
 pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
     let text = String::from_utf8_lossy(bytes);
@@ -1306,6 +1496,7 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
     // High and Critical rules; only the noisy Medium rules are left out.
     let declaration = lang == Lang::Js && is_declaration_file(path);
     let mut tracker = CommentTracker::new(lang);
+    tracker.no_doc = lang == Lang::Python && text.contains("__doc__");
     let mut per_rule: HashMap<&'static str, usize> = HashMap::new();
     let mut imports: BTreeSet<String> = BTreeSet::new();
     let applicable: Vec<&Rule> = rules()
@@ -1314,8 +1505,15 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
         .collect();
     let mut obfuscation_hits = 0usize;
     let mut max_line = 0usize;
+    // Findings on lines that look like comments, kept apart so documentation
+    // cannot use up the caps meant for code.
+    let mut comment_scan = FileScan::default();
+    let mut comment_per_rule: HashMap<&'static str, usize> = HashMap::new();
+    // A Python file that declares an exotic source encoding (`unicode_escape`)
+    // can turn the text of a comment into code: no line is trusted as comment.
+    let distrust_comments = lang == Lang::Python && declares_exotic_encoding(&text);
 
-    for (index, line) in text.lines().enumerate() {
+    for (index, line) in source_lines(&text, lang).into_iter().enumerate() {
         let number = index + 1;
         max_line = max_line.max(line.len());
         if lang == Lang::Python {
@@ -1333,7 +1531,7 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
             }
         }
         let trimmed = line.trim_start();
-        let comment = tracker.line_is_comment(line);
+        let comment = tracker.line_is_comment(line) && !distrust_comments;
         if is_pth && trimmed.starts_with("import ") {
             push_finding(
                 &mut scan,
@@ -1346,6 +1544,7 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
                 line,
                 0,
                 line.len(),
+                false,
             );
         }
         if is_setup {
@@ -1362,14 +1561,23 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
                         line,
                         m.start(),
                         m.end(),
+                        false,
                     );
                 }
             }
         }
         for rule in &applicable {
-            if comment && rule.severity != "Critical" {
-                continue;
-            }
+            // Critical rules read every line. Comment context only lowers such a
+            // finding by one step: what the tracker takes for a comment is a guess
+            // the runtime may not share. The other rules skip comment lines.
+            let severity = if comment {
+                match rule.severity {
+                    "Critical" => "High",
+                    _ => continue,
+                }
+            } else {
+                rule.severity
+            };
             if declaration && !matches!(rule.severity, "Critical" | "High") {
                 continue;
             }
@@ -1377,20 +1585,26 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
                 if !match_is_credible(rule, line, m.as_str()) {
                     continue;
                 }
-                if rule.category == "obfuscation" {
+                if rule.category == "obfuscation" && !comment {
                     obfuscation_hits += 1;
                 }
+                let (target, counts) = if comment {
+                    (&mut comment_scan, &mut comment_per_rule)
+                } else {
+                    (&mut scan, &mut per_rule)
+                };
                 push_finding(
-                    &mut scan,
-                    &mut per_rule,
+                    target,
+                    counts,
                     rule.name,
                     rule.category,
-                    rule.severity,
+                    severity,
                     path,
                     number,
                     line,
                     m.start(),
                     m.end(),
+                    comment,
                 );
             }
         }
@@ -1412,6 +1626,13 @@ pub fn scan_source(lang: Lang, path: &str, bytes: &[u8]) -> FileScan {
         score += 0.2;
     }
     scan.obfuscation_score = score.min(1.0);
+    for mut finding in comment_scan.findings {
+        if scan.findings.len() >= MAX_PER_FILE {
+            break;
+        }
+        finding.evidence = format!("(in a comment or docstring) {}", finding.evidence);
+        scan.findings.push(finding);
+    }
     scan.imports = imports.into_iter().take(40).collect();
     scan
 }
@@ -1446,6 +1667,21 @@ struct CommentTracker {
     string_cont: Option<u8>,
     /// Python and shell: the previous line ended in a backslash.
     joined: bool,
+    /// Python: the open triple-quoted string started a statement of its own (a
+    /// docstring), so its lines are documentation, not code.
+    doc: bool,
+    /// Python: the file runs its own docstring (`__doc__`): none counts as one.
+    no_doc: bool,
+    /// Python: a line of code was seen, and whether the last one ended in `:`.
+    seen_code: bool,
+    last_colon: bool,
+    /// Python: open brackets, to tell a statement start from a continuation.
+    depth: usize,
+    /// JavaScript: the tracker had to guess (a regex with no closing slash, a
+    /// string that does not close). Past a guess nothing is trusted as comment:
+    /// the guess may have swallowed a template literal or a quote, and the
+    /// runtime would read the next lines differently.
+    uncertain: bool,
 }
 
 impl CommentTracker {
@@ -1460,6 +1696,12 @@ impl CommentTracker {
             block_untrusted: false,
             string_cont: None,
             joined: false,
+            doc: false,
+            depth: 0,
+            uncertain: false,
+            no_doc: false,
+            seen_code: false,
+            last_colon: false,
         }
     }
 
@@ -1476,7 +1718,8 @@ impl CommentTracker {
     fn hash_line(&mut self, line: &str, python: bool) -> bool {
         let bytes = line.as_bytes();
         // A line joined to the one before by a backslash is not a comment line.
-        let mut code = self.quote.is_some() || self.joined;
+        let mut code = (self.quote.is_some() && !self.doc) || self.joined;
+        let mut last_sig = 0u8;
         let mut i = 0;
         while i < bytes.len() {
             if let Some((q, triple)) = self.quote {
@@ -1486,6 +1729,7 @@ impl CommentTracker {
                         if triple {
                             if bytes[i..].starts_with(&[q, q, q]) {
                                 self.quote = None;
+                                self.doc = false;
                                 i += 3;
                             } else {
                                 i += 1;
@@ -1500,23 +1744,47 @@ impl CommentTracker {
                 continue;
             }
             match bytes[i] {
-                b' ' | b'\t' | b'\r' => i += 1,
+                b' ' | b'\t' | b'\r' | 0x0c => i += 1,
                 b'#' if python || i == 0 || matches!(bytes[i - 1], b' ' | b'\t' | b';') => break,
                 b'\\' => {
                     code = true;
                     i += 2;
                 }
                 q @ (b'"' | b'\'') => {
-                    code = true;
                     let triple = python && bytes[i..].starts_with(&[q, q, q]);
+                    // A triple-quoted string that starts a statement is a docstring.
+                    // Only the first statement of the file or one right after a line
+                    // ending in `:` is: anything else may be a string the code uses.
+                    self.doc = triple
+                        && !code
+                        && self.depth == 0
+                        && !self.no_doc
+                        && (!self.seen_code || self.last_colon);
+                    if self.doc {
+                        self.seen_code = true;
+                        self.last_colon = false;
+                    } else {
+                        code = true;
+                        last_sig = q;
+                    }
                     self.quote = Some((q, triple));
                     i += if triple { 3 } else { 1 };
                 }
-                _ => {
+                b => {
                     code = true;
+                    last_sig = b;
+                    match b {
+                        b'(' | b'[' | b'{' => self.depth += 1,
+                        b')' | b']' | b'}' => self.depth = self.depth.saturating_sub(1),
+                        _ => {}
+                    }
                     i += 1;
                 }
             }
+        }
+        if code {
+            self.seen_code = true;
+            self.last_colon = last_sig == b':';
         }
         let continued = ends_with_backslash(bytes);
         // A Python string ends with its line unless the line is continued.
@@ -1529,7 +1797,7 @@ impl CommentTracker {
 
     fn js_line(&mut self, line: &str) -> bool {
         let bytes = line.as_bytes();
-        let mut code = matches!(self.templates.last(), Some(None));
+        let mut code = self.uncertain || matches!(self.templates.last(), Some(None));
         let mut i = 0;
         if let Some(q) = self.string_cont.take() {
             // The rest of a string continued from the line before.
@@ -1620,8 +1888,10 @@ impl CommentTracker {
                 {
                     // A regular expression literal: skip to its closing slash.
                     code = true;
+                    let open = i;
                     i += 1;
                     let mut class = false;
+                    let mut closed = false;
                     while i < bytes.len() {
                         match bytes[i] {
                             b'\\' => i += 1,
@@ -1629,13 +1899,28 @@ impl CommentTracker {
                             b']' => class = false,
                             b'/' if !class => {
                                 i += 1;
+                                closed = true;
                                 break;
                             }
                             _ => {}
                         }
                         i += 1;
                     }
-                    self.prev = b'a';
+                    if closed {
+                        // After `}` or a sign the slash may be a division
+                        // (`a++ / 2`) and the "regex" a span of code.
+                        if matches!(self.prev, b'}' | b'+' | b'-') {
+                            self.uncertain = true;
+                        }
+                        self.prev = b'a';
+                    } else {
+                        // A regex does not span lines: this was a division. Read
+                        // the rest of the line again as code, and trust no later
+                        // comment.
+                        self.uncertain = true;
+                        i = open + 1;
+                        self.prev = b'/';
+                    }
                 }
                 b'"' | b'\'' => {
                     code = true;
@@ -1643,8 +1928,14 @@ impl CommentTracker {
                     while i < bytes.len() && bytes[i] != c {
                         i += if bytes[i] == b'\\' { 2 } else { 1 };
                     }
-                    if i >= bytes.len() && ends_with_backslash(bytes) {
-                        self.string_cont = Some(c);
+                    if i >= bytes.len() {
+                        if ends_with_backslash(bytes) {
+                            self.string_cont = Some(c);
+                        } else {
+                            // Not closed on its line: a syntax error, or a quote
+                            // that was not one. Either way nothing after is trusted.
+                            self.uncertain = true;
+                        }
                     }
                     i += 1;
                     self.prev = b'a';
@@ -1672,6 +1963,16 @@ impl CommentTracker {
                 }
                 _ => {
                     code = true;
+                    // A division after `)`, `]`, an identifier or a number is a
+                    // guess; with a slash, quote or backtick after it the pair
+                    // could be read the other way round.
+                    if c == b'/'
+                        && bytes[i + 1..]
+                            .iter()
+                            .any(|b| matches!(b, b'/' | b'\'' | b'"' | b'`'))
+                    {
+                        self.uncertain = true;
+                    }
                     self.prev = c;
                     i += 1;
                 }
@@ -1776,6 +2077,7 @@ fn push_finding(
     line: &str,
     start: usize,
     end: usize,
+    in_comment: bool,
 ) {
     if scan.findings.len() >= MAX_PER_FILE {
         return;
@@ -1792,6 +2094,7 @@ fn push_finding(
         file: path.to_string(),
         line: line_number,
         evidence: evidence_window(line, start, end),
+        in_comment,
     });
 }
 
@@ -1864,6 +2167,7 @@ pub fn source_findings_score(findings: &[SourceFinding]) -> f32 {
     // it alone puts the package at High, wherever in the package it sits.
     if findings.iter().any(|f| {
         severity_rank(&f.severity) >= 3
+            && !f.in_comment
             && matches!(
                 f.category.as_str(),
                 "download-exec" | "credential-theft" | "exfiltration" | "backdoor"
@@ -1986,5 +2290,54 @@ mod tests {
         assert!(!is_metadata_entry("pax_global_header"));
         assert!(is_metadata_entry("__MACOSX/x/y"));
         assert!(!is_metadata_entry("package/package.json"));
+    }
+}
+
+#[cfg(test)]
+mod tar_budget_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn zero_blocks_past_the_stream_budget_stop_the_walk_and_say_so() {
+        let dir = std::env::temp_dir().join(format!("fs-zero-budget-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("z.tar");
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_ustar();
+        h.set_path("a.txt").unwrap();
+        h.set_size(2);
+        h.set_cksum();
+        builder.append(&h, &b"hi"[..]).unwrap();
+        let mut bytes = builder.into_inner().unwrap();
+        bytes.extend(vec![0u8; 8 * 1024 * 1024]);
+        let mut h = tar::Header::new_ustar();
+        h.set_path("evil.js").unwrap();
+        h.set_size(2);
+        h.set_cksum();
+        bytes.extend_from_slice(h.as_bytes());
+        bytes.extend_from_slice(b"hi");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+        let mut seen = Vec::new();
+        let (_, cut) = walk_tar_budget(&path, ContainerKind::Tar, 1024 * 1024, &mut |item| {
+            seen.push(item.path);
+            Ok(true)
+        })
+        .unwrap();
+        assert!(cut);
+        assert_eq!(seen, ["a.txt"]);
+        // Within the budget everything is read and nothing is reported cut.
+        let mut seen = Vec::new();
+        let (_, cut) = walk_tar_budget(&path, ContainerKind::Tar, 64 * 1024 * 1024, &mut |item| {
+            seen.push(item.path);
+            Ok(true)
+        })
+        .unwrap();
+        assert!(!cut);
+        assert_eq!(seen, ["a.txt", "evil.js"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

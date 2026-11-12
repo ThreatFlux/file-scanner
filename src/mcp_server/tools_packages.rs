@@ -500,6 +500,12 @@ fn fingerprint(path: &Path) -> Result<String, String> {
         }
         sources.sort();
         sources.truncate(crate::package_scan::MAX_SCANNED_FILES);
+        // The manifest the analysis reads is the shallowest one; in walk order
+        // many nested manifests can sort before it and push it past the cap.
+        manifests.sort_by_key(|file| {
+            let relative = file.strip_prefix(path).unwrap_or(file);
+            (relative.components().count(), file.clone())
+        });
         for file in manifests
             .iter()
             .take(64)
@@ -1098,6 +1104,29 @@ mod tests {
         std::fs::File::options()
             .write(true)
             .open(&file)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_ne!(first, fingerprint(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn fingerprint_sees_the_root_manifest_behind_many_nested_ones() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for n in 0..70 {
+            let nested = dir.path().join(format!("a/p{n:02}"));
+            std::fs::create_dir_all(&nested).unwrap();
+            std::fs::write(nested.join("package.json"), "{}").unwrap();
+        }
+        let root = dir.path().join("package.json");
+        std::fs::write(&root, "{\"scripts\":{\"postinstall\":\"echo aaaa\"}}").unwrap();
+        let modified = std::fs::metadata(&root).unwrap().modified().unwrap();
+        let first = fingerprint(dir.path()).unwrap();
+        // Same length, same modification time, different content.
+        std::fs::write(&root, "{\"scripts\":{\"postinstall\":\"echo bbbb\"}}").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&root)
             .unwrap()
             .set_modified(modified)
             .unwrap();

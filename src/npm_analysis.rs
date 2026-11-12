@@ -424,11 +424,16 @@ fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<NpmPackageAnalys
             .map(|f| f.path.as_str())
             .take(3)
             .collect();
-        let hint = if nested.is_empty() {
+        let mut hint = if nested.is_empty() {
             String::new()
         } else {
             format!(" Only nested manifests exist: {}.", nested.join(", "))
         };
+        if loaded.listing_truncated {
+            hint.push_str(
+                " The archive listing stopped at a limit (more than 64 MiB of long-name or PAX headers, or too many entries); a package.json may lie beyond it, so nothing was analysed.",
+            );
+        }
         anyhow::bail!(
             "No package.json found at the root of the package (expected package/package.json or package.json).{hint}"
         );
@@ -528,6 +533,7 @@ fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<NpmPackageAnalys
                 "also present: {}",
                 list.chars().take(120).collect::<String>()
             ),
+            in_comment: false,
         });
         sort_findings(&mut scan.findings);
     }

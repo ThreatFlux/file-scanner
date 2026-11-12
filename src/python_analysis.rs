@@ -530,6 +530,7 @@ fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<PythonPackageAna
                     "also present: {}",
                     list.chars().take(120).collect::<String>()
                 ),
+                in_comment: false,
             });
             sort_findings(&mut scan.findings);
         }
