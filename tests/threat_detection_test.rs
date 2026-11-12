@@ -85,6 +85,7 @@ fn test_threat_level_variants() {
             },
             recommendations: vec![],
             enhanced_analysis: None,
+            evidence: Vec::new(),
         };
 
         assert!(std::mem::discriminant(&analysis.threat_level) == std::mem::discriminant(&level));
@@ -557,155 +558,6 @@ fn test_recommendations_for_persistence() {
 }
 
 #[test]
-fn test_extract_rule_name() {
-    let test_cases = vec![
-        (
-            "rule test_rule : suspicious {",
-            Some("test_rule".to_string()),
-        ),
-        (
-            "rule malware_family : trojan malware {",
-            Some("malware_family".to_string()),
-        ),
-        ("rule simple_rule {", Some("simple_rule".to_string())),
-        ("invalid rule format", None),
-        (
-            "rule  spaced_name  : tag {",
-            Some("spaced_name".to_string()),
-        ),
-    ];
-
-    for (input, expected) in test_cases {
-        let result = extract_rule_name(input);
-        assert_eq!(result, expected);
-    }
-}
-
-#[test]
-fn test_extract_tags_from_rule() {
-    let test_cases = vec![
-        (
-            "rule test : tag1 tag2 {",
-            vec!["tag1".to_string(), "tag2".to_string()],
-        ),
-        ("rule test : single_tag {", vec!["single_tag".to_string()]),
-        ("rule test {", vec![]),
-        ("rule test : {", vec![]),
-        (
-            "rule test : tag1  tag2   tag3 {",
-            vec!["tag1".to_string(), "tag2".to_string(), "tag3".to_string()],
-        ),
-    ];
-
-    for (input, expected) in test_cases {
-        let result = extract_tags_from_rule(input);
-        assert_eq!(result, expected);
-    }
-}
-
-#[test]
-fn test_extract_metadata_from_rule() {
-    let rule_text = r#"
-rule test_rule : suspicious {
-    meta:
-        description = "Test rule for analysis"
-        author = "Security Team"
-        severity = "high"
-    strings:
-        $test = "test"
-    condition:
-        $test
-}"#;
-
-    let metadata = extract_metadata_from_rule(rule_text);
-    assert_eq!(metadata.len(), 3);
-    assert_eq!(
-        metadata.get("description").unwrap(),
-        "Test rule for analysis"
-    );
-    assert_eq!(metadata.get("author").unwrap(), "Security Team");
-    assert_eq!(metadata.get("severity").unwrap(), "high");
-}
-
-#[test]
-fn test_contains_string() {
-    let data = b"This is test data with VirtualAlloc function call";
-
-    assert!(contains_string(data, "VirtualAlloc"));
-    assert!(contains_string(data, "test"));
-    assert!(contains_string(data, "This"));
-    assert!(!contains_string(data, "NotPresent"));
-    assert!(!contains_string(data, "virtualalloc")); // Case sensitive
-}
-
-#[test]
-fn test_should_include_match_suspicious_apis() {
-    let rule_match = YaraMatch {
-        rule_identifier: "suspicious_api_calls".to_string(),
-        tags: vec![],
-        metadata: HashMap::new(),
-    };
-
-    // Test with sufficient API calls
-    let data_with_apis = b"VirtualAlloc\0WriteProcessMemory\0CreateRemoteThread\0";
-    assert!(should_include_match(&rule_match, data_with_apis));
-
-    // Test with insufficient API calls
-    let data_insufficient = b"VirtualAlloc\0WriteProcessMemory\0";
-    assert!(!should_include_match(&rule_match, data_insufficient));
-}
-
-#[test]
-fn test_should_include_match_crypto() {
-    let rule_match = YaraMatch {
-        rule_identifier: "crypto_operations".to_string(),
-        tags: vec![],
-        metadata: HashMap::new(),
-    };
-
-    // Test with AES
-    let data_with_aes = b"AES encryption";
-    assert!(should_include_match(&rule_match, data_with_aes));
-
-    // Test with RSA
-    let data_with_rsa = b"RSA key pair";
-    assert!(should_include_match(&rule_match, data_with_rsa));
-
-    // Test with base64
-    let data_with_b64 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    assert!(should_include_match(&rule_match, data_with_b64));
-
-    // Test without crypto
-    let data_without_crypto = b"No cryptographic content here";
-    assert!(!should_include_match(&rule_match, data_without_crypto));
-}
-
-#[test]
-fn test_should_include_match_network() {
-    let rule_match = YaraMatch {
-        rule_identifier: "network_communication".to_string(),
-        tags: vec![],
-        metadata: HashMap::new(),
-    };
-
-    // Test with HTTP
-    let data_with_http = b"http://example.com";
-    assert!(should_include_match(&rule_match, data_with_http));
-
-    // Test with HTTPS
-    let data_with_https = b"https://secure.com";
-    assert!(should_include_match(&rule_match, data_with_https));
-
-    // Test with socket
-    let data_with_socket = b"socket connection";
-    assert!(should_include_match(&rule_match, data_with_socket));
-
-    // Test without network indicators
-    let data_without_network = b"No network content";
-    assert!(!should_include_match(&rule_match, data_without_network));
-}
-
-#[test]
 fn test_create_threat_indicator() {
     let mut metadata = HashMap::new();
     metadata.insert(
@@ -799,6 +651,7 @@ fn test_serialization_deserialization() {
         },
         recommendations: vec!["Test recommendation".to_string()],
         enhanced_analysis: None,
+        evidence: Vec::new(),
     };
 
     // Test JSON serialization

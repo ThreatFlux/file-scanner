@@ -104,6 +104,7 @@ fn create_test_symbols_with_functions(function_names: Vec<&str>) -> SymbolTable 
 #[test]
 fn test_anti_analysis_technique_creation() {
     let technique = AntiAnalysisTechnique {
+        evidence: Vec::new(),
         technique_type: AntiAnalysisType::AntiDebug,
         indicators: vec!["IsDebuggerPresent".to_string()],
         confidence: 0.9,
@@ -135,6 +136,7 @@ fn test_all_anti_analysis_types() {
 
     for anti_type in types {
         let technique = AntiAnalysisTechnique {
+            evidence: Vec::new(),
             technique_type: anti_type.clone(),
             indicators: vec!["test".to_string()],
             confidence: 0.8,
@@ -150,6 +152,7 @@ fn test_all_anti_analysis_types() {
 #[test]
 fn test_persistence_mechanism_creation() {
     let mechanism = PersistenceMechanism {
+        evidence: Vec::new(),
         mechanism_type: PersistenceType::RegistryKeys,
         target_locations: vec!["SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run".to_string()],
         severity: Severity::High,
@@ -181,6 +184,7 @@ fn test_all_persistence_types() {
 
     for pers_type in types {
         let mechanism = PersistenceMechanism {
+            evidence: Vec::new(),
             mechanism_type: pers_type.clone(),
             target_locations: vec![],
             severity: Severity::Medium,
@@ -196,6 +200,7 @@ fn test_all_persistence_types() {
 #[test]
 fn test_network_pattern_creation() {
     let pattern = NetworkPattern {
+        evidence: Vec::new(),
         pattern_type: NetworkPatternType::CommandAndControl,
         indicators: vec!["http://malicious.com".to_string()],
         protocols: vec!["HTTP".to_string()],
@@ -228,6 +233,7 @@ fn test_all_network_pattern_types() {
 
     for pattern_type in types {
         let pattern = NetworkPattern {
+            evidence: Vec::new(),
             pattern_type: pattern_type.clone(),
             indicators: vec![],
             protocols: vec![],
@@ -677,8 +683,10 @@ fn test_backdoor_behavior_identification() {
     let temp_dir = tempdir().unwrap();
     let test_path = temp_dir.path().join("test.exe");
 
+    // A bare "http://" is only a URL scheme and no longer counts as command
+    // and control; an implant names its server by a raw IP address.
     let strings = create_test_strings_with_patterns(vec![
-        "http://",
+        "http://203.0.113.5/gate",
         "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
     ]);
 
@@ -742,12 +750,14 @@ fn test_dropper_behavior_identification() {
 fn test_evasion_score_calculation() {
     let _anti_analysis = [
         AntiAnalysisTechnique {
+            evidence: Vec::new(),
             technique_type: AntiAnalysisType::AntiDebug,
             indicators: vec!["IsDebuggerPresent".to_string()],
             confidence: 0.9,
             description: "Anti-debug".to_string(),
         },
         AntiAnalysisTechnique {
+            evidence: Vec::new(),
             technique_type: AntiAnalysisType::AntiVM,
             indicators: vec!["VMware".to_string()],
             confidence: 0.8,
@@ -828,7 +838,9 @@ fn test_empty_analysis() {
 #[test]
 fn test_serialization_deserialization() {
     let analysis = BehavioralAnalysis {
+        string_coverage: None,
         anti_analysis: vec![AntiAnalysisTechnique {
+            evidence: Vec::new(),
             technique_type: AntiAnalysisType::AntiDebug,
             indicators: vec!["test".to_string()],
             confidence: 0.8,

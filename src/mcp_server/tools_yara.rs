@@ -1,6 +1,9 @@
 //! `yara_scan_file` and the YARA rule suggestion used by `llm_analyze_file`.
 
-use std::{path::PathBuf, time::Instant};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use rmcp::{
     handler::server::wrapper::Json,
@@ -8,20 +11,34 @@ use rmcp::{
     schemars, tool, tool_router, ErrorData,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{
-    output::{input_schema_with_budget, parse_request, respond, tool_error},
+    output::{input_schema_with_budget, page, parse_request, respond, tool_error, DEFAULT_LIMIT},
     paths::Expect,
     tools_analyze::LlmFileAnalysisResult,
     FileScannerMcp,
 };
+use crate::threat_detection::{
+    builtin_rule_sources, compile_rule_sources_with_warnings, load_rule_sources,
+    scan_path_with_rules, CustomYaraScanResult, RuleHitCount, YaraFileMatch, YaraScanError,
+    YaraScanOptions, YaraSkippedFile, DEFAULT_MAX_FILES, DEFAULT_MAX_MATCHES_PER_RULE,
+    DEFAULT_MAX_RULES_PER_FILE, DEFAULT_TIMEOUT_SECONDS,
+};
 
-const YARA_SCAN_DESCRIPTION: &str = "Scan files or directories with custom YARA rules. Pass the \
-rule text in `yara_rule` and an absolute file or directory in `path` (directories are scanned \
-recursively unless `recursive` is false). A rule that does not compile is returned as an error \
-that includes the compiler's message, so fix the rule and call again. Draft a rule with \
-llm_analyze_file first. Results are compact JSON capped at `max_output_bytes` (default 80000, \
-ceiling 400000); cut matches are listed under `truncated`.";
+const YARA_SCAN_DESCRIPTION: &str = "Scan a file or directory with YARA rules and get a summary \
+first: files scanned and matched, how many files each rule hit, skipped and unscanned files, and \
+a paged list of matching files (`offset`, `limit`) whose rule matches carry tags, metadata and the \
+first matched strings with their offsets (text, or hex for binary bytes). Give the rules as \
+`yara_rule` (rule text, or the word `builtin` for the scanner's own 10 rules) and/or `rule_path` \
+(a .yar/.yara file, or a directory of them); `include` directives are not supported. A rule that \
+does not compile is an error that carries the compiler's message, line and column, so fix the \
+rule and call again. Draft a rule with llm_analyze_file first. Listing is capped: \
+`max_matches_per_rule` string matches per rule (the rest are counted in `strings_total`), \
+`max_rules_per_file`, `max_files` (the walk stops there; the rest is not counted) and `timeout_seconds` for \
+the whole scan, walk included; whatever was cut is named in `limits_reached`. Files over `max_file_size`, symlinks and \
+unreadable directories are listed under `skipped`; unreadable files are listed under `errors`. Results are compact JSON capped at `max_output_bytes` \
+(default 80000, ceiling 400000).";
 
 #[tool_router(router = yara_router, vis = "pub(crate)")]
 impl FileScannerMcp {
@@ -29,7 +46,7 @@ impl FileScannerMcp {
         name = "yara_scan_file",
         title = "Scan with YARA",
         description = YARA_SCAN_DESCRIPTION,
-        input_schema = input_schema_with_budget::<YaraScanRequest>(),
+        input_schema = input_schema_with_budget::<YaraScanArgs>(),
         annotations(
             title = "Scan with YARA",
             read_only_hint = true,
@@ -43,60 +60,81 @@ impl FileScannerMcp {
     }
 }
 
-impl FileScannerMcp {
-    /// The `yara_scan_file` tool body.
-    pub(crate) async fn run_yara_scan(&self, args: JsonObject) -> CallToolResult {
-        let started = Instant::now();
-        let (mut request, budget, raw_args) = match parse_request::<YaraScanRequest>(args) {
-            Ok(parsed) => parsed,
-            Err(message) => return tool_error(message),
-        };
-        let raw_path = request.path.clone();
-        let path = match self
-            .state
-            .resolve_path(&raw_path, "Path", Expect::FileOrDir)
-        {
-            Ok(path) => path,
-            Err(message) => return tool_error(message),
-        };
-        // The scan reads what is inside a directory, so vet its members too.
-        if let Err(message) = self
-            .state
-            .check_tree(&path, request.recursive.unwrap_or(true))
-        {
-            return tool_error(message);
-        }
-        request.path = path.to_string_lossy().into_owned();
-
-        let analyzer = self.clone();
-        let runtime = tokio::runtime::Handle::current();
-        let outcome = self
-            .state
-            .run_blocking("yara_scan_file", move || {
-                runtime.block_on(analyzer.yara_scan_file(request))
-            })
-            .await;
-        let result = match outcome {
-            Err(crash) => return tool_error(crash),
-            Ok(Err(message)) => return tool_error(message),
-            Ok(Ok(result)) => result.0,
-        };
-        let value = match serde_json::to_value(&result) {
-            Ok(value) => value,
-            Err(error) => return tool_error(format!("Could not serialize the result: {error}")),
-        };
-        self.state
-            .record_yara_scan(&raw_args, &raw_path, &value, started)
-            .await;
-        respond(value, budget)
-    }
-}
-
 /// Largest `max_file_size` a YARA scan accepts (each file is read into memory).
 pub const MAX_YARA_FILE_BYTES: u64 = 100 * 1024 * 1024;
+/// Ceilings for the scan limits a caller can ask for.
+const MAX_FILES_CEILING: usize = 100_000;
+const MAX_MATCHES_PER_RULE_CEILING: usize = 1_000;
+const MAX_RULES_PER_FILE_CEILING: usize = 1_000;
+const MAX_TIMEOUT_SECONDS: u64 = 600;
 
-use crate::threat_detection::{YaraFileMatch, YaraScanError};
+/// The word that selects the scanner's own rules in `yara_rule`.
+const BUILTIN_KEYWORD: &str = "builtin";
 
+/// Arguments of the `yara_scan_file` tool.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct YaraScanArgs {
+    #[schemars(
+        description = "Absolute path of the file or directory to scan (a leading ~/ is expanded)"
+    )]
+    pub path: String,
+
+    #[schemars(
+        description = "YARA rule text to scan with, or the word `builtin` for the scanner's own \
+                       rule set. Give this, `rule_path`, or both."
+    )]
+    pub yara_rule: Option<String>,
+
+    #[schemars(
+        description = "Absolute path of a rule file (.yar/.yara) or of a directory whose \
+                       .yar/.yara files are all loaded. `include` is not supported."
+    )]
+    pub rule_path: Option<String>,
+
+    #[schemars(description = "If true, recursively scan directories (default: true)")]
+    pub recursive: Option<bool>,
+
+    #[schemars(
+        description = "Maximum file size to scan in bytes (default and ceiling: 100MB); \
+                              larger files are listed under `skipped`"
+    )]
+    pub max_file_size: Option<u64>,
+
+    #[schemars(description = "List the matched strings (default: true). Off gives only counts.")]
+    pub detailed_matches: Option<bool>,
+
+    #[schemars(
+        description = "Most matched strings listed per rule per file (default 10, at most 1000); \
+                       `strings_total` always has the full count"
+    )]
+    pub max_matches_per_rule: Option<usize>,
+
+    #[schemars(description = "Most matching rules listed per file (default 100, at most 1000)")]
+    pub max_rules_per_file: Option<usize>,
+
+    #[schemars(
+        description = "Most files examined (default 10000, at most 100000); the rest are counted \
+                       as not scanned"
+    )]
+    pub max_files: Option<usize>,
+
+    #[schemars(
+        description = "Wall-clock budget for the whole scan in seconds (default 60, at most 600); \
+                       a file still running when it ends is reported in `errors`"
+    )]
+    pub timeout_seconds: Option<u64>,
+
+    #[schemars(description = "Matching files to skip in the listing (default 0)")]
+    pub offset: Option<usize>,
+
+    #[schemars(description = "Matching files per page (default 50, at most 500)")]
+    pub limit: Option<usize>,
+}
+
+/// The scan the CLI asks for: rule text and the four classic options. The
+/// MCP tool takes `YaraScanArgs`, which adds rule files, the built-in rules,
+/// limits and paging.
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct YaraScanRequest {
@@ -121,28 +159,316 @@ pub struct YaraScanRequest {
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct YaraScanResult {
     pub total_files_scanned: usize,
+    /// Rule matches over all files (one rule matching one file counts once).
     pub total_matches: usize,
     pub scan_duration_ms: u64,
+    /// Files with at least one match.
+    pub files_matched: usize,
+    /// Rules in the compiled rule set.
+    pub rules_compiled: usize,
+    /// How many files each rule matched, most first.
+    pub rule_hits: Vec<RuleHitCount>,
     pub matches: Vec<YaraFileMatch>,
     pub errors: Vec<YaraScanError>,
+    /// Files not scanned (too large, unreadable); the first 100 are named.
+    pub skipped: Vec<YaraSkippedFile>,
+    pub skipped_total: usize,
+    /// Files left unscanned because `max_files` or the time budget was hit.
+    pub files_not_scanned: usize,
+    /// True when `files_not_scanned` is a lower bound: the walk stopped early.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub more_files_not_counted: bool,
+    pub timed_out: bool,
+    /// Compiler warnings about the rules.
+    pub rule_warnings: Vec<String>,
+    /// What was cut, and how to ask for more.
+    pub limits_reached: Vec<String>,
+}
+
+/// A validated scan: where, with which rules, within which limits.
+struct ScanPlan {
+    path: PathBuf,
+    sources: Vec<(String, String)>,
+    options: YaraScanOptions,
 }
 
 impl FileScannerMcp {
+    /// The `yara_scan_file` tool body.
+    pub(crate) async fn run_yara_scan(&self, args: JsonObject) -> CallToolResult {
+        let started = Instant::now();
+        let (request, budget, raw_args) = match parse_request::<YaraScanArgs>(args) {
+            Ok(parsed) => parsed,
+            Err(message) => return tool_error(message),
+        };
+        let raw_path = request.path.clone();
+        let path = match self
+            .state
+            .resolve_path(&raw_path, "Path", Expect::FileOrDir)
+        {
+            Ok(path) => path,
+            Err(message) => return tool_error(message),
+        };
+        let recursive = request.recursive.unwrap_or(true);
+        // The scan reads what is inside a directory, so vet its members too.
+        if let Err(message) = self.state.check_tree(&path, recursive) {
+            return tool_error(message);
+        }
+
+        let mut sources = Vec::new();
+        if let Some(rule) = request.yara_rule.as_deref() {
+            if rule.trim().eq_ignore_ascii_case(BUILTIN_KEYWORD) {
+                sources.extend(builtin_rule_sources());
+            } else if !rule.trim().is_empty() {
+                sources.push(("yara_rule".to_string(), rule.to_string()));
+            }
+        }
+        if let Some(raw_rule_path) = request.rule_path.as_deref() {
+            let rule_path =
+                match self
+                    .state
+                    .resolve_path(raw_rule_path, "Rule path", Expect::FileOrDir)
+                {
+                    Ok(rule_path) => rule_path,
+                    Err(message) => return tool_error(message),
+                };
+            if let Err(message) = self.state.check_tree(&rule_path, true) {
+                return tool_error(message);
+            }
+            match load_rule_sources(&rule_path) {
+                Ok(loaded) => sources.extend(loaded),
+                Err(message) => return tool_error(message),
+            }
+        }
+        if sources.is_empty() {
+            return tool_error(
+                "No rules given. Pass `yara_rule` (rule text, or the word `builtin` for the \
+                 scanner's own rules) and/or `rule_path` (a .yar/.yara file or a directory of \
+                 them).",
+            );
+        }
+
+        let options = match options_from_args(&request) {
+            Ok(options) => options,
+            Err(message) => return tool_error(message),
+        };
+        let offset = request.offset.unwrap_or(0);
+        let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
+        let plan = ScanPlan {
+            path,
+            sources,
+            options,
+        };
+
+        let outcome = self
+            .state
+            .run_blocking("yara_scan_file", move || execute_scan(&plan))
+            .await;
+        let result = match outcome {
+            Err(crash) => return tool_error(crash),
+            Ok(Err(message)) => return tool_error(message),
+            Ok(Ok(result)) => result,
+        };
+        let mut value = match serde_json::to_value(&result) {
+            Ok(value) => value,
+            Err(error) => return tool_error(format!("Could not serialize the result: {error}")),
+        };
+        // The cache keeps the complete result; the reply lists one page of files.
+        self.state
+            .record_yara_scan(&raw_args, &raw_path, &value, started)
+            .await;
+        page_matches(&mut value, &result.matches, offset, limit);
+        respond(value, budget)
+    }
+}
+
+fn options_from_args(request: &YaraScanArgs) -> Result<YaraScanOptions, String> {
+    let max_file_size = request.max_file_size.unwrap_or(MAX_YARA_FILE_BYTES);
+    if max_file_size > MAX_YARA_FILE_BYTES {
+        return Err(format!(
+            "max_file_size {max_file_size} is above the limit of {MAX_YARA_FILE_BYTES} bytes \
+             (each scanned file is read into memory). Ask for at most {MAX_YARA_FILE_BYTES}."
+        ));
+    }
+    let bounded = |name: &str, value: Option<usize>, default: usize, ceiling: usize| {
+        let value = value.unwrap_or(default);
+        if value == 0 || value > ceiling {
+            Err(format!(
+                "{name} {value} is out of range: pass a value from 1 to {ceiling}."
+            ))
+        } else {
+            Ok(value)
+        }
+    };
+    let timeout_seconds = request.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECONDS);
+    if timeout_seconds == 0 || timeout_seconds > MAX_TIMEOUT_SECONDS {
+        return Err(format!(
+            "timeout_seconds {timeout_seconds} is out of range: pass a value from 1 to \
+             {MAX_TIMEOUT_SECONDS}."
+        ));
+    }
+    Ok(YaraScanOptions {
+        recursive: request.recursive.unwrap_or(true),
+        max_file_size,
+        detailed_matches: request.detailed_matches.unwrap_or(true),
+        max_files: bounded(
+            "max_files",
+            request.max_files,
+            DEFAULT_MAX_FILES,
+            MAX_FILES_CEILING,
+        )?,
+        max_matches_per_rule: bounded(
+            "max_matches_per_rule",
+            request.max_matches_per_rule,
+            DEFAULT_MAX_MATCHES_PER_RULE,
+            MAX_MATCHES_PER_RULE_CEILING,
+        )?,
+        max_rules_per_file: bounded(
+            "max_rules_per_file",
+            request.max_rules_per_file,
+            DEFAULT_MAX_RULES_PER_FILE,
+            MAX_RULES_PER_FILE_CEILING,
+        )?,
+        timeout: Duration::from_secs(timeout_seconds),
+    })
+}
+
+/// Replace the full `matches` list in `value` with one page of it and say
+/// where the next page starts.
+fn page_matches(value: &mut Value, matches: &[YaraFileMatch], offset: usize, limit: usize) {
+    let paged = page(matches, offset, limit);
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(items) = paged.get("items") {
+        map.insert("matches".to_string(), items.clone());
+    }
+    map.insert("matches_total".to_string(), matches.len().into());
+    map.insert(
+        "matches_returned".to_string(),
+        paged.get("returned").cloned().unwrap_or(Value::Null),
+    );
+    map.insert("matches_offset".to_string(), offset.into());
+    if let Some(next) = paged.get("next_offset") {
+        map.insert("next_offset".to_string(), next.clone());
+    }
+}
+
+/// Compile the rules once and scan with them; the heavy part of the tool.
+fn execute_scan(plan: &ScanPlan) -> Result<YaraScanResult, String> {
+    let started = Instant::now();
+    let (rules, warnings) = compile_rule_sources_with_warnings(&plan.sources)?;
+    let rules_compiled = rules.iter().count();
+    let mut scan = scan_path_with_rules(&plan.path, &rules, &plan.options);
+    scan.rule_warnings = warnings;
+    Ok(summarize(
+        scan,
+        rules_compiled,
+        &plan.options,
+        started.elapsed(),
+    ))
+}
+
+fn summarize(
+    scan: CustomYaraScanResult,
+    rules_compiled: usize,
+    options: &YaraScanOptions,
+    elapsed: Duration,
+) -> YaraScanResult {
+    let mut limits = Vec::new();
+    let at_least = if scan.more_files_not_counted {
+        "at least "
+    } else {
+        ""
+    };
+    if scan.files_not_scanned > 0 {
+        if scan.walk_timed_out {
+            limits.push(format!(
+                "The {} s time budget ran out while walking the directory: {at_least}{} files \
+                 were not scanned. Raise timeout_seconds or narrow `path`.",
+                options.timeout.as_secs(),
+                scan.files_not_scanned
+            ));
+        } else if scan.timed_out {
+            limits.push(format!(
+                "The {} s time budget ran out: {at_least}{} files were not scanned. Raise \
+                 timeout_seconds, narrow `path`, or simplify the rules.",
+                options.timeout.as_secs(),
+                scan.files_not_scanned
+            ));
+        } else {
+            limits.push(format!(
+                "max_files {} reached: {at_least}{} more files were not scanned (the walk \
+                 stops there, so the full count is unknown). Raise max_files or narrow `path`.",
+                options.max_files, scan.files_not_scanned
+            ));
+        }
+    } else if scan.timed_out {
+        limits.push(format!(
+            "A file hit the {} s time budget (see `errors`).",
+            options.timeout.as_secs()
+        ));
+    }
+    let strings_cut = scan
+        .matches
+        .iter()
+        .flat_map(|file| &file.matches)
+        .filter(|rule| options.detailed_matches && rule.strings_total > rule.strings.len())
+        .count();
+    if strings_cut > 0 {
+        limits.push(format!(
+            "{strings_cut} rule matches list only the first {} strings \
+             (max_matches_per_rule); `strings_total` has the full count.",
+            options.max_matches_per_rule
+        ));
+    }
+    let rules_cut = scan
+        .matches
+        .iter()
+        .filter(|file| file.rules_total > file.matches.len())
+        .count();
+    if rules_cut > 0 {
+        limits.push(format!(
+            "{rules_cut} files list only the first {} matching rules (max_rules_per_file); \
+             `rules_total` has the full count.",
+            options.max_rules_per_file
+        ));
+    }
+    if scan.skipped_total > scan.skipped.len() {
+        limits.push(format!(
+            "{} skipped files are named; {} more are only counted in `skipped_total`.",
+            scan.skipped.len(),
+            scan.skipped_total - scan.skipped.len()
+        ));
+    }
+    YaraScanResult {
+        total_files_scanned: scan.total_files_scanned,
+        total_matches: scan.total_matches,
+        scan_duration_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        files_matched: scan.files_matched,
+        rules_compiled,
+        rule_hits: scan.rule_hits,
+        matches: scan.matches,
+        errors: scan.errors,
+        skipped: scan.skipped,
+        skipped_total: scan.skipped_total,
+        files_not_scanned: scan.files_not_scanned,
+        more_files_not_counted: scan.more_files_not_counted,
+        timed_out: scan.timed_out,
+        rule_warnings: scan.rule_warnings,
+        limits_reached: limits,
+    }
+}
+
+impl FileScannerMcp {
+    /// Scan with rule text and the four classic options (the CLI path).
     pub async fn yara_scan_file(
         &self,
         request: YaraScanRequest,
     ) -> Result<Json<YaraScanResult>, String> {
-        use crate::threat_detection::scan_with_custom_rule;
-        use std::time::Instant;
-
-        let start_time = Instant::now();
         let path = PathBuf::from(&request.path);
-
         if !path.exists() {
             return Err(format!("Path does not exist: {}", request.path));
         }
-
-        let recursive = request.recursive.unwrap_or(true);
         let max_file_size = request.max_file_size.unwrap_or(MAX_YARA_FILE_BYTES);
         if max_file_size > MAX_YARA_FILE_BYTES {
             return Err(format!(
@@ -150,94 +476,240 @@ impl FileScannerMcp {
                  (each scanned file is read into memory). Ask for at most {MAX_YARA_FILE_BYTES}."
             ));
         }
-        let detailed_matches = request.detailed_matches.unwrap_or(true);
-
-        // Scan files
-        let scan_result = scan_with_custom_rule(
-            &path,
-            &request.yara_rule,
-            recursive,
-            max_file_size,
-            detailed_matches,
-        )
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-
-        let duration_ms = start_time.elapsed().as_millis() as u64;
-
-        Ok(Json(YaraScanResult {
-            total_files_scanned: scan_result.total_files_scanned,
-            total_matches: scan_result.total_matches,
-            scan_duration_ms: duration_ms,
-            matches: scan_result.matches,
-            errors: scan_result.errors,
-        }))
+        let plan = ScanPlan {
+            path,
+            sources: vec![("yara_rule".to_string(), request.yara_rule)],
+            options: YaraScanOptions {
+                recursive: request.recursive.unwrap_or(true),
+                max_file_size,
+                detailed_matches: request.detailed_matches.unwrap_or(true),
+                // The command line has no flags for the limits: scan it all.
+                max_files: usize::MAX,
+                timeout: Duration::from_secs(24 * 60 * 60),
+                ..YaraScanOptions::default()
+            },
+        };
+        let result = tokio::task::spawn_blocking(move || execute_scan(&plan))
+            .await
+            .map_err(|e| format!("YARA scan task failed: {e}"))??;
+        Ok(Json(result))
     }
+}
+
+/// Words YARA reserves; a rule cannot be named with one.
+const YARA_RESERVED: &[&str] = &[
+    "all",
+    "and",
+    "any",
+    "ascii",
+    "at",
+    "base64",
+    "base64wide",
+    "condition",
+    "contains",
+    "defined",
+    "endswith",
+    "entrypoint",
+    "false",
+    "filesize",
+    "for",
+    "fullword",
+    "global",
+    "icontains",
+    "iendswith",
+    "iequals",
+    "import",
+    "in",
+    "include",
+    "int16",
+    "int16be",
+    "int32",
+    "int32be",
+    "int8",
+    "int8be",
+    "istartswith",
+    "matches",
+    "meta",
+    "nocase",
+    "none",
+    "not",
+    "of",
+    "or",
+    "private",
+    "rule",
+    "startswith",
+    "strings",
+    "them",
+    "true",
+    "uint16",
+    "uint16be",
+    "uint32",
+    "uint32be",
+    "uint8",
+    "uint8be",
+    "wide",
+    "xor",
+];
+
+/// A valid YARA rule identifier for a file name: the last path component
+/// with every character outside `[A-Za-z0-9_]` replaced by `_`, and a
+/// `sample_` prefix when it would start with a digit or is a reserved word.
+fn rule_identifier(file_name: &str) -> String {
+    let base = file_name
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or("");
+    let mut name: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() {
+        name = "sample".to_string();
+    }
+    if name.starts_with(|c: char| c.is_ascii_digit()) || YARA_RESERVED.contains(&name.as_str()) {
+        name = format!("sample_{name}");
+    }
+    name.truncate(120);
+    name
+}
+
+/// A quoted YARA string literal for `text`: quotes, backslashes and control
+/// characters are escaped so the literal always parses.
+fn yara_string_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                let mut buf = [0u8; 4];
+                for byte in c.encode_utf8(&mut buf).bytes() {
+                    out.push_str(&format!("\\x{byte:02x}"));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The rule text for a digest, with or without the hex header pattern.
+fn build_yara_rule(analysis: &LlmFileAnalysisResult, rule_name: &str, with_header: bool) -> String {
+    let mut conditions = vec![format!("filesize == {}", analysis.file_size)];
+    let mut uses_math = false;
+
+    // Entropy condition when the file looks packed
+    if let Some(entropy) = analysis.entropy {
+        if entropy > 7.0 {
+            uses_math = true;
+            conditions.push(format!("math.entropy(0, filesize) > {:.1}", entropy - 0.5));
+        }
+    }
+
+    // Distinct key strings (a pattern may be declared once)
+    let mut strings: Vec<&str> = Vec::new();
+    for s in &analysis.key_strings {
+        if !s.is_empty() && !strings.contains(&s.as_str()) {
+            strings.push(s);
+        }
+        if strings.len() == 10 {
+            break;
+        }
+    }
+    let string_count = strings.len().min(5);
+    if string_count > 0 {
+        conditions.push(format!("{} of ($s*)", string_count.div_ceil(2)));
+    }
+
+    let header = if with_header {
+        analysis
+            .hex_patterns
+            .first()
+            .map(|h| h.trim())
+            .filter(|h| !h.is_empty())
+    } else {
+        None
+    };
+    if header.is_some() {
+        conditions.push("$header at 0".to_string());
+    }
+
+    let mut rule = String::new();
+    if uses_math {
+        rule.push_str("import \"math\"\n\n");
+    }
+    rule.push_str(&format!("rule {rule_name} {{\n"));
+    rule.push_str("    meta:\n");
+    rule.push_str(&format!("        md5 = \"{}\"\n", analysis.md5));
+    // `filesize` is a YARA keyword, so the meta entry is named file_size.
+    rule.push_str(&format!("        file_size = {}\n", analysis.file_size));
+    if header.is_some() || !strings.is_empty() {
+        rule.push_str("    strings:\n");
+    }
+    if let Some(header) = header {
+        rule.push_str(&format!("        $header = {{ {header} }}\n"));
+    }
+    for (i, s) in strings.iter().enumerate() {
+        rule.push_str(&format!(
+            "        $s{} = {}\n",
+            i + 1,
+            yara_string_literal(s)
+        ));
+    }
+    rule.push_str("    condition:\n");
+    rule.push_str(&format!("        {}\n", conditions.join(" and ")));
+    rule.push_str("}\n");
+    rule
 }
 
 /// Draft a YARA rule from an `llm_analyze_file` digest.
 ///
-/// `Err` carries the reason no rule is offered. `llm_analyze_file` (in
+/// The rule is compiled with this server's own engine before it is returned,
+/// so it works in `yara_scan_file` as it stands. `Err` carries the reason no
+/// rule is offered (the compiler's message). `llm_analyze_file` (in
 /// `tools_analyze.rs`) calls this: keep the name and signature.
 pub(crate) fn suggest_yara_rule(
     analysis: &LlmFileAnalysisResult,
     file_name: &str,
 ) -> Result<String, String> {
-    let rule_name = file_name.replace(['/', '.', '-'], "_");
-    let mut conditions = Vec::new();
-
-    // Add file size condition
-    conditions.push(format!("filesize == {}", analysis.file_size));
-
-    // Add entropy condition if packed
-    if let Some(entropy) = analysis.entropy {
-        if entropy > 7.0 {
-            conditions.push(format!("math.entropy(0, filesize) > {:.1}", entropy - 0.5));
+    let rule_name = rule_identifier(file_name);
+    let mut last_error = String::new();
+    // A malformed header pattern costs only the header, not the whole rule.
+    for with_header in [true, false] {
+        if !with_header && analysis.hex_patterns.is_empty() {
+            break;
+        }
+        let rule = build_yara_rule(analysis, &rule_name, with_header);
+        match crate::threat_detection::compile_rule_sources(&[(
+            "yara_rule_suggestion".to_string(),
+            rule.clone(),
+        )]) {
+            Ok(_) => return Ok(rule),
+            Err(message) => last_error = message,
         }
     }
-
-    // Build string conditions
-    let string_count = analysis.key_strings.len().min(5);
-    if string_count > 0 {
-        conditions.push(format!("{} of ($s*)", string_count.div_ceil(2)));
-    }
-
-    // Add hex pattern conditions
-    if !analysis.hex_patterns.is_empty() {
-        conditions.push("$header at 0".to_string());
-    }
-
-    // Build the rule
-    let mut rule = format!("rule {rule_name} {{\n");
-    rule.push_str("    meta:\n");
-    rule.push_str(&format!("        md5 = \"{}\"\n", analysis.md5));
-    rule.push_str(&format!("        filesize = {}\n", analysis.file_size));
-
-    rule.push_str("    strings:\n");
-
-    // Add hex patterns
-    if let Some(header) = analysis.hex_patterns.first() {
-        rule.push_str(&format!("        $header = {{ {header} }}\n"));
-    }
-
-    // Add key strings
-    for (i, s) in analysis.key_strings.iter().take(10).enumerate() {
-        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
-        rule.push_str(&format!("        $s{} = \"{}\"\n", i + 1, escaped));
-    }
-
-    // Add condition
-    rule.push_str("    condition:\n");
-    rule.push_str(&format!("        {}\n", conditions.join(" and ")));
-    rule.push_str("}\n");
-
-    Ok(rule)
+    Err(format!(
+        "The drafted rule did not compile in this server's YARA engine, so it was left out: \
+         {last_error}"
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mcp_server::yara_scan_files;
+    use serde_json::json;
     use std::{fs, io::Write};
     use tempfile::TempDir;
 
@@ -300,10 +772,567 @@ rule TestRule {
 
         assert!(yara_rule.contains("rule test_malware_exe"));
         assert!(yara_rule.contains("md5 = \"abc123def456\""));
-        assert!(yara_rule.contains("filesize = 1024"));
+        assert!(yara_rule.contains("file_size = 1024"));
+        assert!(yara_rule.starts_with("import \"math\""));
         assert!(yara_rule.contains("$header = { 4D 5A 90 00 }"));
         assert!(yara_rule.contains("$s1 = \"suspicious_function\""));
         assert!(yara_rule.contains("filesize == 1024"));
         assert!(yara_rule.contains("math.entropy"));
+    }
+
+    // ---- the drafted rule compiles in this server's own engine
+
+    fn digest(entropy: Option<f64>, strings: &[&str], hex: &[&str]) -> LlmFileAnalysisResult {
+        LlmFileAnalysisResult {
+            md5: "d41d8cd98f00b204e9800998ecf8427e".to_string(),
+            file_size: 4096,
+            key_strings: strings.iter().map(|s| (*s).to_string()).collect(),
+            hex_patterns: hex.iter().map(|s| (*s).to_string()).collect(),
+            imports: vec![],
+            opcodes: vec![],
+            entropy,
+            yara_rule_suggestion: None,
+        }
+    }
+
+    fn compiles(rule: &str) -> Result<(), String> {
+        crate::threat_detection::compile_rule_sources(&[("t".to_string(), rule.to_string())])
+            .map(|_| ())
+    }
+
+    #[test]
+    fn suggestion_compiles_for_low_and_high_entropy_and_odd_names() {
+        let names = [
+            "/bin/ls",
+            "my sample (copy).bin",
+            "lib+tool@2.bin",
+            "7zip_like_name.bin",
+            "invoice (1) final.bin",
+            "all",
+            "import",
+            "",
+            "/tmp/dir with space/üñí.exe",
+        ];
+        for entropy in [None, Some(3.2), Some(7.99)] {
+            for name in names {
+                let analysis = digest(
+                    entropy,
+                    &[
+                        "plain text",
+                        "has \"quote\" and \\ slash",
+                        "line\nbreak\ttab",
+                    ],
+                    &["7F 45 4C 46"],
+                );
+                let rule = suggest_yara_rule(&analysis, name)
+                    .unwrap_or_else(|e| panic!("{name} {entropy:?}: {e}"));
+                compiles(&rule).unwrap_or_else(|e| panic!("{name} {entropy:?}: {e}\n{rule}"));
+                assert_eq!(rule.contains("import \"math\""), entropy == Some(7.99));
+                assert!(!rule.contains("\n        filesize = "), "{rule}");
+            }
+        }
+    }
+
+    #[test]
+    fn suggestion_without_strings_or_header_compiles() {
+        let rule = suggest_yara_rule(&digest(None, &[], &[]), "empty.bin").unwrap();
+        compiles(&rule).unwrap();
+    }
+
+    #[test]
+    fn a_malformed_header_pattern_costs_only_the_header() {
+        let rule =
+            suggest_yara_rule(&digest(None, &["abc def"], &["not hex at all"]), "x.bin").unwrap();
+        assert!(!rule.contains("$header"), "{rule}");
+        compiles(&rule).unwrap();
+    }
+
+    #[test]
+    fn rule_identifiers_are_valid() {
+        assert_eq!(rule_identifier("test_malware.exe"), "test_malware_exe");
+        assert_eq!(rule_identifier("/a/b/7z.bin"), "sample_7z_bin");
+        assert_eq!(rule_identifier("a b (1).bin"), "a_b__1__bin");
+        assert_eq!(rule_identifier("rule"), "sample_rule");
+        assert_eq!(rule_identifier(""), "sample");
+        assert!(rule_identifier(&"x".repeat(500)).len() <= 120);
+    }
+
+    /// The suggestion for every binary in test_programs/ compiles, and the
+    /// scanner then finds the very file it was drafted from.
+    #[tokio::test]
+    async fn suggestion_compiles_and_matches_for_every_test_program_binary() {
+        use crate::mcp_server::LlmFileAnalysisRequest;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_programs");
+        let mut binaries: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("_binary"))
+            })
+            .collect();
+        binaries.sort();
+        assert!(
+            !binaries.is_empty(),
+            "no *_binary files in {}",
+            dir.display()
+        );
+
+        let mcp = FileScannerMcp::new();
+        for binary in binaries {
+            let analysis = mcp
+                .llm_analyze_file(LlmFileAnalysisRequest {
+                    file_path: binary.to_string_lossy().into_owned(),
+                    token_limit: None,
+                    min_string_length: None,
+                    max_strings: None,
+                    max_imports: None,
+                    max_opcodes: None,
+                    hex_pattern_size: None,
+                    suggest_yara_rule: Some(true),
+                })
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e}", binary.display()))
+                .0;
+            let rule = analysis
+                .yara_rule_suggestion
+                .unwrap_or_else(|| panic!("{}: no suggestion", binary.display()));
+            compiles(&rule).unwrap_or_else(|e| panic!("{}: {e}\n{rule}", binary.display()));
+
+            let scan = execute_scan(&ScanPlan {
+                path: binary.clone(),
+                sources: vec![("suggestion".to_string(), rule)],
+                options: YaraScanOptions::default(),
+            })
+            .unwrap();
+            assert_eq!(scan.total_matches, 1, "{}", binary.display());
+        }
+    }
+
+    // ---- the tool
+
+    async fn call(mcp: &FileScannerMcp, args: serde_json::Value) -> (bool, Value) {
+        let args = args.as_object().unwrap().clone();
+        let result = mcp.run_yara_scan(args).await;
+        let value = serde_json::to_value(&result).unwrap();
+        let text = value["content"][0]["text"].as_str().unwrap().to_string();
+        let is_error = value["isError"] == true;
+        let body = serde_json::from_str(&text).unwrap_or(Value::String(text));
+        (is_error, body)
+    }
+
+    fn write(dir: &std::path::Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_rule_that_does_not_compile_is_an_error_with_the_compiler_message() {
+        let dir = TempDir::new().unwrap();
+        let file = write(dir.path(), "a.bin", b"data");
+        let mcp = FileScannerMcp::new();
+        for (rule, expect) in [
+            ("rule t { condition: $a }", "$a"),
+            ("rule t { strings: $a = \"x\" condition: $b }", "$b"),
+            (
+                "rule t { condition: math.entropy(0, filesize) > 1 }",
+                "math",
+            ),
+            ("rule t { condition: true", "t"),
+        ] {
+            let (is_error, body) = call(&mcp, json!({"path": file, "yara_rule": rule})).await;
+            assert!(is_error, "{rule}: {body}");
+            let text = body.as_str().unwrap();
+            assert!(text.contains("Failed to compile YARA rule"), "{text}");
+            assert!(text.contains(expect), "{rule}: {text}");
+            assert!(text.len() > 60, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rules_are_required_and_unknown_arguments_are_rejected() {
+        let dir = TempDir::new().unwrap();
+        let file = write(dir.path(), "a.bin", b"data");
+        let mcp = FileScannerMcp::new();
+        let (is_error, body) = call(&mcp, json!({"path": file})).await;
+        assert!(
+            is_error && body.as_str().unwrap().contains("No rules given"),
+            "{body}"
+        );
+        let (is_error, body) = call(&mcp, json!({"path": file, "yara_rule": "  "})).await;
+        assert!(
+            is_error && body.as_str().unwrap().contains("No rules given"),
+            "{body}"
+        );
+        let (is_error, body) = call(
+            &mcp,
+            json!({"path": file, "yara_rule": "rule t { condition: true }", "rule_file": "x"}),
+        )
+        .await;
+        assert!(
+            is_error && body.as_str().unwrap().contains("rule_file"),
+            "{body}"
+        );
+        let (is_error, body) = call(
+            &mcp,
+            json!({"path": file, "yara_rule": "rule t { condition: true }", "max_files": 0}),
+        )
+        .await;
+        assert!(
+            is_error && body.as_str().unwrap().contains("max_files"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rules_from_a_file_a_directory_and_the_builtin_set() {
+        let dir = TempDir::new().unwrap();
+        let target = write(
+            dir.path(),
+            "sample.txt",
+            b"Your files have been encrypted. Please pay the ransom in Bitcoin.",
+        );
+        let rules = TempDir::new().unwrap();
+        let one = write(
+            rules.path(),
+            "one.yar",
+            b"rule from_file : filetag { strings: $a = \"ransom\" condition: $a }",
+        );
+        write(
+            rules.path(),
+            "two.yara",
+            b"rule from_dir { strings: $a = \"Bitcoin\" condition: $a }",
+        );
+        write(rules.path(), "notes.txt", b"this is not a rule");
+        let mcp = FileScannerMcp::new();
+
+        let (err, body) = call(&mcp, json!({"path": target, "rule_path": one})).await;
+        assert!(!err, "{body}");
+        assert_eq!(body["total_matches"], 1);
+        assert_eq!(
+            body["matches"][0]["matches"][0]["rule_identifier"],
+            "from_file"
+        );
+        assert_eq!(body["matches"][0]["matches"][0]["tags"][0], "filetag");
+
+        let (err, body) = call(&mcp, json!({"path": target, "rule_path": rules.path()})).await;
+        assert!(!err, "{body}");
+        assert_eq!(body["rules_compiled"], 2);
+        assert_eq!(body["total_matches"], 2);
+
+        let (err, body) = call(&mcp, json!({"path": target, "yara_rule": "builtin"})).await;
+        assert!(!err, "{body}");
+        let ids: Vec<&str> = body["matches"][0]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["rule_identifier"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"ransomware_indicators"), "{ids:?}");
+        assert_eq!(body["rule_hits"][0]["files"], 1);
+
+        // Inline text and a file together.
+        let (err, body) = call(
+            &mcp,
+            json!({"path": target, "rule_path": one,
+                   "yara_rule": "rule inline_rule { condition: true }"}),
+        )
+        .await;
+        assert!(!err, "{body}");
+        assert_eq!(body["total_matches"], 2);
+
+        // A directory without rules, and a rule file that does not compile.
+        let empty = TempDir::new().unwrap();
+        let (err, body) = call(&mcp, json!({"path": target, "rule_path": empty.path()})).await;
+        assert!(err && body.as_str().unwrap().contains("no .yar"), "{body}");
+        let bad = write(empty.path(), "bad.yar", b"rule bad { condition: nope }");
+        let (err, body) = call(&mcp, json!({"path": target, "rule_path": bad})).await;
+        let text = body.as_str().unwrap();
+        assert!(
+            err && text.contains("bad.yar") && text.contains("nope"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn includes_are_not_followed() {
+        let dir = TempDir::new().unwrap();
+        let file = write(dir.path(), "a.bin", b"data");
+        let other = write(dir.path(), "other.yar", b"rule other { condition: true }");
+        let mcp = FileScannerMcp::new();
+        let rule = format!("include \"{}\"", other.display());
+        let (is_error, body) = call(&mcp, json!({"path": file, "yara_rule": rule})).await;
+        assert!(is_error, "{body}");
+    }
+
+    #[tokio::test]
+    async fn tags_and_matched_bytes_of_hex_patterns_are_returned() {
+        let dir = TempDir::new().unwrap();
+        let file = write(
+            dir.path(),
+            "bin.dat",
+            &[
+                0x00, 0x11, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0xFF, 0xFE, 0x22,
+            ],
+        );
+        let rule = "rule hexy : testtag secondtag { strings: $h = { DE AD BE EF 00 01 FF FE } \
+                    condition: $h }";
+        let (err, body) = call(&mcp(), json!({"path": file, "yara_rule": rule})).await;
+        assert!(!err, "{body}");
+        let m = &body["matches"][0]["matches"][0];
+        assert_eq!(m["tags"], json!(["testtag", "secondtag"]));
+        assert_eq!(m["strings"][0]["offset"], 2);
+        assert_eq!(m["strings"][0]["length"], 8);
+        assert_eq!(m["strings"][0]["hex"], "DE AD BE EF 00 01 FF FE");
+        assert!(m["strings"][0].get("value").is_none(), "{m}");
+        assert_eq!(m["strings_total"], 1);
+    }
+
+    fn mcp() -> FileScannerMcp {
+        FileScannerMcp::new()
+    }
+
+    #[tokio::test]
+    async fn listed_matches_are_capped_and_the_totals_are_reported() {
+        let dir = TempDir::new().unwrap();
+        let file = write(dir.path(), "many.bin", &vec![b'a'; 5000]);
+        let rule = "rule many { strings: $a = \"a\" condition: $a }";
+        let (err, body) = call(&mcp(), json!({"path": file, "yara_rule": rule})).await;
+        assert!(!err, "{body}");
+        let m = &body["matches"][0]["matches"][0];
+        assert_eq!(m["strings"].as_array().unwrap().len(), 10);
+        assert_eq!(m["strings_total"], 5000);
+        assert!(
+            body["limits_reached"][0]
+                .as_str()
+                .unwrap()
+                .contains("max_matches_per_rule"),
+            "{body}"
+        );
+        // The reply is small even though the rule hit 5000 times.
+        assert!(body.to_string().len() < 5000, "{}", body.to_string().len());
+
+        let (_, body) = call(
+            &mcp(),
+            json!({"path": file, "yara_rule": rule, "max_matches_per_rule": 3}),
+        )
+        .await;
+        assert_eq!(
+            body["matches"][0]["matches"][0]["strings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let (_, body) = call(
+            &mcp(),
+            json!({"path": file, "yara_rule": rule, "detailed_matches": false}),
+        )
+        .await;
+        let m = &body["matches"][0]["matches"][0];
+        assert_eq!(m["strings"].as_array().unwrap().len(), 0);
+        assert_eq!(m["strings_total"], 5000);
+        assert!(body
+            .get("limits_reached")
+            .is_none_or(|l| l.as_array().unwrap().is_empty()));
+    }
+
+    #[tokio::test]
+    async fn rules_per_file_are_capped() {
+        let dir = TempDir::new().unwrap();
+        let file = write(dir.path(), "a.bin", b"x");
+        let rules: String = (0..5)
+            .map(|i| format!("rule r{i} {{ condition: true }}\n"))
+            .collect();
+        let (_, body) = call(
+            &mcp(),
+            json!({"path": file, "yara_rule": rules, "max_rules_per_file": 2}),
+        )
+        .await;
+        assert_eq!(body["matches"][0]["matches"].as_array().unwrap().len(), 2);
+        assert_eq!(body["matches"][0]["rules_total"], 5);
+        assert_eq!(body["total_matches"], 5);
+        assert!(body["limits_reached"][0]
+            .as_str()
+            .unwrap()
+            .contains("max_rules_per_file"));
+    }
+
+    #[tokio::test]
+    async fn file_count_is_capped_and_the_summary_comes_first_with_paged_matches() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..8 {
+            write(dir.path(), &format!("f{i}.txt"), b"hello");
+        }
+        let rule = "rule hello { strings: $a = \"hello\" condition: $a }";
+        let (_, body) = call(
+            &mcp(),
+            json!({"path": dir.path(), "yara_rule": rule, "max_files": 5, "limit": 2}),
+        )
+        .await;
+        assert_eq!(body["total_files_scanned"], 5);
+        assert_eq!(body["files_not_scanned"], 1);
+        assert_eq!(body["more_files_not_counted"], true);
+        assert_eq!(body["files_matched"], 5);
+        assert_eq!(body["matches"].as_array().unwrap().len(), 2);
+        assert_eq!(body["matches_total"], 5);
+        assert_eq!(body["next_offset"], 2);
+        assert_eq!(body["rule_hits"][0], json!({"rule": "hello", "files": 5}));
+        assert!(body["limits_reached"][0]
+            .as_str()
+            .unwrap()
+            .contains("max_files"));
+
+        let (_, page2) = call(
+            &mcp(),
+            json!({"path": dir.path(), "yara_rule": rule, "max_files": 5, "limit": 2,
+                   "offset": 4}),
+        )
+        .await;
+        assert_eq!(page2["matches"].as_array().unwrap().len(), 1);
+        assert!(page2.get("next_offset").is_none());
+    }
+
+    #[tokio::test]
+    async fn oversize_and_unreadable_files_are_reported_as_skipped() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "small.txt", b"hi");
+        write(dir.path(), "big.txt", &[b'x'; 64]);
+        let (_, body) = call(
+            &mcp(),
+            json!({"path": dir.path(), "yara_rule": "rule t { condition: true }",
+                   "max_file_size": 10}),
+        )
+        .await;
+        assert_eq!(body["total_files_scanned"], 1);
+        assert_eq!(body["skipped_total"], 1);
+        let skipped = &body["skipped"][0];
+        assert!(skipped["file_path"].as_str().unwrap().ends_with("big.txt"));
+        assert!(skipped["reason"]
+            .as_str()
+            .unwrap()
+            .contains("max_file_size"));
+
+        // A file the process may not read is an error entry, not a silent drop.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = write(dir.path(), "locked.txt", b"secret");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let readable = std::fs::read(&locked).is_ok(); // root ignores the mode
+            let (_, body) = call(
+                &mcp(),
+                json!({"path": dir.path(), "yara_rule": "rule t { condition: true }"}),
+            )
+            .await;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+            if !readable {
+                let errors = body["errors"].as_array().unwrap();
+                assert!(
+                    errors
+                        .iter()
+                        .any(|e| e["file_path"].as_str().unwrap().ends_with("locked.txt")),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_rule_is_stopped_by_the_timeout() {
+        let dir = TempDir::new().unwrap();
+        let file = write(dir.path(), "big.bin", &vec![7u8; 400_000]);
+        let rule = "rule slow { condition: for any i in (0..filesize) : (for any j in \
+                    (0..filesize) : (uint8(i) != uint8(j))) }";
+        let started = Instant::now();
+        let (err, body) = call(
+            &mcp(),
+            json!({"path": file, "yara_rule": rule, "timeout_seconds": 1}),
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "timeout was not applied"
+        );
+        assert!(!err, "{body}");
+        assert_eq!(body["timed_out"], true, "{body}");
+        assert!(
+            body["errors"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("timed out"),
+            "{body}"
+        );
+        assert!(
+            body["limits_reached"][0]
+                .as_str()
+                .unwrap()
+                .contains("time budget"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn many_small_files_share_one_compiled_rule_set() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..1500 {
+            write(dir.path(), &format!("f{i:04}.txt"), b"needle in a haystack");
+        }
+        let rule = "rule needle { strings: $a = \"needle\" condition: $a }";
+        let (err, body) = call(&mcp(), json!({"path": dir.path(), "yara_rule": rule})).await;
+        assert!(!err, "{body}");
+        assert_eq!(body["total_files_scanned"], 1500);
+        assert_eq!(body["files_matched"], 1500);
+        assert_eq!(body["total_matches"], 1500);
+    }
+
+    #[tokio::test]
+    async fn a_scan_finds_a_match_the_old_one_listed_with_matches_as_an_array() {
+        let dir = TempDir::new().unwrap();
+        let file = write(dir.path(), "a.txt", b"plain text");
+        let rule = r#"rule has_text { strings: $a = "plain text" condition: $a }"#;
+        let (_, body) = call(&mcp(), json!({"path": dir.path(), "yara_rule": rule})).await;
+        assert_eq!(body["total_matches"], 1);
+        assert_eq!(
+            body["matches"][0]["file_path"],
+            file.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            body["matches"][0]["matches"][0]["strings"][0]["value"],
+            "plain text"
+        );
+    }
+
+    #[test]
+    fn the_advertised_schema_lists_every_argument_and_requires_only_the_path() {
+        let tools = FileScannerMcp::new().tool_definitions();
+        let tool = tools.iter().find(|t| t.name == "yara_scan_file").unwrap();
+        let schema = Value::Object((*tool.input_schema).clone());
+        let properties = schema["properties"].as_object().unwrap();
+        for name in [
+            "path",
+            "yara_rule",
+            "rule_path",
+            "recursive",
+            "max_file_size",
+            "detailed_matches",
+            "max_matches_per_rule",
+            "max_rules_per_file",
+            "max_files",
+            "timeout_seconds",
+            "offset",
+            "limit",
+            "max_output_bytes",
+        ] {
+            assert!(properties.contains_key(name), "missing {name}: {schema}");
+        }
+        assert_eq!(schema["required"], json!(["path"]), "{schema}");
+        let description = tool.description.as_deref().unwrap();
+        assert!(description.contains("builtin") && description.contains("rule_path"));
     }
 }
