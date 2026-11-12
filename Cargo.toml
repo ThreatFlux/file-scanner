@@ -76,6 +76,10 @@ petgraph = "0.8.3"
 # Threat detection
 yara-x = "1.22.0"
 
+# Not used by src/ since the repository-integrity module was removed. Kept because it
+# is what links the reviewed, patched libz-sys (scripts/check-native-zlib.py); remove
+# both together.
+git2 = "0.21.0"
 # HTTP client (tests only)
 reqwest = { version = "0.13.5", features = ["json", "blocking"] }
 
@@ -218,6 +222,9 @@ petgraph = { workspace = true }
 # Threat detection
 yara-x = { workspace = true }
 walkdir = { workspace = true }
+
+# Links the reviewed native zlib; see the workspace entry.
+git2 = { workspace = true }
 
 # Archive analysis
 cfb = { workspace = true }
