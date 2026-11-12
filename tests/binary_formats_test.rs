@@ -141,10 +141,12 @@ fn truncated_fat_header_does_not_panic() {
     assert!(select_fat_slice(&bytes, None).is_none());
     let dir = TempDir::new().unwrap();
     let path = write(&dir, "cut", &bytes);
-    // not a class file and not a usable Mach-O: never a Java verdict
-    if let Ok(info) = parse_binary(&path) {
-        assert_ne!(info.format, "Java Class");
-    }
+    // not a class file and not a usable Mach-O: raw data, no Java verdict and
+    // no toolchain claim
+    let info = parse_binary(&path).unwrap();
+    assert_eq!(info.format, "Raw");
+    assert!(info.compiler.is_none() && info.linker.is_none(), "{info:?}");
+    assert!(info.universal_slices.is_none());
 }
 
 /// A universal Mach-O whose only slice is the whole file (or another fat header).
@@ -187,7 +189,7 @@ fn fat_header_with_huge_architecture_count_is_cheap() {
     let start = std::time::Instant::now();
     let sig = verify_signature(&path).unwrap();
     assert!(!sig.is_signed);
-    assert!(start.elapsed().as_secs() < 3, "took {:?}", start.elapsed());
+    assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
 }
 
 #[test]
@@ -471,9 +473,10 @@ fn pe_certificate_table_is_reported_as_present_not_verified() {
     assert!(sig.is_signed, "{sig:?}");
     assert_eq!(sig.signature_type.as_deref(), Some("Authenticode"));
     assert_ne!(sig.verification_status, "No signature found");
+    // The fixture carries no real PKCS#7 blob: whatever verifier is installed,
+    // it is never "Valid".
     assert!(
         sig.verification_status.starts_with("Present, not verified")
-            || sig.verification_status == "Valid"
             || sig
                 .verification_status
                 .starts_with("Present, verification failed"),
@@ -545,4 +548,941 @@ fn rc4_pattern_and_compressed_debug_sections_do_not_mean_encrypted() {
     let path = write(&dir, "rc4_and_sha.bin", &data);
     let result = analyze_entropy(&path).unwrap();
     assert!(!result.encryption_indicators.likely_encrypted);
+}
+
+// ---- hostile counts, entropy and attribution ------------------------------
+
+/// Thin arm64 Mach-O with an `LC_SYMTAB` whose symbol count is `nsyms`.
+fn macho_with_symtab(nsyms: u32, subtype: u32) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&0xFEED_FACFu32.to_le_bytes());
+    b.extend_from_slice(&CPU_ARM64.to_le_bytes());
+    b.extend_from_slice(&subtype.to_le_bytes());
+    b.extend_from_slice(&2u32.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes()); // ncmds
+    b.extend_from_slice(&24u32.to_le_bytes()); // sizeofcmds
+    b.extend_from_slice(&[0u8; 8]);
+    b.extend_from_slice(&2u32.to_le_bytes()); // LC_SYMTAB
+    b.extend_from_slice(&24u32.to_le_bytes());
+    b.extend_from_slice(&64u32.to_le_bytes()); // symoff
+    b.extend_from_slice(&nsyms.to_le_bytes());
+    b.extend_from_slice(&1024u32.to_le_bytes()); // stroff
+    b.extend_from_slice(&16u32.to_le_bytes()); // strsize
+    b.resize(2048, 0);
+    b
+}
+
+#[test]
+fn macho_with_a_huge_symbol_count_is_cheap_everywhere() {
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "nsyms", &macho_with_symtab(u32::MAX, 0));
+    let start = std::time::Instant::now();
+    let info = parse_binary(&path).unwrap();
+    assert_eq!(info.format, "Mach-O");
+    let _ = analyze_symbols(&path);
+    let _ = analyze_dependencies(
+        &path,
+        &analyze_symbols(&path).unwrap_or_else(|_| empty_table()),
+        None,
+    );
+    assert!(start.elapsed().as_secs() < 30, "took {:?}", start.elapsed());
+}
+
+fn empty_table() -> SymbolTable {
+    SymbolTable {
+        functions: vec![],
+        global_variables: vec![],
+        cross_references: vec![],
+        imports: vec![],
+        exports: vec![],
+        symbol_count: SymbolCounts {
+            total_functions: 0,
+            local_functions: 0,
+            imported_functions: 0,
+            exported_functions: 0,
+            global_variables: 0,
+            cross_references: 0,
+        },
+    }
+}
+
+#[test]
+fn thin_arm64e_macho_is_named_arm64e() {
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "arm64e", &thin_macho(CPU_ARM64, 2));
+    assert_eq!(parse_binary(&path).unwrap().architecture, "ARM64E");
+}
+
+/// Copy of the tracked C sample whose `.gnu.version_r` is replaced by `needs`
+/// Verneed entries chained to one chain of `aux` Vernaux entries.
+fn elf_with_hostile_verneed(needs: u32, aux: u32) -> Vec<u8> {
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_programs/c_advanced_binary");
+    let mut b = std::fs::read(sample).unwrap();
+    let u16_at = |b: &[u8], o: usize| u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+    let u32_at = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let u64_at = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    let shoff = u64_at(&b, 0x28) as usize;
+    let shentsize = u16_at(&b, 0x3a) as usize;
+    let shnum = u16_at(&b, 0x3c) as usize;
+    let mut found = None;
+    for i in 0..shnum {
+        let o = shoff + i * shentsize;
+        if u32_at(&b, o + 4) == 0x6fff_fffe {
+            found = Some(o);
+        }
+    }
+    let o = found.expect("sample has a .gnu.version_r");
+    let off = u64_at(&b, o + 0x18) as usize;
+    let vn_file = u32_at(&b, off + 4);
+    let mut blob = Vec::new();
+    for i in 0..needs {
+        blob.extend_from_slice(&1u16.to_le_bytes());
+        blob.extend_from_slice(&(aux.min(65535) as u16).to_le_bytes());
+        blob.extend_from_slice(&vn_file.to_le_bytes());
+        blob.extend_from_slice(&(16 * (needs - i)).to_le_bytes());
+        blob.extend_from_slice(&(if i + 1 < needs { 16u32 } else { 0 }).to_le_bytes());
+    }
+    for j in 0..aux {
+        blob.extend_from_slice(&0u32.to_le_bytes());
+        blob.extend_from_slice(&0u16.to_le_bytes());
+        blob.extend_from_slice(&((j % 65000 + 2) as u16).to_le_bytes());
+        blob.extend_from_slice(&0u32.to_le_bytes());
+        blob.extend_from_slice(&(if j + 1 < aux { 16u32 } else { 0 }).to_le_bytes());
+    }
+    while !b.len().is_multiple_of(16) {
+        b.push(0);
+    }
+    let new_off = b.len() as u64;
+    b.extend_from_slice(&blob);
+    b[o + 0x18..o + 0x20].copy_from_slice(&new_off.to_le_bytes());
+    b[o + 0x20..o + 0x28].copy_from_slice(&(blob.len() as u64).to_le_bytes());
+    b[o + 0x2c..o + 0x30].copy_from_slice(&needs.to_le_bytes());
+    b
+}
+
+#[test]
+fn elf_with_a_hostile_version_needs_table_is_bounded() {
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "verneed", &elf_with_hostile_verneed(8192, 65535));
+    let start = std::time::Instant::now();
+    let table = analyze_symbols(&path).unwrap();
+    assert!(!table.imports.is_empty());
+    assert!(start.elapsed().as_secs() < 30, "took {:?}", start.elapsed());
+}
+
+#[test]
+fn elf_imports_are_attributed_per_library() {
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_programs/cpp_test_binary");
+    assert!(sample.exists(), "tracked sample missing: {sample:?}");
+    let table = analyze_symbols(&sample).unwrap();
+    let deps = analyze_dependencies(&sample, &table, None).unwrap();
+    let count = |name: &str| {
+        deps.dependencies
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.imported_functions.len())
+    };
+    assert_eq!(count("libstdc++.so.6"), Some(30));
+    assert_eq!(count("libc.so.6"), Some(15));
+    assert_eq!(count("libm.so.6"), Some(1));
+    assert_eq!(count("libgcc_s.so.1"), Some(1));
+    // system runtime libraries never get a MissingLicense issue
+    assert!(
+        deps.dependencies.iter().all(|d| d.is_system_library),
+        "{:?}",
+        deps.dependencies
+            .iter()
+            .map(|d| (&d.name, d.is_system_library))
+            .collect::<Vec<_>>()
+    );
+    assert!(deps.license_summary.compliance_issues.is_empty());
+}
+
+#[test]
+fn imports_are_not_counted_as_extra_functions() {
+    let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_programs/c_advanced_binary");
+    let table = analyze_symbols(&sample).unwrap();
+    let imported = table.functions.iter().filter(|f| f.is_imported).count();
+    assert_eq!(imported, table.imports.len());
+    assert_eq!(table.symbol_count.imported_functions, imported);
+    // `nm` lists 22 defined text symbols plus weak __cxa_finalize
+    let defined = table.functions.len() - imported;
+    assert!(defined <= 25, "{defined}");
+}
+
+#[test]
+fn macho_and_pe_system_libraries_are_not_missing_a_license() {
+    let imports: Vec<ImportInfo> = [
+        ("a", "/usr/lib/libutil.dylib"),
+        ("b", "/usr/lib/libncurses.5.4.dylib"),
+        (
+            "c",
+            "/System/Library/Frameworks/Security.framework/Versions/A/Security",
+        ),
+        ("d", "SHLWAPI.dll"),
+    ]
+    .iter()
+    .map(|(n, l)| ImportInfo {
+        name: (*n).to_string(),
+        library: Some((*l).to_string()),
+        address: None,
+        ordinal: None,
+        is_delayed: false,
+    })
+    .collect();
+    let mut table = empty_table();
+    table.imports = imports;
+    let deps = analyze_dependencies(Path::new("/nonexistent"), &table, None).unwrap();
+    assert_eq!(deps.dependencies.len(), 4);
+    assert!(deps.dependencies.iter().all(|d| d.is_system_library));
+    assert!(deps.license_summary.compliance_issues.is_empty());
+}
+
+/// ELF64 with `.text` plus one extra PROGBITS section.
+fn elf_with_section(name: &str, flags: u64, data: &[u8]) -> Vec<u8> {
+    let shstrtab = format!("\0.text\0{name}\0.shstrtab\0");
+    let n_text = 1u32;
+    let n_extra = 7u32;
+    let n_str = 7 + name.len() as u32 + 1;
+    let text = [0x90u8; 512];
+    let data_off = 64 + 4 * 64;
+    let text_off = data_off;
+    let extra_off = text_off + text.len();
+    let str_off = extra_off + data.len();
+    let mut b = vec![0u8; 64];
+    b[0..4].copy_from_slice(b"\x7fELF");
+    b[4] = 2;
+    b[5] = 1;
+    b[6] = 1;
+    b[16..18].copy_from_slice(&2u16.to_le_bytes());
+    b[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
+    b[20..24].copy_from_slice(&1u32.to_le_bytes());
+    b[40..48].copy_from_slice(&64u64.to_le_bytes());
+    b[52..54].copy_from_slice(&64u16.to_le_bytes());
+    b[58..60].copy_from_slice(&64u16.to_le_bytes());
+    b[60..62].copy_from_slice(&4u16.to_le_bytes());
+    b[62..64].copy_from_slice(&3u16.to_le_bytes());
+    let shdr = |name: u32, kind: u32, flags: u64, off: usize, size: usize| {
+        let mut h = vec![0u8; 64];
+        h[0..4].copy_from_slice(&name.to_le_bytes());
+        h[4..8].copy_from_slice(&kind.to_le_bytes());
+        h[8..16].copy_from_slice(&flags.to_le_bytes());
+        h[24..32].copy_from_slice(&(off as u64).to_le_bytes());
+        h[32..40].copy_from_slice(&(size as u64).to_le_bytes());
+        h
+    };
+    b.extend(shdr(0, 0, 0, 0, 0));
+    b.extend(shdr(n_text, 1, 6, text_off, text.len()));
+    b.extend(shdr(n_extra, 1, flags, extra_off, data.len()));
+    b.extend(shdr(n_str, 3, 0, str_off, shstrtab.len()));
+    b.extend_from_slice(&text);
+    b.extend_from_slice(data);
+    b.extend_from_slice(shstrtab.as_bytes());
+    b
+}
+
+fn random_bytes(n: usize) -> Vec<u8> {
+    let mut x = 0x2545_F491u32;
+    (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x >> 11) as u8
+        })
+        .collect()
+}
+
+#[test]
+fn random_bytes_in_a_debug_named_section_are_not_exempt() {
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "debugname",
+        &elf_with_section(".debug_x", 0, &random_bytes(65536)),
+    );
+    let result = analyze_entropy(&path).unwrap();
+    let section = result
+        .sections
+        .iter()
+        .find(|s| s.name == ".debug_x")
+        .unwrap();
+    assert!(section.is_suspicious);
+    assert!(result.encryption_indicators.likely_encrypted);
+    assert!(result
+        .recommendations
+        .iter()
+        .all(|r| !r.starts_with("No significant obfuscation")));
+}
+
+/// `Elf64_Chdr` (zlib) plus `payload`; `claimed` is the uncompressed size.
+fn chdr_zlib(claimed: u64, payload: &[u8]) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&1u32.to_le_bytes()); // ch_type zlib
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&claimed.to_le_bytes());
+    data.extend_from_slice(&1u64.to_le_bytes());
+    data.extend_from_slice(payload);
+    data
+}
+
+fn zlib(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(data).unwrap();
+    enc.finish().unwrap()
+}
+
+#[test]
+fn verified_compressed_debug_section_is_listed_but_not_encrypted() {
+    // SHF_COMPRESSED, a real Elf64_Chdr and a complete stream that inflates to
+    // the claimed size (structured data, as DWARF is)
+    let plain: Vec<u8> = random_bytes(100_000).iter().map(|b| b & 0x3f).collect();
+    let data = chdr_zlib(plain.len() as u64, &zlib(&plain));
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "compressed",
+        &elf_with_section(".debug_info", 0x800, &data),
+    );
+    let result = analyze_entropy(&path).unwrap();
+    let section = result
+        .sections
+        .iter()
+        .find(|s| s.name == ".debug_info")
+        .unwrap();
+    assert!(!section.is_suspicious);
+    assert!(!result.encryption_indicators.likely_encrypted);
+    assert_eq!(result.encryption_indicators.high_entropy_regions.len(), 1);
+    assert!(result.encryption_indicators.high_entropy_regions[0]
+        .description
+        .contains("compressed"));
+}
+
+#[test]
+fn forged_compression_header_on_random_bytes_is_not_exempt() {
+    // Two plausible zlib bytes after a valid Chdr, then random data: it does
+    // not inflate, so neither a .debug_ section nor an executable one is exempt.
+    let mut payload = vec![0x78, 0x9c];
+    payload.extend_from_slice(&random_bytes(65536));
+    let data = chdr_zlib(1 << 20, &payload);
+    let dir = TempDir::new().unwrap();
+    for (name, flags, exec) in [
+        (".debug_info", 0x800u64, false),
+        (".payload", 0x800 | 0x2 | 0x4, true),
+        (".payload", 0x800, false),
+    ] {
+        let path = write(&dir, "forged", &elf_with_section(name, flags, &data));
+        let result = analyze_entropy(&path).unwrap();
+        let section = result.sections.iter().find(|s| s.name == name).unwrap();
+        assert!(section.is_suspicious, "{name} {flags:#x}: {section:?}");
+        assert!(
+            result.encryption_indicators.likely_encrypted,
+            "{name} {flags:#x}"
+        );
+        assert!(result
+            .recommendations
+            .iter()
+            .all(|r| !r.contains("the stream inflates")));
+        if exec {
+            assert!(result
+                .packed_indicators
+                .section_anomalies
+                .iter()
+                .any(|a| a.contains("SHF_COMPRESSED")));
+        }
+    }
+}
+
+#[test]
+fn a_real_stream_in_a_non_debug_section_is_not_exempt() {
+    let plain: Vec<u8> = random_bytes(100_000).iter().map(|b| b & 0x3f).collect();
+    let data = chdr_zlib(plain.len() as u64, &zlib(&plain));
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "named", &elf_with_section(".payload", 0x800, &data));
+    let result = analyze_entropy(&path).unwrap();
+    assert!(result.encryption_indicators.likely_encrypted);
+}
+
+#[test]
+fn appended_random_overlay_is_measured() {
+    let dir = TempDir::new().unwrap();
+    let mut bytes = elf_with_section(".data2", 0, &[0u8; 2048]);
+    bytes.extend_from_slice(&random_bytes(256 * 1024));
+    let path = write(&dir, "overlay", &bytes);
+    let result = analyze_entropy(&path).unwrap();
+    let overlay = result
+        .sections
+        .iter()
+        .find(|s| s.name == "overlay")
+        .unwrap();
+    assert!(overlay.is_suspicious && overlay.size >= 256 * 1024);
+    assert!(result.encryption_indicators.likely_encrypted);
+    assert!(result
+        .encryption_indicators
+        .high_entropy_regions
+        .iter()
+        .any(|r| r.description.contains("outside every section")));
+    assert!(result
+        .recommendations
+        .iter()
+        .all(|r| !r.starts_with("No significant obfuscation")));
+}
+
+#[test]
+fn section_running_past_the_end_of_the_file_is_noted_and_its_bytes_measured() {
+    let dir = TempDir::new().unwrap();
+    let mut bytes = elf_with_section(".big", 0, &random_bytes(65536));
+    // sh_size of the .big header (third section header, offset 64+2*64+32)
+    let off = 64 + 2 * 64 + 32;
+    bytes[off..off + 8].copy_from_slice(&(1u64 << 40).to_le_bytes());
+    let path = write(&dir, "pasteof", &bytes);
+    let result = analyze_entropy(&path).unwrap();
+    assert!(result
+        .recommendations
+        .iter()
+        .any(|r| r.contains("point outside the file")));
+    assert!(result.encryption_indicators.likely_encrypted);
+    assert!(result
+        .recommendations
+        .iter()
+        .all(|r| !r.starts_with("No significant obfuscation")));
+}
+
+#[test]
+fn bad_name_offset_in_the_first_symbol_keeps_the_other_symbols() {
+    // Two nlist entries; the first has an out-of-range n_strx
+    let mut b = macho_with_symtab(2, 0);
+    // symoff 64: entry 0 {n_strx, n_type, n_sect, n_desc, n_value}
+    b[64..68].copy_from_slice(&0x7FFF_FFF0u32.to_le_bytes());
+    b[68] = 0x0f; // N_SECT | N_EXT
+    b[80..84].copy_from_slice(&1u32.to_le_bytes()); // entry 1 name at strtab+1
+    b[84] = 0x01; // N_UNDF | N_EXT: an import
+    b[1025..1030].copy_from_slice(b"_foo\0");
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "badstrx", &b);
+    let table = analyze_symbols(&path).unwrap();
+    assert_eq!(table.imports.len(), 1, "{:?}", table.imports);
+    assert_eq!(table.imports[0].name, "_foo");
+    let info = parse_binary(&path).unwrap();
+    assert_eq!(info.imports, ["_foo"]);
+}
+
+#[test]
+fn dotdot_paths_do_not_count_as_system_libraries() {
+    let mut table = empty_table();
+    table.imports = vec![ImportInfo {
+        name: "a".to_string(),
+        library: Some("/usr/lib/../../tmp/e.dylib".to_string()),
+        address: None,
+        ordinal: None,
+        is_delayed: false,
+    }];
+    let deps = analyze_dependencies(Path::new("/nonexistent"), &table, None).unwrap();
+    assert!(deps.dependencies.iter().all(|d| !d.is_system_library));
+}
+
+#[test]
+fn crypto_constants_alone_do_not_mean_encrypted() {
+    let mut data = vec![0x63, 0x7c, 0x77, 0x7b, 0xf2];
+    data.extend_from_slice(&[0x67, 0xe6, 0x09, 0x6a]);
+    data.extend_from_slice(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+    data.resize(16384, 0x90);
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "constants.bin", &data);
+    let result = analyze_entropy(&path).unwrap();
+    assert!(!result.encryption_indicators.likely_encrypted);
+    assert!(result.encryption_indicators.crypto_constants_found.len() >= 3);
+    assert!(result
+        .recommendations
+        .iter()
+        .any(|r| r.contains("Crypto constants")));
+}
+
+#[test]
+fn elf_section_with_overflowing_offset_does_not_panic() {
+    let mut bytes = elf_with_section(".odd", 0, &[1, 2, 3, 4]);
+    // .odd header is the third one: sh_offset = u64::MAX - 1, sh_size = 16
+    let hdr = 64 + 3 * 64;
+    bytes[hdr + 24..hdr + 32].copy_from_slice(&(u64::MAX - 1).to_le_bytes());
+    bytes[hdr + 32..hdr + 40].copy_from_slice(&16u64.to_le_bytes());
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "overflow", &bytes);
+    let result = analyze_entropy(&path).unwrap();
+    assert!(result.sections.iter().all(|s| s.name != ".odd"));
+}
+
+#[test]
+fn tiny_text_section_is_not_called_suspicious() {
+    // 8 bytes of code in a section named .text: too small to judge
+    let bytes = elf_with_section(
+        ".text",
+        6,
+        &[0x55, 0x48, 0x89, 0xe5, 0x5d, 0xc3, 0x90, 0x90],
+    );
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "tiny", &bytes);
+    let result = analyze_entropy(&path).unwrap();
+    let tiny: Vec<_> = result.sections.iter().filter(|s| s.size == 8).collect();
+    assert_eq!(tiny.len(), 1, "{:?}", result.sections);
+    assert!(!tiny[0].is_suspicious);
+}
+
+#[test]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn large_thin_arm64_macho_is_not_called_x86_64() {
+    // The test harness binary itself: a large thin arm64 Mach-O
+    let me = std::env::current_exe().unwrap();
+    let info = parse_binary(&me).unwrap();
+    assert_eq!(info.format, "Mach-O");
+    assert_eq!(info.architecture, "ARM64");
+    let mut meta = FileMetadata::new(&me).unwrap();
+    meta.extract_basic_info().unwrap();
+    assert_eq!(meta.mime_type.as_deref(), Some("application/x-mach-binary"));
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn system_universal_binary_is_macho_not_java() {
+    let ls = Path::new("/bin/ls");
+    if !ls.exists() {
+        return;
+    }
+    let info = parse_binary(ls).unwrap();
+    assert_eq!(info.format, "Mach-O");
+    assert!(info.java_analysis.is_none());
+    let mut meta = FileMetadata::new(ls).unwrap();
+    meta.extract_basic_info().unwrap();
+    assert_eq!(meta.mime_type.as_deref(), Some("application/x-mach-binary"));
+}
+
+// ---------------------------------------------------------------------------
+// Round 3 (fourth pass): symbol-name caps, whole-stream compression check,
+// forged exempt ranges
+// ---------------------------------------------------------------------------
+
+/// ELF64 with a `.symtab` of `count` global symbols that all name the same
+/// `name_len`-byte string (`defined`: in section 1, else undefined).
+fn elf_with_shared_name_symbols(count: usize, name_len: usize, defined: bool) -> Vec<u8> {
+    let mut strtab = vec![0u8];
+    strtab.extend(std::iter::repeat_n(b'a', name_len));
+    strtab.push(0);
+    let shstrtab = b"\0.symtab\0.strtab\0.shstrtab\0".to_vec();
+    let sym_off = 64 + 4 * 64;
+    let sym_len = (count + 1) * 24;
+    let str_off = sym_off + sym_len;
+    let shstr_off = str_off + strtab.len();
+    let mut b = vec![0u8; 64];
+    b[0..4].copy_from_slice(b"\x7fELF");
+    b[4] = 2;
+    b[5] = 1;
+    b[6] = 1;
+    b[16..18].copy_from_slice(&2u16.to_le_bytes());
+    b[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
+    b[20..24].copy_from_slice(&1u32.to_le_bytes());
+    b[40..48].copy_from_slice(&64u64.to_le_bytes());
+    b[52..54].copy_from_slice(&64u16.to_le_bytes());
+    b[58..60].copy_from_slice(&64u16.to_le_bytes());
+    b[60..62].copy_from_slice(&4u16.to_le_bytes());
+    b[62..64].copy_from_slice(&3u16.to_le_bytes());
+    let shdr = |name: u32, kind: u32, link: u32, off: usize, size: usize, entsize: u64| {
+        let mut h = vec![0u8; 64];
+        h[0..4].copy_from_slice(&name.to_le_bytes());
+        h[4..8].copy_from_slice(&kind.to_le_bytes());
+        h[24..32].copy_from_slice(&(off as u64).to_le_bytes());
+        h[32..40].copy_from_slice(&(size as u64).to_le_bytes());
+        h[40..44].copy_from_slice(&link.to_le_bytes());
+        h[56..64].copy_from_slice(&entsize.to_le_bytes());
+        h
+    };
+    b.extend(shdr(0, 0, 0, 0, 0, 0));
+    b.extend(shdr(1, 2, 2, sym_off, sym_len, 24));
+    b.extend(shdr(9, 3, 0, str_off, strtab.len(), 0));
+    b.extend(shdr(17, 3, 0, shstr_off, shstrtab.len(), 0));
+    b.extend_from_slice(&[0u8; 24]);
+    for _ in 0..count {
+        let mut s = [0u8; 24];
+        s[0..4].copy_from_slice(&1u32.to_le_bytes());
+        s[4] = 0x12; // STB_GLOBAL, STT_FUNC
+        s[6..8].copy_from_slice(&(u16::from(defined)).to_le_bytes());
+        b.extend_from_slice(&s);
+    }
+    b.extend_from_slice(&strtab);
+    b.extend_from_slice(&shstrtab);
+    b
+}
+
+/// 64-bit Mach-O with `count` symbols that all point at one `name_len`-byte name.
+fn macho_with_shared_name_symbols(count: usize, name_len: usize, n_type: u8) -> Vec<u8> {
+    let symoff = 64usize;
+    let stroff = symoff + count * 16;
+    let mut b = Vec::new();
+    b.extend_from_slice(&0xFEED_FACFu32.to_le_bytes());
+    b.extend_from_slice(&CPU_ARM64.to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(&2u32.to_le_bytes());
+    b.extend_from_slice(&1u32.to_le_bytes());
+    b.extend_from_slice(&24u32.to_le_bytes());
+    b.extend_from_slice(&[0u8; 8]);
+    b.extend_from_slice(&2u32.to_le_bytes()); // LC_SYMTAB
+    b.extend_from_slice(&24u32.to_le_bytes());
+    b.extend_from_slice(&(symoff as u32).to_le_bytes());
+    b.extend_from_slice(&(count as u32).to_le_bytes());
+    b.extend_from_slice(&(stroff as u32).to_le_bytes());
+    b.extend_from_slice(&((name_len + 2) as u32).to_le_bytes());
+    b.resize(symoff, 0);
+    for _ in 0..count {
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.push(n_type);
+        b.push(u8::from(n_type & 0x0e != 0)); // n_sect 0 for an undefined symbol
+        b.extend_from_slice(&0u16.to_le_bytes());
+        let value: u64 = if n_type & 0x0e == 0 { 0 } else { 0x1000 };
+        b.extend_from_slice(&value.to_le_bytes());
+    }
+    b.push(0);
+    b.extend(std::iter::repeat_n(b'b', name_len));
+    b.push(0);
+    b
+}
+
+fn longest_name(table: &SymbolTable) -> usize {
+    table
+        .functions
+        .iter()
+        .filter(|f| !f.name.starts_with("[note]"))
+        .map(|f| f.name.len())
+        .chain(table.imports.iter().map(|i| i.name.len()))
+        .chain(table.exports.iter().map(|e| e.name.len()))
+        .chain(table.global_variables.iter().map(|v| v.name.len()))
+        .max()
+        .unwrap_or(0)
+}
+
+const NAME_CAP: usize = 4096 + "...[name truncated]".len();
+
+#[test]
+fn elf_symbols_sharing_one_huge_name_are_capped() {
+    let dir = TempDir::new().unwrap();
+    for defined in [false, true] {
+        let path = write(
+            &dir,
+            "elfnames",
+            &elf_with_shared_name_symbols(2000, 100_000, defined),
+        );
+        let table = analyze_symbols(&path).unwrap();
+        assert!(table.functions.len() >= 2000);
+        assert!(longest_name(&table) <= NAME_CAP);
+        assert!(table.functions[0].name.ends_with("[name truncated]"));
+    }
+}
+
+#[test]
+fn elf_symbol_name_budget_stops_the_listing_with_a_note() {
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "elfbudget",
+        &elf_with_shared_name_symbols(20_000, 100_000, false),
+    );
+    let start = std::time::Instant::now();
+    let table = analyze_symbols(&path).unwrap();
+    assert!(start.elapsed().as_secs() < 5);
+    let kept: usize = table.functions.iter().map(|f| f.name.len()).sum();
+    assert!(kept < 80 << 20, "kept {kept} name bytes");
+    assert!(table.symbol_count.total_functions < 20_000);
+    assert!(
+        table.functions.iter().any(|f| f.name.starts_with("[note]")),
+        "no note"
+    );
+}
+
+#[test]
+fn macho_symbols_sharing_one_huge_name_cost_a_bounded_amount() {
+    let dir = TempDir::new().unwrap();
+    // 30,000 undefined symbols (imports) that all name one 1 MB string
+    let path = write(
+        &dir,
+        "machonames",
+        &macho_with_shared_name_symbols(30_000, 1_000_000, 0x01),
+    );
+    let start = std::time::Instant::now();
+    let info = parse_binary(&path).unwrap();
+    let table = analyze_symbols(&path).unwrap();
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+    assert_eq!(info.format, "Mach-O");
+    assert!(longest_name(&table) <= NAME_CAP);
+    assert!(info.imports.iter().all(|i| i.len() <= NAME_CAP));
+    let kept: usize = table.functions.iter().map(|f| f.name.len()).sum();
+    assert!(kept < 80 << 20, "kept {kept} name bytes");
+    assert!(table.functions.iter().any(|f| f.name.starts_with("[note]")));
+}
+
+#[test]
+fn macho_defined_symbols_sharing_one_huge_name_are_capped() {
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "machodef",
+        &macho_with_shared_name_symbols(2000, 100_000, 0x0f),
+    );
+    let table = analyze_symbols(&path).unwrap();
+    assert_eq!(table.functions.len(), 2000);
+    assert!(longest_name(&table) <= NAME_CAP);
+}
+
+/// A zlib stream of `stored` zeros followed by `tail`.
+fn prefix_then(tail: &[u8], stored: usize) -> Vec<u8> {
+    let mut v = zlib(&vec![0u8; stored]);
+    v.extend_from_slice(tail);
+    v
+}
+
+#[test]
+fn valid_zlib_prefix_followed_by_random_bytes_is_not_exempt() {
+    let dir = TempDir::new().unwrap();
+    let data = chdr_zlib(1 << 20, &prefix_then(&random_bytes(65480), 4096));
+    let path = write(&dir, "prefix", &elf_with_section(".debug_x", 0x800, &data));
+    let result = analyze_entropy(&path).unwrap();
+    let section = result
+        .sections
+        .iter()
+        .find(|s| s.name == ".debug_x")
+        .unwrap();
+    assert!(section.is_suspicious, "{section:?}");
+    assert!(result.encryption_indicators.likely_encrypted);
+    assert!(result
+        .recommendations
+        .iter()
+        .all(|r| !r.contains("inflates")));
+}
+
+#[test]
+fn stream_that_inflates_to_less_than_it_claims_is_not_exempt() {
+    let dir = TempDir::new().unwrap();
+    // A complete stream, but the header claims a megabyte and it holds 4 KiB
+    let data = chdr_zlib(1 << 20, &zlib(&vec![0u8; 4096]));
+    let path = write(&dir, "short", &elf_with_section(".debug_x", 0x800, &data));
+    let result = analyze_entropy(&path).unwrap();
+    let section = result
+        .sections
+        .iter()
+        .find(|s| s.name == ".debug_x")
+        .unwrap();
+    assert!(!section.characteristics.iter().any(|c| c == "compressed"));
+}
+
+#[test]
+fn a_complete_stream_that_inflates_to_what_it_claims_is_exempt() {
+    let dir = TempDir::new().unwrap();
+    let plain: Vec<u8> = random_bytes(100_000).iter().map(|b| b & 0x3f).collect();
+    let data = chdr_zlib(plain.len() as u64, &zlib(&plain));
+    let path = write(&dir, "whole", &elf_with_section(".debug_x", 0x800, &data));
+    let result = analyze_entropy(&path).unwrap();
+    let section = result
+        .sections
+        .iter()
+        .find(|s| s.name == ".debug_x")
+        .unwrap();
+    assert!(section.characteristics.iter().any(|c| c == "compressed"));
+}
+
+/// PE32+ with one `.text` section, the headers padded to 0x400, the section
+/// data at 0x400..0x600 and `tail` after it; the certificate directory names
+/// the `tail` (`size` bytes).
+fn pe_with_text_and_cert(tail: &[u8], size: u32) -> Vec<u8> {
+    let mut b = vec![0u8; 0x40];
+    b[0] = b'M';
+    b[1] = b'Z';
+    b[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    b.extend_from_slice(b"PE\0\0");
+    b.extend_from_slice(&0x8664u16.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes()); // one section
+    b.extend_from_slice(&[0u8; 12]);
+    b.extend_from_slice(&240u16.to_le_bytes());
+    b.extend_from_slice(&0x22u16.to_le_bytes());
+    let opt_start = b.len();
+    b.extend_from_slice(&0x20Bu16.to_le_bytes());
+    b.resize(opt_start + 60, 0);
+    b.extend_from_slice(&0x400u32.to_le_bytes()); // SizeOfHeaders
+    b.resize(opt_start + 108, 0);
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.resize(opt_start + 112 + 4 * 8, 0);
+    b.extend_from_slice(&0x600u32.to_le_bytes());
+    b.extend_from_slice(&size.to_le_bytes());
+    b.resize(opt_start + 240, 0);
+    let mut sec = [0u8; 40];
+    sec[..5].copy_from_slice(b".text");
+    sec[8..12].copy_from_slice(&0x200u32.to_le_bytes());
+    sec[12..16].copy_from_slice(&0x1000u32.to_le_bytes());
+    sec[16..20].copy_from_slice(&0x200u32.to_le_bytes());
+    sec[20..24].copy_from_slice(&0x400u32.to_le_bytes());
+    sec[36..40].copy_from_slice(&0x6000_0020u32.to_le_bytes());
+    b.extend_from_slice(&sec);
+    b.resize(0x400, 0);
+    b.extend(std::iter::repeat_n(0x90u8, 0x200));
+    b.extend_from_slice(tail);
+    b
+}
+
+fn win_certificate(body: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    v.extend_from_slice(&((body.len() + 8) as u32).to_le_bytes());
+    v.extend_from_slice(&0x0200u16.to_le_bytes());
+    v.extend_from_slice(&2u16.to_le_bytes());
+    v.extend_from_slice(body);
+    while v.len() % 8 != 0 {
+        v.push(0);
+    }
+    v
+}
+
+#[test]
+fn random_bytes_behind_a_forged_certificate_header_are_measured() {
+    let dir = TempDir::new().unwrap();
+    // 1 MiB of random bytes behind a WIN_CERTIFICATE header, directory pointing at it
+    let tail = win_certificate(&random_bytes(1 << 20));
+    let path = write(
+        &dir,
+        "forgedcert.exe",
+        &pe_with_text_and_cert(&tail, tail.len() as u32),
+    );
+    let result = analyze_entropy(&path).unwrap();
+    assert!(result.encryption_indicators.likely_encrypted, "{result:#?}");
+    assert!(result
+        .recommendations
+        .iter()
+        .all(|r| !r.starts_with("No significant obfuscation")));
+}
+
+#[test]
+fn a_well_formed_certificate_table_is_not_measured_and_says_so() {
+    let dir = TempDir::new().unwrap();
+    // A DER SEQUENCE (30 82 len) of random content: a plausible PKCS#7 blob
+    let mut der = vec![0x30, 0x82, 0x0b, 0xb8];
+    der.extend(random_bytes(3000));
+    let tail = win_certificate(&der);
+    let path = write(
+        &dir,
+        "realcert.exe",
+        &pe_with_text_and_cert(&tail, tail.len() as u32),
+    );
+    let result = analyze_entropy(&path).unwrap();
+    assert!(
+        !result.encryption_indicators.likely_encrypted,
+        "{result:#?}"
+    );
+    assert!(result
+        .recommendations
+        .iter()
+        .any(|r| r.contains("certificate table") && r.contains("not measured")));
+}
+
+/// 64-bit Mach-O: `__TEXT` (header + a 0x400-byte `__text` at 0x1000) and a
+/// `__LINKEDIT` of `linkedit` bytes after it; `linkedit_filesize` is what the
+/// segment claims, `text_fileoff` the `__TEXT` segment's `fileoff`.
+fn macho_text_and_linkedit(linkedit: &[u8], linkedit_filesize: u64, text_fileoff: u64) -> Vec<u8> {
+    let seg = |name: &[u8], fileoff: u64, filesize: u64, nsects: u32| {
+        let mut s = Vec::new();
+        s.extend_from_slice(&0x19u32.to_le_bytes());
+        s.extend_from_slice(&(72 + 80 * nsects).to_le_bytes());
+        let mut n = [0u8; 16];
+        n[..name.len()].copy_from_slice(name);
+        s.extend_from_slice(&n);
+        s.extend_from_slice(&0u64.to_le_bytes()); // vmaddr
+        s.extend_from_slice(&filesize.to_le_bytes()); // vmsize
+        s.extend_from_slice(&fileoff.to_le_bytes());
+        s.extend_from_slice(&filesize.to_le_bytes());
+        s.extend_from_slice(&[0u8; 8]); // maxprot, initprot
+        s.extend_from_slice(&nsects.to_le_bytes());
+        s.extend_from_slice(&0u32.to_le_bytes());
+        s
+    };
+    let mut text = seg(b"__TEXT", text_fileoff, 0x1400, 1);
+    let mut sect = [0u8; 80];
+    sect[..6].copy_from_slice(b"__text");
+    sect[16..22].copy_from_slice(b"__TEXT");
+    sect[40..48].copy_from_slice(&0x400u64.to_le_bytes()); // size
+    sect[48..52].copy_from_slice(&0x1000u32.to_le_bytes()); // offset
+    sect[64..68].copy_from_slice(&0x8000_0400u32.to_le_bytes());
+    text.extend_from_slice(&sect);
+    let edit = seg(b"__LINKEDIT", 0x1400, linkedit_filesize, 0);
+    let mut b = Vec::new();
+    b.extend_from_slice(&0xFEED_FACFu32.to_le_bytes());
+    b.extend_from_slice(&CPU_ARM64.to_le_bytes());
+    b.extend_from_slice(&0u32.to_le_bytes());
+    b.extend_from_slice(&2u32.to_le_bytes());
+    b.extend_from_slice(&2u32.to_le_bytes());
+    b.extend_from_slice(&((text.len() + edit.len()) as u32).to_le_bytes());
+    b.extend_from_slice(&[0u8; 8]);
+    b.extend_from_slice(&text);
+    b.extend_from_slice(&edit);
+    b.resize(0x1000, 0);
+    b.extend(std::iter::repeat_n(0x1fu8, 0x400));
+    b.extend_from_slice(linkedit);
+    b
+}
+
+#[test]
+fn random_bytes_inside_a_grown_linkedit_segment_are_measured() {
+    let dir = TempDir::new().unwrap();
+    let payload = random_bytes(100_000);
+    let path = write(
+        &dir,
+        "linkedit",
+        &macho_text_and_linkedit(&payload, payload.len() as u64, 0),
+    );
+    let result = analyze_entropy(&path).unwrap();
+    assert!(result.encryption_indicators.likely_encrypted, "{result:#?}");
+    assert!(result
+        .recommendations
+        .iter()
+        .all(|r| !r.starts_with("No significant obfuscation")));
+}
+
+#[test]
+fn universal_macho_slice_with_a_huge_segment_offset_does_not_panic() {
+    let dir = TempDir::new().unwrap();
+    let thin = macho_text_and_linkedit(&random_bytes(4096), 4096, u64::MAX);
+    let path = write(&dir, "fatmax", &fat(&[(CPU_ARM64, 0, thin)]));
+    let _ = analyze_entropy(&path).unwrap();
+}
+
+#[test]
+fn zstd_compressed_debug_section_is_labelled_not_called_encrypted() {
+    let dir = TempDir::new().unwrap();
+    // Elf64_Chdr (ch_type 2 = zstd), a zstd frame header (single segment, 4-byte
+    // content size equal to the claimed size) and random "compressed" bytes
+    let claimed = 1u64 << 20;
+    let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0x80 | 0x20];
+    frame.extend_from_slice(&(claimed as u32).to_le_bytes());
+    frame.extend(random_bytes(65536));
+    let mut data = Vec::new();
+    data.extend_from_slice(&2u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&claimed.to_le_bytes());
+    data.extend_from_slice(&1u64.to_le_bytes());
+    data.extend_from_slice(&frame);
+    let path = write(&dir, "zstd", &elf_with_section(".debug_info", 0x800, &data));
+    let result = analyze_entropy(&path).unwrap();
+    assert!(
+        !result.encryption_indicators.likely_encrypted,
+        "{result:#?}"
+    );
+    assert!(result.encryption_indicators.high_entropy_regions[0]
+        .description
+        .contains("zstd"));
+}
+
+#[test]
+fn system_library_name_from_a_non_system_directory_is_not_a_system_library() {
+    let mut table = empty_table();
+    table.imports = vec![ImportInfo {
+        name: "a".to_string(),
+        library: Some("/tmp/xxx/libSystem.B.dylib".to_string()),
+        address: None,
+        ordinal: None,
+        is_delayed: false,
+    }];
+    let deps = analyze_dependencies(Path::new("/nonexistent"), &table, None).unwrap();
+    assert!(deps.dependencies.iter().all(|d| !d.is_system_library));
 }

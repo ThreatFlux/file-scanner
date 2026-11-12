@@ -219,6 +219,48 @@ const SYSTEM_LIBRARIES: &[&str] = &[
     "libsystem",
     "libobjc",
     "corefoundation",
+    // Windows system DLLs
+    "shlwapi",
+    "gdi32",
+    "shell32",
+    "ole32",
+    "oleaut32",
+    "ws2_32",
+    "wsock32",
+    "comctl32",
+    "comdlg32",
+    "wininet",
+    "winmm",
+    "crypt32",
+    "rpcrt4",
+    "setupapi",
+    "secur32",
+    "userenv",
+    "iphlpapi",
+    "ucrtbase",
+    "vcruntime140",
+    "msvcp140",
+    // GCC / C++ runtime and other base Unix libraries
+    "libstdc++",
+    "libgcc_s",
+    "libc++",
+    "libc++abi",
+    "libutil",
+    "librt",
+    "libresolv",
+    "libncurses",
+];
+
+/// Locations the operating system owns: a library loaded from here is a
+/// system library whatever its name.
+const SYSTEM_LIBRARY_DIRS: &[&str] = &[
+    "/usr/lib/",
+    "/System/Library/",
+    "/lib/",
+    "/lib64/",
+    "/usr/lib64/",
+    "/usr/lib/x86_64-linux-gnu/",
+    "/usr/lib/aarch64-linux-gnu/",
 ];
 
 struct VulnerabilityDatabase {
@@ -335,6 +377,7 @@ impl DependencyAnalyzer {
             display: String,
             path: Option<String>,
             functions: Vec<String>,
+            listed: HashSet<String>,
             system_hint: bool,
             source: DependencySource,
         }
@@ -375,12 +418,18 @@ impl DependencyAnalyzer {
                     }
                 };
             let display_for_hint = display.clone();
+            let in_system_dir = lib_path
+                .as_deref()
+                .is_some_and(Self::is_system_library_path);
             let idx = *index.entry(key).or_insert_with(|| {
                 groups.push(Group {
                     display,
                     path: lib_path,
                     functions: Vec::new(),
-                    system_hint: if import.library.as_deref().is_none_or(str::is_empty)
+                    listed: HashSet::new(),
+                    system_hint: if in_system_dir {
+                        true
+                    } else if import.library.as_deref().is_none_or(str::is_empty)
                         && source == DependencySource::DynamicLink
                     {
                         // attributed through DT_NEEDED: judge the library, not the function
@@ -392,7 +441,7 @@ impl DependencyAnalyzer {
                 });
                 groups.len() - 1
             });
-            if !groups[idx].functions.contains(&import.name) {
+            if groups[idx].listed.insert(import.name.clone()) {
                 groups[idx].functions.push(import.name.clone());
             }
         }
@@ -408,7 +457,8 @@ impl DependencyAnalyzer {
                 display: base.to_string(),
                 path: (base != lib).then(|| lib.clone()),
                 functions: Vec::new(),
-                system_hint: Self::is_system_library_file_name(base),
+                listed: HashSet::new(),
+                system_hint: Self::is_system_library_file_name(lib),
                 source: DependencySource::DynamicLink,
             });
         }
@@ -627,7 +677,40 @@ impl DependencyAnalyzer {
             )
     }
 
+    fn is_system_library_path(path: &str) -> bool {
+        // A `..` component can leave the system directory ("/usr/lib/../../tmp")
+        if path.split(['/', '\\']).any(|part| part == "..") {
+            return false;
+        }
+        if SYSTEM_LIBRARY_DIRS.iter().any(|dir| path.starts_with(dir)) {
+            return true;
+        }
+        // Windows: `<drive>:\Windows\System32\...` or `...\SysWOW64\...`
+        let lower = path.to_lowercase().replace('/', "\\");
+        let rest = lower.get(1..).unwrap_or("");
+        lower.starts_with(|c: char| c.is_ascii_alphabetic())
+            && (rest.starts_with(":\\windows\\system32\\")
+                || rest.starts_with(":\\windows\\syswow64\\"))
+    }
+
+    /// An absolute path (Unix, or a Windows drive or UNC path).
+    fn is_absolute_library_path(name: &str) -> bool {
+        name.starts_with(['/', '\\'])
+            || (name.len() >= 3
+                && name.as_bytes()[0].is_ascii_alphabetic()
+                && name.as_bytes()[1] == b':'
+                && matches!(name.as_bytes()[2], b'\\' | b'/'))
+    }
+
     fn is_system_library_file_name(name: &str) -> bool {
+        if Self::is_system_library_path(name) {
+            return true;
+        }
+        // An absolute path is judged by its directory alone: `libSystem.B.dylib`
+        // loaded from /tmp is not the system's.
+        if Self::is_absolute_library_path(name) {
+            return false;
+        }
         let file_name = name
             .rsplit(['/', '\\'])
             .next()
@@ -1226,6 +1309,31 @@ mod tests {
         // Test non-system libraries
         assert!(!analyzer.is_system_library("libssl"));
         assert!(!analyzer.is_system_library("custom_lib"));
+    }
+
+    #[test]
+    fn system_library_name_under_a_non_system_absolute_path_is_not_system() {
+        assert!(DependencyAnalyzer::is_system_library_file_name(
+            "/usr/lib/libSystem.B.dylib"
+        ));
+        assert!(DependencyAnalyzer::is_system_library_file_name(
+            "libSystem.B.dylib"
+        ));
+        assert!(DependencyAnalyzer::is_system_library_file_name(
+            "kernel32.dll"
+        ));
+        assert!(DependencyAnalyzer::is_system_library_file_name(
+            "C:\\Windows\\System32\\kernel32.dll"
+        ));
+        assert!(!DependencyAnalyzer::is_system_library_file_name(
+            "/tmp/xxx/libSystem.B.dylib"
+        ));
+        assert!(!DependencyAnalyzer::is_system_library_file_name(
+            "D:\\evil\\kernel32.dll"
+        ));
+        assert!(!DependencyAnalyzer::is_system_library_file_name(
+            "/usr/lib/../../tmp/libc.so.6"
+        ));
     }
 
     #[test]

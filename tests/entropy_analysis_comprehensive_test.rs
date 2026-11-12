@@ -376,8 +376,13 @@ fn test_analyze_entropy_with_crypto_constants() {
         .encryption_indicators
         .crypto_constants_found
         .is_empty());
-    assert!(result.encryption_indicators.likely_encrypted);
-    assert!(result.obfuscation_score > 20.0);
+    // Constants alone are not encryption: they are their own field and the
+    // recommendations name them.
+    assert!(!result.encryption_indicators.likely_encrypted);
+    assert!(result
+        .recommendations
+        .iter()
+        .any(|r| r.contains("Crypto constants present") && r.contains("AES S-box")));
 }
 
 #[test]

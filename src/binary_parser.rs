@@ -211,14 +211,45 @@ fn name_matches(slice_name: &str, wanted: &str) -> bool {
 /// damaged; an unknown `preferred` name falls back to the default choice.
 #[must_use]
 pub fn select_fat_slice<'a>(buffer: &'a [u8], preferred: Option<&str>) -> Option<FatSelection<'a>> {
-    if !is_fat_macho(buffer) {
+    let mut slices = fat_slice_table(buffer, buffer.len() as u64, |offset| {
+        usize::try_from(offset)
+            .ok()
+            .and_then(|o| buffer.get(o..))
+            .is_some_and(is_fat_macho)
+    })?;
+    let selected = preferred
+        .and_then(|w| slices.iter().position(|s| name_matches(&s.architecture, w)))
+        .or_else(|| host_cpu_type().and_then(|h| slices.iter().position(|s| s.cpu_type == h)))
+        .unwrap_or(0);
+    slices[selected].analyzed = true;
+    let start = usize::try_from(slices[selected].offset).ok()?;
+    let end = start.checked_add(usize::try_from(slices[selected].size).ok()?)?;
+    Some(FatSelection {
+        data: buffer.get(start..end)?,
+        slices,
+        selected,
+    })
+}
+
+/// The valid slices listed by a universal header, without needing the rest of
+/// the file. `header` holds at least the first bytes of the file (the header
+/// is at most 2056 bytes), `file_len` is the real file size and
+/// `starts_with_fat(offset)` tells whether a universal header begins at
+/// `offset` (a slice that is itself universal is skipped). `None` when the
+/// bytes are not a universal header or no slice is valid.
+pub fn fat_slice_table(
+    header: &[u8],
+    file_len: u64,
+    starts_with_fat: impl Fn(u64) -> bool,
+) -> Option<Vec<UniversalSlice>> {
+    if !is_fat_macho(header) {
         return None;
     }
     let be32 = |o: usize| -> Option<u32> {
-        Some(u32::from_be_bytes(buffer.get(o..o + 4)?.try_into().ok()?))
+        Some(u32::from_be_bytes(header.get(o..o + 4)?.try_into().ok()?))
     };
     let be64 = |o: usize| -> Option<u64> {
-        Some(u64::from_be_bytes(buffer.get(o..o + 8)?.try_into().ok()?))
+        Some(u64::from_be_bytes(header.get(o..o + 8)?.try_into().ok()?))
     };
     let is_64 = be32(0)? == FAT_MAGIC_64;
     let count = be32(4)? as usize;
@@ -238,11 +269,7 @@ pub fn select_fat_slice<'a>(buffer: &'a [u8], preferred: Option<&str>) -> Option
         };
         let end = offset.checked_add(size)?;
         let header_end = (8 + count * entry_len) as u64;
-        let start_is_fat = usize::try_from(offset)
-            .ok()
-            .and_then(|o| buffer.get(o..))
-            .is_some_and(is_fat_macho);
-        if size == 0 || end > buffer.len() as u64 || offset < header_end || start_is_fat {
+        if size == 0 || end > file_len || offset < header_end || starts_with_fat(offset) {
             // Truncated or damaged entry: skip it rather than fail the file
             continue;
         }
@@ -256,20 +283,10 @@ pub fn select_fat_slice<'a>(buffer: &'a [u8], preferred: Option<&str>) -> Option
         });
     }
     if slices.is_empty() {
-        return None;
+        None
+    } else {
+        Some(slices)
     }
-    let selected = preferred
-        .and_then(|w| slices.iter().position(|s| name_matches(&s.architecture, w)))
-        .or_else(|| host_cpu_type().and_then(|h| slices.iter().position(|s| s.cpu_type == h)))
-        .unwrap_or(0);
-    slices[selected].analyzed = true;
-    let start = usize::try_from(slices[selected].offset).ok()?;
-    let end = start.checked_add(usize::try_from(slices[selected].size).ok()?)?;
-    Some(FatSelection {
-        data: buffer.get(start..end)?,
-        slices,
-        selected,
-    })
 }
 
 /// Like [`parse_binary`], but for a universal Mach-O analyzes the slice named
@@ -344,7 +361,7 @@ fn parse_native_buffer(buffer: &[u8]) -> Result<BinaryInfo> {
     match Object::parse(buffer)? {
         Object::Elf(elf) => parse_elf(elf, buffer),
         Object::PE(pe) => parse_pe(pe, buffer),
-        Object::Mach(mach) => parse_mach(mach),
+        Object::Mach(mach) => parse_mach(mach, buffer),
         _ => anyhow::bail!("Unsupported binary format"),
     }
 }
@@ -362,12 +379,12 @@ fn complete_from_goblin(info: &mut BinaryInfo, buffer: &[u8]) {
         Ok(Object::Mach(goblin::mach::Mach::Binary(macho))) => {
             info.needed_libraries = mach_needed_libraries(&macho);
             if info.imports.is_empty() {
-                info.imports = mach_undefined_imports(&macho);
+                info.imports = mach_undefined_imports(&macho, buffer);
             }
             let name = mach_architecture_name(macho.header.cputype, macho.header.cpusubtype);
-            if info.architecture == "Unknown" {
-                info.architecture = name;
-            }
+            // The Mach-O header is the authority (ARM64E vs ARM64 is a subtype
+            // the generic analyzer does not tell apart).
+            info.architecture = name;
         }
         _ => {}
     }
@@ -408,17 +425,160 @@ fn mach_needed_libraries(macho: &goblin::mach::MachO) -> Vec<String> {
     )
 }
 
+/// Longest symbol name kept, in bytes. A name is read from the file with this
+/// cap (a hostile file can point thousands of symbols at one huge string), and
+/// a longer one ends in [`NAME_TRUNCATED`].
+pub(crate) const MAX_SYMBOL_NAME: usize = 4096;
+/// Marker that ends a symbol name cut at [`MAX_SYMBOL_NAME`].
+pub(crate) const NAME_TRUNCATED: &str = "...[name truncated]";
+/// Total symbol-name bytes one analysis keeps (every copy counts).
+pub(crate) const SYMBOL_NAME_BUDGET: usize = 32 << 20;
+
+/// `name` limited to [`MAX_SYMBOL_NAME`] bytes (cut on a character boundary).
+pub(crate) fn capped_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if name.len() <= MAX_SYMBOL_NAME {
+        return std::borrow::Cow::Borrowed(name);
+    }
+    let mut end = MAX_SYMBOL_NAME;
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}{NAME_TRUNCATED}", &name[..end]))
+}
+
+/// Running total of symbol-name bytes kept by one analysis.
+#[derive(Default)]
+pub(crate) struct NameBudget {
+    used: usize,
+    cut: bool,
+}
+
+impl NameBudget {
+    /// Charges `copies` copies of `name`; false (and the budget is marked cut)
+    /// when that would exceed [`SYMBOL_NAME_BUDGET`].
+    pub(crate) fn charge(&mut self, name: &str, copies: usize) -> bool {
+        let cost = name.len().saturating_mul(copies);
+        if self.cut || self.used.saturating_add(cost) > SYMBOL_NAME_BUDGET {
+            self.cut = true;
+            return false;
+        }
+        self.used += cost;
+        true
+    }
+
+    pub(crate) fn is_cut(&self) -> bool {
+        self.cut
+    }
+}
+
+/// The readable, non-debugger entries of a Mach-O symbol table, read straight
+/// from `LC_SYMTAB`. The walk is bounded by what fits in the file (a hostile
+/// `nsyms` costs at most `file_len / nlist_size` steps), an entry whose name
+/// offset is bad is skipped instead of ending the walk, and every name is read
+/// with the [`MAX_SYMBOL_NAME`] cap, so the work per entry does not depend on
+/// the length of the string it points at.
+pub(crate) fn mach_symbols_bounded<'a>(
+    macho: &goblin::mach::MachO<'a>,
+    data: &'a [u8],
+) -> impl Iterator<Item = (std::borrow::Cow<'a, str>, goblin::mach::symbols::Nlist)> {
+    let nlist_size: u64 = if macho.is_64 { 16 } else { 12 };
+    let is_64 = macho.is_64;
+    let little = macho.little_endian;
+    let symtab = macho.load_commands.iter().find_map(|lc| match &lc.command {
+        goblin::mach::load_command::CommandVariant::Symtab(s) => Some(*s),
+        _ => None,
+    });
+    let (symoff, stroff, strend, fit) = symtab.map_or((0, 0, 0, 0), |s| {
+        let room = (data.len() as u64).saturating_sub(u64::from(s.symoff)) / nlist_size;
+        let strend = (u64::from(s.stroff) + u64::from(s.strsize)).min(data.len() as u64);
+        (
+            u64::from(s.symoff),
+            u64::from(s.stroff),
+            strend,
+            u64::from(s.nsyms).min(room),
+        )
+    });
+    (0..fit).filter_map(move |i| {
+        let at = usize::try_from(symoff + i * nlist_size).ok()?;
+        let rec = data.get(at..at + usize::try_from(nlist_size).ok()?)?;
+        let u32_at = |o: usize| {
+            let b: [u8; 4] = rec[o..o + 4].try_into().unwrap_or([0; 4]);
+            if little {
+                u32::from_le_bytes(b)
+            } else {
+                u32::from_be_bytes(b)
+            }
+        };
+        let n_desc = {
+            let b: [u8; 2] = rec[6..8].try_into().unwrap_or([0; 2]);
+            if little {
+                u16::from_le_bytes(b)
+            } else {
+                u16::from_be_bytes(b)
+            }
+        };
+        let n_value = if is_64 {
+            let b: [u8; 8] = rec[8..16].try_into().unwrap_or([0; 8]);
+            if little {
+                u64::from_le_bytes(b)
+            } else {
+                u64::from_be_bytes(b)
+            }
+        } else {
+            u64::from(u32_at(8))
+        };
+        let nlist = goblin::mach::symbols::Nlist {
+            n_strx: u32_at(0) as usize,
+            n_type: rec[4],
+            n_sect: usize::from(rec[5]),
+            n_desc,
+            n_value,
+        };
+        // Debugger entries are never wanted; skip them before reading a name
+        if nlist.is_stab() {
+            return None;
+        }
+        let start = stroff.checked_add(nlist.n_strx as u64)?;
+        if start >= strend {
+            return None;
+        }
+        let limit = strend.min(start + MAX_SYMBOL_NAME as u64 + 1);
+        let bytes = data.get(start as usize..limit as usize)?;
+        let (name_bytes, truncated) = match bytes.iter().position(|b| *b == 0) {
+            Some(nul) => (&bytes[..nul], false),
+            None if bytes.len() > MAX_SYMBOL_NAME => (&bytes[..MAX_SYMBOL_NAME], true),
+            None => (bytes, false),
+        };
+        let mut name = String::from_utf8_lossy(name_bytes);
+        if truncated {
+            name.to_mut().push_str(NAME_TRUNCATED);
+        }
+        Some((name, nlist))
+    })
+}
+
 /// Imports as `name (library)` taken from the undefined symbols, for binaries
 /// whose bind info is absent.
-fn mach_undefined_imports(macho: &goblin::mach::MachO) -> Vec<String> {
+fn mach_undefined_imports(macho: &goblin::mach::MachO, data: &[u8]) -> Vec<String> {
+    let mut budget = NameBudget::default();
     let mut out = Vec::new();
-    for (name, nlist) in macho.symbols().flatten() {
-        if !nlist.is_undefined() || name.is_empty() {
+    for (name, nlist) in mach_symbols_bounded(macho, data) {
+        if nlist.is_stab() || !nlist.is_undefined() || name.is_empty() {
             continue;
         }
         match crate::function_analysis::mach_import_library(macho, &nlist) {
-            Some(lib) => out.push(format!("{name} ({lib})")),
-            None => out.push(name.to_string()),
+            Some(lib) => {
+                if !budget.charge(&name, 1) {
+                    break;
+                }
+                out.push(format!("{name} ({lib})"));
+            }
+            None => {
+                if !budget.charge(&name, 1) {
+                    break;
+                }
+                out.push(name.into_owned());
+            }
         }
     }
     out
@@ -472,8 +632,9 @@ fn extract_legacy_compiler_info(buffer: &[u8]) -> Result<(Option<String>, Option
                 };
             }
         }
-        Object::Mach(_) => {
-            // Basic macOS compiler detection
+        Object::Mach(goblin::mach::Mach::Binary(_)) => {
+            // Basic macOS compiler detection (a damaged universal header that
+            // goblin accepts is not a Mach-O image and gets no toolchain claim)
             compiler_info = Some("Apple Clang".to_string());
             linker_info = Some("Apple LD".to_string());
         }
@@ -618,7 +779,7 @@ fn parse_pe(pe: pe::PE, _buffer: &[u8]) -> Result<BinaryInfo> {
     Ok(info)
 }
 
-fn parse_mach(mach: goblin::mach::Mach) -> Result<BinaryInfo> {
+fn parse_mach(mach: goblin::mach::Mach, data: &[u8]) -> Result<BinaryInfo> {
     use goblin::mach::Mach;
 
     let mut info = BinaryInfo {
@@ -659,7 +820,7 @@ fn parse_mach(mach: goblin::mach::Mach) -> Result<BinaryInfo> {
                 info.imports.push(import.name.to_string());
             }
             if info.imports.is_empty() {
-                info.imports = mach_undefined_imports(&mach_o);
+                info.imports = mach_undefined_imports(&mach_o, data);
             }
 
             let exports = mach_o.exports()?;

@@ -1,8 +1,51 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::Command;
+
+/// Most bytes read for any one header region. Signature detection looks only
+/// at headers, load commands and the certificate-table entry (never the whole
+/// file, so a 300 MiB binary costs a few KiB). A Mach-O whose load commands
+/// exceed this is reported as not inspected, not as unsigned.
+const HEADER_READ_CAP: u64 = 8 << 20;
+/// Bytes of a universal header: 8 + 64 entries of 32 bytes.
+const FAT_HEADER_LEN: usize = 8 + 64 * 32;
+
+/// Random-access reader over the file that keeps the length at hand.
+struct FileReader {
+    file: File,
+    len: u64,
+    /// Bytes handed out so far (tests assert that detection stays small).
+    bytes_read: u64,
+}
+
+impl FileReader {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let len = file.metadata()?.len();
+        Ok(Self {
+            file,
+            len,
+            bytes_read: 0,
+        })
+    }
+
+    /// Up to `n` bytes at `offset` (fewer at the end of the file); `None`
+    /// past the end, when `n` exceeds the read cap, or on an I/O error.
+    fn read_at(&mut self, offset: u64, n: u64) -> Option<Vec<u8>> {
+        if offset >= self.len || n > HEADER_READ_CAP {
+            return None;
+        }
+        let n = n.min(self.len - offset);
+        self.file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut out = Vec::new();
+        self.file.by_ref().take(n).read_to_end(&mut out).ok()?;
+        self.bytes_read += out.len() as u64;
+        Some(out)
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SignatureInfo {
@@ -47,13 +90,32 @@ pub fn verify_signature(path: &Path) -> Result<SignatureInfo> {
     }
 
     // Check for macOS code signatures (only for Mach-O binaries)
-    if let Ok(buffer) = fs::read(path) {
-        if let Some(has_code_signature) = macho_has_code_signature(&buffer) {
+    if let Ok(mut reader) = FileReader::open(path) {
+        if let Some(found) = macho_code_signature(&mut reader) {
             if cfg!(target_os = "macos") && tool_available("codesign") {
                 if let Ok(codesign_info) = check_macos_codesign(path) {
                     return Ok(codesign_info);
                 }
-            } else if has_code_signature {
+                if !found.present {
+                    // The load commands were never inspected: say so instead of
+                    // claiming a command exists.
+                    if let Some(problem) = found.problem {
+                        not_checked.push(problem);
+                    }
+                } else {
+                    return Ok(SignatureInfo {
+                        is_signed: false,
+                        signature_type: Some("Mach-O code signature".to_string()),
+                        signer: None,
+                        timestamp: None,
+                        certificate_chain: Vec::new(),
+                        verification_status: format!(
+                            "Code signature load command present but codesign could not read it (damaged or stripped signature){}",
+                            found.problem.map_or(String::new(), |p| format!(": {p}"))
+                        ),
+                    });
+                }
+            } else if found.present {
                 // The load commands prove a signature blob exists even when we
                 // cannot run the verifier.
                 return Ok(SignatureInfo {
@@ -65,6 +127,8 @@ pub fn verify_signature(path: &Path) -> Result<SignatureInfo> {
                     verification_status: "Present, not verified (codesign is not available)"
                         .to_string(),
                 });
+            } else if let Some(problem) = found.problem {
+                not_checked.push(problem);
             }
         }
     }
@@ -109,96 +173,167 @@ fn tool_available(name: &str) -> bool {
 /// Location of the PE security (certificate table) data directory, read from
 /// the headers: `Some(Some((file_offset, size)))` when the entry is populated,
 /// `Some(None)` for a PE with an empty entry, `None` when the bytes are not a PE.
-fn pe_certificate_table(buffer: &[u8]) -> Option<Option<(usize, usize)>> {
+fn pe_certificate_table(reader: &mut FileReader) -> Option<Option<(u64, u64)>> {
     fn u16_at(b: &[u8], o: usize) -> Option<u16> {
         Some(u16::from_le_bytes(b.get(o..o + 2)?.try_into().ok()?))
     }
     fn u32_at(b: &[u8], o: usize) -> Option<u32> {
         Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?))
     }
-    if buffer.len() < 64 || &buffer[0..2] != b"MZ" {
+    let dos = reader.read_at(0, 64)?;
+    if dos.len() < 64 || &dos[0..2] != b"MZ" {
         return None;
     }
-    let pe_off = u32_at(buffer, 0x3c)? as usize;
-    if buffer.get(pe_off..pe_off + 4)? != b"PE\0\0" {
+    let pe_off = u64::from(u32_at(&dos, 0x3c)?);
+    // PE signature, COFF header, optional header and the first data directories
+    let b = reader.read_at(pe_off, 24 + 112 + 8 * 5)?;
+    if b.get(0..4)? != b"PE\0\0" {
         return None;
     }
-    let opt = pe_off + 24;
-    let dd = match u16_at(buffer, opt)? {
+    let opt = 24;
+    let dd = match u16_at(&b, opt)? {
         0x10b => opt + 96,
         0x20b => opt + 112,
         _ => return None,
     };
-    let count = u32_at(buffer, dd - 4)? as usize;
+    let count = u32_at(&b, dd - 4)?;
     if count <= 4 {
         return Some(None);
     }
-    let offset = u32_at(buffer, dd + 32)? as usize;
-    let size = u32_at(buffer, dd + 36)? as usize;
+    let offset = u64::from(u32_at(&b, dd + 32)?);
+    let size = u64::from(u32_at(&b, dd + 36)?);
     if offset == 0 && size == 0 {
         return Some(None);
     }
     Some(Some((offset, size)))
 }
 
-/// For Mach-O (thin or universal) bytes: `Some(true)` when an `LC_CODE_SIGNATURE`
-/// load command is present, `Some(false)` for an unsigned Mach-O, `None` otherwise.
-fn macho_has_code_signature(buffer: &[u8]) -> Option<bool> {
-    use goblin::mach::{load_command::CommandVariant, Mach};
-    fn signed(m: &goblin::mach::MachO) -> bool {
-        m.load_commands
-            .iter()
-            .any(|lc| matches!(lc.command, CommandVariant::CodeSignature(_)))
+/// What the load commands of a Mach-O say about its signature.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CodeSignatureScan {
+    /// An `LC_CODE_SIGNATURE` load command exists.
+    present: bool,
+    /// Something that stopped a full check (blob outside its slice, load
+    /// commands too large to read).
+    problem: Option<String>,
+}
+
+/// Load commands of the thin Mach-O at `base` (inside a slice of `slice_len`
+/// bytes), looking for `LC_CODE_SIGNATURE`. Only the header and the load
+/// commands are read. `None` when the bytes are not a Mach-O header.
+fn thin_code_signature(
+    reader: &mut FileReader,
+    base: u64,
+    slice_len: u64,
+) -> Option<CodeSignatureScan> {
+    const LC_CODE_SIGNATURE: u32 = 0x1d;
+    let head = reader.read_at(base, 32)?;
+    if head.len() < 28 {
+        return None;
     }
-    // Universal files go through the bounded slice reader; goblin never sees
-    // a file-controlled architecture count.
-    if let Some(selection) = crate::binary_parser::select_fat_slice(buffer, None) {
-        let mut parsed_any = false;
-        let mut any = false;
-        for slice in &selection.slices {
-            let (Ok(start), Ok(len)) = (usize::try_from(slice.offset), usize::try_from(slice.size))
-            else {
-                continue;
-            };
-            let Some(bytes) = start
-                .checked_add(len)
-                .and_then(|end| buffer.get(start..end))
-            else {
-                continue;
-            };
-            if let Ok(m) = goblin::mach::MachO::parse(bytes, 0) {
-                parsed_any = true;
-                any |= signed(&m);
+    let magic = [head[0], head[1], head[2], head[3]];
+    let (little, header_len) = match magic {
+        [0xcf, 0xfa, 0xed, 0xfe] => (true, 32u64),
+        [0xce, 0xfa, 0xed, 0xfe] => (true, 28),
+        [0xfe, 0xed, 0xfa, 0xcf] => (false, 32),
+        [0xfe, 0xed, 0xfa, 0xce] => (false, 28),
+        _ => return None,
+    };
+    let rd = |b: &[u8], o: usize| -> Option<u32> {
+        let v: [u8; 4] = b.get(o..o + 4)?.try_into().ok()?;
+        Some(if little {
+            u32::from_le_bytes(v)
+        } else {
+            u32::from_be_bytes(v)
+        })
+    };
+    let ncmds = u64::from(rd(&head, 16)?);
+    let sizeofcmds = u64::from(rd(&head, 20)?);
+    let mut scan = CodeSignatureScan::default();
+    if sizeofcmds > HEADER_READ_CAP {
+        scan.problem = Some(format!(
+            "the load commands ({sizeofcmds} bytes) exceed the {} MiB read cap and were not inspected",
+            HEADER_READ_CAP >> 20
+        ));
+        return Some(scan);
+    }
+    let cmds = reader.read_at(base + header_len, sizeofcmds)?;
+    let mut pos = 0usize;
+    for _ in 0..ncmds {
+        let (Some(cmd), Some(cmdsize)) = (rd(&cmds, pos), rd(&cmds, pos + 4)) else {
+            break;
+        };
+        let cmdsize = cmdsize as usize;
+        if cmdsize < 8 || pos.saturating_add(cmdsize) > cmds.len() {
+            break;
+        }
+        if cmd == LC_CODE_SIGNATURE {
+            scan.present = true;
+            if let (Some(off), Some(size)) = (rd(&cmds, pos + 8), rd(&cmds, pos + 12)) {
+                if u64::from(off) + u64::from(size) > slice_len {
+                    scan.problem = Some(format!(
+                        "the signature blob (offset {off}, size {size}) lies outside the file"
+                    ));
+                }
             }
         }
-        return parsed_any.then_some(any);
+        pos += cmdsize;
     }
-    if buffer.len() < 4 || buffer[0..3] == [0xCA, 0xFE, 0xBA] {
+    Some(scan)
+}
+
+/// For Mach-O (thin or universal) files: what the load commands say about the
+/// code signature; `None` when the file is not a Mach-O. Universal files are
+/// walked through the bounded slice reader, so a file-controlled
+/// architecture count is never trusted.
+fn macho_code_signature(reader: &mut FileReader) -> Option<CodeSignatureScan> {
+    let head = reader.read_at(0, FAT_HEADER_LEN as u64)?;
+    if crate::binary_parser::is_fat_macho(&head) {
+        let len = reader.len;
+        // `fat_slice_table` asks whether a universal header starts at a slice
+        // offset; the answer comes from an 8-byte read there.
+        let table = {
+            let cell = std::cell::RefCell::new(&mut *reader);
+            crate::binary_parser::fat_slice_table(&head, len, |offset| {
+                cell.borrow_mut()
+                    .read_at(offset, 8)
+                    .is_some_and(|b| crate::binary_parser::is_fat_macho(&b))
+            })?
+        };
+        let mut total = CodeSignatureScan::default();
+        let mut parsed_any = false;
+        for slice in &table {
+            if let Some(scan) = thin_code_signature(reader, slice.offset, slice.size) {
+                parsed_any = true;
+                total.present |= scan.present;
+                if total.problem.is_none() {
+                    total.problem = scan.problem;
+                }
+            }
+        }
+        return parsed_any.then_some(total);
+    }
+    if head.len() >= 4 && head[0..3] == [0xCA, 0xFE, 0xBA] {
         // Java class file or damaged universal header: not a Mach-O to inspect
         return None;
     }
-    match Mach::parse(buffer).ok()? {
-        Mach::Binary(m) => Some(signed(&m)),
-        Mach::Fat(_) => None,
-    }
+    let len = reader.len;
+    thin_code_signature(reader, 0, len)
 }
 
 fn check_authenticode_signature(path: &Path) -> Result<SignatureInfo> {
-    let buffer = std::fs::read(path)?;
+    let mut reader = FileReader::open(path)?;
+    let file_len = reader.len;
 
     // Check for PE signature
-    let Some(table) = pe_certificate_table(&buffer) else {
+    let Some(table) = pe_certificate_table(&mut reader) else {
         anyhow::bail!("Not a PE file");
     };
     let Some((offset, size)) = table else {
         anyhow::bail!("No Authenticode signature found");
     };
 
-    if size < 8
-        || offset
-            .checked_add(size)
-            .is_none_or(|end| end > buffer.len())
-    {
+    if size < 8 || offset.checked_add(size).is_none_or(|end| end > file_len) {
         return Ok(SignatureInfo {
             is_signed: false,
             signature_type: Some("Authenticode".to_string()),
@@ -445,6 +580,26 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
+    #[test]
+    fn macho_signature_scan_reads_only_headers_of_a_huge_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("big");
+        let mut head = vec![0xcf, 0xfa, 0xed, 0xfe];
+        head.extend_from_slice(&0x0100_000cu32.to_le_bytes());
+        head.extend_from_slice(&[0u8; 24]); // no load commands
+        let f = fs::File::create(&path).unwrap();
+        (&f).write_all(&head).unwrap();
+        f.set_len(1 << 30).unwrap();
+        let mut reader = FileReader::open(&path).unwrap();
+        let scan = macho_code_signature(&mut reader);
+        assert!(scan.is_some_and(|s| !s.present));
+        assert!(
+            reader.bytes_read < 64 * 1024,
+            "read {} bytes of a 1 GiB file",
+            reader.bytes_read
+        );
+    }
+
     fn create_test_file(content: &[u8]) -> Result<(TempDir, std::path::PathBuf)> {
         let temp_dir = TempDir::new()?;
         let file_path = temp_dir.path().join("test_file");
@@ -549,6 +704,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_check_gpg_signature_with_sig_file() {
         let content = b"Test file content";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
@@ -557,13 +713,17 @@ mod tests {
         let sig_path = file_path.with_extension("sig");
         fs::write(&sig_path, b"dummy signature").unwrap();
 
-        // Whatever gpg does with a dummy signature, it is never reported as valid
-        if let Ok(info) = check_gpg_signature(&file_path) {
-            assert!(!info.is_signed);
-        }
+        // A stub gpg that rejects the signature: always the same outcome
+        let stub = stub_gpg(sig_path.parent().unwrap(), "gpg: BAD signature");
+        let info = check_gpg_signature_with(&file_path, stub.to_str().unwrap()).unwrap();
+        assert!(!info.is_signed);
+        assert!(info
+            .verification_status
+            .starts_with("Detached signature present, not verified"));
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_check_gpg_signature_with_asc_file() {
         let content = b"Test file content";
         let (_temp_dir, file_path) = create_test_file(content).unwrap();
@@ -572,10 +732,12 @@ mod tests {
         let asc_path = file_path.with_extension("asc");
         fs::write(&asc_path, b"dummy ascii signature").unwrap();
 
-        // Whatever gpg does with a dummy signature, it is never reported as valid
-        if let Ok(info) = check_gpg_signature(&file_path) {
-            assert!(!info.is_signed);
-        }
+        let stub = stub_gpg(asc_path.parent().unwrap(), "gpg: BAD signature");
+        let info = check_gpg_signature_with(&file_path, stub.to_str().unwrap()).unwrap();
+        assert!(!info.is_signed);
+        assert!(info
+            .verification_status
+            .starts_with("Detached signature present, not verified"));
     }
 
     #[cfg(unix)]
@@ -625,9 +787,80 @@ mod tests {
     fn fat_header_with_huge_count_is_not_walked() {
         let mut buf = vec![0xCA, 0xFE, 0xBA, 0xBE, 0xFF, 0xFF, 0xFF, 0xFF];
         buf.resize(4096, 0);
+        let (_dir, path) = create_test_file(&buf).unwrap();
         let start = std::time::Instant::now();
-        assert_eq!(macho_has_code_signature(&buf), None);
+        let mut reader = FileReader::open(&path).unwrap();
+        assert_eq!(macho_code_signature(&mut reader), None);
         assert!(start.elapsed().as_secs() < 2);
+    }
+
+    /// Thin 64-bit little-endian Mach-O with the given load commands.
+    fn thin_macho(commands: &[Vec<u8>], tail: &[u8]) -> Vec<u8> {
+        let mut b = vec![0xcf, 0xfa, 0xed, 0xfe];
+        b.extend_from_slice(&0x0100_000cu32.to_le_bytes()); // arm64
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&2u32.to_le_bytes()); // MH_EXECUTE
+        b.extend_from_slice(&(commands.len() as u32).to_le_bytes());
+        let total: usize = commands.iter().map(Vec::len).sum();
+        b.extend_from_slice(&(total as u32).to_le_bytes());
+        b.extend_from_slice(&[0u8; 8]);
+        for c in commands {
+            b.extend_from_slice(c);
+        }
+        b.extend_from_slice(tail);
+        b
+    }
+
+    fn code_signature_command(dataoff: u32, datasize: u32) -> Vec<u8> {
+        let mut c = 0x1du32.to_le_bytes().to_vec();
+        c.extend_from_slice(&16u32.to_le_bytes());
+        c.extend_from_slice(&dataoff.to_le_bytes());
+        c.extend_from_slice(&datasize.to_le_bytes());
+        c
+    }
+
+    #[test]
+    fn code_signature_command_is_found_from_the_headers_only() {
+        let bytes = thin_macho(&[code_signature_command(64, 16)], &[0u8; 128]);
+        let (_dir, path) = create_test_file(&bytes).unwrap();
+        let mut reader = FileReader::open(&path).unwrap();
+        let scan = macho_code_signature(&mut reader).unwrap();
+        assert!(scan.present);
+        assert_eq!(scan.problem, None);
+    }
+
+    #[test]
+    fn signature_blob_outside_the_file_is_a_problem() {
+        let bytes = thin_macho(&[code_signature_command(1 << 20, 4096)], &[0u8; 16]);
+        let (_dir, path) = create_test_file(&bytes).unwrap();
+        let mut reader = FileReader::open(&path).unwrap();
+        let scan = macho_code_signature(&mut reader).unwrap();
+        assert!(scan.present);
+        assert!(scan.problem.unwrap().contains("outside the file"));
+    }
+
+    #[test]
+    fn huge_load_command_area_is_reported_not_read() {
+        let mut bytes = thin_macho(&[], &[0u8; 64]);
+        bytes[16..20].copy_from_slice(&u32::MAX.to_le_bytes()); // ncmds
+        bytes[20..24].copy_from_slice(&u32::MAX.to_le_bytes()); // sizeofcmds
+        let (_dir, path) = create_test_file(&bytes).unwrap();
+        let mut reader = FileReader::open(&path).unwrap();
+        let scan = macho_code_signature(&mut reader).unwrap();
+        assert!(!scan.present);
+        assert!(scan.problem.unwrap().contains("read cap"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn damaged_signature_is_not_reported_as_no_signature() {
+        // Load command present, blob zeroed: codesign cannot read it
+        let bytes = thin_macho(&[code_signature_command(64, 16)], &[0u8; 128]);
+        let (_dir, path) = create_test_file(&bytes).unwrap();
+        let info = verify_signature(&path).unwrap();
+        assert!(!info.is_signed);
+        assert_ne!(info.verification_status, "No signature found");
+        assert!(info.verification_status.contains("codesign"));
     }
 
     #[test]
@@ -880,6 +1113,7 @@ gpg: WARNING: This key is not certified with a trusted signature!
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_gpg_signature_extensions() {
         let content = b"Test content";
         let temp_dir = TempDir::new().unwrap();
@@ -897,21 +1131,18 @@ gpg: WARNING: This key is not certified with a trusted signature!
             let file_path = temp_dir.path().join(filename);
             fs::write(&file_path, content).unwrap();
 
-            // Create corresponding .sig file
-            let sig_extension = if ext.is_empty() {
-                "sig".to_string()
-            } else {
-                format!("{ext}.sig")
-            };
-
-            let sig_path = file_path.with_extension(&sig_extension);
+            // The detached signature is the full file name plus `.sig`
+            let mut sig_name = file_path.as_os_str().to_os_string();
+            sig_name.push(".sig");
+            let sig_path = std::path::PathBuf::from(sig_name);
             fs::write(&sig_path, b"dummy sig").unwrap();
 
-            let result = check_gpg_signature(&file_path);
-            // GPG rejects the dummy signature (or is missing): never valid
-            if let Ok(info) = result {
-                assert!(!info.is_signed);
-            }
+            let stub = stub_gpg(temp_dir.path(), "gpg: BAD signature");
+            let info = check_gpg_signature_with(&file_path, stub.to_str().unwrap()).unwrap();
+            assert!(!info.is_signed);
+            assert!(info
+                .verification_status
+                .starts_with("Detached signature present, not verified"));
         }
     }
 

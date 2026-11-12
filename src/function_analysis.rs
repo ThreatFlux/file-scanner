@@ -1,3 +1,4 @@
+use crate::binary_parser::{capped_name, NameBudget};
 use anyhow::Result;
 use goblin::{elf, mach, pe, Object};
 use serde::{Deserialize, Serialize};
@@ -161,6 +162,33 @@ fn strip_symbol_version(name: &str) -> &str {
     }
 }
 
+fn budget_note() -> String {
+    format!(
+        "Symbol names were kept only up to a budget of {} MiB (each name is also cut at {} bytes); the symbols after that point are not listed.",
+        crate::binary_parser::SYMBOL_NAME_BUDGET >> 20,
+        crate::binary_parser::MAX_SYMBOL_NAME
+    )
+}
+
+/// Appends one marker entry per note to the function list, after the counts were
+/// taken, so a cut is visible in every listing of the table. The markers are not
+/// counted in `symbol_count`.
+fn push_notes(functions: &mut Vec<FunctionInfo>, notes: &[String]) {
+    for note in notes {
+        functions.push(FunctionInfo {
+            name: format!("[note] {note}"),
+            address: 0,
+            size: 0,
+            function_type: FunctionType::Local,
+            calling_convention: None,
+            parameters: Vec::new(),
+            is_entry_point: false,
+            is_exported: false,
+            is_imported: false,
+        });
+    }
+}
+
 pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable> {
     let mut functions = Vec::new();
     let mut global_variables = Vec::new();
@@ -168,24 +196,43 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
     let mut exports = Vec::new();
     let cross_references = Vec::new();
 
-    // Analyze ELF symbols
-    for sym in &elf.syms {
-        let mut name = elf.strtab.get_at(sym.st_name).unwrap_or("").to_string();
+    let mut budget = NameBudget::default();
+    let mut notes: Vec<String> = Vec::new();
 
-        if name.is_empty() || name.starts_with('$') {
+    // Analyze ELF symbols. A name is copied only for a symbol that is kept, with
+    // the length cap, and the copies are charged against a per-call budget.
+    for sym in &elf.syms {
+        let mut raw = elf.strtab.get_at(sym.st_name).unwrap_or("");
+
+        if raw.is_empty() || raw.starts_with('$') {
             continue;
         }
 
         // .symtab spells imports with their version (`strcpy@GLIBC_2.2.5`);
         // keep the plain name so the same import is not listed twice.
         if sym.st_shndx == 0 {
-            name = strip_symbol_version(&name).to_string();
+            raw = strip_symbol_version(raw);
         }
 
         let sym_type = sym.st_type();
         let binding = sym.st_bind();
         let address = sym.st_value;
         let size = sym.st_size;
+
+        let keep = match sym_type {
+            goblin::elf::sym::STT_FUNC => true,
+            goblin::elf::sym::STT_OBJECT => {
+                binding == goblin::elf::sym::STB_GLOBAL || binding == goblin::elf::sym::STB_LOCAL
+            }
+            _ => false,
+        };
+        if !keep {
+            continue;
+        }
+        let name = capped_name(raw).into_owned();
+        if !budget.charge(&name, 2) {
+            break;
+        }
 
         match sym_type {
             goblin::elf::sym::STT_FUNC => {
@@ -198,25 +245,15 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
                         }
                     }
                     goblin::elf::sym::STB_LOCAL => FunctionType::Local,
+                    // Weak and other bindings: an undefined one is still an import.
+                    _ if sym.st_shndx == 0 => FunctionType::Imported,
                     _ => FunctionType::Local,
                 };
 
                 let is_entry_point =
-                    name == "_start" || name == "main" || address == elf.header.e_entry;
+                    raw == "_start" || raw == "main" || address == elf.header.e_entry;
                 let is_exported = binding == goblin::elf::sym::STB_GLOBAL && sym.st_shndx != 0;
                 let is_imported = sym.st_shndx == 0;
-
-                functions.push(FunctionInfo {
-                    name: name.clone(),
-                    address,
-                    size,
-                    function_type,
-                    calling_convention: Some(CallingConvention::SysV),
-                    parameters: Vec::new(), // Would need debug info for this
-                    is_entry_point,
-                    is_exported,
-                    is_imported,
-                });
 
                 // Add to imports/exports lists
                 if is_imported {
@@ -236,13 +273,22 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
                         forwarder_name: None,
                     });
                 }
+
+                functions.push(FunctionInfo {
+                    name,
+                    address,
+                    size,
+                    function_type,
+                    calling_convention: Some(CallingConvention::SysV),
+                    parameters: Vec::new(), // Would need debug info for this
+                    is_entry_point,
+                    is_exported,
+                    is_imported,
+                });
             }
-            goblin::elf::sym::STT_OBJECT
-                if binding == goblin::elf::sym::STB_GLOBAL
-                    || binding == goblin::elf::sym::STB_LOCAL =>
-            {
+            _ => {
                 global_variables.push(VariableInfo {
-                    name: name.clone(),
+                    name,
                     address,
                     size,
                     var_type: if binding == goblin::elf::sym::STB_GLOBAL {
@@ -253,26 +299,45 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
                     section: None, // Could be enhanced to include section name
                 });
             }
-            _ => {}
         }
     }
 
     // Which library provides an imported dynamic symbol: the version-needs
     // table names the file for every version index (GLIBC_2.2.5 -> libc.so.6).
-    let mut version_files: std::collections::HashMap<u16, String> =
+    // Both the number of needs and the number of aux entries come from the
+    // file and the chains may loop, so the walk is capped (65,536 covers every
+    // possible u16 version index) and each file name is stored once.
+    const MAX_VERNEED: usize = 4096;
+    const MAX_VERNAUX_TOTAL: usize = 65_536;
+    let mut version_files: std::collections::HashMap<u16, std::rc::Rc<str>> =
         std::collections::HashMap::new();
     if let Some(verneed) = &elf.verneed {
-        for need in verneed.iter() {
+        let mut aux_total = 0usize;
+        let mut needs = verneed.iter();
+        for need in needs.by_ref().take(MAX_VERNEED) {
             let file = elf.dynstrtab.get_at(need.vn_file).unwrap_or("");
             if file.is_empty() {
                 continue;
             }
+            let file: std::rc::Rc<str> = std::rc::Rc::from(capped_name(file).as_ref());
             for aux in need.iter() {
-                version_files.insert(aux.vna_other, file.to_string());
+                aux_total += 1;
+                if aux_total > MAX_VERNAUX_TOTAL {
+                    break;
+                }
+                version_files.insert(aux.vna_other, std::rc::Rc::clone(&file));
+            }
+            if aux_total > MAX_VERNAUX_TOTAL {
+                break;
             }
         }
+        if aux_total > MAX_VERNAUX_TOTAL || needs.next().is_some() {
+            notes.push(format!(
+                "The ELF version-needs table was cut at {MAX_VERNEED} entries or {MAX_VERNAUX_TOTAL} version records; some imports may lack the name of their library."
+            ));
+        }
     }
-    let mut import_library: std::collections::HashMap<String, String> =
+    let mut import_library: std::collections::HashMap<String, std::rc::Rc<str>> =
         std::collections::HashMap::new();
     if !version_files.is_empty() {
         for (index, sym) in elf.dynsyms.iter().enumerate() {
@@ -286,22 +351,41 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
                 version_files.get(&version.version()),
                 elf.dynstrtab.get_at(sym.st_name),
             ) {
-                import_library.insert(strip_symbol_version(name).to_string(), file.clone());
+                let name = capped_name(strip_symbol_version(name)).into_owned();
+                if !budget.charge(&name, 1) {
+                    break;
+                }
+                import_library.insert(name, std::rc::Rc::clone(file));
             }
         }
     }
 
     // Analyze dynamic symbols if available
+    let mut known_names: std::collections::HashSet<String> =
+        functions.iter().map(|f| f.name.clone()).collect();
     for sym in &elf.dynsyms {
-        let name =
-            strip_symbol_version(elf.dynstrtab.get_at(sym.st_name).unwrap_or("")).to_string();
-
-        if name.is_empty() || functions.iter().any(|f| f.name == name) {
+        if budget.is_cut() {
+            break;
+        }
+        if !(sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_shndx == 0) {
             continue;
         }
+        let raw = strip_symbol_version(elf.dynstrtab.get_at(sym.st_name).unwrap_or(""));
+        if raw.is_empty() {
+            continue;
+        }
+        let name = capped_name(raw).into_owned();
 
-        if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_shndx == 0 {
+        if known_names.contains(&name) {
+            continue;
+        }
+        if !budget.charge(&name, 4) {
+            break;
+        }
+
+        {
             // This is an imported function
+            known_names.insert(name.clone());
             functions.push(FunctionInfo {
                 name: name.clone(),
                 address: sym.st_value,
@@ -330,8 +414,15 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
 
     for import in &mut imports {
         if import.library.is_none() {
-            import.library = import_library.get(&import.name).cloned();
+            if let Some(file) = import_library.get(&import.name) {
+                if budget.charge(file, 1) {
+                    import.library = Some(file.to_string());
+                }
+            }
         }
+    }
+    if budget.is_cut() {
+        notes.push(budget_note());
     }
 
     let symbol_count = SymbolCounts {
@@ -345,6 +436,8 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
         global_variables: global_variables.len(),
         cross_references: cross_references.len(),
     };
+
+    push_notes(&mut functions, &notes);
 
     Ok(SymbolTable {
         functions,
@@ -363,11 +456,19 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
     let mut exports = Vec::new();
     let cross_references = Vec::new();
 
+    let mut budget = NameBudget::default();
+    let mut notes: Vec<String> = Vec::new();
+
     // Analyze PE imports
     for import in &pe.imports {
+        let name = capped_name(&import.name).into_owned();
+        let dll = capped_name(import.dll).into_owned();
+        if !(budget.charge(&name, 2) && budget.charge(&dll, 1)) {
+            break;
+        }
         imports.push(ImportInfo {
-            name: import.name.to_string(),
-            library: Some(import.dll.to_string()),
+            name: name.clone(),
+            library: Some(dll),
             address: Some(import.rva as u64),
             ordinal: Some(import.ordinal),
             is_delayed: false, // Would need to check delay import table
@@ -375,7 +476,7 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
 
         // Add imported functions to function list
         functions.push(FunctionInfo {
-            name: import.name.to_string(),
+            name,
             address: import.rva as u64,
             size: 0, // PE imports don't have size info
             function_type: FunctionType::Imported,
@@ -389,7 +490,10 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
 
     // Analyze PE exports
     for export in &pe.exports {
-        let export_name = export.name.unwrap_or("").to_string();
+        let export_name = capped_name(export.name.unwrap_or("")).into_owned();
+        if !budget.charge(&export_name, 2) {
+            break;
+        }
         let export_address = export.rva as u64;
 
         exports.push(ExportInfo {
@@ -435,6 +539,11 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
         cross_references: cross_references.len(),
     };
 
+    if budget.is_cut() {
+        notes.push(budget_note());
+    }
+    push_notes(&mut functions, &notes);
+
     Ok(SymbolTable {
         functions,
         global_variables,
@@ -477,10 +586,11 @@ pub(crate) fn mach_import_library<'a>(
 
 pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTable> {
     let mut functions = Vec::new();
-    let mut global_variables = Vec::new();
+    let global_variables = Vec::new();
     let mut imports = Vec::new();
     let mut exports = Vec::new();
     let cross_references = Vec::new();
+    let mut budget = NameBudget::default();
 
     match mach {
         mach::Mach::Fat(_) => {
@@ -498,9 +608,10 @@ pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTab
         }
         mach::Mach::Binary(macho) => {
             // Analyze Mach-O symbols
-            for sym in macho.symbols().flatten() {
-                let name = sym.0.to_string();
-                let nlist = sym.1;
+            for (name, nlist) in crate::binary_parser::mach_symbols_bounded(&macho, buffer) {
+                if nlist.is_stab() {
+                    continue;
+                }
 
                 // Linker-provided markers are not functions. Everything else with
                 // a leading double underscore (Itanium C++ and Rust names such
@@ -521,9 +632,12 @@ pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTab
                     };
 
                     let is_entry_point = name == "_main" || name == "main";
+                    if !budget.charge(&name, 2) {
+                        break;
+                    }
 
                     functions.push(FunctionInfo {
-                        name: name.clone(),
+                        name: name.to_string(),
                         address,
                         size: 0, // Mach-O doesn't provide function sizes directly
                         function_type,
@@ -536,38 +650,27 @@ pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTab
 
                     if is_external {
                         exports.push(ExportInfo {
-                            name: name.clone(),
+                            name: name.to_string(),
                             address,
                             ordinal: None,
                             is_forwarder: false,
                             forwarder_name: None,
                         });
                     }
-                } else if nlist.n_type & mach::symbols::N_TYPE == mach::symbols::N_SECT
-                    && !name.contains("func")
-                {
-                    global_variables.push(VariableInfo {
-                        name: name.clone(),
-                        address,
-                        size: 0, // Size not available
-                        var_type: if is_external {
-                            VariableType::Global
-                        } else {
-                            VariableType::Static
-                        },
-                        section: None,
-                    });
                 }
             }
 
             // Analyze imports (undefined symbols)
-            for sym in macho.symbols().flatten() {
-                let name = sym.0.to_string();
-                let nlist = sym.1;
-
-                if nlist.is_undefined() && !name.is_empty() {
+            for (name, nlist) in crate::binary_parser::mach_symbols_bounded(&macho, buffer) {
+                if budget.is_cut() {
+                    break;
+                }
+                if !nlist.is_stab() && nlist.is_undefined() && !name.is_empty() {
+                    if !budget.charge(&name, 2) {
+                        break;
+                    }
                     imports.push(ImportInfo {
-                        name: name.clone(),
+                        name: name.to_string(),
                         library: mach_import_library(&macho, &nlist).map(str::to_owned),
                         address: None,
                         ordinal: None,
@@ -575,7 +678,7 @@ pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTab
                     });
 
                     functions.push(FunctionInfo {
-                        name: name.clone(),
+                        name: name.to_string(),
                         address: 0,
                         size: 0,
                         function_type: FunctionType::Imported,
@@ -601,6 +704,12 @@ pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTab
         global_variables: global_variables.len(),
         cross_references: cross_references.len(),
     };
+
+    let mut notes: Vec<String> = Vec::new();
+    if budget.is_cut() {
+        notes.push(budget_note());
+    }
+    push_notes(&mut functions, &notes);
 
     Ok(SymbolTable {
         functions,
