@@ -342,6 +342,22 @@ impl FileScannerMcp {
         };
 
         let mut result = build_view(ecosystem, &path, &full, view);
+        // The byte budget may cut a page: `returned` and `next_offset` must then
+        // describe the rows that were sent.
+        if let Some(total) = result["total"].as_u64() {
+            let offset = result["offset"].as_u64().unwrap_or(0) as usize;
+            let effective = budget.clamp(
+                crate::mcp_server::output::MIN_OUTPUT_BYTES,
+                crate::mcp_server::output::MAX_OUTPUT_BYTES,
+            );
+            crate::mcp_server::output::fit_rows(
+                &mut result,
+                "items",
+                effective,
+                offset,
+                total as usize,
+            );
+        }
         if let Some(object) = result.as_object_mut() {
             object.insert("cache".to_string(), json!(cache_state));
         }
@@ -416,13 +432,32 @@ fn fingerprint(path: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
+    /// Content of files up to this size is hashed, up to [`HASH_BUDGET`] bytes in all.
+    const HASH_FILE_LIMIT: u64 = 2 * 1024 * 1024;
+    const HASH_BUDGET: u64 = 128 * 1024 * 1024;
+
     let mut hasher = Sha256::new();
     if path.is_dir() {
         hasher.update(b"dir:");
+        let mut hashed = 0u64;
         let walker = walkdir::WalkDir::new(path)
             .follow_links(false)
-            .sort_by_file_name();
-        for entry in walker.into_iter().filter_map(Result::ok).take(200_000) {
+            .sort_by_file_name()
+            .into_iter()
+            // The directories the analysis does not enter are not read here either,
+            // so the content-hashed set is the one the analysis reads.
+            .filter_entry(|entry| {
+                entry.depth() == 0
+                    || !(entry.file_type().is_dir()
+                        && crate::package_scan::SKIPPED_DIRS
+                            .contains(&entry.file_name().to_string_lossy().as_ref()))
+            });
+        // Content is hashed only for what the analysis reads: manifests and the
+        // shallowest sources (the same order package_scan reads them in). The rest
+        // is covered by size and time, so a call on a big tree does not read it all.
+        let mut manifests: Vec<std::path::PathBuf> = Vec::new();
+        let mut sources: Vec<(usize, std::path::PathBuf)> = Vec::new();
+        for entry in walker.filter_map(Result::ok).take(200_000) {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -437,6 +472,46 @@ fn fingerprint(path: &Path) -> Result<String, String> {
             hasher.update(entry.path().to_string_lossy().as_bytes());
             hasher.update(metadata.len().to_le_bytes());
             hasher.update(modified.to_le_bytes());
+            // Size and time are not enough: an edit that keeps both would be served
+            // from the cache.
+            if metadata.len() > HASH_FILE_LIMIT {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy();
+            let is_manifest = matches!(
+                name.as_ref(),
+                "package.json"
+                    | "package-lock.json"
+                    | "npm-shrinkwrap.json"
+                    | "setup.py"
+                    | "setup.cfg"
+                    | "pyproject.toml"
+                    | "PKG-INFO"
+                    | "METADATA"
+                    | "poetry.lock"
+            ) || (name.starts_with("requirements") && name.ends_with(".txt"));
+            if is_manifest {
+                manifests.push(entry.path().to_path_buf());
+            } else if crate::package_scan::language_of(&name).is_some() {
+                let relative = entry.path().strip_prefix(path).unwrap_or(entry.path());
+                let depth = relative.to_string_lossy().matches('/').count();
+                sources.push((depth, entry.path().to_path_buf()));
+            }
+        }
+        sources.sort();
+        sources.truncate(crate::package_scan::MAX_SCANNED_FILES);
+        for file in manifests
+            .iter()
+            .take(64)
+            .chain(sources.iter().map(|(_, f)| f))
+        {
+            if hashed >= HASH_BUDGET {
+                break;
+            }
+            if let Ok(bytes) = std::fs::read(file) {
+                hashed += bytes.len() as u64;
+                hasher.update(&bytes);
+            }
         }
         hasher.update(path.to_string_lossy().as_bytes());
     } else {
@@ -680,7 +755,7 @@ fn findings_page(full: &Value, view: &View) -> Value {
     let floor = view
         .min_severity
         .as_deref()
-        .map_or(0, |s| severity_rank(&capitalise(s)));
+        .map_or(0, |s| severity_rank(&capitalise(s.trim())));
     let needle = view.query.as_deref().map(str::to_lowercase);
     let rows: Vec<&Value> = full["source_findings"]
         .as_array()
@@ -806,6 +881,13 @@ fn dependencies_page(full: &Value, view: &View) -> Value {
                 "name": name,
                 "kind": kind,
                 "spec": details["version_spec"],
+                "direct_reference": if details["is_git"] == json!(true) {
+                    json!("git")
+                } else if details["is_url"] == json!(true) {
+                    json!("url or path")
+                } else {
+                    Value::Null
+                },
                 "resolved": details["resolved_version"],
                 "advisories": advisories(&details["vulnerabilities"]),
                 "range_may_include": details["range_floor_advisories"].as_array().filter(|l| !l.is_empty()),
@@ -995,5 +1077,30 @@ mod tests {
         let dir_first = fingerprint(dir.path()).unwrap();
         std::fs::write(dir.path().join("b.txt"), "x").unwrap();
         assert_ne!(dir_first, fingerprint(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn fingerprint_hashes_what_the_analysis_reads_not_node_modules() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src/lib");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("x.js");
+        std::fs::write(&file, "// aaaa\n").unwrap();
+        let modules = dir.path().join("node_modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        for n in 0..450 {
+            std::fs::write(modules.join(format!("m{n}.js")), "x\n").unwrap();
+        }
+        let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let first = fingerprint(dir.path()).unwrap();
+        // Same length, same modification time, different content.
+        std::fs::write(&file, "// bbbb\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert_ne!(first, fingerprint(dir.path()).unwrap());
     }
 }

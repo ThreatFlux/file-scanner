@@ -388,6 +388,34 @@ pub struct SpecCheck {
 /// empty). An unpinned requirement is unknown, not vulnerable. `resolved` is a
 /// version a lock file pins and wins over the specifier.
 pub fn check_dependency_spec(name: &str, specifier: &str, resolved: Option<&str>) -> SpecCheck {
+    let mut check = check_dependency_spec_version(name, specifier, resolved);
+    if let Some(entry) = known_malicious_package_entry(name) {
+        check.vulnerabilities.push(entry);
+    }
+    check
+}
+
+/// An entry for a package that is malicious at every version, whatever the
+/// specifier or source.
+fn known_malicious_package_entry(package_name: &str) -> Option<KnownVulnerability> {
+    let normalised = normalize_name(package_name);
+    get_known_malicious_packages()
+        .iter()
+        .any(|known| normalize_name(known) == normalised)
+        .then(|| KnownVulnerability {
+            cve_id: "KNOWN-MALICIOUS-PACKAGE".to_string(),
+            severity: VulnerabilitySeverity::Critical,
+            description: format!(
+                "{package_name} is on the list of packages that are malicious at every version (typosquat or trojan). Do not install it. Look it up: https://osv.dev/list?q={normalised}&ecosystem=PyPI"
+            ),
+            affected_versions: vec!["*".to_string()],
+            fixed_in: None,
+            cvss_score: None,
+            published_date: None,
+        })
+}
+
+fn check_dependency_spec_version(name: &str, specifier: &str, resolved: Option<&str>) -> SpecCheck {
     if let Some(version) = resolved.and_then(Pep440::parse) {
         return SpecCheck {
             vulnerabilities: check_package_vulnerabilities(name, resolved.unwrap_or_default()),

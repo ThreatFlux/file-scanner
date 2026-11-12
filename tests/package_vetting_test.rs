@@ -617,7 +617,7 @@ fn npm_uses_the_root_manifest_not_a_nested_one_and_ignores_appledouble() {
         ),
         (
             "package/._package.json",
-            &[0xff, 0xfe, 0x00, 0x05, 0x16, 0x07],
+            &[0x00, 0x05, 0x16, 0x07, 0xff, 0xfe],
         ),
         ("package/package.json", hooks.as_bytes()),
     ]);
@@ -639,10 +639,10 @@ fn npm_uses_the_root_manifest_not_a_nested_one_and_ignores_appledouble() {
 #[test]
 fn python_sdist_uses_the_root_setup_py_even_when_a_nested_one_comes_last() {
     let dir = TempDir::new().unwrap();
-    let root = b"from setuptools import setup\nimport subprocess\nsetup(name='real-root', version='1.0')\n";
+    let root = b"from setuptools import setup\nimport subprocess\nsubprocess.check_output(['git', 'describe'])\nsetup(name='real-root', version='1.0')\n";
     let nested = b"from setuptools import setup\nsetup(name='zz-inner-fixture', version='0.1')\n";
     let archive = tgz(&[
-        ("pkg-1.0/._setup.py", &[0xff, 0xfe, 0x00]),
+        ("pkg-1.0/._setup.py", &[0x00, 0x05, 0x16, 0x07, 0xff]),
         ("pkg-1.0/setup.py", root),
         ("pkg-1.0/tests/fixtures/setup.py", nested),
     ]);
@@ -653,7 +653,7 @@ fn python_sdist_uses_the_root_setup_py_even_when_a_nested_one_comes_last() {
         .security_analysis
         .suspicious_imports
         .iter()
-        .any(|i| i.module_name == "subprocess"));
+        .any(|i| i.module_name == "Process execution"));
 }
 
 // ---------------------------------------------------------------------------

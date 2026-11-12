@@ -597,13 +597,20 @@ fn analyze_package_with_metadata(
 
     let security_analysis =
         perform_security_analysis(&package_info, &dependencies, &files, &setup_analysis, &scan)?;
-    let malicious_indicators = detect_malicious_indicators(
+    let mut malicious_indicators = detect_malicious_indicators(
         &package_info,
         &dependencies,
         &security_analysis,
         &scan.findings,
         true,
     )?;
+    if let Some(reason) = input.incomplete_reason() {
+        if malicious_indicators.overall_risk_score < package_scan::INCOMPLETE_FLOOR {
+            malicious_indicators.overall_risk_score = package_scan::INCOMPLETE_FLOOR;
+            malicious_indicators.risk_level = RiskLevel::Low;
+        }
+        malicious_indicators.risk_reasons.push(reason);
+    }
     let maintainer_analysis = analyze_maintainers(&package_info)?;
     let quality_metrics = calculate_quality_metrics(&files)?;
 
@@ -632,53 +639,89 @@ fn analyze_package_with_files(
     format: PackageFormat,
     scan: SourceScan,
     lock: Option<&ParsedLock>,
-    input: InputInfo,
+    mut input: InputInfo,
 ) -> Result<PythonPackageAnalysis> {
-    // Extract package info from available sources
-    let mut package_info = if let Some(ref content) = pyproject_toml {
-        parse_pyproject_toml(content)?
-    } else if let Some(ref content) = setup_py {
-        parse_setup_py(content)?
-    } else if let Some(ref content) = setup_cfg {
-        parse_setup_cfg(content)?
-    } else if let Some(ref content) = pkg_info {
-        parse_pkg_info(content)?
-    } else {
-        anyhow::bail!("No package metadata found")
-    };
-    package_info.package_format = format;
-    // A pyproject.toml without a [project] name (setuptools via setup.py) falls back to setup.py.
-    if package_info.name.is_empty() {
-        if let Some(ref content) = setup_py {
-            let fallback = parse_setup_py(content)?;
-            if !fallback.name.is_empty() {
-                package_info.name = fallback.name;
-                if package_info.version.is_empty() {
-                    package_info.version = fallback.version;
-                }
-            }
+    if let Some(ref content) = setup_py {
+        let unread = manifest::parse_setup_py(content).unread();
+        if !unread.is_empty() {
+            input.notes.push(format!(
+                "setup.py computes {} at run time; the value was not read, so the name, version or dependencies it would give are missing.",
+                unread.join(", ")
+            ));
         }
     }
+    // Package identity: PKG-INFO (what the build recorded) first, then the source
+    // manifests; each fills only what is still empty, so a field is never taken
+    // from a table or call that does not own it.
+    let mut candidates: Vec<PackageInfo> = Vec::new();
+    if let Some(ref content) = pkg_info {
+        candidates.push(parse_pkg_info(content)?);
+    }
+    if let Some(ref content) = pyproject_toml {
+        candidates.push(parse_pyproject_toml(content)?);
+    }
+    if let Some(ref content) = setup_py {
+        candidates.push(parse_setup_py(content)?);
+    }
+    if let Some(ref content) = setup_cfg {
+        candidates.push(parse_setup_cfg(content)?);
+    }
+    let mut candidates = candidates.into_iter();
+    let Some(mut package_info) = candidates.next() else {
+        anyhow::bail!("No package metadata found")
+    };
+    for other in candidates {
+        if package_info.name.is_empty() {
+            package_info.name = other.name.clone();
+        }
+        if package_info.version.is_empty() {
+            package_info.version = other.version.clone();
+        }
+        package_info.description = package_info.description.take().or(other.description);
+        package_info.author = package_info.author.take().or(other.author);
+        package_info.author_email = package_info.author_email.take().or(other.author_email);
+        package_info.license = package_info.license.take().or(other.license);
+        package_info.url = package_info.url.take().or(other.url);
+        package_info.python_requires = package_info
+            .python_requires
+            .take()
+            .or(other.python_requires);
+        if package_info.keywords.is_empty() {
+            package_info.keywords = other.keywords;
+        }
+        if package_info.classifiers.is_empty() {
+            package_info.classifiers = other.classifiers;
+        }
+    }
+    package_info.package_format = format;
 
     // Analyze dependencies
-    let mut dependencies = analyze_dependencies(&setup_py, &setup_cfg, &pyproject_toml, lock)?;
+    let mut dependencies =
+        analyze_dependencies(&setup_py, &setup_cfg, &pyproject_toml, &pkg_info, lock)?;
     finish_dependencies(&mut dependencies, &package_info, lock);
 
     // Analyze setup scripts
-    let setup_analysis = analyze_setup_scripts(&setup_py, &setup_cfg, &pyproject_toml)?;
+    let setup_analysis = analyze_setup_scripts(&setup_py, &scan);
 
     // Perform security analysis
     let security_analysis =
         perform_security_analysis(&package_info, &dependencies, &files, &setup_analysis, &scan)?;
 
     // Detect malicious indicators
-    let malicious_indicators = detect_malicious_indicators(
+    let mut malicious_indicators = detect_malicious_indicators(
         &package_info,
         &dependencies,
         &security_analysis,
         &scan.findings,
         true,
     )?;
+    if let Some(reason) = input.incomplete_reason() {
+        if malicious_indicators.overall_risk_score < package_scan::INCOMPLETE_FLOOR {
+            malicious_indicators.overall_risk_score = package_scan::INCOMPLETE_FLOOR;
+            malicious_indicators.risk_level = RiskLevel::Low;
+        }
+        malicious_indicators.risk_reasons.push(reason);
+    }
 
     // Analyze maintainers
     let maintainer_analysis = analyze_maintainers(&package_info)?;
@@ -721,7 +764,7 @@ fn parse_poetry_lock(text: &str) -> ParsedLock {
             if packages.len() < MAX_LOCKED {
                 by_name.insert(normalize_name(&n), v.clone());
                 packages.push(LockedPackage {
-                    vulnerabilities: check_package_vulnerabilities(&n, &v),
+                    vulnerabilities: check_dependency_spec(&n, "", Some(&v)).vulnerabilities,
                     name: n,
                     version: v,
                     dev: *dev,
@@ -882,11 +925,81 @@ fn analyze_poetry_lock(text: &str) -> Result<PythonPackageAnalysis> {
     )
 }
 
+/// True for a requirement that is a URL, a VCS reference, an archive or a path.
+fn is_direct_reference(requirement: &str) -> bool {
+    let lower = requirement.to_ascii_lowercase();
+    let first = lower.split_whitespace().next().unwrap_or("");
+    first.contains("://")
+        || first.starts_with("git+")
+        || first.starts_with("file:")
+        || first.starts_with("./")
+        || first.starts_with("../")
+        || first.starts_with('/')
+        || first.starts_with('~')
+        || (!lower.contains(" @ ")
+            && (first.ends_with(".whl") || first.ends_with(".tar.gz") || first.ends_with(".zip")))
+}
+
+/// Replace `user:password@` in URLs by `***@`.
+fn redact_credentials(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        out.push_str(&rest[..at + 3]);
+        rest = &rest[at + 3..];
+        let end = rest.find(['/', ' ']).unwrap_or(rest.len());
+        if let Some(userinfo) = rest[..end].rfind('@') {
+            out.push_str("***@");
+            rest = &rest[userinfo + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Say what a requirements-file option line does that this analysis does not follow.
+fn note_requirements_option(line: &str, notes: &mut Vec<String>, unread: &mut usize) {
+    *unread += 1;
+    if notes.len() >= 20 {
+        return;
+    }
+    // Credentials in an index URL are not repeated.
+    let redacted = redact_credentials(line);
+    let line = redacted.as_str();
+    let mut parts = line.splitn(2, [' ', '=']);
+    let option = parts.next().unwrap_or("");
+    let value = parts.next().unwrap_or("").trim();
+    let text = match option {
+        "-r" | "--requirement" => format!(
+            "`{line}` includes another requirements file that was not read: its pins are not analysed. Analyse {value} on its own."
+        ),
+        "-c" | "--constraint" => format!(
+            "`{line}` names a constraints file that was not read: it may pin or limit versions."
+        ),
+        "-e" | "--editable" => format!(
+            "`{line}` is an editable install from a path or VCS URL; it was not analysed."
+        ),
+        "-i" | "--index-url" => format!(
+            "`{line}` replaces the package index: every requirement here is resolved from that server."
+        ),
+        "--extra-index-url" => format!(
+            "`{line}` adds a second package index. pip takes the highest version from any index, so an internal package name can be taken over from here (dependency confusion)."
+        ),
+        "-f" | "--find-links" => format!(
+            "`{line}` adds a location to look for archives; it was not examined."
+        ),
+        _ => format!("option line `{line}` is not followed by this analysis."),
+    };
+    notes.push(text);
+}
+
 /// A requirements file as the only input.
 fn analyze_requirements_text(text: &str, file_name: &str) -> Result<PythonPackageAnalysis> {
     let mut install_requires = HashMap::new();
     let mut joined = String::new();
     let mut capped = false;
+    let mut notes: Vec<String> = Vec::new();
+    let mut unread_options = 0usize;
     for raw in text.lines() {
         if install_requires.len() >= package_scan::MAX_DEPENDENCY_ENTRIES {
             capped = true;
@@ -901,12 +1014,33 @@ fn analyze_requirements_text(text: &str, file_name: &str) -> Result<PythonPackag
         joined.push_str(line);
         let entry = std::mem::take(&mut joined);
         let entry = entry.split(" #").next().unwrap_or("").trim().to_string();
-        if entry.is_empty() || entry.starts_with('#') || entry.starts_with('-') {
+        if entry.is_empty() || entry.starts_with('#') {
+            continue;
+        }
+        if entry.starts_with('-') {
+            note_requirements_option(&entry, &mut notes, &mut unread_options);
             continue;
         }
         // Drop per-requirement options such as `--hash=sha256:...`.
         let requirement = entry.split(" --").next().unwrap_or("").trim();
         if requirement.is_empty() {
+            continue;
+        }
+        if is_direct_reference(requirement) {
+            // A URL or a path installs whatever is there: not a name, not a version.
+            install_requires.insert(
+                redact_credentials(requirement),
+                DependencyDetails {
+                    version_spec: "direct reference".to_string(),
+                    is_pinned: false,
+                    is_url: true,
+                    is_git: requirement.starts_with("git+"),
+                    vulnerabilities: vec![],
+                    deprecated: false,
+                    resolved_version: None,
+                    range_floor_advisories: vec![],
+                },
+            );
             continue;
         }
         let (name, specifier) = parse_dependency_spec(requirement);
@@ -929,6 +1063,13 @@ fn analyze_requirements_text(text: &str, file_name: &str) -> Result<PythonPackag
             package_scan::MAX_DEPENDENCY_ENTRIES
         ));
     }
+    if unread_options > notes.len() {
+        notes.push(format!(
+            "{} more option lines are not described here.",
+            unread_options - notes.len()
+        ));
+    }
+    input.notes.extend(notes);
     dependency_list_analysis(
         &format!("({file_name})"),
         install_requires,
@@ -1081,164 +1222,204 @@ fn parse_wheel_metadata(metadata: &str) -> Result<PackageInfo> {
     })
 }
 
-/// Parse pyproject.toml
-fn parse_pyproject_toml(content: &str) -> Result<PackageInfo> {
-    // Simple parsing - in production, use a TOML parser
-    let mut name = String::new();
-    let mut version = String::new();
-    let mut description = None;
-    let author = None;
-    let license = None;
-
-    for line in content.lines() {
-        if line.contains("name =") {
-            if let Some(value) = extract_quoted_value(line) {
-                name = value;
-            }
-        } else if line.contains("version =") {
-            if let Some(value) = extract_quoted_value(line) {
-                version = value;
-            }
-        } else if line.contains("description =") {
-            if let Some(value) = extract_quoted_value(line) {
-                description = Some(value);
-            }
-        }
-    }
-
-    Ok(PackageInfo {
-        name,
-        version,
-        description,
-        author,
+fn empty_info(format: PackageFormat) -> PackageInfo {
+    PackageInfo {
+        name: String::new(),
+        version: String::new(),
+        description: None,
+        author: None,
         author_email: None,
         maintainer: None,
         maintainer_email: None,
-        license,
+        license: None,
         url: None,
         project_urls: HashMap::new(),
         keywords: vec![],
         classifiers: vec![],
         python_requires: None,
-        package_format: PackageFormat::Directory,
-    })
+        package_format: format,
+    }
 }
 
-/// Parse setup.py
-fn parse_setup_py(content: &str) -> Result<PackageInfo> {
-    // Extract package info from setup() call
-    let mut name = String::new();
-    let mut version = String::new();
-    let mut description = None;
-    let mut author = None;
-    let mut author_email = None;
-    let mut license = None;
-    let mut url = None;
-
-    // Simple regex-based extraction
-    if let Some(cap) = regex::Regex::new(r#"name\s*=\s*["']([^"']+)["']"#)?.captures(content) {
-        name = cap[1].to_string();
+/// `Name <email>` as Poetry writes authors.
+fn split_name_email(text: &str) -> (String, Option<String>) {
+    match (text.find('<'), text.rfind('>')) {
+        (Some(start), Some(end)) if end > start => (
+            text[..start].trim().to_string(),
+            Some(text[start + 1..end].trim().to_string()),
+        ),
+        _ => (text.trim().to_string(), None),
     }
-    if let Some(cap) = regex::Regex::new(r#"version\s*=\s*["']([^"']+)["']"#)?.captures(content) {
-        version = cap[1].to_string();
-    }
-    if let Some(cap) = regex::Regex::new(r#"description\s*=\s*["']([^"']+)["']"#)?.captures(content)
-    {
-        description = Some(cap[1].to_string());
-    }
-    if let Some(cap) = regex::Regex::new(r#"author\s*=\s*["']([^"']+)["']"#)?.captures(content) {
-        author = Some(cap[1].to_string());
-    }
-    if let Some(cap) =
-        regex::Regex::new(r#"author_email\s*=\s*["']([^"']+)["']"#)?.captures(content)
-    {
-        author_email = Some(cap[1].to_string());
-    }
-    if let Some(cap) = regex::Regex::new(r#"license\s*=\s*["']([^"']+)["']"#)?.captures(content) {
-        license = Some(cap[1].to_string());
-    }
-    if let Some(cap) = regex::Regex::new(r#"url\s*=\s*["']([^"']+)["']"#)?.captures(content) {
-        url = Some(cap[1].to_string());
-    }
-
-    // Extract keywords - handle list format
-    let mut keywords = vec![];
-    if let Some(keywords_list) = extract_list_from_setup_py(content, "keywords") {
-        keywords = keywords_list;
-    }
-
-    Ok(PackageInfo {
-        name,
-        version,
-        description,
-        author,
-        author_email,
-        maintainer: None,
-        maintainer_email: None,
-        license,
-        url,
-        project_urls: HashMap::new(),
-        keywords,
-        classifiers: vec![],
-        python_requires: None,
-        package_format: PackageFormat::SourceDistribution,
-    })
 }
 
-/// Parse setup.cfg
-fn parse_setup_cfg(content: &str) -> Result<PackageInfo> {
-    // Simple INI-style parsing
-    let mut name = String::new();
-    let mut version = String::new();
-    let mut description = None;
-    let mut author = None;
-    let mut author_email = None;
-    let mut license = None;
-    let mut url = None;
-
-    let mut in_metadata = false;
-
-    for line in content.lines() {
-        if line.trim() == "[metadata]" {
-            in_metadata = true;
+/// Names and emails of a PEP 621 `authors` / `maintainers` array of tables.
+fn people(value: Option<&manifest::Toml>) -> (Option<String>, Option<String>) {
+    let mut names = Vec::new();
+    let mut emails = Vec::new();
+    for person in value.and_then(manifest::Toml::as_array).unwrap_or(&[]) {
+        if let Some(name) = person.get("name").and_then(manifest::Toml::as_str) {
+            names.push(name.to_string());
+        } else if let Some(text) = person.as_str() {
+            let (name, email) = split_name_email(text);
+            names.push(name);
+            emails.extend(email);
             continue;
         }
-        if line.starts_with('[') {
-            in_metadata = false;
+        if let Some(email) = person.get("email").and_then(manifest::Toml::as_str) {
+            emails.push(email.to_string());
         }
+    }
+    let join = |items: Vec<String>| (!items.is_empty()).then(|| items.join(", "));
+    (join(names), join(emails))
+}
 
-        if in_metadata {
-            if let Some((key, value)) = line.split_once(" = ") {
-                match key.trim() {
-                    "name" => name = value.trim().to_string(),
-                    "version" => version = value.trim().to_string(),
-                    "description" => description = Some(value.trim().to_string()),
-                    "author" => author = Some(value.trim().to_string()),
-                    "author_email" => author_email = Some(value.trim().to_string()),
-                    "license" => license = Some(value.trim().to_string()),
-                    "url" => url = Some(value.trim().to_string()),
-                    _ => {}
+/// Parse pyproject.toml: the `[project]` table (PEP 621), else `[tool.poetry]`.
+/// Only keys of those tables count; a `name = ` under `[tool.black]` or an
+/// author's name is not the package's.
+fn parse_pyproject_toml(content: &str) -> Result<PackageInfo> {
+    let doc = manifest::parse_toml(content);
+    let mut info = empty_info(PackageFormat::Directory);
+    let text = |table: &manifest::Toml, key: &str| {
+        table
+            .get(key)
+            .and_then(manifest::Toml::as_str)
+            .map(String::from)
+    };
+    if let Some(project) = doc.get("project") {
+        info.name = text(project, "name").unwrap_or_default();
+        info.version = text(project, "version").unwrap_or_default();
+        info.description = text(project, "description");
+        info.python_requires = text(project, "requires-python");
+        info.license = text(project, "license").or_else(|| {
+            project
+                .at(&["license", "text"])
+                .and_then(manifest::Toml::as_str)
+                .map(String::from)
+        });
+        let (author, author_email) = people(project.get("authors"));
+        info.author = author;
+        info.author_email = author_email;
+        let (maintainer, maintainer_email) = people(project.get("maintainers"));
+        info.maintainer = maintainer;
+        info.maintainer_email = maintainer_email;
+        info.keywords = project
+            .get("keywords")
+            .map(manifest::Toml::strings)
+            .unwrap_or_default();
+        info.classifiers = project
+            .get("classifiers")
+            .map(manifest::Toml::strings)
+            .unwrap_or_default();
+        if let Some(urls) = project.get("urls").and_then(manifest::Toml::as_table) {
+            for (key, value) in urls {
+                if let Some(url) = value.as_str() {
+                    info.project_urls.insert(key.clone(), url.to_string());
                 }
             }
         }
+        info.url = info
+            .project_urls
+            .iter()
+            .find(|(k, _)| matches!(k.to_ascii_lowercase().as_str(), "homepage" | "home"))
+            .map(|(_, v)| v.clone());
     }
+    if info.name.is_empty() {
+        if let Some(poetry) = doc.at(&["tool", "poetry"]) {
+            info.name = text(poetry, "name").unwrap_or_default();
+            info.version = text(poetry, "version").unwrap_or_default();
+            info.description = text(poetry, "description");
+            info.license = text(poetry, "license");
+            info.url = text(poetry, "homepage");
+            info.keywords = poetry
+                .get("keywords")
+                .map(manifest::Toml::strings)
+                .unwrap_or_default();
+            info.classifiers = poetry
+                .get("classifiers")
+                .map(manifest::Toml::strings)
+                .unwrap_or_default();
+            let authors = poetry
+                .get("authors")
+                .map(manifest::Toml::strings)
+                .unwrap_or_default();
+            if let Some(first) = authors.first() {
+                let (name, email) = split_name_email(first);
+                info.author = Some(name);
+                info.author_email = email;
+            }
+            info.python_requires = poetry
+                .at(&["dependencies", "python"])
+                .and_then(manifest::Toml::as_str)
+                .map(String::from);
+        }
+    }
+    Ok(info)
+}
 
-    Ok(PackageInfo {
-        name,
-        version,
-        description,
-        author,
-        author_email,
-        maintainer: None,
-        maintainer_email: None,
-        license,
-        url,
-        project_urls: HashMap::new(),
-        keywords: vec![],
-        classifiers: vec![],
-        python_requires: None,
-        package_format: PackageFormat::SourceDistribution,
-    })
+/// Parse setup.py: the keyword arguments of its `setup()` call, with simple
+/// `NAME = '...'` constants resolved. Arguments computed at run time stay empty.
+fn parse_setup_py(content: &str) -> Result<PackageInfo> {
+    let args = manifest::parse_setup_py(content);
+    let mut info = empty_info(PackageFormat::SourceDistribution);
+    info.name = args.string("name").unwrap_or_default();
+    info.version = args.string("version").unwrap_or_default();
+    info.description = args.string("description");
+    info.author = args.string("author");
+    info.author_email = args.string("author_email");
+    info.maintainer = args.string("maintainer");
+    info.maintainer_email = args.string("maintainer_email");
+    info.license = args.string("license");
+    info.url = args.string("url");
+    info.python_requires = args.string("python_requires");
+    info.keywords = match args.strings("keywords") {
+        Some(list) if list.len() == 1 && list[0].contains(',') => {
+            list[0].split(',').map(|k| k.trim().to_string()).collect()
+        }
+        Some(list) => list,
+        None => vec![],
+    };
+    info.classifiers = args.strings("classifiers").unwrap_or_default();
+    Ok(info)
+}
+
+/// Parse setup.cfg: its `[metadata]` section.
+fn parse_setup_cfg(content: &str) -> Result<PackageInfo> {
+    let ini = manifest::parse_ini(content);
+    let get = |key: &str| {
+        ini.get("metadata", key)
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && !v.starts_with("attr:") && !v.starts_with("file:"))
+            .map(String::from)
+    };
+    let mut info = empty_info(PackageFormat::SourceDistribution);
+    info.name = get("name").unwrap_or_default();
+    info.version = get("version").unwrap_or_default();
+    info.description = get("description").or_else(|| get("summary"));
+    info.author = get("author");
+    info.author_email = get("author_email").or_else(|| get("author-email"));
+    info.maintainer = get("maintainer");
+    info.maintainer_email = get("maintainer_email");
+    info.license = get("license");
+    info.url = get("url").or_else(|| get("home_page"));
+    info.python_requires = ini.get("options", "python_requires").map(String::from);
+    info.keywords = get("keywords")
+        .map(|k| {
+            k.split([',', '\n'])
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    info.classifiers = ini
+        .get("metadata", "classifiers")
+        .map(|c| {
+            c.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(info)
 }
 
 /// Parse PKG-INFO
@@ -1290,26 +1471,39 @@ fn analyze_dependencies(
     setup_py: &Option<String>,
     setup_cfg: &Option<String>,
     pyproject_toml: &Option<String>,
+    pkg_info: &Option<String>,
     lock: Option<&ParsedLock>,
 ) -> Result<PythonDependencyAnalysis> {
     let mut install_requires = HashMap::new();
-    let mut extras_require = HashMap::new();
-    let setup_requires = HashMap::new();
-    let tests_require = HashMap::new();
+    let extras_require = HashMap::new();
+    let mut setup_requires = HashMap::new();
+    let mut tests_require = HashMap::new();
 
     // Extract from setup.py
     if let Some(content) = setup_py {
-        extract_setup_py_dependencies(content, &mut install_requires, &mut extras_require)?;
+        extract_setup_py_dependencies(
+            content,
+            &mut install_requires,
+            &mut setup_requires,
+            &mut tests_require,
+        );
     }
 
     // Extract from setup.cfg
     if let Some(content) = setup_cfg {
-        extract_setup_cfg_dependencies(content, &mut install_requires)?;
+        extract_setup_cfg_dependencies(content, &mut install_requires);
     }
 
     // Extract from pyproject.toml
     if let Some(content) = pyproject_toml {
-        extract_pyproject_dependencies(content, &mut install_requires)?;
+        extract_pyproject_dependencies(content, &mut install_requires);
+    }
+
+    // An sdist's PKG-INFO lists what the build produced (setup.py may compute it).
+    if let Some(content) = pkg_info {
+        for (name, details) in analyze_dependencies_from_metadata(content)?.install_requires {
+            install_requires.entry(name).or_insert(details);
+        }
     }
 
     // A lock file settles which version a requirement resolves to.
@@ -1327,6 +1521,8 @@ fn analyze_dependencies(
     }
 
     let dependency_count = install_requires.len()
+        + setup_requires.len()
+        + tests_require.len()
         + extras_require
             .values()
             .map(std::collections::HashMap::len)
@@ -1347,165 +1543,98 @@ fn analyze_dependencies(
     })
 }
 
-/// Extract dependencies from setup.py
+/// Add one requirement string to a dependency map.
+fn add_requirement(map: &mut HashMap<String, DependencyDetails>, requirement: &str) {
+    if map.len() >= package_scan::MAX_DEPENDENCY_ENTRIES {
+        return;
+    }
+    let requirement = requirement.trim();
+    let (name, version_spec) = parse_dependency_spec(requirement);
+    if name.is_empty() {
+        return;
+    }
+    let details = dependency_details(&name, requirement, &version_spec, None);
+    map.insert(name, details);
+}
+
+/// Extract dependencies from setup.py's `install_requires`, `setup_requires`
+/// and `tests_require` arguments.
 fn extract_setup_py_dependencies(
     content: &str,
     install_requires: &mut HashMap<String, DependencyDetails>,
-    _extras_require: &mut HashMap<String, HashMap<String, DependencyDetails>>,
-) -> Result<()> {
-    // Extract install_requires
-    if let Some(deps) = extract_list_from_setup_py(content, "install_requires") {
-        for dep in deps {
-            let (name, version_spec) = parse_dependency_spec(&dep);
-            if name.is_empty() {
-                continue;
-            }
-            let details = dependency_details(&name, &dep, &version_spec, None);
-            install_requires.insert(name, details);
+    setup_requires: &mut HashMap<String, DependencyDetails>,
+    tests_require: &mut HashMap<String, DependencyDetails>,
+) {
+    let args = manifest::parse_setup_py(content);
+    for (key, target) in [
+        ("install_requires", install_requires),
+        ("setup_requires", setup_requires),
+        ("tests_require", tests_require),
+    ] {
+        for requirement in args.strings(key).unwrap_or_default() {
+            add_requirement(target, &requirement);
         }
     }
-
-    Ok(())
-}
-
-/// Extract a list from setup.py
-fn extract_list_from_setup_py(content: &str, field_name: &str) -> Option<Vec<String>> {
-    // Simple regex to extract list contents
-    let pattern = format!(r"{field_name}\s*=\s*\[([\s\S]*?)\]");
-    if let Ok(re) = regex::Regex::new(&pattern) {
-        if let Some(cap) = re.captures(content) {
-            let list_content = &cap[1];
-            return Some(
-                list_content
-                    .split(',')
-                    .filter_map(|s| {
-                        let trimmed = s.trim();
-                        if trimmed.is_empty() {
-                            None
-                        } else {
-                            Some(trimmed.trim_matches(|c| c == '"' || c == '\'').to_string())
-                        }
-                    })
-                    .collect(),
-            );
-        }
-    }
-    None
 }
 
 /// Extract dependencies from setup.cfg
 fn extract_setup_cfg_dependencies(
     content: &str,
     install_requires: &mut HashMap<String, DependencyDetails>,
-) -> Result<()> {
-    let mut in_options = false;
-    let mut in_install_requires = false;
-
-    for line in content.lines() {
-        if line.trim() == "[options]" {
-            in_options = true;
-            continue;
-        }
-        if line.starts_with('[') {
-            in_options = false;
-            in_install_requires = false;
-        }
-
-        if in_options && line.trim() == "install_requires =" {
-            in_install_requires = true;
-            continue;
-        }
-
-        if in_install_requires && !line.starts_with(' ') && !line.starts_with('\t') {
-            in_install_requires = false;
-        }
-
-        if in_install_requires && !line.trim().is_empty() {
-            let dep = line.trim();
-            let (name, version_spec) = parse_dependency_spec(dep);
-            if name.is_empty() {
-                continue;
+) {
+    let ini = manifest::parse_ini(content);
+    if let Some(list) = ini.get("options", "install_requires") {
+        for line in list.lines() {
+            // A line that is not a requirement (`file:`, `attr:`, a comment) names nothing.
+            if !line.starts_with("file:") && !line.starts_with("attr:") {
+                add_requirement(install_requires, line);
             }
-            let details = dependency_details(&name, dep, &version_spec, None);
-            install_requires.insert(name, details);
         }
     }
-
-    Ok(())
 }
 
-/// Extract dependencies from pyproject.toml
+/// Extract dependencies from pyproject.toml: `[project] dependencies` (PEP 621)
+/// and `[tool.poetry.dependencies]`.
 fn extract_pyproject_dependencies(
     content: &str,
     install_requires: &mut HashMap<String, DependencyDetails>,
-) -> Result<()> {
-    // Simple extraction - in production use a TOML parser
-    let mut in_dependencies = false;
-    let mut in_project_deps = false;
-    let mut in_deps_list = false;
-
-    for line in content.lines() {
-        // Handle [tool.poetry.dependencies] section (key-value format)
-        if line.contains("[tool.poetry.dependencies]") {
-            in_dependencies = true;
-            in_project_deps = false;
-            in_deps_list = false;
-            continue;
-        }
-
-        // Handle [project] section
-        if line.contains("[project]") {
-            in_project_deps = true;
-            in_dependencies = false;
-            in_deps_list = false;
-            continue;
-        }
-
-        // Handle dependencies list in [project] section
-        if in_project_deps && line.trim() == "dependencies = [" {
-            in_deps_list = true;
-            continue;
-        }
-
-        // End of section
-        if line.starts_with('[') {
-            in_dependencies = false;
-            in_project_deps = false;
-            in_deps_list = false;
-        }
-
-        // End of dependencies list
-        if in_deps_list && line.contains(']') {
-            in_deps_list = false;
-        }
-
-        // Parse dependencies in [project] dependencies list format
-        if in_deps_list && line.trim().starts_with('"') {
-            let dep_spec = line.trim().trim_matches('"').trim_matches(',');
-            let (name, version_spec) = parse_dependency_spec(dep_spec);
-            if name.is_empty() {
-                continue;
-            }
-            let details = dependency_details(&name, dep_spec, &version_spec, None);
-            install_requires.insert(name, details);
-        }
-        // Parse dependencies in [tool.poetry.dependencies] format
-        else if in_dependencies && line.contains('=') {
-            if let Some((name, version)) = line.split_once('=') {
-                let name = name.trim().trim_matches('"');
-                if name == "python" {
-                    continue; // Skip python version requirement
-                }
-                // Poetry: "^1.2" is a caret range; a bare "1.2.3" is exact.
-                let raw_spec = version.trim().trim_matches('"');
-                let specifier = poetry_specifier(raw_spec);
-                let details = dependency_details(name, raw_spec, &specifier, None);
-                install_requires.insert(name.to_string(), details);
-            }
+) {
+    let doc = manifest::parse_toml(content);
+    if let Some(list) = doc.at(&["project", "dependencies"]) {
+        for requirement in list.strings() {
+            add_requirement(install_requires, &requirement);
         }
     }
-
-    Ok(())
+    if let Some(table) = doc
+        .at(&["tool", "poetry", "dependencies"])
+        .and_then(manifest::Toml::as_table)
+    {
+        for (name, value) in table.iter().take(package_scan::MAX_DEPENDENCY_ENTRIES) {
+            if name == "python" {
+                continue;
+            }
+            // A constraint is a string, an inline table (`{ version = "^1", extras = [..] }`)
+            // or an array of such tables for markers.
+            let first = value.as_array().and_then(|a| a.first()).unwrap_or(value);
+            let raw = match first {
+                manifest::Toml::Str(s) => s.clone(),
+                table => table
+                    .get("version")
+                    .and_then(manifest::Toml::as_str)
+                    .map(String::from)
+                    .unwrap_or_default(),
+            };
+            let (is_git, is_url) = (
+                first.get("git").is_some(),
+                first.get("url").is_some() || first.get("path").is_some(),
+            );
+            let specifier = poetry_specifier(&raw);
+            let mut details = dependency_details(name, &raw, &specifier, None);
+            details.is_git |= is_git;
+            details.is_url |= is_url;
+            install_requires.insert(name.clone(), details);
+        }
+    }
 }
 
 /// Turn a Poetry version constraint into a PEP 440 specifier: `^1.2.3` and
@@ -1586,11 +1715,16 @@ fn calculate_vulnerability_summary(
 }
 
 /// Analyze setup scripts
-fn analyze_setup_scripts(
-    setup_py: &Option<String>,
-    _setup_cfg: &Option<String>,
-    _pyproject_toml: &Option<String>,
-) -> Result<SetupAnalysis> {
+/// True for a finding in the package's own top-level `setup.py`.
+fn is_setup_py_finding(finding: &SourceFinding) -> bool {
+    finding.file == "setup.py"
+        || (finding.file.ends_with("/setup.py") && finding.file.matches('/').count() == 1)
+}
+
+/// What the setup script does, from the scan findings on `setup.py` (token
+/// aware, with line numbers) and its `setup()` arguments. Words that merely
+/// appear in text ("executable", "evaluate") are not operations.
+fn analyze_setup_scripts(setup_py: &Option<String>, scan: &SourceScan) -> SetupAnalysis {
     let mut setup_type = SetupType::PyProjectToml;
     let mut setup_commands = vec![];
     let mut custom_commands = HashMap::new();
@@ -1600,62 +1734,46 @@ fn analyze_setup_scripts(
     if let Some(content) = setup_py {
         setup_type = SetupType::SetupPy;
 
-        // Check for custom commands
-        if content.contains("cmdclass") {
+        // `cmdclass` replaces build or install steps with the package's own code:
+        // worth knowing, and common in packages that build C extensions.
+        if manifest::parse_setup_py(content).has("cmdclass") {
             setup_commands.push(SetupCommand {
-                command_name: "custom".to_string(),
-                command_class: "Custom command detected".to_string(),
-                is_suspicious: true,
-                risk_reason: Some("Custom setup commands can execute arbitrary code".to_string()),
+                command_name: "cmdclass".to_string(),
+                command_class: "Custom build or install command classes".to_string(),
+                is_suspicious: false,
+                risk_reason: None,
             });
-
-            // Also add to custom_commands map
             custom_commands.insert(
                 "cmdclass".to_string(),
-                "Custom commands detected".to_string(),
+                "setup() passes cmdclass: the package's own code runs as part of building or installing it".to_string(),
             );
         }
 
-        // Check for imports that indicate dangerous operations
-        let dangerous_imports = [
-            ("subprocess", "Process execution"),
-            ("os.system", "System command execution"),
-            ("urllib", "Network access"),
-            ("requests", "HTTP requests"),
-            ("socket", "Network socket access"),
-            ("base64", "Base64 encoding/decoding"),
-            ("exec", "Dynamic code execution"),
-            ("eval", "Code evaluation"),
-            ("compile", "Code compilation"),
-            ("__import__", "Dynamic import"),
-        ];
-
-        for (import, reason) in &dangerous_imports {
-            if content.contains(import) {
+        for finding in scan.findings.iter().filter(|f| is_setup_py_finding(f)) {
+            if finding.rule == "Network access in setup.py" {
+                if external_downloads.len() < 20 {
+                    external_downloads.push(format!(
+                        "{} at {}:{}",
+                        finding.rule, finding.file, finding.line
+                    ));
+                }
+            } else if dangerous_operations.len() < 40 {
                 dangerous_operations.push(DangerousOperation {
-                    operation: import.to_string(),
-                    location: "setup.py".to_string(),
-                    risk_reason: reason.to_string(),
+                    operation: finding.rule.clone(),
+                    location: format!("{}:{}", finding.file, finding.line),
+                    risk_reason: format!("{}: {}", finding.severity, finding.evidence),
                 });
             }
         }
-
-        // Check for external downloads
-        if content.contains("urlopen")
-            || content.contains("requests.get")
-            || content.contains("wget")
-        {
-            external_downloads.push("External download detected in setup.py".to_string());
-        }
     }
 
-    Ok(SetupAnalysis {
+    SetupAnalysis {
         setup_type,
         setup_commands,
         custom_commands,
         dangerous_operations,
         external_downloads,
-    })
+    }
 }
 
 /// Perform security analysis
@@ -1694,7 +1812,7 @@ fn perform_security_analysis(
         });
     }
     let file_system_access = detect_filesystem_patterns(files, setup_analysis);
-    let mut process_execution = detect_process_execution(files, setup_analysis);
+    let mut process_execution: Vec<ProcessExecution> = Vec::new();
     for finding in scan
         .findings
         .iter()
@@ -1709,29 +1827,20 @@ fn perform_security_analysis(
         });
     }
 
-    // Check for obfuscation in files and setup script
-    let mut obfuscation_detected = detect_obfuscation(files);
-    if !obfuscation_detected && matches!(setup_analysis.setup_type, SetupType::SetupPy) {
-        // Also check setup.py content if we have it
-        for op in &setup_analysis.dangerous_operations {
-            if op.operation == "base64"
-                || op.operation == "exec"
-                || op.operation == "eval"
-                || op.operation == "__import__"
-                || op.operation == "compile"
-            {
-                obfuscation_detected = true;
-                break;
-            }
-        }
-    }
-
-    let crypto_mining_indicators = scan.findings.iter().any(|f| f.category == "cryptomining");
-    let data_exfiltration_risk = detect_data_exfiltration(&script_network_patterns)
+    // Obfuscation: a file that looks packed, or an exec of decoded content in the setup script.
+    let obfuscation_detected = detect_obfuscation(files)
         || scan
             .findings
             .iter()
-            .any(|f| f.category == "exfiltration" && f.severity != "Medium");
+            .any(|f| f.category == "obfuscation" && is_setup_py_finding(f));
+
+    let crypto_mining_indicators = scan.findings.iter().any(|f| f.category == "cryptomining");
+    // A download in setup.py is listed under network patterns; only an exfiltration
+    // finding (an endpoint that receives data, environment sent out) counts here.
+    let data_exfiltration_risk = scan
+        .findings
+        .iter()
+        .any(|f| f.category == "exfiltration" && f.severity != "Medium");
     let mut backdoor_indicators = detect_backdoor_indicators(files, &process_execution);
     for finding in scan
         .findings
@@ -1770,24 +1879,56 @@ fn perform_security_analysis(
     })
 }
 
-/// Detect suspicious imports
+/// Modules whose import in `setup.py` is worth listing (informational).
+const NOTABLE_SETUP_IMPORTS: &[(&str, &str)] = &[
+    ("subprocess", "Process execution"),
+    ("socket", "Network socket access"),
+    ("urllib", "Network access"),
+    ("urllib2", "Network access"),
+    ("requests", "HTTP requests"),
+    ("httpx", "HTTP requests"),
+    ("base64", "Base64 encoding/decoding"),
+    ("marshal", "Bytecode loading"),
+    ("ctypes", "Foreign function calls"),
+    ("pty", "Pseudo-terminal control"),
+];
+
+/// The operations found in `setup.py` and the notable modules it imports, as
+/// suspicious-import rows. An import alone is listed as Low: it is a pointer
+/// for the reader, not evidence.
 fn detect_suspicious_imports(
-    _files: &[PythonFileAnalysis],
+    files: &[PythonFileAnalysis],
     setup_analysis: &SetupAnalysis,
 ) -> Vec<SuspiciousImport> {
-    let mut imports = vec![];
-
-    // Check setup.py dangerous operations
-    for op in &setup_analysis.dangerous_operations {
-        imports.push(SuspiciousImport {
+    let mut rows: Vec<SuspiciousImport> = Vec::new();
+    if let Some(setup) = files.iter().find(|f| {
+        f.file_path == "setup.py"
+            || (f.file_path.ends_with("/setup.py") && f.file_path.matches('/').count() == 1)
+    }) {
+        for (module, reason) in NOTABLE_SETUP_IMPORTS {
+            if setup.imports.iter().any(|i| i == module) {
+                rows.push(SuspiciousImport {
+                    module_name: (*module).to_string(),
+                    risk_level: "Low".to_string(),
+                    reason: format!("{reason}: imported by setup.py"),
+                    found_in: setup.file_path.clone(),
+                });
+            }
+        }
+    }
+    rows.extend(setup_analysis.dangerous_operations.iter().map(|op| {
+        SuspiciousImport {
             module_name: op.operation.clone(),
-            risk_level: "High".to_string(),
+            risk_level: op
+                .risk_reason
+                .split_once(':')
+                .map_or("Medium", |(severity, _)| severity)
+                .to_string(),
             reason: op.risk_reason.clone(),
             found_in: op.location.clone(),
-        });
-    }
-
-    imports
+        }
+    }));
+    rows
 }
 
 /// Detect network patterns
@@ -1818,71 +1959,24 @@ const fn detect_filesystem_patterns(
     vec![] // TODO: Implement
 }
 
-/// Detect process execution
-fn detect_process_execution(
-    _files: &[PythonFileAnalysis],
-    setup_analysis: &SetupAnalysis,
-) -> Vec<ProcessExecution> {
-    let mut executions = vec![];
-
-    // Check for process execution in setup
-    for op in &setup_analysis.dangerous_operations {
-        if op.operation.contains("subprocess") || op.operation.contains("os.system") {
-            executions.push(ProcessExecution {
-                command: op.operation.clone(),
-                arguments: vec![],
-                is_suspicious: true,
-                risk_level: "High".to_string(),
-            });
-        }
-    }
-
-    executions
+/// Paths whose code does not run when the package is used: tests, docs, examples.
+fn is_non_runtime_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or("");
+    lower.split('/').any(|part| {
+        matches!(
+            part,
+            "tests" | "test" | "testing" | "docs" | "doc" | "examples" | "example" | "benchmarks"
+        )
+    }) || name.starts_with("test_")
+        || name == "conftest.py"
+        || name.ends_with("_test.py")
 }
 
 /// Detect obfuscation
 fn detect_obfuscation(files: &[PythonFileAnalysis]) -> bool {
     // Check if any file has suspicious content suggesting obfuscation
     files.iter().any(|f| f.obfuscation_score > 0.5)
-}
-
-/// Detect obfuscation in setup content
-fn detect_obfuscation_in_content(content: &str) -> bool {
-    // Check for various obfuscation patterns
-    let obfuscation_patterns = [
-        r"base64\.b64decode",
-        r"codecs\.decode.*hex",
-        r"exec\s*\(",
-        r"eval\s*\(",
-        r"compile\s*\(",
-        r"__import__",
-        r"chr\s*\(\s*\d+\s*\)",
-        r"\\x[0-9a-fA-F]{2}",
-        r"lambda\s*:.*\(\s*\)",
-    ];
-
-    for pattern in &obfuscation_patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            if re.is_match(content) {
-                return true;
-            }
-        }
-    }
-
-    // Check for string concatenation obfuscation (many single char strings)
-    if let Ok(re) = regex::Regex::new(r"'[^']'\s*\+\s*'[^']'") {
-        let matches = re.find_iter(content).count();
-        if matches > 3 {
-            return true;
-        }
-    }
-
-    false
-}
-
-/// Detect data exfiltration
-fn detect_data_exfiltration(network_patterns: &[NetworkAccessPattern]) -> bool {
-    network_patterns.iter().any(|p| p.is_suspicious)
 }
 
 /// Detect backdoor indicators
@@ -1921,7 +2015,7 @@ fn calculate_supply_chain_risk(
         risk_score += 10.0;
     }
     if !setup_analysis.setup_commands.is_empty() {
-        risk_score += 15.0;
+        risk_score += 5.0;
     }
     if !setup_analysis.dangerous_operations.is_empty() {
         risk_score += 20.0;
@@ -1983,7 +2077,7 @@ fn detect_malicious_indicators(
         vec![]
     };
     let suspicious_maintainer_activity = false; // needs registry data; this tool is offline
-    let code_injection_patterns = detect_code_injection_patterns(security, findings);
+    let code_injection_patterns = detect_code_injection_patterns(findings);
 
     let mut overall_risk_score = 0.0;
     let mut reasons: Vec<String> = vec![];
@@ -2015,12 +2109,19 @@ fn detect_malicious_indicators(
         reasons.push("dynamic code execution of decoded content".into());
     }
 
-    let source_points = source_findings_score(findings);
+    // Medium and Low findings in tests, docs and examples (an `exec` in a test
+    // fixture) are listed but do not raise the score of the package.
+    let weighed: Vec<SourceFinding> = findings
+        .iter()
+        .filter(|f| package_scan::severity_rank(&f.severity) >= 3 || !is_non_runtime_path(&f.file))
+        .cloned()
+        .collect();
+    let source_points = source_findings_score(&weighed);
     if source_points > 0.0 {
         overall_risk_score += source_points;
         reasons.push(format!(
             "{} finding(s) in source files (see section findings)",
-            findings.len()
+            weighed.len()
         ));
     }
 
@@ -2214,17 +2315,6 @@ fn detect_known_malicious_patterns(
         }
     }
 
-    // Check for suspicious setup scripts
-    if security.has_setup_script && security.has_install_script {
-        patterns.push(MaliciousPattern {
-            pattern_type: "Multiple install hooks".to_string(),
-            description: "Package uses setup.py with install commands".to_string(),
-            found_in: "setup.py".to_string(),
-            severity: "High".to_string(),
-            evidence: "setup.py with install hooks".to_string(),
-        });
-    }
-
     if security.crypto_mining_indicators {
         let hit = findings.iter().find(|f| f.category == "cryptomining");
         patterns.push(MaliciousPattern {
@@ -2263,22 +2353,9 @@ fn detect_known_malicious_patterns(
 }
 
 /// Detect code injection patterns
-fn detect_code_injection_patterns(
-    security: &PythonSecurityAnalysis,
-    findings: &[SourceFinding],
-) -> Vec<CodeInjectionPattern> {
+fn detect_code_injection_patterns(findings: &[SourceFinding]) -> Vec<CodeInjectionPattern> {
     let mut patterns = vec![];
 
-    for import in &security.suspicious_imports {
-        if import.module_name.contains("exec") || import.module_name.contains("eval") {
-            patterns.push(CodeInjectionPattern {
-                injection_type: "Dynamic code execution".to_string(),
-                location: import.found_in.clone(),
-                code_snippet: import.module_name.clone(),
-                risk_level: "High".to_string(),
-            });
-        }
-    }
     for finding in findings
         .iter()
         .filter(|f| f.rule == "Exec of decoded payload")
@@ -2417,18 +2494,984 @@ fn detect_python_file_type(path: &str) -> String {
     }
 }
 
-/// Extract quoted value from a line
-fn extract_quoted_value(line: &str) -> Option<String> {
-    // Extract value between quotes
-    if let Some(start) = line.find('"') {
-        if let Some(end) = line[start + 1..].find('"') {
-            return Some(line[start + 1..start + 1 + end].to_string());
+mod manifest {
+    //! Readers for Python package manifests: a TOML reader for `pyproject.toml`
+    //! (the `toml` crate is not a dependency of this crate and may not be added
+    //! here), a reader for the `setup()` call of `setup.py`, and an INI reader for
+    //! `setup.cfg`. All of them are tolerant: input they cannot understand yields
+    //! fewer fields, never a wrong one.
+
+    use std::collections::BTreeMap;
+
+    // ---------------------------------------------------------------------------
+    // TOML
+    // ---------------------------------------------------------------------------
+
+    /// A TOML value; dates, numbers and booleans are kept as their text.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Toml {
+        Str(String),
+        Array(Vec<Toml>),
+        Table(BTreeMap<String, Toml>),
+        Other(String),
+    }
+
+    impl Toml {
+        pub fn as_str(&self) -> Option<&str> {
+            match self {
+                Self::Str(s) => Some(s),
+                _ => None,
+            }
+        }
+
+        pub fn as_array(&self) -> Option<&[Toml]> {
+            match self {
+                Self::Array(a) => Some(a),
+                _ => None,
+            }
+        }
+
+        pub fn as_table(&self) -> Option<&BTreeMap<String, Toml>> {
+            match self {
+                Self::Table(t) => Some(t),
+                _ => None,
+            }
+        }
+
+        pub fn get(&self, key: &str) -> Option<&Toml> {
+            self.as_table()?.get(key)
+        }
+
+        /// Follow a path of table keys.
+        pub fn at(&self, path: &[&str]) -> Option<&Toml> {
+            let mut current = self;
+            for key in path {
+                current = current.get(key)?;
+            }
+            Some(current)
+        }
+
+        /// The strings of an array, skipping other values.
+        pub fn strings(&self) -> Vec<String> {
+            self.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
         }
     }
-    if let Some(start) = line.find('\'') {
-        if let Some(end) = line[start + 1..].find('\'') {
-            return Some(line[start + 1..start + 1 + end].to_string());
+
+    const MAX_TOML_DEPTH: usize = 32;
+    /// Most dotted parts in one key or table header. A deeper key is skipped, so a
+    /// hostile file cannot build a value that overflows the stack when it is dropped.
+    const MAX_TOML_KEY_PARTS: usize = 16;
+
+    struct Parser<'a> {
+        text: &'a str,
+        bytes: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> Parser<'a> {
+        const fn new(text: &'a str) -> Self {
+            Self {
+                text,
+                bytes: text.as_bytes(),
+                pos: 0,
+            }
+        }
+
+        fn peek(&self) -> Option<u8> {
+            self.bytes.get(self.pos).copied()
+        }
+
+        fn starts_with(&self, s: &str) -> bool {
+            self.bytes[self.pos..].starts_with(s.as_bytes())
+        }
+
+        fn skip_inline_space(&mut self) {
+            while matches!(self.peek(), Some(b' ' | b'\t' | b'\r')) {
+                self.pos += 1;
+            }
+        }
+
+        fn skip_comment(&mut self) {
+            if self.peek() == Some(b'#') {
+                while !matches!(self.peek(), None | Some(b'\n')) {
+                    self.pos += 1;
+                }
+            }
+        }
+
+        /// Whitespace, newlines and comments.
+        fn skip_blank(&mut self) {
+            loop {
+                self.skip_inline_space();
+                match self.peek() {
+                    Some(b'\n') => self.pos += 1,
+                    Some(b'#') => self.skip_comment(),
+                    _ => break,
+                }
+            }
+        }
+
+        fn skip_line(&mut self) {
+            while !matches!(self.peek(), None | Some(b'\n')) {
+                self.pos += 1;
+            }
+        }
+
+        fn parse_string(&mut self) -> Option<String> {
+            let quote = self.peek()?;
+            if quote != b'"' && quote != b'\'' {
+                return None;
+            }
+            let triple = self.starts_with(&String::from_utf8(vec![quote; 3]).ok()?);
+            let basic = quote == b'"';
+            self.pos += if triple { 3 } else { 1 };
+            if triple && self.peek() == Some(b'\r') {
+                self.pos += 1;
+            }
+            if triple && self.peek() == Some(b'\n') {
+                self.pos += 1;
+            }
+            let mut out = String::new();
+            loop {
+                let byte = self.peek()?;
+                if byte == quote {
+                    if !triple {
+                        self.pos += 1;
+                        return Some(out);
+                    }
+                    if self.starts_with(&String::from_utf8(vec![quote; 3]).ok()?) {
+                        self.pos += 3;
+                        // Up to two more quotes belong to the string.
+                        while self.peek() == Some(quote) {
+                            out.push(quote as char);
+                            self.pos += 1;
+                        }
+                        return Some(out);
+                    }
+                }
+                if byte == b'\n' && !triple {
+                    return None;
+                }
+                if byte == b'\\' && basic {
+                    self.pos += 1;
+                    let escaped = self.peek()?;
+                    self.pos += 1;
+                    match escaped {
+                        b'n' => out.push('\n'),
+                        b't' => out.push('\t'),
+                        b'r' => out.push('\r'),
+                        b'b' => out.push('\u{8}'),
+                        b'f' => out.push('\u{c}'),
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'u' | b'U' => {
+                            let len = if escaped == b'u' { 4 } else { 8 };
+                            let hex = self.text.get(self.pos..self.pos + len)?;
+                            out.push(u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)?);
+                            self.pos += len;
+                        }
+                        b'\n' | b' ' | b'\t' | b'\r' if triple => {
+                            // Line-ending backslash: drop the whitespace that follows.
+                            while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+                                self.pos += 1;
+                            }
+                        }
+                        _ => return None,
+                    }
+                    continue;
+                }
+                // Copy one whole UTF-8 character.
+                let start = self.pos;
+                self.pos += 1;
+                while self.pos < self.bytes.len() && !self.text.is_char_boundary(self.pos) {
+                    self.pos += 1;
+                }
+                out.push_str(&self.text[start..self.pos]);
+            }
+        }
+
+        fn parse_key(&mut self) -> Option<Vec<String>> {
+            let mut parts = Vec::new();
+            loop {
+                if parts.len() >= MAX_TOML_KEY_PARTS {
+                    // No real manifest nests this deep; the line is skipped.
+                    return None;
+                }
+                self.skip_inline_space();
+                match self.peek()? {
+                    b'"' | b'\'' => parts.push(self.parse_string()?),
+                    b if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' => {
+                        let start = self.pos;
+                        while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+                        {
+                            self.pos += 1;
+                        }
+                        parts.push(self.text[start..self.pos].to_string());
+                    }
+                    _ => return None,
+                }
+                self.skip_inline_space();
+                if self.peek() == Some(b'.') {
+                    self.pos += 1;
+                } else {
+                    return Some(parts);
+                }
+            }
+        }
+
+        fn parse_value(&mut self, depth: usize) -> Option<Toml> {
+            if depth > MAX_TOML_DEPTH {
+                return None;
+            }
+            self.skip_inline_space();
+            match self.peek()? {
+                b'"' | b'\'' => self.parse_string().map(Toml::Str),
+                b'[' => {
+                    self.pos += 1;
+                    let mut items = Vec::new();
+                    loop {
+                        self.skip_blank();
+                        match self.peek()? {
+                            b']' => {
+                                self.pos += 1;
+                                return Some(Toml::Array(items));
+                            }
+                            b',' => self.pos += 1,
+                            _ => items.push(self.parse_value(depth + 1)?),
+                        }
+                    }
+                }
+                b'{' => {
+                    self.pos += 1;
+                    let mut table = BTreeMap::new();
+                    loop {
+                        self.skip_blank();
+                        match self.peek()? {
+                            b'}' => {
+                                self.pos += 1;
+                                return Some(Toml::Table(table));
+                            }
+                            b',' => self.pos += 1,
+                            _ => {
+                                let key = self.parse_key()?;
+                                self.skip_inline_space();
+                                if self.peek()? != b'=' {
+                                    return None;
+                                }
+                                self.pos += 1;
+                                let value = self.parse_value(depth + 1)?;
+                                insert_dotted(&mut table, &key, value);
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    let start = self.pos;
+                    while !matches!(self.peek(), None | Some(b',' | b']' | b'}' | b'\n' | b'#')) {
+                        self.pos += 1;
+                    }
+                    let raw = self.text[start..self.pos].trim();
+                    (!raw.is_empty()).then(|| Toml::Other(raw.to_string()))
+                }
+            }
         }
     }
-    None
+
+    fn insert_dotted(table: &mut BTreeMap<String, Toml>, key: &[String], value: Toml) {
+        let Some((last, parents)) = key.split_last() else {
+            return;
+        };
+        let target = table_at(table, parents);
+        target.insert(last.clone(), value);
+    }
+
+    /// The table at `path`, created on the way. An array of tables is entered at
+    /// its last element.
+    fn table_at<'a>(
+        root: &'a mut BTreeMap<String, Toml>,
+        path: &[String],
+    ) -> &'a mut BTreeMap<String, Toml> {
+        let mut current = root;
+        for segment in path.iter().take(MAX_TOML_KEY_PARTS) {
+            let entry = current
+                .entry(segment.clone())
+                .or_insert_with(|| Toml::Table(BTreeMap::new()));
+            if !matches!(entry, Toml::Table(_) | Toml::Array(_)) {
+                *entry = Toml::Table(BTreeMap::new());
+            }
+            if let Toml::Array(items) = entry {
+                if !matches!(items.last(), Some(Toml::Table(_))) {
+                    items.push(Toml::Table(BTreeMap::new()));
+                }
+            }
+            current = match entry {
+                Toml::Table(t) => t,
+                Toml::Array(items) => match items.last_mut() {
+                    Some(Toml::Table(t)) => t,
+                    _ => unreachable!("an array of tables ends in a table"),
+                },
+                _ => unreachable!("entry was made a table or array above"),
+            };
+        }
+        current
+    }
+
+    /// Read TOML text. Lines that are not valid TOML are skipped; the rest is kept.
+    pub fn parse_toml(text: &str) -> Toml {
+        let mut parser = Parser::new(text);
+        let mut root: BTreeMap<String, Toml> = BTreeMap::new();
+        let mut current: Vec<String> = Vec::new();
+        loop {
+            parser.skip_blank();
+            let Some(byte) = parser.peek() else { break };
+            if byte == b'[' {
+                let array = parser.starts_with("[[");
+                parser.pos += if array { 2 } else { 1 };
+                let Some(path) = parser.parse_key() else {
+                    parser.skip_line();
+                    continue;
+                };
+                parser.skip_inline_space();
+                let closer = if array { "]]" } else { "]" };
+                if !parser.starts_with(closer) {
+                    parser.skip_line();
+                    continue;
+                }
+                parser.pos += closer.len();
+                if array {
+                    let (last, parents) = path.split_last().expect("key has a part");
+                    let parent = table_at(&mut root, parents);
+                    let entry = parent
+                        .entry(last.clone())
+                        .or_insert_with(|| Toml::Array(Vec::new()));
+                    if let Toml::Array(items) = entry {
+                        items.push(Toml::Table(BTreeMap::new()));
+                    } else {
+                        *entry = Toml::Array(vec![Toml::Table(BTreeMap::new())]);
+                    }
+                } else {
+                    table_at(&mut root, &path);
+                }
+                current = path;
+            } else if let Some(key) = parser.parse_key() {
+                parser.skip_inline_space();
+                if parser.peek() != Some(b'=') {
+                    parser.skip_line();
+                    continue;
+                }
+                parser.pos += 1;
+                match parser.parse_value(0) {
+                    Some(value) => {
+                        let table = table_at(&mut root, &current);
+                        insert_dotted(table, &key, value);
+                    }
+                    None => parser.skip_line(),
+                }
+            } else {
+                parser.skip_line();
+            }
+        }
+        Toml::Table(root)
+    }
+
+    // ---------------------------------------------------------------------------
+    // setup.py
+    // ---------------------------------------------------------------------------
+
+    /// A value read from a `setup()` argument.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Py {
+        Str(String),
+        List(Vec<Py>),
+        Unknown,
+    }
+
+    /// The keyword arguments of the `setup(...)` call.
+    #[derive(Debug, Default)]
+    pub struct SetupArgs {
+        /// A `setup(` call was found.
+        pub found: bool,
+        /// The call passes `**something`, whose keys are known only at run time.
+        pub kwargs: bool,
+        args: BTreeMap<String, Py>,
+    }
+
+    impl SetupArgs {
+        /// Identity and dependency arguments that are computed at run time and
+        /// could not be read, plus `**kwargs` when the call uses it.
+        pub fn unread(&self) -> Vec<String> {
+            let mut out: Vec<String> = [
+                "name",
+                "version",
+                "install_requires",
+                "setup_requires",
+                "tests_require",
+            ]
+            .iter()
+            .filter(|k| matches!(self.args.get(**k), Some(Py::Unknown)))
+            .map(|k| (*k).to_string())
+            .collect();
+            if self.kwargs {
+                out.push("**kwargs".to_string());
+            }
+            out
+        }
+
+        pub fn has(&self, key: &str) -> bool {
+            self.args.contains_key(key)
+        }
+
+        /// A string argument, when it is a plain string (or a constant that is).
+        pub fn string(&self, key: &str) -> Option<String> {
+            match self.args.get(key)? {
+                Py::Str(s) => Some(s.clone()),
+                _ => None,
+            }
+        }
+
+        /// A list argument: the string items that could be read. A single string
+        /// is split by lines, as setuptools does.
+        pub fn strings(&self, key: &str) -> Option<Vec<String>> {
+            match self.args.get(key)? {
+                Py::List(items) => Some(
+                    items
+                        .iter()
+                        .filter_map(|i| match i {
+                            Py::Str(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                Py::Str(s) => Some(
+                    s.lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(String::from)
+                        .collect(),
+                ),
+                Py::Unknown => None,
+            }
+        }
+    }
+
+    const MAX_SETUP_CALL_BYTES: usize = 256 * 1024;
+    /// Most `setup` look-alikes examined before giving up.
+    const MAX_SETUP_CANDIDATES: usize = 200;
+    const MAX_CONSTANTS: usize = 500;
+    const MAX_EXPR_DEPTH: usize = 16;
+
+    /// Index just past the end of the string literal that starts at `start`.
+    fn string_end(text: &str, start: usize) -> usize {
+        let bytes = text.as_bytes();
+        let quote = bytes[start];
+        let triple = bytes[start..].starts_with(&[quote, quote, quote]);
+        let mut i = start + if triple { 3 } else { 1 };
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 2,
+                b if b == quote => {
+                    if !triple {
+                        return i + 1;
+                    }
+                    if bytes[i..].starts_with(&[quote, quote, quote]) {
+                        return i + 3;
+                    }
+                    i += 1;
+                }
+                b'\n' if !triple => return i,
+                _ => i += 1,
+            }
+        }
+        bytes.len()
+    }
+
+    /// Split `text` at top-level occurrences of `sep` (outside strings, comments
+    /// and brackets).
+    fn split_top(text: &str, sep: u8) -> Vec<&str> {
+        let bytes = text.as_bytes();
+        let mut parts = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0;
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' | b'\'' => {
+                    i = string_end(text, i);
+                    continue;
+                }
+                b'#' => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b if b == sep && depth == 0 => {
+                    parts.push(&text[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        parts.push(&text[start..]);
+        parts
+    }
+
+    /// The text between the bracket at `open` and its match, and the index after it.
+    fn balanced(text: &str, open: usize) -> Option<(&str, usize)> {
+        let bytes = text.as_bytes();
+        let mut depth = 0i32;
+        let mut i = open;
+        while i < bytes.len() && i - open < MAX_SETUP_CALL_BYTES {
+            match bytes[i] {
+                b'"' | b'\'' => {
+                    i = string_end(text, i);
+                    continue;
+                }
+                b'#' => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&text[open + 1..i], i + 1));
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    fn is_string_prefix(text: &str) -> usize {
+        // r, u, b, R, U, B and combinations, directly before a quote; f-strings are not literals.
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while i < bytes.len()
+            && i < 2
+            && matches!(bytes[i], b'r' | b'R' | b'u' | b'U' | b'b' | b'B')
+        {
+            i += 1;
+        }
+        if matches!(bytes.get(i), Some(b'"' | b'\'')) {
+            i
+        } else {
+            usize::MAX
+        }
+    }
+
+    fn unescape(body: &str, raw: bool) -> String {
+        if raw || !body.contains('\\') {
+            return body.to_string();
+        }
+        let mut out = String::new();
+        let mut chars = body.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('\n') | None => {}
+                Some(other) => out.push(other),
+            }
+        }
+        out
+    }
+
+    fn eval_py(expr: &str, constants: &BTreeMap<String, Py>, depth: usize) -> Py {
+        if depth > MAX_EXPR_DEPTH {
+            return Py::Unknown;
+        }
+        let expr = strip_comments(expr);
+        let expr = expr.trim();
+        if expr.is_empty() {
+            return Py::Unknown;
+        }
+        let terms = split_top(expr, b'+');
+        if terms.len() > 1 {
+            let values: Vec<Py> = terms
+                .iter()
+                .map(|t| eval_py(t, constants, depth + 1))
+                .collect();
+            if values.iter().all(|v| matches!(v, Py::Str(_))) {
+                return Py::Str(
+                    values
+                        .iter()
+                        .filter_map(|v| match v {
+                            Py::Str(s) => Some(s.as_str()),
+                            _ => None,
+                        })
+                        .collect(),
+                );
+            }
+            if values.iter().all(|v| matches!(v, Py::List(_))) {
+                return Py::List(
+                    values
+                        .into_iter()
+                        .flat_map(|v| match v {
+                            Py::List(items) => items,
+                            _ => vec![],
+                        })
+                        .collect(),
+                );
+            }
+            return Py::Unknown;
+        }
+        let prefix = is_string_prefix(expr);
+        if prefix != usize::MAX {
+            // One or more adjacent string literals.
+            let mut out = String::new();
+            let mut rest = expr;
+            while !rest.is_empty() {
+                let prefix = is_string_prefix(rest);
+                if prefix == usize::MAX {
+                    return Py::Unknown;
+                }
+                let raw = rest[..prefix].contains(['r', 'R']);
+                let end = string_end(rest, prefix);
+                let literal = &rest[prefix..end];
+                let quote = literal.as_bytes()[0];
+                let triple = literal.as_bytes().starts_with(&[quote, quote, quote]);
+                let cut = if triple { 3 } else { 1 };
+                if literal.len() < cut * 2 || !literal.as_bytes().ends_with(&[quote]) {
+                    return Py::Unknown;
+                }
+                out.push_str(&unescape(&literal[cut..literal.len() - cut], raw));
+                rest = rest[end..].trim_start();
+            }
+            return Py::Str(out);
+        }
+        let first = expr.as_bytes()[0];
+        if first == b'[' || first == b'(' {
+            let Some((inner, end)) = balanced(expr, 0) else {
+                return Py::Unknown;
+            };
+            if !expr[end..].trim().is_empty() {
+                return Py::Unknown;
+            }
+            let items = split_top(inner, b',');
+            if first == b'(' && items.len() == 1 {
+                return eval_py(items[0], constants, depth + 1);
+            }
+            let inner_trim = inner.trim();
+            if inner_trim.contains(" for ") && split_top(inner, b',').len() == 1 {
+                return Py::Unknown;
+            }
+            return Py::List(
+                items
+                    .iter()
+                    .filter(|i| !i.trim().is_empty())
+                    .map(|i| eval_py(i, constants, depth + 1))
+                    .collect(),
+            );
+        }
+        if expr.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return constants.get(expr).cloned().unwrap_or(Py::Unknown);
+        }
+        Py::Unknown
+    }
+
+    /// The expression that starts at `start`: to the end of the line, or further
+    /// while brackets or a string are open.
+    fn expression_at(text: &str, start: usize) -> &str {
+        let bytes = text.as_bytes();
+        let mut depth = 0i32;
+        let mut i = start;
+        while i < bytes.len() && i - start < MAX_SETUP_CALL_BYTES {
+            match bytes[i] {
+                b'"' | b'\'' => {
+                    i = string_end(text, i);
+                    continue;
+                }
+                b'#' => {
+                    if depth <= 0 {
+                        break;
+                    }
+                    // Inside brackets a comment ends at the line end and the list goes on.
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b'\\' if bytes.get(i + 1) == Some(&b'\n') => i += 1,
+                b'\n' if depth <= 0 => break,
+                _ => {}
+            }
+            i += 1;
+        }
+        let mut end = i.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[start..end]
+    }
+
+    /// `text` without its `#` comments (outside strings).
+    fn strip_comments(text: &str) -> std::borrow::Cow<'_, str> {
+        if !text.contains('#') {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0;
+        let mut copied = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' | b'\'' => {
+                    i = string_end(text, i).min(bytes.len());
+                }
+                b'#' => {
+                    out.push_str(&text[copied..i]);
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    copied = i;
+                }
+                _ => i += 1,
+            }
+        }
+        out.push_str(&text[copied..]);
+        std::borrow::Cow::Owned(out)
+    }
+
+    fn constants_of(content: &str) -> BTreeMap<String, Py> {
+        let mut constants = BTreeMap::new();
+        let mut offset = 0usize;
+        let mut evaluated = 0usize;
+        for line in content.split_inclusive('\n') {
+            let line_start = offset;
+            offset += line.len();
+            let first = line.as_bytes().first().copied().unwrap_or(b' ');
+            if !(first.is_ascii_alphabetic() || first == b'_') {
+                continue;
+            }
+            let name_end = line
+                .bytes()
+                .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+                .unwrap_or(line.len());
+            let after = line[name_end..].trim_start();
+            let Some(rhs) = after.strip_prefix('=') else {
+                continue;
+            };
+            if rhs.starts_with('=') {
+                continue;
+            }
+            evaluated += 1;
+            if evaluated > MAX_CONSTANTS {
+                break;
+            }
+            let expr_start = line_start + (line.len() - rhs.len());
+            let value = eval_py(expression_at(content, expr_start), &constants, 0);
+            if constants.len() < MAX_CONSTANTS {
+                constants.insert(line[..name_end].to_string(), value);
+            }
+        }
+        constants
+    }
+
+    /// Read the keyword arguments of the first real `setup(...)` call.
+    pub fn parse_setup_py(content: &str) -> SetupArgs {
+        let Some(open) = find_setup_call(content) else {
+            return SetupArgs::default();
+        };
+        let Some((inner, _)) = balanced(content, open) else {
+            return SetupArgs::default();
+        };
+        let constants = constants_of(content);
+        let mut args = BTreeMap::new();
+        let mut kwargs = false;
+        for item in split_top(inner, b',') {
+            let item = strip_comments(item);
+            let item = item.trim();
+            if item.starts_with("**") {
+                kwargs = true;
+                continue;
+            }
+            let name_end = item
+                .bytes()
+                .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+                .unwrap_or(item.len());
+            if name_end == 0 {
+                continue;
+            }
+            let Some(value) = item[name_end..].trim_start().strip_prefix('=') else {
+                continue;
+            };
+            if value.starts_with('=') {
+                continue;
+            }
+            args.insert(item[..name_end].to_string(), eval_py(value, &constants, 0));
+        }
+        SetupArgs {
+            found: true,
+            kwargs,
+            args,
+        }
+    }
+
+    /// Index of the `(` of the first `setup(` call that is not a definition, a
+    /// method call or inside a comment.
+    fn find_setup_call(content: &str) -> Option<usize> {
+        let bytes = content.as_bytes();
+        let mut search = 0usize;
+        let mut candidates = 0usize;
+        while let Some(found) = content[search..].find("setup") {
+            candidates += 1;
+            if candidates > MAX_SETUP_CANDIDATES {
+                return None;
+            }
+            let at = search + found;
+            search = at + 5;
+            let before = if at == 0 { b' ' } else { bytes[at - 1] };
+            let qualified = before == b'.'
+                && (content[..at].ends_with("setuptools.") || content[..at].ends_with("core."));
+            if (before.is_ascii_alphanumeric() || before == b'_' || before == b'.') && !qualified {
+                continue;
+            }
+            let after = content[at + 5..].trim_start();
+            if !after.starts_with('(') {
+                continue;
+            }
+            let line_start = content[..at].rfind('\n').map_or(0, |i| i + 1);
+            let prefix = &content[line_start..at];
+            if prefix.contains('#') || prefix.trim_start().starts_with("def ") {
+                continue;
+            }
+            return Some(content.len() - after.len());
+        }
+        None
+    }
+
+    // ---------------------------------------------------------------------------
+    // setup.cfg
+    // ---------------------------------------------------------------------------
+
+    /// An INI file: section name to (key, value) pairs. A value that continues on
+    /// indented lines is joined with newlines.
+    #[derive(Debug, Default)]
+    pub struct Ini {
+        sections: Vec<(String, Vec<(String, String)>)>,
+    }
+
+    impl Ini {
+        pub fn get(&self, section: &str, key: &str) -> Option<&str> {
+            self.sections
+                .iter()
+                .filter(|(name, _)| name == section)
+                .flat_map(|(_, pairs)| pairs.iter())
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        }
+    }
+
+    pub fn parse_ini(text: &str) -> Ini {
+        let mut ini = Ini::default();
+        for raw in text.lines() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+                continue;
+            }
+            let indented = raw.starts_with([' ', '\t']);
+            if !indented && trimmed.starts_with('[') && trimmed.ends_with(']') {
+                ini.sections
+                    .push((trimmed[1..trimmed.len() - 1].trim().to_string(), vec![]));
+                continue;
+            }
+            let Some((_, pairs)) = ini.sections.last_mut() else {
+                continue;
+            };
+            if indented {
+                if let Some((_, value)) = pairs.last_mut() {
+                    value.push('\n');
+                    value.push_str(trimmed);
+                }
+                continue;
+            }
+            if let Some((key, value)) = trimmed.split_once(['=', ':']) {
+                pairs.push((key.trim().to_string(), value.trim().to_string()));
+            }
+        }
+        ini
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::manifest::{parse_ini, parse_setup_py, parse_toml, Toml};
+
+    #[test]
+    fn toml_tables_arrays_and_comments() {
+        let doc = parse_toml(
+            "a = 1 # c\n[t]\nname = \"x\\\"y\"\nlist = [\n 'a', # one\n \"b\",\n]\ninline = { k = \"v\", n = [1, 2] }\n[[t.rows]]\nid = 1\n[[t.rows]]\nid = 2\n[t.sub.deep]\nz = '''multi\nline'''\n",
+        );
+        assert_eq!(doc.at(&["t", "name"]).and_then(Toml::as_str), Some("x\"y"));
+        assert_eq!(doc.at(&["t", "list"]).unwrap().strings(), vec!["a", "b"]);
+        assert_eq!(
+            doc.at(&["t", "inline", "k"]).and_then(Toml::as_str),
+            Some("v")
+        );
+        assert_eq!(
+            doc.at(&["t", "rows"])
+                .and_then(Toml::as_array)
+                .map(<[Toml]>::len),
+            Some(2)
+        );
+        assert_eq!(
+            doc.at(&["t", "sub", "deep", "z"]).and_then(Toml::as_str),
+            Some("multi\nline")
+        );
+    }
+
+    #[test]
+    fn toml_garbage_is_skipped_not_fatal() {
+        let doc =
+            parse_toml("= = =\n[unclosed\nname = \"kept\"\n[x]\nv = \"ok\"\n\u{0}\u{1}\n[[[\n");
+        assert_eq!(doc.at(&["x", "v"]).and_then(Toml::as_str), Some("ok"));
+        // Deeply nested arrays stop at the depth limit instead of overflowing the stack.
+        let nested = format!("a = {}", "[".repeat(10_000));
+        let _ = parse_toml(&nested);
+    }
+
+    #[test]
+    fn setup_py_constants_concatenation_and_unknowns() {
+        let args = parse_setup_py(
+            "NAME = 'a' 'b'\nVER = '1.' + '2'\nREQ = ['x==1']\nsetup(name=NAME, version=VER,\n  install_requires=REQ + ['y>=2'],  # c\n  long_description=open('R').read(), keywords='a, b')\n",
+        );
+        assert!(args.found);
+        assert_eq!(args.string("name").as_deref(), Some("ab"));
+        assert_eq!(args.string("version").as_deref(), Some("1.2"));
+        assert_eq!(
+            args.strings("install_requires").unwrap(),
+            vec!["x==1", "y>=2"]
+        );
+        assert_eq!(args.string("long_description"), None);
+        assert!(!parse_setup_py("def setup(self):\n    pass\n# setup(name='x')\n").found);
+        assert!(parse_setup_py("import setuptools\nsetuptools.setup(name='q')\n").found);
+    }
+
+    #[test]
+    fn ini_values_continue_on_indented_lines() {
+        let ini =
+            parse_ini("[metadata]\nname=pkg\n[options]\ninstall_requires =\n    a==1\n    b\n");
+        assert_eq!(ini.get("metadata", "name"), Some("pkg"));
+        assert_eq!(ini.get("options", "install_requires"), Some("\na==1\nb"));
+    }
 }

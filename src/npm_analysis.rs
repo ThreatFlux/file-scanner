@@ -531,7 +531,14 @@ fn analyze_loaded(loaded: &LoadedPackage, kind: &str) -> Result<NpmPackageAnalys
         });
         sort_findings(&mut scan.findings);
     }
-    analyze_package_json(&manifest_text, files, scan, lock.as_ref(), input, true)
+    analyze_package_json(
+        &manifest_text,
+        files,
+        scan,
+        lock.as_ref(),
+        input,
+        Some(&manifest_path),
+    )
 }
 
 /// A lock file read as a dependency list.
@@ -568,7 +575,8 @@ fn parse_lock(text: &str) -> Option<ParsedLock> {
                 name: name.to_string(),
                 version: version.to_string(),
                 dev,
-                vulnerabilities: check_package_vulnerabilities(name, version),
+                vulnerabilities: check_dependency_spec(name, version, Some(version))
+                    .vulnerabilities,
             });
         }
     };
@@ -687,7 +695,7 @@ fn analyze_lock_text(text: &str, file_name: &str) -> Result<NpmPackageAnalysis> 
         SourceScan::default(),
         Some(&lock),
         input,
-        false,
+        None,
     )
 }
 
@@ -697,23 +705,36 @@ fn analyze_package_json(
     files: Vec<NpmFileAnalysis>,
     scan: SourceScan,
     lock: Option<&ParsedLock>,
-    input: InputInfo,
-    judge_name: bool,
+    mut input: InputInfo,
+    manifest_path: Option<&str>,
 ) -> Result<NpmPackageAnalysis> {
+    // A lock file read as a manifest has no package of its own to judge.
+    let judge_name = manifest_path.is_some();
+    let mut scan = scan;
     let parsed: Value =
         serde_json::from_str(package_json).context("Failed to parse package.json")?;
+    if let Some(manifest_path) = manifest_path {
+        scan_install_scripts(&parsed, manifest_path, &mut scan, &mut input.notes);
+    }
 
     let package_info = extract_package_info(&parsed)?;
     let dependencies = analyze_dependencies(&parsed, lock, &package_info)?;
     let scripts_analysis = analyze_scripts(&parsed)?;
     let security_analysis = perform_security_analysis(&parsed, &scripts_analysis, &scan)?;
-    let malicious_indicators = detect_malicious_indicators(
+    let mut malicious_indicators = detect_malicious_indicators(
         &package_info,
         &dependencies,
         &security_analysis,
         &scan.findings,
         judge_name,
     )?;
+    if let Some(reason) = input.incomplete_reason() {
+        if malicious_indicators.overall_risk_score < package_scan::INCOMPLETE_FLOOR {
+            malicious_indicators.overall_risk_score = package_scan::INCOMPLETE_FLOOR;
+            malicious_indicators.risk_level = RiskLevel::Low;
+        }
+        malicious_indicators.risk_reasons.push(reason);
+    }
     let maintainer_analysis = analyze_maintainers(&parsed)?;
     let quality_metrics = calculate_quality_metrics(&parsed, &files)?;
 
@@ -1003,15 +1024,7 @@ fn extract_bundled_dependencies(bundled_value: Option<&Value>) -> Vec<String> {
 }
 
 fn analyze_scripts(package_json: &Value) -> Result<ScriptsAnalysis> {
-    let scripts: HashMap<String, String> = package_json
-        .get("scripts")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let (scripts, _) = scripts_of(package_json);
 
     let mut script_hooks = HashMap::new();
     let mut custom_scripts = HashMap::new();
@@ -1020,7 +1033,6 @@ fn analyze_scripts(package_json: &Value) -> Result<ScriptsAnalysis> {
     let mut shell_injection_risk = false;
 
     for (name, content) in &scripts {
-        // Categorize scripts
         if is_npm_hook(name) {
             script_hooks.insert(name.clone(), content.clone());
         } else {
@@ -1037,12 +1049,12 @@ fn analyze_scripts(package_json: &Value) -> Result<ScriptsAnalysis> {
         }
 
         // Check for external downloads
-        if content.contains("curl") || content.contains("wget") || content.contains("fetch") {
+        if download_regex().is_match(content) {
             external_downloads.push(content.clone());
         }
 
         // Check for shell injection
-        if content.contains('$') || content.contains('`') || content.contains("eval") {
+        if content.contains('$') || content.contains('`') || eval_word_regex().is_match(content) {
             shell_injection_risk = true;
         }
     }
@@ -1056,64 +1068,145 @@ fn analyze_scripts(package_json: &Value) -> Result<ScriptsAnalysis> {
     })
 }
 
+fn download_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\b(curl|wget)\b").expect("download regex"))
+}
+
+fn eval_word_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\beval\b").expect("eval regex"))
+}
+
+/// Scripts npm runs by itself when the package is installed.
+const INSTALL_HOOKS: &[&str] = &[
+    "preinstall",
+    "install",
+    "postinstall",
+    "prepare",
+    "prepublish",
+];
+
+/// Most scripts of one package.json that are analysed.
+const MAX_SCRIPTS: usize = 500;
+
 fn is_npm_hook(script_name: &str) -> bool {
-    matches!(
-        script_name,
-        "preinstall"
-            | "install"
-            | "postinstall"
-            | "preuninstall"
-            | "uninstall"
-            | "postuninstall"
-            | "prepublish"
-            | "prepare"
-            | "prepublishOnly"
-            | "prepack"
-            | "postpack"
-            | "publish"
-            | "postpublish"
-            | "preversion"
-            | "version"
-            | "postversion"
-            | "preshrinkwrap"
-            | "shrinkwrap"
-            | "postshrinkwrap"
-            | "pretest"
-            | "test"
-            | "posttest"
-            | "prestop"
-            | "stop"
-            | "poststop"
-            | "prestart"
-            | "start"
-            | "poststart"
-            | "prerestart"
-            | "restart"
-            | "postrestart"
-    )
+    INSTALL_HOOKS.contains(&script_name)
+}
+
+/// Scripts of a package.json in analysis order: install hooks first, then the
+/// rest by name, at most [`MAX_SCRIPTS`]. Returns how many were left out.
+fn scripts_of(package_json: &Value) -> (Vec<(String, String)>, usize) {
+    let mut scripts: Vec<(String, String)> = package_json
+        .get("scripts")
+        .and_then(Value::as_object)
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    scripts.sort_by(|a, b| (!is_npm_hook(&a.0), &a.0).cmp(&(!is_npm_hook(&b.0), &b.0)));
+    let left_out = scripts.len().saturating_sub(MAX_SCRIPTS);
+    scripts.truncate(MAX_SCRIPTS);
+    (scripts, left_out)
+}
+
+fn node_eval_regex() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"\bnode(js)?\b[^\n]*\s(-e|--eval|-p|--print)\b").expect("node -e regex")
+    })
+}
+
+/// Run the install-time scripts through the source rules: `curl ... | sh` in a
+/// `postinstall` is the textbook install-time attack and is rated like the same
+/// line in a source file. Findings carry `<manifest>#scripts.<name>` as file.
+fn scan_install_scripts(
+    package_json: &Value,
+    manifest_path: &str,
+    scan: &mut SourceScan,
+    notes: &mut Vec<String>,
+) {
+    let (scripts, left_out) = scripts_of(package_json);
+    if left_out > 0 {
+        notes.push(format!(
+            "package.json has {} scripts; only the first {MAX_SCRIPTS} (install hooks first) were analysed",
+            scripts.len() + left_out
+        ));
+    }
+    let mut added = false;
+    for (name, text) in scripts.iter().filter(|(name, _)| is_npm_hook(name)) {
+        // The whole text: package.json is already capped, and padding must not hide the tail.
+        let bytes = text.as_bytes();
+        let mut langs = vec![package_scan::Lang::Shell];
+        if node_eval_regex().is_match(text) {
+            langs.push(package_scan::Lang::Js);
+        }
+        for lang in langs {
+            let mut result = scan_source(lang, "package.json", bytes);
+            for finding in &mut result.findings {
+                finding.file = format!("{manifest_path}#scripts.{name}");
+                if !scan.findings.iter().any(|f| {
+                    f.file == finding.file && f.rule == finding.rule && f.line == finding.line
+                }) {
+                    scan.findings.push(finding.clone());
+                    added = true;
+                }
+            }
+            for (url, line) in result.suspicious_urls {
+                scan.urls
+                    .push((url, format!("{manifest_path}#scripts.{name}"), line));
+            }
+        }
+    }
+    if added {
+        sort_findings(&mut scan.findings);
+    }
+}
+
+fn dangerous_command_rules() -> &'static Vec<(regex::Regex, &'static str)> {
+    static RULES: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> =
+        std::sync::OnceLock::new();
+    RULES.get_or_init(|| {
+        [
+            (
+                r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r",
+                "Recursive file deletion",
+            ),
+            (r"\bsudo\b", "Elevated privileges"),
+            (
+                r"\bchmod\s+(-R\s+)?777\b",
+                "Overly permissive file permissions",
+            ),
+            (r"\b(nc|ncat|netcat)\s", "Netcat network tool"),
+            (r"\btelnet\b", "Unencrypted network communication"),
+            (r"/dev/tcp", "Bash network redirection"),
+            (
+                r"\bbase64\s+(-d|--decode)\b",
+                "Base64 decoding (possible obfuscation)",
+            ),
+            (r"\beval\b", "Dynamic code execution"),
+            (r"\bexec\b", "Process execution"),
+            (r"\bspawn\b", "Process spawning"),
+        ]
+        .iter()
+        .map(|(pattern, reason)| (regex::Regex::new(pattern).expect("dangerous rule"), *reason))
+        .collect()
+    })
 }
 
 fn check_dangerous_command(command: &str) -> Option<String> {
-    let dangerous_patterns = [
-        ("rm -rf", "Recursive file deletion"),
-        ("sudo", "Elevated privileges"),
-        ("chmod 777", "Overly permissive file permissions"),
-        ("nc ", "Netcat network tool"),
-        ("telnet", "Unencrypted network communication"),
-        ("/dev/tcp", "Bash network redirection"),
-        ("base64 -d", "Base64 decoding (possible obfuscation)"),
-        ("eval", "Dynamic code execution"),
-        ("exec", "Process execution"),
-        ("spawn", "Process spawning"),
-    ];
-
-    for (pattern, reason) in &dangerous_patterns {
-        if command.contains(pattern) {
-            return Some(reason.to_string());
-        }
+    // A download that is run is the first thing to say about a script.
+    let text = command.as_bytes();
+    let scan = scan_source(package_scan::Lang::Shell, "package.json", text);
+    if let Some(finding) = scan.findings.iter().find(|f| f.category == "download-exec") {
+        return Some(format!("{} (download and run)", finding.rule));
     }
-
-    None
+    dangerous_command_rules()
+        .iter()
+        .find(|(re, _)| re.is_match(command))
+        .map(|(_, reason)| (*reason).to_string())
 }
 
 fn perform_security_analysis(
@@ -1234,6 +1327,7 @@ fn analyze_suspicious_scripts(scripts: &ScriptsAnalysis) -> Vec<SuspiciousScript
 }
 
 fn detect_script_obfuscation(script: &str) -> ObfuscationLevel {
+    static SHORT_NAMES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let mut score = 0;
 
     // Check various obfuscation indicators
@@ -1257,7 +1351,8 @@ fn detect_script_obfuscation(script: &str) -> ObfuscationLevel {
     }
 
     // Check for suspicious variable names
-    let suspicious_vars = regex::Regex::new(r"\b[a-zA-Z_]\w{0,2}\b").unwrap();
+    let suspicious_vars = SHORT_NAMES
+        .get_or_init(|| regex::Regex::new(r"\b[a-zA-Z_]\w{0,2}\b").expect("short names"));
     if suspicious_vars.find_iter(script).count() > 20 {
         score += 2;
     }
@@ -1272,36 +1367,42 @@ fn detect_script_obfuscation(script: &str) -> ObfuscationLevel {
 }
 
 fn extract_external_commands(script: &str) -> Vec<String> {
+    static PATTERNS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            r"(?:^|\s)(curl|wget|fetch|nc|netcat|telnet|ssh|scp)\s+[^\s]+",
+            r"(?:^|\s)(node|npm|npx|yarn|pnpm)\s+[^\s]+",
+            r"(?:^|\s)(python|python3|pip|pip3)\s+[^\s]+",
+            r"(?:^|\s)(sh|bash|zsh|cmd|powershell)\s+[^\s]+",
+        ]
+        .iter()
+        .map(|p| regex::Regex::new(p).expect("command pattern"))
+        .collect()
+    });
     let mut commands = vec![];
-
-    let command_patterns = [
-        r"(?:^|\s)(curl|wget|fetch|nc|netcat|telnet|ssh|scp)\s+[^\s]+",
-        r"(?:^|\s)(node|npm|npx|yarn|pnpm)\s+[^\s]+",
-        r"(?:^|\s)(python|python3|pip|pip3)\s+[^\s]+",
-        r"(?:^|\s)(sh|bash|zsh|cmd|powershell)\s+[^\s]+",
-    ];
-
-    for pattern in &command_patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            for mat in re.find_iter(script) {
-                commands.push(mat.as_str().trim().to_string());
-            }
+    for re in patterns {
+        for mat in re.find_iter(script).take(20) {
+            commands.push(mat.as_str().trim().to_string());
         }
     }
-
     commands
 }
 
 fn detect_network_patterns(scripts: &ScriptsAnalysis) -> Vec<NetworkAccessPattern> {
+    static URL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let mut patterns = vec![];
 
-    // URL regex pattern
-    let url_re = regex::Regex::new(r#"https?://[^\s"']+"#).unwrap();
+    let url_re = URL.get_or_init(|| regex::Regex::new(r#"https?://[^\s"']+"#).expect("url"));
 
     // Check scripts
     for (name, content) in scripts.script_hooks.iter().chain(&scripts.custom_scripts) {
-        for mat in url_re.find_iter(content) {
+        for mat in url_re.find_iter(content).take(50) {
             let url = mat.as_str().to_string();
+            // A raw-file or gist URL in a script that runs at install is a staging
+            // download; in a benchmark or build script it is ordinary. Hosts that
+            // exist to receive stolen data count wherever they appear.
+            let suspicious = package_scan::is_suspicious_url(&url)
+                || (is_suspicious_url(&url) && is_npm_hook(name));
             patterns.push(NetworkAccessPattern {
                 url: url.clone(),
                 protocol: if url.starts_with("https") {
@@ -1310,8 +1411,8 @@ fn detect_network_patterns(scripts: &ScriptsAnalysis) -> Vec<NetworkAccessPatter
                     "http"
                 }
                 .to_string(),
-                is_suspicious: is_suspicious_url(&url),
-                reputation_score: None, // TODO: Implement reputation checking
+                is_suspicious: suspicious,
+                reputation_score: None, // no reputation source is available offline
                 found_in: format!("script:{name}"),
             });
         }
@@ -1342,30 +1443,34 @@ fn is_suspicious_url(url: &str) -> bool {
 }
 
 fn detect_filesystem_patterns(scripts: &ScriptsAnalysis) -> Vec<FileSystemAccess> {
+    static PATTERNS: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> =
+        std::sync::OnceLock::new();
+    let fs_patterns = PATTERNS.get_or_init(|| {
+        [
+            (r#"fs\.\w+\s*\(['"]([^'"]+)"#, "Node.js fs operation"),
+            (r#"require\s*\(\s*['"]fs['"]\s*\)"#, "fs module import"),
+            (
+                r"writeFile|readFile|mkdir|rmdir|unlink",
+                "File system operation",
+            ),
+            (r"/etc/passwd|/etc/shadow|~/.ssh", "Sensitive file access"),
+            (r"process\.env|\.env", "Environment variable access"),
+        ]
+        .iter()
+        .map(|(p, o)| (regex::Regex::new(p).expect("fs pattern"), *o))
+        .collect()
+    });
     let mut accesses = vec![];
 
-    let fs_patterns = [
-        (r#"fs\.\w+\s*\(['"]([^'"]+)"#, "Node.js fs operation"),
-        (r#"require\s*\(\s*['"]fs['"]\s*\)"#, "fs module import"),
-        (
-            r"writeFile|readFile|mkdir|rmdir|unlink",
-            "File system operation",
-        ),
-        (r"/etc/passwd|/etc/shadow|~/.ssh", "Sensitive file access"),
-        (r"process\.env|\.env", "Environment variable access"),
-    ];
-
     for (name, content) in scripts.script_hooks.iter().chain(&scripts.custom_scripts) {
-        for (pattern, operation) in &fs_patterns {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                if re.is_match(content) {
-                    accesses.push(FileSystemAccess {
-                        path: name.clone(),
-                        operation: operation.to_string(),
-                        is_suspicious: true,
-                        reason: Some("Detected in script".to_string()),
-                    });
-                }
+        for (re, operation) in fs_patterns {
+            if re.is_match(content) {
+                accesses.push(FileSystemAccess {
+                    path: name.clone(),
+                    operation: (*operation).to_string(),
+                    is_suspicious: true,
+                    reason: Some("Detected in script".to_string()),
+                });
             }
         }
     }
@@ -1374,27 +1479,31 @@ fn detect_filesystem_patterns(scripts: &ScriptsAnalysis) -> Vec<FileSystemAccess
 }
 
 fn detect_process_execution(scripts: &ScriptsAnalysis) -> Vec<ProcessExecution> {
+    static PATTERNS: std::sync::OnceLock<Vec<(regex::Regex, &'static str)>> =
+        std::sync::OnceLock::new();
+    let exec_patterns = PATTERNS.get_or_init(|| {
+        [
+            (r"child_process|\bexec\b|\bspawn\b|\bfork\b", "high"),
+            (r#"require\s*\(\s*['"]child_process"#, "high"),
+            (r"process\.kill|process\.exit", "medium"),
+            (r"`[^`]+`", "medium"),     // Backticks
+            (r"\$\([^)]+\)", "medium"), // Command substitution
+        ]
+        .iter()
+        .map(|(p, r)| (regex::Regex::new(p).expect("exec pattern"), *r))
+        .collect()
+    });
     let mut executions = vec![];
 
-    let exec_patterns = [
-        (r"child_process|exec|spawn|fork", "high"),
-        (r#"require\s*\(\s*['"]child_process"#, "high"),
-        (r"process\.kill|process\.exit", "medium"),
-        (r"`[^`]+`", "medium"),     // Backticks
-        (r"\$\([^)]+\)", "medium"), // Command substitution
-    ];
-
     for (name, content) in scripts.script_hooks.iter().chain(&scripts.custom_scripts) {
-        for (pattern, risk) in &exec_patterns {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                if re.is_match(content) {
-                    executions.push(ProcessExecution {
-                        command: name.clone(),
-                        arguments: vec![],
-                        is_suspicious: true,
-                        risk_level: risk.to_string(),
-                    });
-                }
+        for (re, risk) in exec_patterns {
+            if re.is_match(content) {
+                executions.push(ProcessExecution {
+                    command: name.clone(),
+                    arguments: vec![],
+                    is_suspicious: true,
+                    risk_level: (*risk).to_string(),
+                });
             }
         }
     }
@@ -1417,31 +1526,20 @@ fn detect_obfuscation(scripts: &ScriptsAnalysis) -> bool {
 }
 
 fn detect_crypto_mining(scripts: &ScriptsAnalysis) -> bool {
-    let mining_indicators = [
-        "stratum+tcp://",
-        "cryptonight",
-        "coinhive",
-        "crypto-loot",
-        "coin-hive",
-        "miner",
-        "monero",
-        "bitcoin",
-        "ethereum",
-        "mining",
-        "hashrate",
-    ];
-
-    for (_, content) in scripts.script_hooks.iter().chain(&scripts.custom_scripts) {
-        let content_lower = content.to_lowercase();
-        if mining_indicators
-            .iter()
-            .any(|indicator| content_lower.contains(indicator))
-        {
-            return true;
-        }
-    }
-
-    false
+    // Strong indicators only: the words "miner", "bitcoin" or "ethereum" appear in
+    // ordinary script and file names (examiner, ethereum.config.js).
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)(stratum\+(tcp|ssl|tls)://|\bcryptonight\b|\bcoin-?hive\b|\bcrypto-?loot\b|\bxmrig\b|\bminerd\b|\bcpuminer\b|\bminexmr\b)",
+        )
+        .expect("mining regex")
+    });
+    scripts
+        .script_hooks
+        .values()
+        .chain(scripts.custom_scripts.values())
+        .any(|content| re.is_match(content))
 }
 
 fn detect_data_exfiltration(network_patterns: &[NetworkAccessPattern]) -> bool {
@@ -1574,6 +1672,20 @@ fn detect_malicious_indicators(
         reasons.push(format!(
             "{} finding(s) in source files (see section findings)",
             findings.len()
+        ));
+    }
+
+    // The same behaviour is worse in a script npm runs on install: nobody has
+    // to import the code for it to run.
+    if let Some(hit) = findings
+        .iter()
+        .find(|f| f.file.contains("#scripts.") && package_scan::severity_rank(&f.severity) >= 3)
+    {
+        overall_risk_score += 20.0;
+        reasons.push(format!(
+            "an install-time script runs suspicious code: {} ({})",
+            hit.rule,
+            hit.file.rsplit('#').next().unwrap_or("scripts")
         ));
     }
 

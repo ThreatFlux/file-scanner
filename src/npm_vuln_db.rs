@@ -333,6 +333,34 @@ pub struct SpecCheck {
 /// reported separately in [`SpecCheck::range_floor_matches`]. Git, file, URL,
 /// tag and alias specs cannot be judged and give an empty result.
 pub fn check_dependency_spec(name: &str, spec: &str, resolved: Option<&str>) -> SpecCheck {
+    let mut check = check_dependency_spec_version(name, spec, resolved);
+    if let Some(entry) = known_malicious_package_entry(name) {
+        check.vulnerabilities.push(entry);
+    }
+    check
+}
+
+/// An entry for a package that is malicious at every version, whatever the
+/// declared range or source.
+fn known_malicious_package_entry(package_name: &str) -> Option<KnownVulnerability> {
+    let lower = package_name.trim().to_ascii_lowercase();
+    get_known_malicious_packages()
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(&lower))
+        .then(|| KnownVulnerability {
+            cve_id: "KNOWN-MALICIOUS-PACKAGE".to_string(),
+            severity: VulnerabilitySeverity::Critical,
+            description: format!(
+                "{package_name} is on the list of packages that are malicious at every version (typosquat, trojan or hijack). Do not install it. Look it up: https://osv.dev/list?q={lower}&ecosystem=npm"
+            ),
+            affected_versions: vec!["*".to_string()],
+            fixed_in: None,
+            cvss_score: None,
+            published_date: None,
+        })
+}
+
+fn check_dependency_spec_version(name: &str, spec: &str, resolved: Option<&str>) -> SpecCheck {
     if let Some(version) = resolved.and_then(SemVer::parse) {
         return SpecCheck {
             vulnerabilities: check_package_vulnerabilities(name, &version.to_string()),
@@ -812,9 +840,9 @@ pub fn get_malicious_patterns() -> Vec<MaliciousPackagePattern> {
             indicators: vec![
                 "\\.ssh/id_rsa".to_string(),
                 "\\.aws/credentials".to_string(),
-                "\\.npmrc".to_string(),
-                "\\.env".to_string(),
-                "config\\.json".to_string(),
+                "(^|[\\s'\"/=])\\.npmrc\\b".to_string(),
+                // A dot-env file named on its own, not `tsconfig.json` or `process.env`.
+                "(^|[\\s'\"/=])\\.env(\\s|$|['\"])".to_string(),
                 "/etc/passwd".to_string(),
                 "/etc/shadow".to_string(),
                 "readdir.*recursive".to_string(),
