@@ -65,9 +65,8 @@ With a root set, every tool path must resolve to a place under a root. The check
 `..` first, so a link that points outside the root is refused. A refused call returns an error that
 names the allowed directories. Without `--allow-root` (and without `FILE_SCANNER_ALLOWED_ROOTS`), every
 readable path is allowed. The server expands a leading `~/` in `--allow-root` and in
-`FILE_SCANNER_ALLOWED_ROOTS` to the home directory, so a JSON client config may use it. On this build the
-startup banner prints the text unexpanded and warns that it does not exist; a full path (for example
-`/Users/you/samples`) avoids that warning.
+`FILE_SCANNER_ALLOWED_ROOTS` to the home directory, so a JSON client config may use it. The startup banner
+prints the expanded path.
 
 ### HTTP
 

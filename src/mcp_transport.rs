@@ -67,7 +67,7 @@ impl McpTransportServer {
             "file-scanner {} MCP server on stdio (protocol revisions 2024-11-05 to 2026-07-28)",
             env!("CARGO_PKG_VERSION")
         );
-        let roots = &self.handler.state().config().allow_roots;
+        let roots = self.handler.state().allowed_roots();
         if roots.is_empty() {
             eprintln!("  File access: unrestricted (no --allow-root)");
         } else {
@@ -131,7 +131,7 @@ impl McpTransportServer {
         let server =
             http::BoundServer::bind(self.handler.clone(), &config, shutdown.clone()).await?;
         let address = server.local_addr()?;
-        let roots = self.handler.state().config().allow_roots.clone();
+        let roots = self.handler.state().allowed_roots().to_vec();
         for warning in http::startup_warnings(&config, &roots) {
             eprintln!("{warning}");
         }

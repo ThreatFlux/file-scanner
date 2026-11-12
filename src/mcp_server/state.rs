@@ -991,6 +991,12 @@ impl ServerState {
         &self.section_cache
     }
 
+    /// The allowed roots as the path policy uses them: `~` expanded and
+    /// existing directories canonicalized. Empty means unrestricted.
+    pub fn allowed_roots(&self) -> &[PathBuf] {
+        self.policy.roots()
+    }
+
     /// Resolve a tool path argument (see [`PathPolicy::resolve`]).
     pub fn resolve_path(&self, raw: &str, noun: &str, expect: Expect) -> Result<PathBuf, String> {
         self.policy.resolve(raw, noun, expect)

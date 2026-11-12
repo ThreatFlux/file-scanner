@@ -1124,8 +1124,9 @@ fn pe_import_cost(buf: &[u8]) -> Option<String> {
                     let len = match measured.get(&rva) {
                         Some(len) => *len,
                         None => {
-                            let len = offset(rva + 2)
-                                .and_then(|n| bounded_strlen(buf, n, remaining))
+                            // as goblin does: map the RVA, then step over the hint
+                            let len = offset(rva)
+                                .and_then(|n| bounded_strlen(buf, n + 2, remaining))
                                 .unwrap_or(0);
                             measured.insert(rva, len);
                             len

@@ -2332,6 +2332,46 @@ fn pe_bomb_with_unmapped_lookup_table_is_refused() {
 }
 
 #[test]
+fn pe_bomb_whose_name_starts_in_the_next_section_is_refused() {
+    // Every thunk points at the last two mapped bytes of the first section
+    // (the hint). goblin maps that RVA and reads the name two bytes further
+    // on in the file, which is the raw data of a second section mapped far
+    // away, so the name must be measured at offset(rva) + 2, not offset(rva + 2).
+    let thunks = 20_000;
+    let mut pe = pe_with_shared_import_name(8, thunks);
+    let raw_size = pe.len() - 0x200;
+    let hint_rva = (0x1000 + raw_size - 2) as u64;
+    let ilt_at = 0x200 + 40;
+    let iat_at = ilt_at + 8 * (thunks + 1);
+    for i in 0..thunks {
+        pe[ilt_at + 8 * i..ilt_at + 8 * i + 8].copy_from_slice(&hint_rva.to_le_bytes());
+        pe[iat_at + 8 * i..iat_at + 8 * i + 8].copy_from_slice(&hint_rva.to_le_bytes());
+    }
+    let name_len = 100_000usize;
+    let raw_ptr = pe.len();
+    assert_eq!(raw_ptr % 0x200, 0);
+    pe.extend(std::iter::repeat_n(b'L', name_len));
+    pe.push(0);
+    pe.resize(pe.len().div_ceil(0x200) * 0x200, 0);
+    let second = (pe.len() - raw_ptr) as u32;
+    let s = 0x58 + 240 + 40;
+    pe[s..s + 8].copy_from_slice(b".names\0\0");
+    pe[s + 8..s + 12].copy_from_slice(&second.to_le_bytes());
+    pe[s + 12..s + 16].copy_from_slice(&0x2000_0000u32.to_le_bytes());
+    pe[s + 16..s + 20].copy_from_slice(&second.to_le_bytes());
+    pe[s + 20..s + 24].copy_from_slice(&(raw_ptr as u32).to_le_bytes());
+    pe[s + 36..s + 40].copy_from_slice(&0x4000_0040u32.to_le_bytes());
+    pe[0x46..0x48].copy_from_slice(&2u16.to_le_bytes());
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "straddle.exe", &pe);
+    let err = parse_binary(&path).expect_err("the bomb must not be analyzed");
+    assert!(
+        err.to_string().contains("The PE file was not analyzed"),
+        "{err}"
+    );
+}
+
+#[test]
 fn pe_long_shared_name_under_the_budget_is_capped_and_stored_once() {
     // 100,000-byte name x 300 thunks = 30 MB: within the budget, so it is parsed.
     let dir = TempDir::new().unwrap();
