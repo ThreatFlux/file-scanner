@@ -442,12 +442,27 @@ fn push_evidence(evidence: &mut Vec<StringEvidence>, hit: &str, needle: &str) {
         return;
     }
     let value = evidence_window(hit, hit.find(needle).unwrap_or(0), needle.len());
-    if !evidence.iter().any(|e| e.value == value) {
-        evidence.push(StringEvidence {
-            value,
-            offset: None,
-        });
+    if evidence.iter().any(|e| e.value == value) {
+        return;
     }
+    // Several needles in one giant run give windows of the same text; keep
+    // the first and skip a window that overlaps one already kept.
+    if hit.chars().count() > MAX_EVIDENCE_CHARS {
+        if let Some(start) = hit.find(&value) {
+            let end = start + value.len();
+            let overlaps = evidence.iter().any(|e| {
+                hit.find(&e.value)
+                    .is_some_and(|s| s < end && start < s + e.value.len())
+            });
+            if overlaps {
+                return;
+            }
+        }
+    }
+    evidence.push(StringEvidence {
+        value,
+        offset: None,
+    });
 }
 
 /// At most `MAX_EVIDENCE_CHARS` characters of `text`, centred on the
@@ -1763,6 +1778,26 @@ fn generate_behavioral_recommendations(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overlapping_evidence_windows_of_one_long_run_are_listed_once() {
+        let run = format!(
+            "{}ptrace{}IsDebuggerPresent{}",
+            "a".repeat(300),
+            "b".repeat(40),
+            "c".repeat(300)
+        );
+        let mut evidence = Vec::new();
+        push_evidence(&mut evidence, &run, "ptrace");
+        push_evidence(&mut evidence, &run, "IsDebuggerPresent");
+        assert_eq!(evidence.len(), 1, "{evidence:?}");
+        // A window far from the first is kept.
+        let far = format!("ptrace{}IsDebuggerPresent", "x".repeat(2000));
+        let mut evidence = Vec::new();
+        push_evidence(&mut evidence, &far, "ptrace");
+        push_evidence(&mut evidence, &far, "IsDebuggerPresent");
+        assert_eq!(evidence.len(), 2);
+    }
+
     use super::*;
     use crate::disassembly::{
         ControlFlowSummary, InstructionAnalysis, OutputFormats, PatternType,

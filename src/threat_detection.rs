@@ -10,7 +10,7 @@ use walkdir::WalkDir;
 use threatflux_threat_detection::{ThreatDetector, ThreatDetectorConfig};
 
 // YARA-related types for scanning
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct YaraFileMatch {
     pub file_path: String,
     pub file_size: u64,
@@ -105,9 +105,30 @@ pub struct EnhancedAnalysisInfo {
     /// The engine's own verdict, before it was merged into `threat_level`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_threat_level: Option<String>,
-    /// Rules the engine matched (their details are merged into `matches`).
+    /// Rules the engine matched. They are reported here, separately: the
+    /// engine's rules are generic keyword rules that ordinary programs also
+    /// hit, so they reach `matches`, `classifications`, `indicators` and
+    /// `threat_level` only when a built-in rule that is not informational
+    /// corroborates them (`engine_merged`); even then only its non-keyword
+    /// rules and their indicators are added, never its classes.
     #[serde(default)]
     pub engine_matches: Vec<String>,
+    /// The classes the engine proposed (not counted unless `engine_merged`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_classifications: Vec<String>,
+    /// The indicators the engine proposed, as "Severity: description".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_indicators: Vec<String>,
+    /// What the engine's strings matched, with offsets (up to 10 per rule).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_evidence: Vec<RuleEvidence>,
+    /// True when the engine's non-keyword rules and indicators were folded into
+    /// the top-level result (its classes never are).
+    #[serde(default)]
+    pub engine_merged: bool,
+    /// Why the engine's findings were or were not counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_note: Option<String>,
     /// Why the enhanced engine did not run, when it did not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -325,12 +346,12 @@ pub async fn analyze_threats_enhanced(path: &Path) -> Result<ThreatAnalysis> {
     let mut analysis = analyze_threats(path)?;
 
     match run_enhanced_analysis(path).await {
-        Ok((info, engine)) => {
+        Ok((mut info, engine)) => {
             let data = match fs::metadata(path) {
                 Ok(m) if m.len() <= 100 * 1024 * 1024 => fs::read(path).ok(),
                 _ => None,
             };
-            merge_engine_result(&mut analysis, &engine, data.as_deref());
+            merge_engine_result(&mut analysis, &mut info, &engine, data.as_deref());
             analysis.enhanced_analysis = Some(info);
             analysis.recommendations.push(
                 "Enhanced threat analysis completed with additional intelligence.".to_string(),
@@ -345,6 +366,11 @@ pub async fn analyze_threats_enhanced(path: &Path) -> Result<ThreatAnalysis> {
                 engines_used: 1, // Only the built-in rules
                 engine_threat_level: None,
                 engine_matches: Vec::new(),
+                engine_classifications: Vec::new(),
+                engine_indicators: Vec::new(),
+                engine_evidence: Vec::new(),
+                engine_merged: false,
+                engine_note: None,
                 error: Some(format!("{e:#}")),
             });
         }
@@ -409,6 +435,11 @@ async fn run_enhanced_analysis(
             }
             names
         },
+        engine_classifications: Vec::new(),
+        engine_indicators: Vec::new(),
+        engine_evidence: Vec::new(),
+        engine_merged: false,
+        engine_note: None,
         error: None,
     };
     Ok((info, result))
@@ -482,38 +513,55 @@ fn map_engine_level(level: &threatflux_threat_detection::ThreatLevel) -> ThreatL
 /// They stay in `matches`, but add no indicator, class or verdict.
 const GENERIC_ENGINE_RULES: &[&str] = &["Exploit_Detection"];
 
+/// Engine rules built from generic keywords or patterns. Their matches stay
+/// in the engine's own report and are not folded into the built-in analysis.
+fn is_keyword_engine_rule(rule: &str) -> bool {
+    rule.ends_with("_Detection")
+        || rule.starts_with("string_pattern_")
+        || rule.starts_with("regex_pattern_")
+}
+
 fn is_generic_engine_rule(rule: &str) -> bool {
     GENERIC_ENGINE_RULES.contains(&rule)
 }
 
-/// Fold the engine's detections into the built-in analysis. `data` is the
-/// file's bytes, used to show what each engine string matched. The engine's
-/// own verdict stays in `enhanced_analysis.engine_threat_level`; on its own it
-/// raises the merged level to Suspicious at most, and only when a
-/// non-generic rule matched.
+/// Report the engine's detections, and fold them into the built-in analysis
+/// only when that analysis corroborates them. `data` is the file's bytes,
+/// used to show what each engine string matched.
+///
+/// The engine's rules are generic keyword rules (socket + "/bin/sh", any
+/// base58-looking run, the words "mining" and "difficulty"): /bin/bash, ssh
+/// and a README match them. So the engine's matches, classes, indicators and
+/// verdict always go into `info` (`engine_*`), while `matches`,
+/// `classifications`, `indicators` and the recommendations take them over only
+/// when a built-in rule that is not informational already put the file at
+/// Suspicious or above. The engine never raises `threat_level` itself.
 fn merge_engine_result(
     analysis: &mut ThreatAnalysis,
+    info: &mut EnhancedAnalysisInfo,
     engine: &threatflux_threat_detection::ThreatAnalysis,
     data: Option<&[u8]>,
 ) {
     use threatflux_threat_detection::Severity as E;
 
+    let corroborated = analysis.threat_level >= ThreatLevel::Suspicious;
     let mut specific_rule_matched = false;
     let mut generic_rule_matched = false;
+    let mut engine_evidence: Vec<RuleEvidence> = Vec::new();
+    let mut engine_rules: Vec<YaraMatch> = Vec::new();
     for engine_match in &engine.matches {
         if is_generic_engine_rule(&engine_match.rule_identifier) {
             generic_rule_matched = true;
         } else {
             specific_rule_matched = true;
         }
-        if analysis
-            .matches
+        if engine_rules
             .iter()
             .any(|m| m.rule_identifier == engine_match.rule_identifier)
         {
             continue;
         }
-        analysis.matches.push(YaraMatch {
+        engine_rules.push(YaraMatch {
             rule_identifier: engine_match.rule_identifier.clone(),
             tags: engine_match.tags.clone(),
             metadata: engine_match.metadata.clone(),
@@ -546,24 +594,26 @@ fn merge_engine_result(
                 });
             }
         }
-        analysis.evidence.push(RuleEvidence {
+        engine_evidence.push(RuleEvidence {
             rule_identifier: engine_match.rule_identifier.clone(),
             strings_total: engine_match.strings.len(),
             strings,
         });
     }
 
+    let mut engine_classes: Vec<ThreatClassification> = Vec::new();
     for classification in &engine.classifications {
         let mapped = map_engine_classification(classification);
         if generic_rule_matched && !specific_rule_matched && mapped == ThreatClassification::Exploit
         {
             continue;
         }
-        if !analysis.classifications.contains(&mapped) {
-            analysis.classifications.push(mapped);
+        if !engine_classes.contains(&mapped) {
+            engine_classes.push(mapped);
         }
     }
 
+    let mut engine_indicators: Vec<ThreatIndicator> = Vec::new();
     for indicator in &engine.indicators {
         if GENERIC_ENGINE_RULES
             .iter()
@@ -575,14 +625,13 @@ fn merge_engine_result(
         if let Some(technique) = &indicator.mitre_technique {
             description.push_str(&format!(" (MITRE {technique})"));
         }
-        if analysis
-            .indicators
+        if engine_indicators
             .iter()
             .any(|i| i.description == description)
         {
             continue;
         }
-        analysis.indicators.push(ThreatIndicator {
+        engine_indicators.push(ThreatIndicator {
             indicator_type: map_engine_indicator_type(&indicator.indicator_type),
             description,
             severity: match indicator.severity {
@@ -595,12 +644,64 @@ fn merge_engine_result(
         });
     }
 
-    let engine_level = map_engine_level(&engine.threat_level);
-    if specific_rule_matched
-        && engine_level > ThreatLevel::Clean
-        && analysis.threat_level < ThreatLevel::Suspicious
-    {
-        analysis.threat_level = ThreatLevel::Suspicious;
+    info.engine_classifications = engine_classes.iter().map(|c| format!("{c:?}")).collect();
+    info.engine_indicators = engine_indicators
+        .iter()
+        .map(|i| format!("{:?}: {}", i.severity, i.description))
+        .collect();
+    info.engine_evidence = engine_evidence.clone();
+    info.engine_merged = corroborated;
+    info.engine_note = Some(if corroborated {
+        "A built-in rule that is not informational also matched, so the engine's rules that \
+         are not keyword rules and their indicators are added to the result. The engine's \
+         classes are never added and it does not change threat_level."
+            .to_string()
+    } else if engine_rules.is_empty() {
+        "The engine matched no rules.".to_string()
+    } else {
+        "The engine's rules are generic keyword rules that ordinary programs also match. No \
+         built-in rule corroborated them, so they are listed here only and do not count \
+         toward threat_level, classifications or indicators."
+            .to_string()
+    });
+
+    if !corroborated {
+        return;
+    }
+    for (rule, evidence) in engine_rules.into_iter().zip(engine_evidence) {
+        if is_keyword_engine_rule(&rule.rule_identifier) {
+            continue;
+        }
+        if analysis
+            .matches
+            .iter()
+            .any(|m| m.rule_identifier == rule.rule_identifier)
+        {
+            continue;
+        }
+        analysis.matches.push(rule);
+        analysis.evidence.push(evidence);
+    }
+    // The engine's keyword rules (Backdoor_Detection, Cryptominer_Detection,
+    // ...) match ordinary programs, so their classes are not added: a class is
+    // reported only when a built-in rule produced it. Their Critical
+    // KnownMalwareFamily indicators are left out for the same reason.
+    for indicator in engine_indicators {
+        if matches!(indicator.indicator_type, IndicatorType::KnownMalwareFamily)
+            && indicator.description.starts_with("YARA rule match")
+        {
+            continue;
+        }
+        if indicator.description.contains("string_pattern_")
+            || indicator.description.contains("regex_pattern_")
+            || analysis
+                .indicators
+                .iter()
+                .any(|i| i.description == indicator.description)
+        {
+            continue;
+        }
+        analysis.indicators.push(indicator);
     }
     analysis.scan_stats.patterns_matched = analysis.matches.len();
     analysis.recommendations = generate_recommendations(
@@ -651,20 +752,24 @@ pub fn compile_rule_sources_with_warnings(
 ) -> std::result::Result<(yara_x::Rules, Vec<String>), String> {
     let mut compiler = yara_x::Compiler::new();
     compiler.enable_includes(false);
+    // Warnings about the server's own rules are not the caller's to act on:
+    // keep the ones a source raised only when it is not a built-in source.
+    let mut warnings: Vec<String> = Vec::new();
+    let builtin_origins: HashSet<String> =
+        builtin_rule_sources().into_iter().map(|(o, _)| o).collect();
     for (origin, text) in sources {
         let source = yara_x::SourceCode::from(text.as_str()).with_origin(origin.clone());
+        let before = compiler.warnings().len();
         if let Err(error) = compiler.add_source(source) {
             return Err(format!("Failed to compile YARA rule ({origin}): {error}"));
         }
+        let is_builtin = builtin_origins.contains(origin);
+        for warning in &compiler.warnings()[before..] {
+            if !is_builtin && warnings.len() < 10 {
+                warnings.push(warning.to_string());
+            }
+        }
     }
-    // Warnings about the server's own rules are not the caller's to act on.
-    let warnings: Vec<String> = compiler
-        .warnings()
-        .iter()
-        .map(|w| w.to_string())
-        .filter(|w| !w.contains("builtin rule "))
-        .take(10)
-        .collect();
     let rules = compiler.build();
     if rules.iter().count() == 0 {
         return Err(
@@ -742,8 +847,14 @@ rule anti_analysis : anti_vm anti_debug {
         $dbg1 = "IsDebuggerPresent" ascii
         $dbg2 = "OutputDebugString" ascii
         $dbg3 = "CheckRemoteDebuggerPresent" ascii
+        // Linux: reading the tracer's pid next to ptrace or the DMI product
+        // names (the way programs spot a debugger or a virtual machine).
+        $tracer = "TracerPid" ascii
+        $procstatus = "/proc/self/status" ascii
+        $ptrace = "ptrace" ascii
+        $dmi = "/dmi/id/" ascii
     condition:
-        2 of ($vm*) or 2 of ($dbg*)
+        2 of ($vm*) or 2 of ($dbg*) or ($tracer and $procstatus and ($ptrace or $dmi))
 }"#,
         // Rule 5: Network communication
         r#"
@@ -803,8 +914,15 @@ rule cryptominer_patterns : cryptominer {
         $str3 = "monero" ascii nocase
         $str4 = "bitcoin" ascii nocase
         $wallet = /[13][a-km-zA-HJ-NP-Z1-9]{25,34}/
+        // A wallet-like run alone is common (hex digests, hashes); it counts
+        // only next to the words a miner prints about itself.
+        $m1 = "mining" ascii nocase fullword
+        $m2 = "hashrate" ascii nocase
+        $m3 = "xmrig" ascii nocase
+        $m4 = "cryptonight" ascii nocase
+        $m5 = "wallet" ascii nocase
     condition:
-        2 of ($str*) or ($str1 and $wallet)
+        2 of ($str*) or ($str1 and $wallet) or ($wallet and 2 of ($m*))
 }"#,
         // Rule 9: Info stealer patterns
         r#"
@@ -1024,7 +1142,8 @@ pub struct YaraScanOptions {
     pub max_file_size: u64,
     /// List string matches (off: only counts).
     pub detailed_matches: bool,
-    /// Most files examined; the rest are counted in `files_not_scanned`.
+    /// Most files examined; the walk stops there and `files_not_scanned` is a
+    /// lower bound.
     pub max_files: usize,
     /// Most string matches listed per rule per file.
     pub max_matches_per_rule: usize,
@@ -1082,6 +1201,11 @@ pub struct CustomYaraScanResult {
     /// The time budget ran out while walking the tree.
     #[serde(default)]
     pub walk_timed_out: bool,
+    /// Files whose match detail (strings, tags, metadata, rules past the
+    /// first few) was dropped because the scan had kept `MAX_DETAIL_BYTES`
+    /// of detail already. Their rule counts are still exact.
+    #[serde(default)]
+    pub detail_trimmed_files: usize,
     pub timed_out: bool,
     /// How many files each rule matched, most hits first.
     pub rule_hits: Vec<RuleHitCount>,
@@ -1118,6 +1242,41 @@ pub async fn scan_with_custom_rule(
         .map_err(|e| anyhow::anyhow!("YARA scan task failed: {e}"))
 }
 
+/// How much match detail one scan keeps in memory (estimated bytes). Past it
+/// further matching files keep only their path, size, rule count and the
+/// first few rule names.
+const MAX_DETAIL_BYTES: usize = 24 * 1024 * 1024;
+/// Rules still listed for a file whose detail was dropped.
+const TRIMMED_RULES_PER_FILE: usize = 3;
+
+/// A rough size of what one file's match keeps in memory.
+fn estimate_match_bytes(file_match: &YaraFileMatch) -> usize {
+    let rules: usize = file_match
+        .matches
+        .iter()
+        .map(|rule| {
+            let strings: usize = rule
+                .strings
+                .iter()
+                .map(|s| {
+                    s.identifier.len()
+                        + s.value.as_ref().map_or(0, String::len)
+                        + s.hex.as_ref().map_or(0, String::len)
+                        + 80
+                })
+                .sum();
+            let meta: usize = rule
+                .metadata
+                .iter()
+                .map(|(k, v)| k.len() + v.len() + 64)
+                .sum();
+            let tags: usize = rule.tags.iter().map(|t| t.len() + 24).sum();
+            rule.rule_identifier.len() + 128 + strings + meta + tags
+        })
+        .sum();
+    file_match.file_path.len() + 96 + rules
+}
+
 /// One compiled rule set, scanned over a file or a directory tree by a few
 /// worker threads; the rules are shared, not copied per file.
 pub fn scan_path_with_rules(
@@ -1145,6 +1304,9 @@ pub fn scan_path_with_rules(
     let next = AtomicUsize::new(0);
     let timed_out = AtomicBool::new(false);
     let outcomes: Mutex<Vec<(usize, FileOutcome)>> = Mutex::new(Vec::new());
+    let hits: Mutex<HashMap<String, usize>> = Mutex::new(HashMap::new());
+    let detail_bytes = AtomicUsize::new(0);
+    let trimmed_files = AtomicUsize::new(0);
     let workers = std::thread::available_parallelism()
         .map_or(2, std::num::NonZeroUsize::get)
         .clamp(1, MAX_SCAN_WORKERS)
@@ -1167,7 +1329,26 @@ pub fn scan_path_with_rules(
                         continue;
                     }
                     scanner.set_timeout(deadline - now);
-                    let outcome = scan_one_file(&mut scanner, file, options);
+                    let mut outcome = scan_one_file(&mut scanner, file, options);
+                    if let FileOutcome::Scanned(Some(file_match)) = &mut outcome {
+                        {
+                            let mut hits = hits.lock().expect("rule hit lock");
+                            for rule in file_match.all_rules.drain(..) {
+                                *hits.entry(rule).or_default() += 1;
+                            }
+                        }
+                        let size = estimate_match_bytes(file_match);
+                        if detail_bytes.fetch_add(size, Ordering::SeqCst) + size > MAX_DETAIL_BYTES
+                        {
+                            file_match.matches.truncate(TRIMMED_RULES_PER_FILE);
+                            for rule in &mut file_match.matches {
+                                rule.strings.clear();
+                                rule.tags.clear();
+                                rule.metadata.clear();
+                            }
+                            trimmed_files.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
                     if matches!(outcome, FileOutcome::TimedOut) {
                         timed_out.store(true, Ordering::SeqCst);
                     }
@@ -1182,7 +1363,8 @@ pub fn scan_path_with_rules(
 
     let mut outcomes = outcomes.into_inner().expect("outcome list lock");
     outcomes.sort_by_key(|(index, _)| *index);
-    let mut hits: HashMap<String, usize> = HashMap::new();
+    let hits = hits.into_inner().expect("rule hit lock");
+    result.detail_trimmed_files = trimmed_files.load(Ordering::SeqCst);
     for (index, outcome) in outcomes {
         let file = &files[index];
         match outcome {
@@ -1191,9 +1373,6 @@ pub fn scan_path_with_rules(
                 if let Some(file_match) = file_match {
                     result.files_matched += 1;
                     result.total_matches += file_match.rules_total;
-                    for rule in &file_match.all_rules {
-                        *hits.entry(rule.clone()).or_default() += 1;
-                    }
                     result.matches.push(file_match);
                 }
             }
@@ -2246,18 +2425,8 @@ mod tests {
     // Test compile_rules function
     #[test]
     fn test_compile_rules() {
-        let result = compile_rules();
-        // The compilation might fail due to yara-x setup in test environment
-        // but we can at least verify the function doesn't panic
-        // In a real environment with proper yara-x setup, this should succeed
-        match result {
-            Ok(_rules) => {
-                // Rules compiled successfully
-            }
-            Err(_e) => {
-                // Expected in test environment without proper yara-x setup
-            }
-        }
+        let rules = compile_rules().expect("the built-in rules compile");
+        assert_eq!(rules.iter().count(), 10);
     }
 
     // Test all severity levels
@@ -2465,9 +2634,14 @@ mod tests {
         assert!(info.engines_used >= 1);
         assert!(info.coverage_percentage.is_none());
         assert!(!info.engine_matches.is_empty(), "{info:?}");
-        // The engine's matches are in the merged result, with a verdict.
+        // The engine's specific matches are in the merged result, with a
+        // verdict; its keyword rules (`*_Detection`) stay under `info`.
         for rule in &info.engine_matches {
-            assert!(rule_ids(&analysis).contains(&rule.as_str()), "{rule}");
+            if is_keyword_engine_rule(rule) {
+                assert!(!rule_ids(&analysis).contains(&rule.as_str()), "{rule}");
+            } else {
+                assert!(rule_ids(&analysis).contains(&rule.as_str()), "{rule}");
+            }
         }
         assert!(info.engine_threat_level.is_some());
         assert!(!analysis.indicators.is_empty());
@@ -2522,11 +2696,26 @@ mod tests {
     fn warnings_are_returned_with_the_rules() {
         let (_, warnings) = compile_rule_sources_with_warnings(&[(
             "w".to_string(),
-            "rule w { strings: $a = \"ab\" condition: $a }".to_string(),
+            "rule w { condition: true }".to_string(),
         )])
         .unwrap();
-        // Short patterns draw a warning in yara-x; the point is that they are not lost.
-        let _ = warnings;
+        // A rule that is always true draws a warning in yara-x; it names its origin.
+        assert!(!warnings.is_empty(), "{warnings:?}");
+        assert!(warnings[0].contains("-->"), "{warnings:?}");
+    }
+
+    #[test]
+    fn builtin_sources_raise_no_warnings_and_a_user_warning_mentioning_them_stays() {
+        let (_, warnings) = compile_rule_sources_with_warnings(&builtin_rule_sources()).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // The text of the user's rule says "builtin rule 3"; the warning is theirs.
+        let mut sources = builtin_rule_sources();
+        sources.push((
+            "yara_rule".to_string(),
+            "rule w { meta: d = \"like builtin rule 3\" condition: true }".to_string(),
+        ));
+        let (_, warnings) = compile_rule_sources_with_warnings(&sources).unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     #[test]
@@ -2625,14 +2814,8 @@ mod tests {
         // "rop" and "property" trip the engine's generic Exploit_Detection rule.
         let (_dir, file) = kept(b"Europe is a property of the group; see .note.gnu.property");
         let analysis = analyze_threats_enhanced(&file).await.unwrap();
-        assert!(
-            analysis.threat_level <= ThreatLevel::Suspicious,
-            "{:?}",
-            analysis.threat_level
-        );
-        assert!(!analysis
-            .classifications
-            .contains(&ThreatClassification::Exploit));
+        assert_eq!(analysis.threat_level, ThreatLevel::Clean);
+        assert!(analysis.classifications.is_empty());
         assert!(analysis
             .indicators
             .iter()
@@ -2642,7 +2825,8 @@ mod tests {
             let analysis = analyze_threats_enhanced(std::path::Path::new("/bin/ls"))
                 .await
                 .unwrap();
-            assert!(analysis.threat_level <= ThreatLevel::Suspicious);
+            assert_eq!(analysis.threat_level, ThreatLevel::Clean);
+            assert!(analysis.classifications.is_empty());
         }
     }
 

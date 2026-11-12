@@ -41,7 +41,7 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -284,7 +284,11 @@ enum Commands {
     YaraScan {
         #[arg(help = "Path to file or directory to scan")]
         path: PathBuf,
-        #[arg(short, long, help = "YARA rule file or inline rule")]
+        #[arg(
+            short,
+            long,
+            help = "YARA rule file, directory of .yar/.yara files, or inline rule"
+        )]
         rule: String,
         #[arg(short = 'R', long, help = "Recursively scan directories")]
         recursive: bool,
@@ -292,6 +296,13 @@ enum Commands {
         max_file_size_mb: u64,
         #[arg(long, help = "Show detailed match information")]
         detailed: bool,
+        #[arg(long, help = "Most files to examine (default: no limit)")]
+        max_files: Option<usize>,
+        #[arg(
+            long,
+            help = "Stop the scan after this many seconds (default: no limit)"
+        )]
+        timeout: Option<u64>,
     },
     /// Analyze NPM package for security issues
     AnalyzeNpm {
@@ -360,8 +371,18 @@ async fn run() -> Result<()> {
             recursive,
             max_file_size_mb,
             detailed,
+            max_files,
+            timeout,
         }) => {
-            return handle_yara_scan(path, rule, recursive, max_file_size_mb, detailed).await;
+            return handle_yara_scan(
+                path,
+                rule,
+                recursive,
+                max_file_size_mb,
+                detailed,
+                (max_files, timeout),
+            )
+            .await;
         }
         Some(Commands::AnalyzeNpm { package_path }) => {
             return handle_npm_analysis(package_path).await;
@@ -630,13 +651,18 @@ async fn handle_yara_scan(
     recursive: bool,
     max_file_size_mb: u64,
     detailed: bool,
+    (max_files, timeout_seconds): (Option<usize>, Option<u64>),
 ) -> Result<()> {
+    // A rule file or directory goes in as `rule_path`, so diagnostics name the
+    // file and a directory of rules works; anything else is rule text.
     let rule_path = PathBuf::from(&rule);
-    let yara_rule = if rule_path.exists() {
-        std::fs::read_to_string(&rule_path)
-            .with_context(|| format!("failed to read YARA rule file: {}", rule_path.display()))?
+    let (yara_rule, rule_path) = if rule_path.exists() {
+        (
+            String::new(),
+            Some(rule_path.to_string_lossy().into_owned()),
+        )
     } else {
-        rule
+        (rule, None)
     };
     let max_file_size = max_file_size_mb
         .checked_mul(1024 * 1024)
@@ -644,9 +670,12 @@ async fn handle_yara_scan(
     let result = yara_scan_files(YaraScanRequest {
         path: path.to_string_lossy().into_owned(),
         yara_rule,
+        rule_path,
         recursive: Some(recursive),
         max_file_size: Some(max_file_size),
         detailed_matches: Some(detailed),
+        max_files,
+        timeout_seconds,
     })
     .await?;
     println!("{}", serde_json::to_string(&result)?);

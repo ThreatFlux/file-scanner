@@ -2,6 +2,7 @@
 
 use std::{
     path::PathBuf,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -14,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    output::{input_schema_with_budget, page, parse_request, respond, tool_error, DEFAULT_LIMIT},
+    output::{
+        fit_rows, input_schema_with_budget, page, parse_request, respond, tool_error,
+        DEFAULT_LIMIT, MAX_OUTPUT_BYTES, MIN_OUTPUT_BYTES,
+    },
     paths::Expect,
     tools_analyze::LlmFileAnalysisResult,
     FileScannerMcp,
@@ -35,8 +39,12 @@ first matched strings with their offsets (text, or hex for binary bytes). Give t
 does not compile is an error that carries the compiler's message, line and column, so fix the \
 rule and call again. Draft a rule with llm_analyze_file first. Listing is capped: \
 `max_matches_per_rule` string matches per rule (the rest are counted in `strings_total`), \
-`max_rules_per_file`, `max_files` (the walk stops there; the rest is not counted) and `timeout_seconds` for \
-the whole scan, walk included; whatever was cut is named in `limits_reached`. Files over `max_file_size`, symlinks and \
+`max_rules_per_file`, `max_files` (the walk stops there; `files_not_scanned` is then a lower bound) \
+and `timeout_seconds` for the scan and its own directory walk; whatever was cut is named in \
+`limits_reached`. Before the scan starts the server checks every entry under `path` against the \
+allowed folders, and that check is not covered by `max_files` or `timeout_seconds`, so a huge tree \
+can take longer than `timeout_seconds` to answer. A call without `offset` always scans anew. Later pages (`offset` above 0) are a snapshot of \
+that first call, served from the kept result (`cache: \"hit\"`) for 10 minutes. Files over `max_file_size`, symlinks and \
 unreadable directories are listed under `skipped`; unreadable files are listed under `errors`. Results are compact JSON capped at `max_output_bytes` \
 (default 80000, ceiling 400000).";
 
@@ -67,6 +75,9 @@ const MAX_FILES_CEILING: usize = 100_000;
 const MAX_MATCHES_PER_RULE_CEILING: usize = 1_000;
 const MAX_RULES_PER_FILE_CEILING: usize = 1_000;
 const MAX_TIMEOUT_SECONDS: u64 = 600;
+
+/// Largest rule text accepted inline (rule files have their own limits).
+const MAX_INLINE_RULE_BYTES: usize = 5 * 1024 * 1024;
 
 /// The word that selects the scanner's own rules in `yara_rule`.
 const BUILTIN_KEYWORD: &str = "builtin";
@@ -114,14 +125,15 @@ pub struct YaraScanArgs {
     pub max_rules_per_file: Option<usize>,
 
     #[schemars(
-        description = "Most files examined (default 10000, at most 100000); the rest are counted \
-                       as not scanned"
+        description = "Most files examined (default 10000, at most 100000); the walk stops there \
+                       and `files_not_scanned` is then a lower bound (`more_files_not_counted`)"
     )]
     pub max_files: Option<usize>,
 
     #[schemars(
-        description = "Wall-clock budget for the whole scan in seconds (default 60, at most 600); \
-                       a file still running when it ends is reported in `errors`"
+        description = "Wall-clock budget for the scan and its directory walk in seconds (default \
+                       60, at most 600; the server's check of the tree before the scan is not \
+                       included); a file still running when it ends is reported in `errors`"
     )]
     pub timeout_seconds: Option<u64>,
 
@@ -144,7 +156,14 @@ pub struct YaraScanRequest {
     pub path: String,
 
     #[schemars(description = "YARA rule content to use for scanning")]
+    #[serde(default)]
     pub yara_rule: String,
+
+    #[schemars(
+        description = "A rule file (.yar/.yara) or a directory of them, instead of or with `yara_rule`"
+    )]
+    #[serde(default)]
+    pub rule_path: Option<String>,
 
     #[schemars(description = "If true, recursively scan directories (default: true)")]
     pub recursive: Option<bool>,
@@ -154,9 +173,17 @@ pub struct YaraScanRequest {
 
     #[schemars(description = "Include detailed match information (default: true)")]
     pub detailed_matches: Option<bool>,
+
+    #[schemars(description = "Most files examined (default: no limit on the command line)")]
+    #[serde(default)]
+    pub max_files: Option<usize>,
+
+    #[schemars(description = "Wall-clock budget in seconds (default: none on the command line)")]
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct YaraScanResult {
     pub total_files_scanned: usize,
     /// Rule matches over all files (one rule matching one file counts once).
@@ -173,7 +200,8 @@ pub struct YaraScanResult {
     /// Files not scanned (too large, unreadable); the first 100 are named.
     pub skipped: Vec<YaraSkippedFile>,
     pub skipped_total: usize,
-    /// Files left unscanned because `max_files` or the time budget was hit.
+    /// Files left unscanned because `max_files` or the time budget was hit;
+    /// a lower bound when `more_files_not_counted` is set.
     pub files_not_scanned: usize,
     /// True when `files_not_scanned` is a lower bound: the walk stopped early.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -218,6 +246,12 @@ impl FileScannerMcp {
         if let Some(rule) = request.yara_rule.as_deref() {
             if rule.trim().eq_ignore_ascii_case(BUILTIN_KEYWORD) {
                 sources.extend(builtin_rule_sources());
+            } else if rule.len() > MAX_INLINE_RULE_BYTES {
+                return tool_error(format!(
+                    "`yara_rule` is {} bytes, above the {MAX_INLINE_RULE_BYTES}-byte limit. Put \
+                     big rule sets in a file and pass it as `rule_path`.",
+                    rule.len()
+                ));
             } else if !rule.trim().is_empty() {
                 sources.push(("yara_rule".to_string(), rule.to_string()));
             }
@@ -253,6 +287,9 @@ impl FileScannerMcp {
         };
         let offset = request.offset.unwrap_or(0);
         let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
+        let rule_text_is_a_path = request.yara_rule.as_deref().is_some_and(looks_like_a_path);
+        let single_file = path.is_file();
+        let key = scan_key(&path, &sources, &options);
         let plan = ScanPlan {
             path,
             sources,
@@ -261,24 +298,274 @@ impl FileScannerMcp {
 
         let outcome = self
             .state
-            .run_blocking("yara_scan_file", move || execute_scan(&plan))
+            .run_blocking("yara_scan_file", move || {
+                fetch_or_scan(&plan, key, offset > 0)
+            })
             .await;
-        let result = match outcome {
+        let (result, hit, store_note) = match outcome {
             Err(crash) => return tool_error(crash),
-            Ok(Err(message)) => return tool_error(message),
-            Ok(Ok(result)) => result,
+            Ok(Err(message)) => {
+                return tool_error(if rule_text_is_a_path {
+                    format!(
+                        "{message}\n`yara_rule` holds rule text, not a file name. To load rules \
+                         from a file or a directory, pass it as `rule_path`."
+                    )
+                } else {
+                    message
+                })
+            }
+            Ok(Ok(found)) => found,
         };
-        let mut value = match serde_json::to_value(&result) {
-            Ok(value) => value,
-            Err(error) => return tool_error(format!("Could not serialize the result: {error}")),
-        };
-        // The cache keeps the complete result; the reply lists one page of files.
-        self.state
-            .record_yara_scan(&raw_args, &raw_path, &value, started)
-            .await;
-        page_matches(&mut value, &result.matches, offset, limit);
+        if single_file && result.total_files_scanned == 0 && !result.timed_out {
+            if let Some(error) = result.errors.first() {
+                return tool_error(format!(
+                    "The file could not be scanned: {}: {}",
+                    error.file_path, error.error
+                ));
+            }
+        }
+        let mut value = reply_value(&result, offset, limit, budget, store_note);
+        value["cache"] = if hit { "hit" } else { "miss" }.into();
+        if !hit {
+            // Only the compact page goes to the analysis cache, never the
+            // complete result.
+            self.state
+                .record_yara_scan(&raw_args, &raw_path, &value, started)
+                .await;
+        }
         respond(value, budget)
     }
+}
+
+/// A `yara_rule` value that reads like a file name, not like rule text.
+fn looks_like_a_path(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && !text.contains('{')
+        && !text.contains('\n')
+        && !text.contains(char::is_whitespace)
+        && (text.starts_with('/')
+            || text.starts_with("~/")
+            || text.ends_with(".yar")
+            || text.ends_with(".yara"))
+}
+
+/// The most the kept scan result may take (as compact JSON).
+const STORE_MAX_BYTES: usize = 32 * 1024 * 1024;
+/// How long a kept scan result answers later pages.
+const STORE_TTL: Duration = Duration::from_secs(600);
+
+/// The one scan result kept so later pages need no new scan. It is replaced,
+/// never added to, and only stored when it is at most `STORE_MAX_BYTES`.
+struct StoredScan {
+    key: String,
+    result: Arc<YaraScanResult>,
+    stored: Instant,
+}
+
+static SCAN_STORE: Mutex<Option<StoredScan>> = Mutex::new(None);
+
+/// Identity of a scan: the path (and, for a file, its size and mtime), the
+/// rule texts and every option, but not `offset`, `limit` or the budget.
+fn scan_key(
+    path: &std::path::Path,
+    sources: &[(String, String)],
+    options: &YaraScanOptions,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(path.to_string_lossy().as_bytes());
+    if let Ok(meta) = std::fs::metadata(path) {
+        hasher.update(&meta.len().to_le_bytes());
+        if let Some(age) = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        {
+            hasher.update(&age.as_nanos().to_le_bytes());
+        }
+    }
+    for (origin, text) in sources {
+        hasher.update(&(origin.len() as u64).to_le_bytes());
+        hasher.update(origin.as_bytes());
+        hasher.update(&(text.len() as u64).to_le_bytes());
+        hasher.update(text.as_bytes());
+    }
+    hasher.update(format!("{options:?}").as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+/// The kept result for `key`, or a new scan (kept when small enough). The
+/// third member says why a result was not kept.
+fn fetch_or_scan(
+    plan: &ScanPlan,
+    key: String,
+    later_page: bool,
+) -> Result<(Arc<YaraScanResult>, bool, Option<String>), String> {
+    // A first call (offset 0) always scans, so edits to the tree are seen;
+    // only later pages are a snapshot of that first call.
+    if let (true, Ok(store)) = (later_page, SCAN_STORE.lock()) {
+        if let Some(kept) = store.as_ref() {
+            if kept.key == key && kept.stored.elapsed() < STORE_TTL {
+                return Ok((Arc::clone(&kept.result), true, None));
+            }
+        }
+    }
+    let result = Arc::new(execute_scan(plan)?);
+    let size = json_size(&*result);
+    let mut note = None;
+    if let Ok(mut store) = SCAN_STORE.lock() {
+        if size <= STORE_MAX_BYTES {
+            *store = Some(StoredScan {
+                key,
+                result: Arc::clone(&result),
+                stored: Instant::now(),
+            });
+        } else {
+            *store = None;
+            note = Some(format!(
+                "The full result is {size} bytes, above the {STORE_MAX_BYTES}-byte limit for \
+                 keeping it, so every page re-runs the scan. Narrow `path`, lower \
+                 `max_matches_per_rule` or turn `detailed_matches` off to make later pages \
+                 fast."
+            ));
+        }
+    }
+    Ok((result, false, note))
+}
+
+/// The compact JSON size of `value`, counted without building the text.
+fn json_size<T: serde::Serialize>(value: &T) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    if serde_json::to_writer(&mut counter, value).is_err() {
+        return usize::MAX;
+    }
+    counter.0
+}
+
+/// Everything in `result` except the matching files.
+fn summary_of(result: &YaraScanResult) -> YaraScanResult {
+    YaraScanResult {
+        total_files_scanned: result.total_files_scanned,
+        total_matches: result.total_matches,
+        scan_duration_ms: result.scan_duration_ms,
+        files_matched: result.files_matched,
+        rules_compiled: result.rules_compiled,
+        rule_hits: result.rule_hits.clone(),
+        matches: Vec::new(),
+        errors: result.errors.clone(),
+        skipped: result.skipped.clone(),
+        skipped_total: result.skipped_total,
+        files_not_scanned: result.files_not_scanned,
+        more_files_not_counted: result.more_files_not_counted,
+        timed_out: result.timed_out,
+        rule_warnings: result.rule_warnings.clone(),
+        limits_reached: Vec::new(),
+    }
+}
+
+/// The reply: the summary (always whole, its lists capped with totals) and
+/// one page of matching files cut to fit `budget`, with `matches_returned`
+/// and `next_offset` describing the files actually listed.
+fn reply_value(
+    result: &YaraScanResult,
+    offset: usize,
+    limit: usize,
+    budget: usize,
+    store_note: Option<String>,
+) -> Value {
+    let budget = budget.clamp(MIN_OUTPUT_BYTES, MAX_OUTPUT_BYTES);
+    let mut limits = result.limits_reached.clone();
+    let hits_cap = (budget / 400).clamp(5, 100);
+    let list_cap = (budget / 2_000).clamp(3, 20);
+    let mut summary = summary_of(result);
+    if summary.rule_hits.len() > hits_cap {
+        limits.push(format!(
+            "rule_hits lists the {hits_cap} most-hit of {} rules that matched (`rule_hits_total`).",
+            summary.rule_hits.len()
+        ));
+    }
+    if summary.errors.len() > list_cap {
+        limits.push(format!(
+            "errors lists the first {list_cap} of {} (`errors_total`).",
+            summary.errors.len()
+        ));
+    }
+    if summary.skipped.len() > list_cap {
+        limits.push(format!(
+            "skipped names the first {list_cap} of {} files (`skipped_total`).",
+            summary.skipped_total
+        ));
+    }
+    limits.extend(store_note);
+    let rule_hits_total = summary.rule_hits.len();
+    let errors_total = summary.errors.len();
+    summary.rule_hits.truncate(hits_cap);
+    summary.errors.truncate(list_cap);
+    summary.skipped.truncate(list_cap);
+    summary.rule_warnings.truncate(10);
+    summary.limits_reached = limits;
+
+    let mut value = serde_json::to_value(&summary).unwrap_or(Value::Null);
+    let take = rows_that_fit(&result.matches, offset, limit, budget);
+    let paged = page(&result.matches, offset, take);
+    let Some(map) = value.as_object_mut() else {
+        return value;
+    };
+    map.insert("rule_hits_total".into(), rule_hits_total.into());
+    map.insert("errors_total".into(), errors_total.into());
+    map.insert(
+        "matches".into(),
+        paged.get("items").cloned().unwrap_or(Value::Null),
+    );
+    map.insert("matches_total".into(), result.matches.len().into());
+    map.insert("matches_offset".into(), offset.into());
+    map.insert(
+        "returned".into(),
+        paged.get("returned").cloned().unwrap_or(Value::Null),
+    );
+    if let Some(next) = paged.get("next_offset") {
+        map.insert("next_offset".into(), next.clone());
+    }
+    fit_rows(&mut value, "matches", budget, offset, result.matches.len());
+    if let Some(map) = value.as_object_mut() {
+        if let Some(returned) = map.remove("returned") {
+            map.insert("matches_returned".into(), returned);
+        }
+    }
+    value
+}
+
+/// How many rows from `offset` to turn into JSON: add up each row's size and
+/// stop before the page budget is passed (at least one row, at most `limit`),
+/// so a large `limit` never builds values for rows the reply cannot carry.
+fn rows_that_fit(
+    matches: &[crate::threat_detection::YaraFileMatch],
+    offset: usize,
+    limit: usize,
+    budget: usize,
+) -> usize {
+    let start = offset.min(matches.len());
+    let mut used = 0usize;
+    let mut count = 0usize;
+    for row in matches[start..].iter().take(limit.max(1)) {
+        let size = json_size(row);
+        if count > 0 && used.saturating_add(size) > budget {
+            break;
+        }
+        used = used.saturating_add(size);
+        count += 1;
+    }
+    count.max(1)
 }
 
 fn options_from_args(request: &YaraScanArgs) -> Result<YaraScanOptions, String> {
@@ -330,27 +617,6 @@ fn options_from_args(request: &YaraScanArgs) -> Result<YaraScanOptions, String> 
         )?,
         timeout: Duration::from_secs(timeout_seconds),
     })
-}
-
-/// Replace the full `matches` list in `value` with one page of it and say
-/// where the next page starts.
-fn page_matches(value: &mut Value, matches: &[YaraFileMatch], offset: usize, limit: usize) {
-    let paged = page(matches, offset, limit);
-    let Some(map) = value.as_object_mut() else {
-        return;
-    };
-    if let Some(items) = paged.get("items") {
-        map.insert("matches".to_string(), items.clone());
-    }
-    map.insert("matches_total".to_string(), matches.len().into());
-    map.insert(
-        "matches_returned".to_string(),
-        paged.get("returned").cloned().unwrap_or(Value::Null),
-    );
-    map.insert("matches_offset".to_string(), offset.into());
-    if let Some(next) = paged.get("next_offset") {
-        map.insert("next_offset".to_string(), next.clone());
-    }
 }
 
 /// Compile the rules once and scan with them; the heavy part of the tool.
@@ -406,6 +672,15 @@ fn summarize(
         limits.push(format!(
             "A file hit the {} s time budget (see `errors`).",
             options.timeout.as_secs()
+        ));
+    }
+    if scan.detail_trimmed_files > 0 {
+        limits.push(format!(
+            "The scan kept all the match detail it may hold in memory; {} files list only their \
+             first few rule names without strings, tags or metadata (`rules_total` and \
+             `rule_hits` are exact). Narrow `path`, lower `max_files`, or turn \
+             `detailed_matches` off.",
+            scan.detail_trimmed_files
         ));
     }
     let strings_cut = scan
@@ -476,16 +751,38 @@ impl FileScannerMcp {
                  (each scanned file is read into memory). Ask for at most {MAX_YARA_FILE_BYTES}."
             ));
         }
+        let mut sources = Vec::new();
+        if request
+            .yara_rule
+            .trim()
+            .eq_ignore_ascii_case(BUILTIN_KEYWORD)
+        {
+            sources.extend(builtin_rule_sources());
+        } else if !request.yara_rule.trim().is_empty() {
+            sources.push(("yara_rule".to_string(), request.yara_rule));
+        }
+        if let Some(rule_path) = request.rule_path.as_deref() {
+            sources.extend(load_rule_sources(&PathBuf::from(rule_path))?);
+        }
+        if sources.is_empty() {
+            return Err("No rules given: pass a rule file or rule text.".to_string());
+        }
+        if request.max_files == Some(0) {
+            return Err("max_files must be at least 1.".to_string());
+        }
+        if request.timeout_seconds == Some(0) {
+            return Err("timeout_seconds must be at least 1.".to_string());
+        }
         let plan = ScanPlan {
             path,
-            sources: vec![("yara_rule".to_string(), request.yara_rule)],
+            sources,
             options: YaraScanOptions {
                 recursive: request.recursive.unwrap_or(true),
                 max_file_size,
                 detailed_matches: request.detailed_matches.unwrap_or(true),
-                // The command line has no flags for the limits: scan it all.
-                max_files: usize::MAX,
-                timeout: Duration::from_secs(24 * 60 * 60),
+                // Without the flags the command line scans everything.
+                max_files: request.max_files.unwrap_or(usize::MAX),
+                timeout: Duration::from_secs(request.timeout_seconds.unwrap_or(24 * 60 * 60)),
                 ..YaraScanOptions::default()
             },
         };
@@ -713,6 +1010,30 @@ mod tests {
     use std::{fs, io::Write};
     use tempfile::TempDir;
 
+    #[test]
+    fn rows_that_fit_stops_at_the_budget_before_any_conversion() {
+        use crate::threat_detection::YaraFileMatch;
+        let rows: Vec<YaraFileMatch> = (0..300)
+            .map(|i| YaraFileMatch {
+                file_path: format!("f{i}-{}", "x".repeat(50_000)),
+                ..Default::default()
+            })
+            .collect();
+        let take = rows_that_fit(&rows, 0, 500, 80_000);
+        assert_eq!(take, 1, "one 50 KB row fits an 80 KB budget, two do not");
+        let small: Vec<YaraFileMatch> = (0..300).map(|_| YaraFileMatch::default()).collect();
+        assert_eq!(rows_that_fit(&small, 10, 20, 1_000_000), 20);
+        assert_eq!(rows_that_fit(&small, 290, 500, 1_000_000), 10);
+        assert_eq!(rows_that_fit(&rows, 0, 500, 1), 1);
+        let result = YaraScanResult {
+            matches: rows,
+            ..Default::default()
+        };
+        let value = reply_value(&result, 0, 500, 80_000, None);
+        assert_eq!(value["matches_returned"], 1);
+        assert_eq!(value["next_offset"], 1);
+    }
+
     fn create_test_file(content: &[u8]) -> Result<(TempDir, std::path::PathBuf), std::io::Error> {
         let temp_dir = TempDir::new()?;
         let file_path = temp_dir.path().join("test_file.bin");
@@ -739,9 +1060,12 @@ rule TestRule {
         let request = YaraScanRequest {
             path: file_path.to_string_lossy().to_string(),
             yara_rule: rule,
+            rule_path: None,
             recursive: Some(false),
             max_file_size: None,
             detailed_matches: Some(true),
+            max_files: None,
+            timeout_seconds: None,
         };
 
         let result = yara_scan_files(request).await;
@@ -914,7 +1238,16 @@ rule TestRule {
 
     // ---- the tool
 
+    /// The kept scan is one process-wide entry, so calls are serialized to
+    /// keep one test's scan from evicting another's.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn call(mcp: &FileScannerMcp, args: serde_json::Value) -> (bool, Value) {
+        let _serial = SERIAL.lock().await;
+        call_unlocked(mcp, args).await
+    }
+
+    async fn call_unlocked(mcp: &FileScannerMcp, args: serde_json::Value) -> (bool, Value) {
         let args = args.as_object().unwrap().clone();
         let result = mcp.run_yara_scan(args).await;
         let value = serde_json::to_value(&result).unwrap();
@@ -1196,6 +1529,178 @@ rule TestRule {
         .await;
         assert_eq!(page2["matches"].as_array().unwrap().len(), 1);
         assert!(page2.get("next_offset").is_none());
+    }
+
+    #[tokio::test]
+    async fn later_pages_come_from_one_kept_scan_and_the_cache_gets_only_pages() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..30 {
+            write(dir.path(), &format!("f{i:02}.txt"), b"hello hello hello");
+        }
+        let rule = "rule hello_pages_store_test { strings: $a = \"hello\" condition: $a }";
+        let server = mcp();
+        let mut seen = Vec::new();
+        let mut hits = 0;
+        let mut offset = 0;
+        let _serial = SERIAL.lock().await;
+        loop {
+            let (_, body) = call_unlocked(
+                &server,
+                json!({"path": dir.path(), "yara_rule": rule, "limit": 7, "offset": offset}),
+            )
+            .await;
+            if offset > 0 && body["cache"] == "hit" {
+                hits += 1;
+            }
+            for m in body["matches"].as_array().unwrap() {
+                seen.push(m["file_path"].as_str().unwrap().to_string());
+            }
+            match body.get("next_offset").and_then(Value::as_u64) {
+                Some(next) => offset = next as usize,
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), 30);
+        let mut unique = seen.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 30);
+        // 30 files at 7 per page: pages 2 to 5 all come from the first call's scan.
+        assert_eq!(hits, 4, "later pages must be served from the kept scan");
+    }
+
+    #[tokio::test]
+    async fn a_byte_cut_page_reports_what_it_lists_and_keeps_the_summary() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..60 {
+            write(
+                dir.path(),
+                &format!("a_long_file_name_to_fill_the_page_{i:03}.txt"),
+                b"hello",
+            );
+        }
+        let rule = "rule hello_cut { strings: $a = \"hello\" condition: $a }";
+        let (_, body) = call(
+            &mcp(),
+            json!({"path": dir.path(), "yara_rule": rule, "limit": 60, "max_files": 50,
+                   "max_output_bytes": 4000}),
+        )
+        .await;
+        let listed = body["matches"].as_array().unwrap().len();
+        assert!(listed > 0 && listed < 50, "{listed}");
+        assert_eq!(body["matches_returned"], listed);
+        assert_eq!(body["next_offset"], listed);
+        assert_eq!(body["matches_total"], 50);
+        // The summary survives the cut.
+        assert_eq!(body["total_files_scanned"], 50);
+        assert_eq!(body["rule_hits"][0]["rule"], "hello_cut");
+        assert!(body["limits_reached"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str().unwrap().contains("max_files")));
+        // Following next_offset skips no file.
+        let (_, next) = call(
+            &mcp(),
+            json!({"path": dir.path(), "yara_rule": rule, "limit": 60, "max_files": 50,
+                   "max_output_bytes": 4000, "offset": listed}),
+        )
+        .await;
+        assert_eq!(
+            next["matches"][0]["file_path"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap(),
+            format!("a_long_file_name_to_fill_the_page_{listed:03}.txt")
+        );
+    }
+
+    #[tokio::test]
+    async fn rule_text_that_is_a_path_gets_a_hint_and_an_unreadable_file_is_an_error() {
+        let dir = TempDir::new().unwrap();
+        let file = write(dir.path(), "a.bin", b"x");
+        let rule_file = write(dir.path(), "r.yar", b"rule t { condition: true }");
+        let (is_error, body) = call(
+            &mcp(),
+            json!({"path": file, "yara_rule": rule_file.to_string_lossy()}),
+        )
+        .await;
+        assert!(is_error);
+        assert!(body.to_string().contains("rule_path"), "{body}");
+
+        // The hint is decided from the text alone: a name that exists in the
+        // working directory and one that does not give the same error.
+        let (_, existing) = call(&mcp(), json!({"path": file, "yara_rule": "Cargo.toml"})).await;
+        let (_, missing) = call(&mcp(), json!({"path": file, "yara_rule": "Cargo.nope"})).await;
+        assert_eq!(
+            existing.to_string().replace("Cargo.toml", "X"),
+            missing.to_string().replace("Cargo.nope", "X")
+        );
+        assert!(!existing.to_string().contains("rule_path"), "{existing}");
+
+        // A file the process may not read is an error, not an empty result.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = write(dir.path(), "locked.bin", b"secret");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let readable = std::fs::read(&locked).is_ok(); // root ignores the mode
+            let (is_error, body) = call(
+                &mcp(),
+                json!({"path": locked, "yara_rule": "rule t { condition: true }"}),
+            )
+            .await;
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+            if !readable {
+                assert!(is_error, "{body}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_first_call_always_scans_again_and_sees_changes_in_subdirectories() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        write(dir.path(), "a.txt", b"nothing");
+        write(&dir.path().join("sub"), "b.txt", b"nothing");
+        let rule = "rule stale_probe_marker { strings: $a = \"EVILMARKER\" condition: $a }";
+        let args = json!({"path": dir.path(), "yara_rule": rule});
+        let (_, first) = call(&mcp(), args.clone()).await;
+        assert_eq!(first["files_matched"], 0);
+        write(&dir.path().join("sub"), "new.txt", b"EVILMARKER");
+        let (_, second) = call(&mcp(), args).await;
+        assert_eq!(second["cache"], "miss", "{second}");
+        assert_eq!(second["files_matched"], 1, "{second}");
+    }
+
+    #[tokio::test]
+    async fn match_detail_is_bounded_and_the_result_says_when_it_was_dropped() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..2500 {
+            write(dir.path(), &format!("f{i:05}.txt"), b"aaaa bbbb");
+        }
+        let rules: String = (0..100)
+            .map(|i| format!("rule budget_r{i} {{ strings: $a = \"aa\" condition: $a }}\n"))
+            .collect();
+        let (is_error, body) = call(
+            &mcp(),
+            json!({"path": dir.path(), "yara_rule": rules, "max_rules_per_file": 100}),
+        )
+        .await;
+        assert!(!is_error, "{body}");
+        assert_eq!(body["files_matched"], 2500);
+        // Counts stay exact while the detail of later files is cut.
+        assert_eq!(body["rule_hits"][0]["files"], 2500);
+        assert!(
+            body["limits_reached"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l.as_str().unwrap().contains("match detail")),
+            "{body}"
+        );
     }
 
     #[tokio::test]

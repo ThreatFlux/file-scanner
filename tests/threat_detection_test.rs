@@ -669,3 +669,105 @@ fn test_serialization_deserialization() {
         deserialized.recommendations.len()
     );
 }
+
+/// Ordinary programs and documents are not malware: the enhanced analysis
+/// (built-in rules plus the threatflux engine) keeps them Clean, with no
+/// malware class and no Critical indicator, while the engine's own matches
+/// stay visible under `enhanced_analysis`.
+#[tokio::test]
+async fn enhanced_analysis_keeps_ordinary_files_clean() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files: Vec<std::path::PathBuf> = vec![
+        root.join("README.md"),
+        root.join("test_programs/rust_test_binary"),
+    ];
+    for system in ["/bin/bash", "/usr/bin/ssh", "/bin/ls"] {
+        if std::path::Path::new(system).exists() {
+            files.push(system.into());
+        }
+    }
+    for file in files {
+        let analysis = analyze_threats_enhanced(&file).await.unwrap();
+        assert_eq!(analysis.threat_level, ThreatLevel::Clean, "{file:?}");
+        assert!(analysis.classifications.is_empty(), "{file:?}");
+        assert!(
+            analysis
+                .indicators
+                .iter()
+                .all(|i| !matches!(i.severity, Severity::Critical)),
+            "{file:?}"
+        );
+        let info = analysis.enhanced_analysis.expect("enhanced info");
+        assert!(!info.engine_merged, "{file:?}");
+        assert!(info.engine_note.is_some());
+    }
+}
+
+/// The repository's simulated-malware programs that carry detectable
+/// behavior (mining words with a wallet, VM and debugger probing) are still
+/// at least Suspicious.
+#[tokio::test]
+async fn enhanced_analysis_still_flags_the_simulated_malware() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_programs");
+    for name in [
+        "crypto_miner_binary",
+        "nim_test_binary",
+        "c_advanced_binary",
+        "d_test_binary",
+        "fortran_test_binary",
+    ] {
+        let analysis = analyze_threats_enhanced(&root.join(name)).await.unwrap();
+        assert!(
+            analysis.threat_level >= ThreatLevel::Suspicious,
+            "{name}: {:?}",
+            analysis.threat_level
+        );
+        assert!(!analysis.matches.is_empty(), "{name}");
+    }
+}
+
+/// Built-in rules that matched (here the backdoor words) must not pull the
+/// engine's unrelated malware classes or its Critical KnownMalwareFamily
+/// indicators into the result.
+#[tokio::test]
+async fn engine_classes_are_not_added_to_a_file_with_one_builtin_match() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("tool.bin");
+    let text = "sh -c ls\nsocket bind listen /bin/sh\n\
+                d41d8cd98f00b204e9800998ecf8427e mining difficulty hashrate\n";
+    std::fs::write(&path, text).unwrap();
+    let analysis = analyze_threats_enhanced(&path).await.unwrap();
+    let extra: Vec<_> = analysis
+        .classifications
+        .iter()
+        .filter(|c| !matches!(c, ThreatClassification::Backdoor))
+        .collect();
+    assert!(extra.is_empty(), "{:?}", analysis.classifications);
+    assert!(
+        analysis.indicators.iter().all(|i| !matches!(
+            (&i.indicator_type, &i.severity),
+            (IndicatorType::KnownMalwareFamily, Severity::Critical)
+        )),
+        "{:?}",
+        analysis.indicators
+    );
+}
+
+/// A system editor that the built-in rules flag only for `sh -c` gets no
+/// extra class or Critical indicator from the engine (skipped without vim).
+#[tokio::test]
+async fn enhanced_analysis_adds_no_classes_beyond_the_builtin_ones() {
+    let vim = std::path::Path::new("/usr/bin/vim");
+    if !vim.exists() {
+        return;
+    }
+    let builtin = analyze_threats(vim).unwrap();
+    let enhanced = analyze_threats_enhanced(vim).await.unwrap();
+    for class in &enhanced.classifications {
+        assert!(builtin.classifications.contains(class), "{class:?}");
+    }
+    assert!(enhanced
+        .indicators
+        .iter()
+        .all(|i| !matches!(i.severity, Severity::Critical)));
+}
