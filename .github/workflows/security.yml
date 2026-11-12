@@ -50,7 +50,7 @@ jobs:
 
       - name: Install security tools
         run: |
-          cargo install cargo-audit --locked --version 0.22.2
+          cargo install cargo-audit --locked --version 0.23.0
           cargo install cargo-deny --locked --version 0.20.2
 
       - name: Verify reviewed RSA exception conditions
@@ -162,7 +162,7 @@ jobs:
           toolchain: 1.99.1
       - name: Generate SBOM
         run: |
-          cargo install cargo-cyclonedx --locked --version 0.5.9
+          cargo install cargo-cyclonedx --locked --version 0.5.10
           cargo cyclonedx --all-features --format json --spec-version 1.5 --override-filename sbom
           cargo cyclonedx --manifest-path threatflux-package-security/Cargo.toml --all-features --format json --spec-version 1.5 --override-filename sbom
 

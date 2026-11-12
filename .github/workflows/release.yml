@@ -300,9 +300,8 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
 
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: cargo-cyclonedx@0.5.10
+        # This stable version is absent from the installer verification manifest.
+        run: cargo install --locked --version 0.5.10 cargo-cyclonedx
 
       - name: Generate SBOM
         env:
@@ -632,9 +631,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
-          version: v0.38.1
+          version: v0.39.0
           cache-binary: false
-          driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+          driver-opts: image=moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
 
       - name: Build runtime image without pushing
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
