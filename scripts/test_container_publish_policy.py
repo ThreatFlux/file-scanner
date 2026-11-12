@@ -1,4 +1,4 @@
-"""Publication replay regressions; executed by the existing hosted Quick Check."""
+"""Publication replay regressions for the hosted container review suite."""
 
 import importlib.util
 import json
