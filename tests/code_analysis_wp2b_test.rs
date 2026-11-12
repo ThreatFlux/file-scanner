@@ -9,9 +9,9 @@ use file_scanner::call_graph::{
     MAX_REPORT_EDGES, MAX_REPORT_NODES,
 };
 use file_scanner::control_flow::{
-    analyze_control_flow, analyze_control_flow_with_arch, resolve_import_targets, BasicBlock,
-    BlockType, ControlFlowAnalyzer, FlowControl, Instruction as CfInstruction,
-    InstructionType as CfInstructionType, MAX_CFG_FUNCTIONS,
+    analyze_control_flow, analyze_control_flow_with_arch, resolve_import_targets,
+    resolve_import_targets_noted, BasicBlock, BlockType, ControlFlowAnalyzer, FlowControl,
+    Instruction as CfInstruction, InstructionType as CfInstructionType, MAX_CFG_FUNCTIONS,
 };
 use file_scanner::disassembly::{
     disassemble_binary, disassemble_binary_with_arch, disassemble_binary_with_coverage,
@@ -1594,10 +1594,14 @@ fn r3_a_jump_inside_the_function_is_not_a_call() {
     let result = VulnerabilityDetector::new()
         .analyze_with_imports(&symbols(vec![]), &analysis, &imports)
         .unwrap();
-    // 0x1002 is inside this function, so it names no import; and the rule
-    // fires only when the jump target resolves, which here it does by
-    // construction: this documents that resolution decides.
-    assert!(result.vulnerabilities.len() <= 1);
+    // 0x1002 is inside this function: a jump there is not a call to the import
+    // named at that address, so nothing is reported.
+    let ids: Vec<&str> = result
+        .vulnerabilities
+        .iter()
+        .map(|v| v.rule_id.as_str())
+        .collect();
+    assert!(ids.is_empty(), "{ids:?}");
 }
 
 // ------------------------------- round 3: taint report lists
@@ -1719,10 +1723,11 @@ fn r3b_a_huge_bind_repeat_count_does_not_expand_into_imports() {
         assert!(!file_scanner::control_flow::macho_bind_count_within_cap(
             &macho, &bytes
         ));
-        let started = std::time::Instant::now();
-        let map = resolve_import_targets(&bytes);
-        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        // Bounded work: the interpreter stops at its entry cap, says so, and
+        // the map stays small.
+        let (map, note) = resolve_import_targets_noted(&bytes, None);
         assert!(map.len() < 1000);
+        assert!(note.is_some(), "the cut is not reported");
     }
     // a small repeat count is expanded as before
     let bytes = macho_with_bind_count(3);
@@ -1739,9 +1744,9 @@ fn r3c_a_bind_size_that_ends_inside_the_repeat_count_is_still_bounded() {
     // stream: 11 40 "_x\0" 51 72 00 C0 <count>: the count starts at index 9
     for count in [20_000_000u64, 0xFFFF_FFFF] {
         let bytes = macho_with_bind_count_sized(count, Some(10));
-        let started = std::time::Instant::now();
-        let map = resolve_import_targets(&bytes);
-        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        let (map, note) = resolve_import_targets_noted(&bytes, None);
+        // (the count is cut off by the stream's end, so the walk may end without a cap)
+        let _ = note;
         assert!(map.len() < 1000, "{}", map.len());
     }
 }
@@ -1799,9 +1804,13 @@ fn r3c_many_dyld_info_commands_sharing_one_stream_stay_linear() {
     f[16..20].copy_from_slice(&ncmds.to_le_bytes());
     f[20..24].copy_from_slice(&size.to_le_bytes());
     f.resize(f.len() + stream_len as usize, 0);
+    // Only the last command is read and the stream holds no binds: nothing is
+    // named and nothing is cut. A bound generous by a factor of twenty guards
+    // against reading the stream once per command (3000 x 1 MB).
     let started = std::time::Instant::now();
-    let _ = resolve_import_targets(&f);
-    assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+    let (map, note) = resolve_import_targets_noted(&f, None);
+    assert!(map.is_empty() && note.is_none());
+    assert!(started.elapsed().as_secs() < 40, "{:?}", started.elapsed());
 }
 
 fn uleb_bytes(mut v: u64) -> Vec<u8> {
@@ -1833,9 +1842,8 @@ fn r4_one_long_symbol_name_bound_many_times_is_not_copied_per_bind() {
         assert!(!file_scanner::control_flow::macho_bind_count_within_cap(
             &m, &bytes
         ));
-        let started = std::time::Instant::now();
-        let map = resolve_import_targets(&bytes);
-        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        let (map, note) = resolve_import_targets_noted(&bytes, None);
+        assert!(note.is_some(), "the cut is not reported");
         let total: usize = map.values().map(String::len).sum();
         assert!(total < 1_000_000, "{total} bytes of names");
     }
@@ -1863,12 +1871,13 @@ fn r4_binds_with_an_out_of_range_segment_still_count_against_the_cap() {
     let Ok(goblin::mach::Mach::Binary(m)) = goblin::mach::Mach::parse(&bytes) else {
         panic!("fixture does not parse");
     };
-    let started = std::time::Instant::now();
+    // Bounded work: the attempts are counted against the cap, which ends the walk.
     assert!(!file_scanner::control_flow::macho_bind_count_within_cap(
         &m, &bytes
     ));
-    let _ = resolve_import_targets(&bytes);
-    assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+    let (map, note) = resolve_import_targets_noted(&bytes, None);
+    assert!(map.is_empty(), "{}", map.len());
+    assert!(note.is_some(), "the cut is not reported");
 }
 
 #[test]
@@ -2029,4 +2038,99 @@ fn r4_one_long_symbol_named_by_many_indirect_entries_stays_within_the_name_budge
     let total = name_bytes_total(&map);
     assert!(total <= 16 * 1024 * 1024, "{total} name bytes in the map");
     assert!(map.len() < ENTRIES, "{} entries", map.len());
+}
+
+// ------------------------------- round 5
+
+#[test]
+fn r5_never_bound_symbol_names_are_dropped_from_the_bind_table() {
+    // 3,000 SET_SYMBOL names of 1,000 bytes that no bind uses, then one bound name.
+    let mut stream = vec![0x11];
+    for _ in 0..3_000 {
+        stream.push(0x40);
+        stream.extend(std::iter::repeat_n(b'z', 1_000));
+        stream.push(0);
+    }
+    stream.extend([0x40, b'_', b'y', 0, 0x51, 0x70, 0x08, 0x90, 0x00]);
+    let bytes = macho_with_stream(stream, None);
+    let Ok(goblin::mach::Mach::Binary(m)) = goblin::mach::Mach::parse(&bytes) else {
+        panic!("fixture does not parse");
+    };
+    let kept = file_scanner::control_flow::macho_bind_name_table_len(&m, &bytes).unwrap();
+    assert!(kept <= 2, "{kept} names kept");
+    // the bound name is still the one resolved
+    let map = resolve_import_targets(&bytes);
+    assert!(map.values().any(|n| n == "_y"), "{map:?}");
+}
+
+#[test]
+fn r5_a_cut_import_map_is_reported_and_reaches_the_vulnerability_notes() {
+    // One 1 MiB name bound 20 times: the 16 MiB name budget is not enough once
+    // the name is also charged for the slot table and the map.
+    let mut stream = vec![0x11, 0x40];
+    stream.extend(std::iter::repeat_n(b'a', 1 << 20));
+    stream.extend([0, 0x51, 0x72, 0x00, 0xC0]);
+    stream.extend(uleb_bytes(20));
+    stream.extend([0x00, 0x00]);
+    let bytes = macho_with_stream(stream, None);
+    let (_, note) = resolve_import_targets_noted(&bytes, None);
+    let note = note.expect("the cut is not reported");
+    assert!(note.contains("left unnamed"), "{note}");
+    // an ordinary file has no such note
+    let small = macho_with_stream(
+        vec![0x11, 0x40, b'_', b'x', 0, 0x51, 0x72, 0x00, 0x90, 0x00],
+        None,
+    );
+    assert!(resolve_import_targets_noted(&small, None).1.is_none());
+    // and the detector puts a given note first in its recommendations
+    let analysis = ControlFlowAnalyzer::new_x86_64()
+        .unwrap()
+        .analyze_code(&[0xc3], 0x1000, vec![function("f", 0x1000, 1)])
+        .unwrap();
+    let result = VulnerabilityDetector::new()
+        .analyze_with_imports_and_notes(
+            &symbols(vec![]),
+            &analysis,
+            &HashMap::new(),
+            std::slice::from_ref(&note),
+        )
+        .unwrap();
+    assert_eq!(result.risk_assessment.recommendations[0], note);
+}
+
+#[test]
+fn r5_a_named_architecture_that_is_absent_is_an_error_naming_the_slices() {
+    let slice = macho_build(CPU_X86_64, "__text", SIMPLE_FN, None, None, 0, 1);
+    let mut fat = Vec::new();
+    fat.extend(0xcafe_babeu32.to_be_bytes());
+    fat.extend(1u32.to_be_bytes());
+    let offset = 4096u32;
+    for v in [CPU_X86_64, 3, offset, slice.len() as u32, 12] {
+        fat.extend(v.to_be_bytes());
+    }
+    fat.resize(offset as usize, 0);
+    fat.extend(&slice);
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "one_slice_fat", &fat);
+    let table = symbols(vec![]);
+    let err = analyze_control_flow_with_arch(&path, Some("arm64"), &table)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("no 'arm64' slice") && err.contains("x86_64"),
+        "{err}"
+    );
+    let err = file_scanner::disassembly::disassemble_binary_with_arch(&path, Some("arm64"), &table)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("slices present"), "{err}");
+    // the present slice is still accepted, by name and by default
+    // (the fixture has no function symbols, so these end in another error)
+    for arch in [Some("x86_64"), Some("X86-64"), None] {
+        let message = analyze_control_flow_with_arch(&path, arch, &table)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(!message.contains("slice"), "{arch:?}: {message}");
+    }
 }

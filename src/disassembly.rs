@@ -533,6 +533,35 @@ pub(crate) fn detect_architecture_and_code(buffer: &[u8]) -> Result<(Arch, Mode,
     detect_architecture_and_code_with_arch(buffer, None)
 }
 
+/// Error when `arch_choice` names an architecture the universal Mach-O does not
+/// hold (the slice picked would otherwise be another one, without a word). The
+/// message lists the slices present.
+pub(crate) fn require_named_slice(
+    selection: &crate::binary_parser::FatSelection<'_>,
+    arch_choice: Option<&str>,
+) -> Result<()> {
+    let Some(wanted) = arch_choice else {
+        return Ok(());
+    };
+    let norm = |s: &str| s.to_ascii_lowercase().replace(['-', '_', ' '], "");
+    let (picked, w) = (
+        norm(&selection.slices[selection.selected].architecture),
+        norm(wanted),
+    );
+    if picked == w || (w == "aarch64" && picked == "arm64") || (w == "amd64" && picked == "x8664") {
+        return Ok(());
+    }
+    let present: Vec<&str> = selection
+        .slices
+        .iter()
+        .map(|s| s.architecture.as_str())
+        .collect();
+    Err(anyhow::anyhow!(
+        "This universal Mach-O has no '{wanted}' slice; slices present: {}",
+        present.join(", ")
+    ))
+}
+
 /// Like [`detect_architecture_and_code`]; a universal Mach-O is narrowed to the
 /// slice named by `arch` first (default: host architecture, else the first).
 pub(crate) fn detect_architecture_and_code_with_arch(
@@ -545,6 +574,7 @@ pub(crate) fn detect_architecture_and_code_with_arch(
                 "Malformed universal (fat) Mach-O: no usable slice (the fat header is damaged or every slice is cut off), so it cannot be disassembled"
             )
         })?;
+        require_named_slice(&selection, arch_choice)?;
         return detect_architecture_and_code(selection.data);
     }
     match Object::parse(buffer)? {

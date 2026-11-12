@@ -93,6 +93,23 @@ pub fn generate_call_graph(
     generate_call_graph_with_arch(path, None, disassembly, symbols)
 }
 
+/// Longest node name kept for an imported function, in bytes.
+const MAX_NODE_NAME_BYTES: usize = 256;
+
+/// `name` cut to [`MAX_NODE_NAME_BYTES`] at a character boundary, with a marker
+/// saying how long it really was. A crafted import table can hold names of
+/// megabytes; every node would otherwise keep a full copy.
+fn clip_node_name(name: &str) -> String {
+    if name.len() <= MAX_NODE_NAME_BYTES {
+        return name.to_string();
+    }
+    let mut end = MAX_NODE_NAME_BYTES;
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...[name cut, {} bytes]", &name[..end], name.len())
+}
+
 /// Like [`generate_call_graph`] for a universal (fat) Mach-O: imports are
 /// resolved in the slice named by `arch`.
 #[allow(dead_code)]
@@ -125,7 +142,11 @@ pub fn generate_call_graph_with_arch(
     }
     for (address, name) in &import_targets {
         let name = name.split('@').next().unwrap_or(name);
-        graph_builder.add_node(*address, format!("{name}@plt"), NodeType::External);
+        graph_builder.add_node(
+            *address,
+            format!("{}@plt", clip_node_name(name)),
+            NodeType::External,
+        );
     }
 
     // Sized functions sorted by start, for locating the function of an
@@ -728,6 +749,25 @@ pub fn summarize_call_graph(mut graph: CallGraph) -> CallGraphReport {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[test]
+    fn long_import_names_are_clipped_on_a_character_boundary() {
+        assert_eq!(clip_node_name("strcpy"), "strcpy");
+        // One leading ASCII byte puts byte MAX_NODE_NAME_BYTES inside a 2-byte character.
+        let long = format!("a{}", "é".repeat(MAX_NODE_NAME_BYTES));
+        let clipped = clip_node_name(&long);
+        assert_eq!(
+            clipped.split("...[").next().unwrap().len(),
+            MAX_NODE_NAME_BYTES - 1
+        );
+        assert!(
+            clipped.len() < MAX_NODE_NAME_BYTES + 40,
+            "{}",
+            clipped.len()
+        );
+        assert!(clipped.contains("[name cut, 513 bytes]"), "{clipped}");
+        assert!(clipped.starts_with("aéé"));
+    }
 
     #[test]
     fn test_call_graph_generation() {

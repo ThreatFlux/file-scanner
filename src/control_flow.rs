@@ -1033,7 +1033,10 @@ pub fn analyze_control_flow_with_arch(
     let mut whole = Vec::new();
     file.read_to_end(&mut whole)?;
     let buffer: &[u8] = match crate::binary_parser::select_fat_slice(&whole, arch_choice) {
-        Some(selection) => selection.data,
+        Some(selection) => {
+            crate::disassembly::require_named_slice(&selection, arch_choice)?;
+            selection.data
+        }
         None => &whole,
     };
 
@@ -1093,6 +1096,7 @@ fn macho_indirect_imports(
     macho: &goblin::mach::MachO,
     buffer: &[u8],
     name_budget: &mut usize,
+    cut: &mut bool,
 ) -> HashMap<u64, String> {
     use goblin::mach::load_command::CommandVariant;
     const SKIP: u32 = 0xC000_0000; // INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS
@@ -1175,6 +1179,7 @@ fn macho_indirect_imports(
             let count = (size / item).min(table_len.saturating_sub(base) as u64) as usize;
             for k in 0..count {
                 if budget == 0 {
+                    *cut = true;
                     return map;
                 }
                 budget -= 1;
@@ -1193,6 +1198,7 @@ fn macho_indirect_imports(
                             name,
                         )
                     {
+                        *cut = true;
                         return map;
                     }
                 }
@@ -1221,6 +1227,29 @@ pub fn resolve_import_targets(buffer: &[u8]) -> HashMap<u64, String> {
 pub fn resolve_import_targets_with_arch(
     buffer: &[u8],
     arch_choice: Option<&str>,
+) -> HashMap<u64, String> {
+    resolve_import_targets_noted(buffer, arch_choice).0
+}
+
+/// Note for a result whose import map was cut by the name budget.
+pub const IMPORT_NAMES_CUT_NOTE: &str = "Imports were left unnamed: the import tables hold more name bytes than the 16 MiB analysis budget (or more entries than the entry cap), so some calls to imported functions may not be matched by name and findings that depend on them can be missing";
+
+/// Like [`resolve_import_targets_with_arch`], and also says whether the map was
+/// cut by a name or entry budget: the second value is then
+/// [`IMPORT_NAMES_CUT_NOTE`], for the partial-scan notes of the caller.
+pub fn resolve_import_targets_noted(
+    buffer: &[u8],
+    arch_choice: Option<&str>,
+) -> (HashMap<u64, String>, Option<String>) {
+    let mut cut = false;
+    let map = resolve_import_targets_inner(buffer, arch_choice, &mut cut);
+    (map, cut.then(|| IMPORT_NAMES_CUT_NOTE.to_string()))
+}
+
+fn resolve_import_targets_inner(
+    buffer: &[u8],
+    arch_choice: Option<&str>,
+    cut: &mut bool,
 ) -> HashMap<u64, String> {
     let buffer = crate::binary_parser::select_fat_slice(buffer, arch_choice)
         .map_or(buffer, |selection| selection.data);
@@ -1252,6 +1281,7 @@ pub fn resolve_import_targets_with_arch(
                     if !name.is_empty()
                         && !put_name(&mut got, &mut slot_budget, reloc.r_offset, name)
                     {
+                        *cut = true;
                         break;
                     }
                 }
@@ -1260,6 +1290,7 @@ pub fn resolve_import_targets_with_arch(
             // long name that exhausts the budget never crowds out its own slot.
             for (key, name) in &got {
                 if !put_name(&mut map, &mut map_budget, *key, name) {
+                    *cut = true;
                     break;
                 }
             }
@@ -1297,6 +1328,7 @@ pub fn resolve_import_targets_with_arch(
                         &got,
                         &mut map,
                         &mut map_budget,
+                        cut,
                     );
                 }
             }
@@ -1306,6 +1338,7 @@ pub fn resolve_import_targets_with_arch(
                 // `offset` is the RVA of this import's slot in the address table.
                 let slot = pe.image_base.saturating_add(import.offset as u64);
                 if !put_name(&mut map, &mut map_budget, slot, &import.name) {
+                    *cut = true;
                     break;
                 }
             }
@@ -1313,19 +1346,25 @@ pub fn resolve_import_targets_with_arch(
         Object::Mach(goblin::mach::Mach::Binary(macho)) => {
             // Bounded own interpreter: goblin's imports() allocates one entry per
             // bind (repeat counts come from the file) and can panic.
-            let (names, imports) = macho_bind_imports(&macho, buffer).unwrap_or_default();
+            let bound = macho_bind_imports(&macho, buffer);
+            if bound.is_none() {
+                *cut = true;
+            }
+            let (names, imports) = bound.unwrap_or_default();
             if imports.is_empty() {
                 // Chained fixups carry no bind opcodes: use the indirect symbol table.
-                return macho_indirect_imports(&macho, buffer, &mut map_budget);
+                return macho_indirect_imports(&macho, buffer, &mut map_budget, cut);
             }
             let mut slots: HashMap<u64, String> = HashMap::new();
             for (address, name) in imports.iter().filter(|(address, _)| *address != 0) {
                 if !put_name(&mut slots, &mut slot_budget, *address, &names[*name]) {
+                    *cut = true;
                     break;
                 }
             }
             for (key, name) in &slots {
                 if !put_name(&mut map, &mut map_budget, *key, name) {
+                    *cut = true;
                     break;
                 }
             }
@@ -1344,6 +1383,7 @@ pub fn resolve_import_targets_with_arch(
                                 &slots,
                                 &mut map,
                                 &mut map_budget,
+                                cut,
                             );
                         }
                     }
@@ -1415,6 +1455,10 @@ fn macho_bind_imports(
             continue;
         };
         let (mut segment, mut offset, mut name) = (0usize, 0u64, usize::MAX);
+        // Whether the current SET_SYMBOL name was bound at least once: a name
+        // never bound is dropped when the next one arrives, so a stream of
+        // SET_SYMBOL opcodes alone cannot make the table grow.
+        let mut name_bound = true;
         let mut pos = 0usize;
         let push = |segment: usize,
                     offset: u64,
@@ -1452,6 +1496,10 @@ fn macho_bind_imports(
                     while pos < stream.len() && stream[pos] != 0 {
                         pos += 1;
                     }
+                    if !name_bound && name != usize::MAX && name + 1 == names.len() {
+                        names.pop();
+                    }
+                    name_bound = false;
                     names.push(String::from_utf8_lossy(&stream[begin..pos]).into_owned());
                     name = names.len() - 1;
                     pos = (pos + 1).min(stream.len());
@@ -1462,6 +1510,7 @@ fn macho_bind_imports(
                 }
                 0x80 => offset = offset.wrapping_add(uleb(stream, &mut pos)),
                 0x90 => {
+                    name_bound = true;
                     if !push(
                         segment,
                         offset,
@@ -1476,6 +1525,7 @@ fn macho_bind_imports(
                     offset = offset.wrapping_add(ptr);
                 }
                 0xa0 => {
+                    name_bound = true;
                     if !push(
                         segment,
                         offset,
@@ -1492,6 +1542,7 @@ fn macho_bind_imports(
                         .wrapping_add(uleb(stream, &mut pos));
                 }
                 0xb0 => {
+                    name_bound = true;
                     if !push(
                         segment,
                         offset,
@@ -1512,6 +1563,7 @@ fn macho_bind_imports(
                         return None;
                     }
                     for _ in 0..count {
+                        name_bound = true;
                         if !push(
                             segment,
                             offset,
@@ -1540,6 +1592,14 @@ pub fn macho_bind_count_within_cap(macho: &goblin::mach::MachO, buffer: &[u8]) -
     macho_bind_imports(macho, buffer).is_some()
 }
 
+/// Number of symbol names the bind interpreter keeps for this file. Names that
+/// no bind ever used are dropped, so this is at most the number of names bound
+/// (plus one). For tests.
+#[doc(hidden)]
+pub fn macho_bind_name_table_len(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<usize> {
+    macho_bind_imports(macho, buffer).map(|(names, _)| names.len())
+}
+
 /// Walk `entry`-sized stubs of a stub section; a stub that holds `jmp [slot]`
 /// (`ff 25`) and whose slot is in `slots` is recorded under the stub's address.
 fn scan_jmp_stubs(
@@ -1550,6 +1610,7 @@ fn scan_jmp_stubs(
     slots: &HashMap<u64, String>,
     out: &mut HashMap<u64, String>,
     name_budget: &mut usize,
+    cut: &mut bool,
 ) {
     for (index, stub) in bytes.chunks(entry).enumerate() {
         let Some(pos) = stub.windows(2).position(|w| w == [0xff, 0x25]) else {
@@ -1571,6 +1632,7 @@ fn scan_jmp_stubs(
         };
         if let Some(name) = slots.get(&slot) {
             if !put_name(out, name_budget, stub_addr, name) {
+                *cut = true;
                 return;
             }
         }
