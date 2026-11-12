@@ -114,8 +114,10 @@ curl -s -X POST http://127.0.0.1:3000/tools/list \
 ```
 
 `/tools/list` is one of the REST helper routes. The MCP endpoint itself, `/mcp`, is for MCP clients: it
-needs an `Accept: application/json, text/event-stream` header (without it the answer is `406`) and an
-initialized session.
+needs an `Accept: application/json, text/event-stream` header (without it the answer is `406`). Clients that
+use sessions (revisions before 2026-07-28) also need an initialized session. A 2026-07-28 request is stateless and
+needs no session, but it must carry the `MCP-Protocol-Version`, `Mcp-Method` and (for `tools/call`) `Mcp-Name`
+headers; see [docs/MCP.md](docs/MCP.md#protocol-revisions).
 
 A client sends `Authorization: Bearer <token>` on every request. Stop the server with Ctrl-C or SIGTERM.
 

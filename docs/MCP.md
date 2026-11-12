@@ -225,7 +225,8 @@ Notes:
 
 1. **Overview.** Call `analyze_file` with only `file_path`. You get type, hashes, headline facts, the most telling
    strings and a `next_steps` list that names the next call. It never runs the heavy analyses. For a directory it
-   returns one triage row per file.
+   returns one triage row per file. Each `next_steps` entry has `tool`, `arguments` and `gives` (what the call
+   returns), and can be sent exactly as written.
 2. **One section.** Ask for a named section: `analyze_file` with `sections: ["symbols", "vulnerabilities"]`. Each
    section is computed in full, cached by the file's SHA-256 and returned as a short summary.
 3. **Read the items.** `query_analysis` pages and filters the lists inside a section (strings, imports,
@@ -240,9 +241,11 @@ Notes:
 ### `all: true`
 
 `analyze_file` with `all: true` runs every analysis once, stores each full section in the cache, and returns only
-per-section summaries. The later `query_analysis`, `disassemble` and `read_hex` calls on that file are answered from
-the cache. It still costs analysis time on a large binary, so use it when you plan to ask several follow-up
-questions. For a quick look, the overview is enough.
+per-section summaries. The later `query_analysis` calls on that file, and `disassemble` calls inside the stored
+window, are answered from the cache. `read_hex` reads the file directly and has no cache. A `disassemble` call for a
+function outside the stored window is decoded again each time (the answer carries a `window_note`; about a second
+on a large binary). `all: true` still costs analysis time on a large binary, so use it when you plan to ask several
+follow-up questions. For a quick look, the overview is enough.
 
 ### Output size and the byte budget
 
@@ -250,7 +253,11 @@ Clients limit how much tool output they will inline: Claude Code warns above 10,
 25,000 tokens by default. The server therefore bounds every answer.
 
 - Every tool takes `max_output_bytes` (default 80,000, minimum 4,000, ceiling 400,000). The answer never exceeds it.
-- Anything that did not fit is named under `truncated`.
+  A value above or below that range is clamped to it; a negative value is an error.
+- Anything that did not fit is named in the answer: a cut page carries a `hint` and `next_offset` (a cut
+  `disassemble` listing carries a `note` and `next_address`); `analyze_file` section summaries (`sections` or
+  `all: true`) that were reduced to counts say so in `note`; a cut overview and some other answers (`analyze_file`
+  with `all: true`, `compare_files`, `llm_analyze_file`) list what was cut under `truncated`.
 - Lists come back in pages (see below), so a large list is never sent whole.
 
 Real sizes, in characters of the default answer (debug build, test programs from this repository):
@@ -266,14 +273,21 @@ Real sizes, in characters of the default answer (debug build, test programs from
 
 ### Paging
 
-Every list answer has the same fields:
+The paged tools use the same four ideas (a total, a count returned, the offset, and where to continue), but the
+field names depend on the tool:
 
-| Field | Meaning |
-| --- | --- |
-| `total` | How many rows match (after any filter). |
-| `returned` | How many rows are in this answer. |
-| `offset` | The row this page started at. |
-| `next_offset` | Pass this as `offset` to get the next page. Absent on the last page. |
+- `query_analysis`, `search_strings`, `string_details`, `cache_status` and the `disassemble` function list return
+  `total`, `returned`, `offset` and `next_offset` at the top level. `next_offset` is absent on the last page.
+  `analyze_file` on a directory does the same for its `files` table.
+- `analyze_document`, `analyze_script`, `inspect_archive` and `analyze_java_file` nest the four fields under the
+  list's name (`findings`, `entries`, `classes`, `resources` and so on) and put the summary beside it.
+- `yara_scan_file` pages matching files and calls the fields `matches_total`, `matches_returned`, `matches_offset`
+  and `next_offset`.
+- A `disassemble` listing pages instructions, not rows: `returned`, `more`, `remaining` and `next_address`. Pass
+  `next_address` as `address` to continue.
+
+Capped lists inside a summary (for example `nested_archives` or `manifest.class_path` in `analyze_java_file`) are
+`{items, total, truncated}` or a bare array; they are not paged.
 
 If the byte budget cuts a page, `returned` and `next_offset` describe the rows actually sent, so following
 `next_offset` loses nothing:
@@ -294,7 +308,9 @@ If the byte budget cuts a page, `returned` and `next_offset` describe the rows a
 
 Most answers say where they came from. `hit` means a stored result was used; `miss` means the analysis ran now and
 was stored. `partial` (analysis sections) means some of the requested sections were stored and some were computed.
-Under `--no-cache` nothing is stored and every call recomputes.
+Under `--no-cache` nothing is stored and every call recomputes. Answers still carry `cache: "miss"`
+(`search_strings` with `file_path`: `miss_not_cached`); `analyze_file`, `query_analysis` and `disassemble` add a
+`cache_note` that says the section cache is off, the other tools do not. `cache_status` reports `enabled: false`.
 
 ### Errors
 
@@ -312,9 +328,13 @@ the valid ones. Calling a tool that does not exist is a JSON-RPC `-32602` error.
 
 ### Paths
 
-Pass absolute paths. A leading `~/` is expanded. Symbolic links are resolved. FIFOs, sockets and device files are
-refused as a path. Inside a directory, such an entry is skipped and listed as skipped; it is never opened. With
-`--allow-root`, every path must resolve (symlinks and `..` included) to a place under one of the roots.
+Absolute paths are recommended. A relative path is accepted and resolved against the server's working directory, which
+for a client-launched server is often not the directory you expect, so the same call can read a different file (or none)
+from one launch to the next. A leading `~/` is expanded. Symbolic links are resolved. FIFOs, sockets and device files
+are refused as a path. Inside a directory, such an entry is skipped and listed as skipped; it is never opened. Under
+`--allow-root` a symbolic link inside a directory that points outside the roots is not skipped: it refuses the whole
+directory call. With `--allow-root`, every path must resolve (symlinks and `..` included) to a place under one of the
+roots.
 
 ### Testing by hand
 
@@ -340,8 +360,9 @@ only JSON-RPC to stdout; the banner goes to stderr.
 
 ## Tool reference
 
-Arguments marked `*` are required. Every tool also accepts `max_output_bytes` (default 80,000; values outside
-4,000 to 400,000 are clamped, not rejected).
+Arguments marked `*` are required. Every tool also accepts `max_output_bytes` (default 80,000; a value outside
+4,000 to 400,000 is clamped to that range, and a negative value is an error, even though the schema declares the
+range as minimum and maximum).
 Paged tools accept `offset` (default 0) and `limit` (default 50, at most 500 unless stated). Unknown arguments are
 rejected. All tools are read-only except `cache_clear`. Examples are shortened and use `/samples/...` for paths.
 
@@ -357,7 +378,7 @@ Start here. Triage overview of a file or directory.
 | Boolean flags | The same section names as flags (`symbols: true`) are accepted too. |
 | `min_string_length` | Shortest string to count (default 4, at most 4,096). |
 | `hex_dump`, `hex_dump_size`, `hex_dump_offset` | Default 256 bytes, at most 4,096; negative offset: from end. |
-| `arch` | Universal Mach-O slice (`arm64`, `x86_64`, ...), for every per-slice section. Unknown: error. |
+| `arch` | Universal Mach-O slice, as `binary_info.universal_slices` names it, for per-slice sections. Unknown: error. |
 | `recursive`, `max_files` | Directory only: descend; most files listed (default 1,000, ceiling 10,000). |
 | `offset`, `limit` | Directory only: page of the triage table (limit at most 200). |
 
@@ -439,8 +460,10 @@ unreachable_functions); `taint` (flows, vulnerabilities, sources, sinks, sanitiz
 }
 ```
 
-Limits: for a file with more strings than the stored list holds (50,000 plain and 50,000 categorized), an unfiltered
-page says so, and a `filter`, `category` or `encoding` scans the whole file again for the matches.
+`unfiltered_total` is the size of the stored list before the filter. For a file with more strings than the
+stored list holds (50,000 plain and 50,000 categorized), an unfiltered page says so (`strings_in_file` and a `note`);
+a `filter`, `category` or `encoding` scans the whole file again for the matches, and `unfiltered_total` then equals
+`total`, not the size of the list.
 
 ### disassemble
 
@@ -450,7 +473,7 @@ Machine code of one function or address range, as a text listing. Never the whol
 | Argument | Notes |
 | --- | --- |
 | `file_path`* | Absolute path. |
-| `function` | Function name (exact, else a unique case-insensitive match) or its address. |
+| `function` | A symbol or function-list name (exact, else a unique case-insensitive match), or an address. |
 | `address` | `"0x401136"` or a number: the function containing it is listed from there. |
 | `arch` | Universal Mach-O slice. Unknown: error. |
 | `max_instructions` | Default 200, at most 1,000. |
@@ -482,8 +505,10 @@ With `function: "main", max_instructions: 5`:
 ```
 
 Limits: `disassemble` works on an ELF, a thin Mach-O, or one slice of a universal Mach-O. Pick the slice with
-`arch`. A bounded part of the disassembly is cached; an address outside it is decoded again for the call, which
-takes a moment on a large file.
+`arch`. A bounded part of the disassembly (the first 20,000 instructions) is cached; code outside it is decoded
+again on every call, which takes about a second on a large file, and the answer says so in `window_note`. A function
+is found by any name the `symbols` section lists, also on a file with more than 5,000 functions; an imported name
+has no code to list and is refused. When the function list is capped, the answer says so.
 
 ### read_hex
 
@@ -580,7 +605,8 @@ Everything known about one exact string: files, offsets, categories, entropy and
 }
 ```
 
-A value that was never tracked is an error that says how to get it tracked.
+Strings indexed by `analyze_file` carry their offsets too. A value that was never tracked is an error that says
+how to get it tracked.
 
 ### llm_analyze_file
 
@@ -621,7 +647,7 @@ Scan a file or directory with YARA rules (YARA-X).
 | --- | --- |
 | `path`* | Absolute path of a file or directory. |
 | `yara_rule` | Rule text, or the word `builtin` for the scanner's own rule set (max 5 MiB of text). |
-| `rule_path` | A `.yar`/`.yara` file or a directory of them: 20 MiB in all, 5 MiB a file, 1,000 files. No `include`. |
+| `rule_path` | A rule file, or a directory of `.yar`/`.yara` files: 20 MiB, 5 MiB a file, 1,000 files. No `include`. |
 | `recursive` | Default true. |
 | `max_file_size` | Bytes; default and ceiling 100 MB. Larger files are listed under `skipped`. |
 | `detailed_matches` | List matched strings (default true). |
@@ -657,8 +683,11 @@ Failed to compile YARA rule (yara_rule): error[E025]: unknown pattern `$b`
  --> yara_rule:1:41
 ```
 
-Limits: whatever was cut is named under `limits_reached`. The server checks every entry under `path` against
-`--allow-root` before the scan starts, and `timeout_seconds` does not cover that check.
+Limits: whatever was cut is named under `limits_reached`. Under `--allow-root` the server checks each entry under
+`path` as the walk reaches it, inside `max_files` and `timeout_seconds`, not the whole tree first. A symbolic link
+that leaves the roots refuses the call when the walk reaches it, so a call with a small `max_files` may succeed on
+a tree where a full scan is refused. `rule_path` is different: it is checked whole before the scan. A rule file
+named directly is loaded whatever its extension; only a directory is filtered to `.yar` and `.yara` files.
 
 ### analyze_document
 
@@ -670,6 +699,8 @@ the first bytes.
 | `file_path`* | Absolute path. |
 | `category` | PDF: see list below. Office: `auto_exec`, `keyword`, `network`, `modules`. |
 | `module` | Office only: one VBA module's source lines (paged) instead of findings. |
+| `offset`, `limit` | Page of findings (default 0 and 50, at most 500). |
+| `max_output_bytes` | Byte budget of the answer, as for every tool. |
 
 PDF categories: `action`, `script`, `link`, `launch`, `submit`, `attachment`, `evasion`, `encryption`.
 
@@ -681,7 +712,8 @@ PDF categories: `action`, `script`, `link`, `launch`, `submit`, `attachment`, `e
     "risk": { "level": "critical", "score": 65,
               "reasons": ["JavaScript present (1 reference(s))", "OpenAction runs when the document opens", ...] },
     "feature_counts": { "JS": 1, "JavaScript": 1, "OpenAction": 1 },
-    "next_steps": ["analyze_document {file_path, category: \"script\"} shows the JavaScript", ...]
+    "next_steps": [ { "tool": "analyze_document", "arguments": { "file_path": "...", "category": "script" },
+                      "gives": "the JavaScript" }, ... ]
   },
   "findings": { "items": [ { "category": "action", "name": "JS", "severity": "high", "count": 1,
                              "evidence": [ { "offset": 203, "object": 4, "in_stream": false } ] }, ... ],
@@ -691,7 +723,8 @@ PDF categories: `action`, `script`, `link`, `launch`, `submit`, `attachment`, `e
 
 Office files report whether a VBA project exists, its modules, auto-execute entry points and suspicious keywords with
 module and line. Limits: module count, bytes read and decompressed, and keyword hits are capped, and the summary says
-so; a file that could not be read in full is never rated low. A file that is neither PDF nor Office gives an error
+so; a file that could not be read in full, such as an encrypted one or a PDF with no readable body, is never rated
+low. A file that is neither PDF nor Office gives an error
 that names the right tool.
 
 ### analyze_script
@@ -704,6 +737,8 @@ One script file: shell, PowerShell, JavaScript, Python, batch or VBScript.
 | `language` | Force `shell`, `powershell`, `javascript`, `python`, `batch` or `vbscript`. Default: detect. |
 | `category` | One finding category (listed below the table). |
 | `min_severity` | `low`, `medium`, `high` or `critical`. |
+| `offset`, `limit` | Page of findings (default 0 and 50, at most 500). |
+| `max_output_bytes` | Byte budget of the answer, as for every tool. |
 
 Categories: `download_execute`, `dynamic_execution`, `encoded_payload`, `persistence`, `credential_access`,
 `defense_evasion`, `remote_shell`, `command_execution`, `obfuscation`, `privilege_escalation`.
@@ -736,6 +771,8 @@ List the entries of an archive without extracting it: `.zip` (and `.jar`, `.apk`
 | `file_path`* | Absolute path. |
 | `filter` | Case-insensitive text in the entry path. |
 | `risky_only` | Only entries with a medium or higher risk indicator. |
+| `offset`, `limit` | Page of entries (default 0 and 50, at most 500). |
+| `max_output_bytes` | Byte budget of the answer, as for every tool. |
 
 ```json
 {
@@ -754,10 +791,13 @@ List the entries of an archive without extracting it: `.zip` (and `.jar`, `.apk`
 }
 ```
 
-Risk flags: path traversal, links leaving the extraction root, device nodes, setuid bits, executables, double
-extensions, possible compression bombs. The listing is cached by SHA-256, so paging does not parse the archive again.
-Limits: encrypted or compressed RAR and 7z headers cannot be listed; `.tar.bz2` and `.tar.xz` are recognized but not
-listed. When a listing is unavailable, partial or capped, counts are `null` and the risk is `unknown`, not `low`.
+Entry risk flags: path traversal, links leaving the extraction root, device nodes, setuid bits, executables, double
+extensions. These are what `risky_only` selects. A possible compression bomb is different: it is reported only in the
+summary (`possible_bomb: true`, with the sizes and ratio). No entry gets an indicator for it and `risky_only` does not
+return one. The listing is cached by SHA-256, so paging does not parse the archive again. Limits: encrypted or
+compressed RAR and 7z headers cannot be listed; `.tar.bz2` and `.tar.xz` are recognized but not listed. When a listing
+is unavailable, partial or capped, `entries` and `uncompressed_bytes` in the summary are `null` and the risk is
+`unknown`, not `low`. An encrypted archive is never rated low.
 
 ### analyze_java_file
 
@@ -790,8 +830,10 @@ A Java archive (JAR, WAR, EAR, AAR, APK) or a class file, decided from the conte
 ```
 
 Dangerous APIs (process execution, reflection, class and native loading, network, crypto, deserialization, JNDI,
-scripting, `Unsafe`) are read from the class constant pool. Nested archives are opened one level deep within byte
-caps. Not done: signatures are listed as "present, not verified"; `classes.dex` is not parsed, so APK code is not
+scripting, `Unsafe`) are read from the class constant pool. Nested archives are opened up to two levels deep (an
+EAR's WAR's libraries) within byte caps; a third level is reported as not opened. They are named by their full path,
+for example `a.war!WEB-INF/lib/util.jar`. `cache_clear` and `--no-cache` apply to this tool as to every other.
+Not done: signatures are listed as "present, not verified"; `classes.dex` is not parsed, so APK code is not
 assessed; there is no vulnerable-library (CVE) check.
 
 ### analyze_npm_package
@@ -927,8 +969,12 @@ When you want bytes around a string offset (12682 for `Debugger detected!`), use
                                      "offset": 12640, "length": 96 } }
 ```
 
-Every answer after the first said `cache: "hit"` or came from the cached sections, so the follow-ups were quick.
-`all: true` in step one would have prepared all of them at once.
+On a fresh cache directory the five calls answer as follows. The overview and the `threats`, `behavioral` call are
+each a `cache: "miss"`: the sections are computed and stored. The `query_analysis` call on strings is a `hit`: the
+overview had already stored the strings. The `disassemble` call for `main` is a `miss`: it is the first time the
+code is decoded. `read_hex` has no `cache` field, because it reads the file directly. Repeat the second or the
+fourth call and each is a `hit`. `all: true` in step one would have stored every section at once, so the later
+`query_analysis` calls and the `disassemble` calls inside the stored window would all be hits.
 
 ### Vet an npm package
 
@@ -1083,7 +1129,7 @@ It reports a download-and-run on line 3 and a cron entry on line 4. If you are n
 | --- | --- | --- |
 | `--allow-root <DIR>` | all | Directory the tools may read. Repeatable. |
 | `--cache-dir <DIR>` | all | Cache directory (created with mode 0700). |
-| `--no-cache` | all | Store and serve nothing from a cache. |
+| `--no-cache` | all | Keep no section cache or analysis history, in memory or on disk. |
 | `--port`, `-p <PORT>` | HTTP | Default 3000; 0 picks a free port. |
 | `--host <HOST>` | HTTP | Bind address, default `127.0.0.1`. |
 | `--allowed-host <HOST>` | HTTP | Extra `Host` value to accept (`name` or `name:port`). Repeatable. |
@@ -1108,16 +1154,57 @@ banner and security-relevant events (refused requests, an unusable cache directo
 
 The server negotiates every revision from 2024-11-05 through 2026-07-28 and reports its name, version and usage
 instructions in the `initialize` result. In HTTP mode, clients older than 2026-07-28 use sessions (the
-`Mcp-Session-Id` header); 2026-07-28 requests are stateless and carry the protocol version in their request metadata.
-On stdio, a request sent before `initialize` needs that metadata too, except `ping`, which is always answered.
-An `initialize` request that asks for 2026-07-28 is answered with `protocolVersion` 2025-11-25: 2026-07-28 is the
-stateless revision, reached through the per-request metadata without `initialize`. The metadata goes in
-`params._meta` as `io.modelcontextprotocol/protocolVersion` and
-`io.modelcontextprotocol/clientCapabilities`:
+`Mcp-Session-Id` header). A 2026-07-28 request is stateless: it needs no `initialize` and no session, and carries
+the protocol version in its request metadata. An `initialize` request that asks for 2026-07-28 is answered with
+`protocolVersion` 2025-11-25: 2026-07-28 is the stateless revision, reached through the per-request metadata without
+`initialize`. The metadata goes in `params._meta` as `io.modelcontextprotocol/protocolVersion` and
+`io.modelcontextprotocol/clientCapabilities`. On stdio one line is enough:
 
 ```json
 {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
 ```
+
+Over HTTP a stateless request also needs three headers that repeat what the body says, and the server answers 400
+(`-32020`) without them: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: <method>` and, for `tools/call`,
+`Mcp-Name: <tool name>`. Send both `Accept` values, as for any `/mcp` request. The reply is an event stream with one
+`data:` line. List the tools:
+
+```bash
+META='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
+curl -s -X POST http://127.0.0.1:3000/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: tools/list' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{$META}}" \
+  | sed 's/^data: //' | jq -c '.result.tools | length'
+```
+
+```text
+17
+```
+
+Call a tool (the name goes in the body and in `Mcp-Name`):
+
+```bash
+ARGS='"name":"read_hex","arguments":{"file_path":"/samples/test_programs/c_advanced_binary","length":16}'
+curl -s -X POST http://127.0.0.1:3000/mcp \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' -H 'Mcp-Method: tools/call' -H 'Mcp-Name: read_hex' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{$ARGS,$META}}" \
+  | sed 's/^data: //' | jq -r '.result.content[0].text' | jq -c '{total_bytes, next_offset}'
+```
+
+```text
+{"total_bytes":22088,"next_offset":16}
+```
+
+On stdio a request sent before `initialize` needs the same metadata, with one exception: `ping` is answered on a
+connection that has not used the stateless form. After one stateless request the connection stays stateless. A bare
+`ping` is then refused (`-32602`), and `ping` with the metadata is not a method of the stateless revision (`-32601`
+on stdio, 404 over HTTP). A `tools/call` that has no `name` is answered `-32601` by the SDK layer, before any tool
+runs.
+
+JSON-RPC batches (a JSON array of messages) are not accepted on any revision, although revision 2025-03-26 allows
+them: stdio answers `-32600` and HTTP answers 415. Send one message at a time.
 
 ### HTTP protections, in the order they apply
 
@@ -1150,11 +1237,11 @@ protocol; they are for scripts and health checks.
 | --- | --- |
 | `GET /health` | `{"status":"ok","service":"file-scanner-mcp","version":"...",...}`. Needs no token. |
 | `GET /api/info` | Routes, version and uptime. |
-| `POST /initialize`, `POST /tools/list` | Server identity and tool schemas. |
+| `POST /initialize`, `POST /tools/list` | Identity, tool schemas. `/tools/list` replies `{jsonrpc, result: {tools}}`. |
 | `POST /tools/call` | Call a tool: `{"name": "...", "arguments": {...}}`. Replies `{resultType, content, isError}`. |
 | `GET /cache/list`, `GET /cache/stats` | Analysis history entries and statistics. |
 | `POST /cache/search` | Body field `file_path_pattern` (not `file_path`), and `tool_name`. |
-| `POST /cache/clear` | Clear the caches. |
+| `POST /cache/clear` | Clears what `cache_clear` clears by default (history, sections, tracked strings). |
 | `GET /strings/stats`; `POST /strings/{search,details,related,filter}` | String tracker. |
 | `GET /api-docs/openapi.json` | OpenAPI description of the REST routes. |
 
@@ -1195,8 +1282,11 @@ share one directory.
 What is stored: the results the tools returned or computed, including extracted strings and hex samples from the
 files you analyzed, and the call history. The tracked-string index is kept in memory only and is rebuilt in each
 server process, so it is empty after a restart. It never stores a copy of the analyzed file. Treat the directory
-as sensitive if the files were. Run `cache_clear` (or delete the directory) to remove it. `--no-cache` turns all of
-it off; drill-down calls then recompute their sections each time.
+as sensitive if the files were. Run `cache_clear` (or delete the directory) to remove it. `--no-cache` stops the
+section cache and the analysis history, on disk and in memory, and drill-down calls then recompute their sections
+each time (see `cache: hit | miss` for what the answers carry). The in-memory string
+index is not part of that cache: it still fills while the server runs (see `search_strings`), and `cache_clear`
+empties it. `cache_clear` removes only what the cache wrote.
 
 At most `max(4, CPU count)` analyses run at the same time across all connections; others wait.
 
@@ -1247,10 +1337,22 @@ name, add `--allowed-host name`; for a browser app add `--allowed-origin`.
 
 **`401` from the HTTP server.** The server has a token. Send `Authorization: Bearer <token>`.
 
+**`415` from `/mcp`.** The body is not one valid JSON-RPC message: it is not JSON, or it is a batch (an array). Send a
+single object per request.
+
+**`406` from `/mcp`.** The `Accept` header must list both `application/json` and `text/event-stream`.
+
+**`400` with `-32020` from `/mcp`.** A 2026-07-28 request is missing `MCP-Protocol-Version`, `Mcp-Method` or (for
+`tools/call`) `Mcp-Name`. See [Protocol revisions](#protocol-revisions).
+
+**`-32601` for a `tools/call`.** The call has no `name`. The SDK layer answers this before any tool runs; the
+message is the method name.
+
 **"outside the directories this server may read".** The path is not under an `--allow-root`. The message names the
 allowed directories.
 
-**Answers are cut off.** Look for `truncated`, `returned` and `next_offset`. Page with `offset`, narrow with
+**Answers are cut off.** Look for `truncated`, `hint`, `note`, `returned`
+and `next_offset`. Page with `offset`, narrow with
 `filter`, or raise `max_output_bytes` (ceiling 400,000). Clients may still limit what they inline.
 
 **Results look stale or you want a clean slate.** Call `cache_clear`, or start the server with `--no-cache`.

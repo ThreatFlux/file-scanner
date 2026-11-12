@@ -230,8 +230,9 @@ Design rules every tool follows:
 - A bare `analyze_file` call returns a small overview and `next_steps`; sections are computed on request, cached by
   SHA-256 and returned as summaries; `query_analysis` pages the items. `all: true` runs everything once and still
   returns summaries only.
-- Every tool takes `max_output_bytes` (default 80,000, ceiling 400,000). Output is compact JSON; cuts are listed under
-  `truncated`. Lists page with `offset`, `limit`, `total`, `returned`, `next_offset`.
+- Every tool takes `max_output_bytes` (default 80,000, ceiling 400,000). Output is compact JSON; anything cut is
+  named in the answer (`truncated`, `hint` or `note`). Lists page with `offset` and `limit`; most answers carry
+  `total`, `returned` and `next_offset`, with per-tool field names (see `docs/MCP.md`, Paging).
 - Answers that can come from the cache carry `cache: hit | miss`.
 - Input schemas reject unknown fields. Failures are tool errors (`isError: true`) whose message names the fix.
 - All tools are read-only except `cache_clear`. Nothing is executed.
@@ -290,7 +291,9 @@ downloaded; a registry name is rejected with a message that says to run `npm pac
 - Source scan (`package_scan.rs`): up to 400 files, 1 MiB each, 16 MiB in all, for download-and-execute, decoded
   `eval`, credential and wallet access, exfiltration endpoints, miners, reverse shells and obfuscation, with file and
   line evidence.
-- Install scripts (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) are scanned in full.
+- Install hooks (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) are judged by their command string
+  (for example a download piped to a shell). The tool does not follow a hook into the script it runs: a hook that runs
+  a JavaScript file is judged by that file only through the ordinary source scan.
 - Typosquatting check against a popular-package list; a popular package is never a typosquat of itself.
 - Advisories: `src/npm_vuln_db.rs` holds a small table (6 packages: event-stream, ua-parser-js, node-ipc, colors,
   lodash, minimist) matched by semver range. Every result states the table's date and size. An empty list means "not

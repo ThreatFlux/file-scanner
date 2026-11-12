@@ -40,7 +40,8 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   they accept tarballs, wheels, zips, directories and lock or requirements files, and page `findings`, `files`,
   `dependencies` and `scripts`.
 - Output control on every tool: `max_output_bytes` (default 80,000, ceiling 400,000) caps each result, anything cut
-  is listed under `truncated`, and lists page with `offset`, `limit`, `total`, `returned` and `next_offset`. Answers
+  is named in the answer (`truncated`, `hint` or `note`), and lists page with `offset`, `limit`, `total`, `returned`
+  and `next_offset` (`yara_scan_file` names them `matches_total`, `matches_returned` and `matches_offset`). Answers
   say `cache: hit` or `miss`. Failures are tool errors (`isError: true`) whose message says what to fix.
 - `yara_scan_file` takes rules as text, as `rule_path` (a file or a directory of `.yar`/`.yara` files) or as
   `builtin`, and has limits (`max_matches_per_rule`, `max_rules_per_file`, `max_files`, `timeout_seconds`, paging).
@@ -99,7 +100,9 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   message, line and column); an unknown tool is JSON-RPC `-32602`. A panic in one analyzer fails only that section;
   the release profile no longer uses `panic = "abort"`.
 - `mcp-stdio` writes only JSON-RPC to stdout, exits 0 when stdin closes, and expects one JSON object per line.
-  Requests before `initialize` need the 2026-07-28 request metadata.
+  Requests before `initialize` need the 2026-07-28 request metadata (`ping` is answered on a connection that has not
+  used it). Over HTTP, a 2026-07-28 request also needs the `MCP-Protocol-Version`, `Mcp-Method` and, for `tools/call`,
+  `Mcp-Name` headers. JSON-RPC batches are not accepted.
 - `mcp-sse` is a deprecated alias of `mcp-http` and prints a notice. The SSE transport and the `/sse` route are
   gone. What to change: point SSE clients at `http://host:port/mcp`.
 - REST helper routes: `/api/info` lists exactly the routes that exist and a real uptime; `/health` reports
