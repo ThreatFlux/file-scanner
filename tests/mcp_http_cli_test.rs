@@ -30,6 +30,7 @@ impl Server {
             .args(args)
             .args(["--port", "0"])
             .env("TMPDIR", cache_home.path())
+            .env("FILE_SCANNER_CACHE_DIR", cache_home.path().join("cache"))
             .env_remove("FILE_SCANNER_AUTH_TOKEN")
             .env_remove("FILE_SCANNER_ALLOWED_ROOTS")
             .stdin(Stdio::null())

@@ -1013,8 +1013,10 @@ async fn tool_calls_run_concurrently_with_a_shared_handler() {
 #[test]
 fn initialized_before_initialize_gives_a_readable_error() {
     use std::process::{Command, Stdio};
+    let cache_home = TempDir::new().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_file-scanner"))
         .arg("mcp-stdio")
+        .env("FILE_SCANNER_CACHE_DIR", cache_home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -308,24 +308,44 @@ fn two_paths_with_the_same_content_are_both_recorded() {
 }
 
 #[test]
-fn a_file_tracked_by_one_route_is_not_counted_again_by_another() {
+fn a_file_through_two_routes_counts_each_string_once_and_the_offset_scan_wins() {
     let tracker = StringTracker::new();
     let strings = vec!["msftupdater.com".to_string()];
     tracker
         .track_strings_from_results(&strings, "/f", "h", "analyze_file")
         .unwrap();
+    // The scan with offsets adds what analyze_file did not have, and replaces
+    // what it had without an offset.
     let report = tracker.track_strings_at(
-        || vec![("msftupdater.com".to_string(), 12)],
+        || {
+            vec![
+                ("msftupdater.com".to_string(), 12),
+                ("only in the scan".to_string(), 40),
+            ]
+        },
         "/f",
         "h",
         "search_strings",
         "min=4",
     );
-    assert!(report.tracked_by_other_route);
+    assert_eq!(report.tracked, 2);
     let entry = tracker.get_string_details("msftupdater.com").unwrap();
     assert_eq!(entry.total_occurrences, 1);
+    assert!(matches!(
+        entry.occurrences[0].context,
+        StringContext::FileString { offset: Some(12) }
+    ));
+    assert_eq!(
+        tracker
+            .get_string_details("only in the scan")
+            .unwrap()
+            .total_occurrences,
+        1
+    );
+    assert_eq!(tracker.get_statistics(None).total_occurrences, 2);
 
-    // The other order gives the same count.
+    // The other order gives the same counts, and a repeat of analyze_file
+    // adds nothing.
     let other = StringTracker::new();
     other.track_strings_at(
         || vec![("msftupdater.com".to_string(), 12)],
@@ -337,13 +357,66 @@ fn a_file_tracked_by_one_route_is_not_counted_again_by_another() {
     other
         .track_strings_from_results(&strings, "/f", "h", "analyze_file")
         .unwrap();
+    let entry = other.get_string_details("msftupdater.com").unwrap();
+    assert_eq!(entry.total_occurrences, 1);
+    assert!(matches!(
+        entry.occurrences[0].context,
+        StringContext::FileString { offset: Some(12) }
+    ));
+}
+
+#[test]
+fn string_search_after_analyze_file_still_indexes_every_string_with_offsets() {
+    let tracker = StringTracker::new();
+    let few: Vec<String> = (0..10).map(|n| format!("analyze string {n:03}")).collect();
+    tracker
+        .track_strings_from_results(&few, "/f", "h", "analyze_file")
+        .unwrap();
+    let all: Vec<(String, usize)> = (0..500)
+        .map(|n| (format!("analyze string {n:03}"), n * 64))
+        .collect();
+    let report = tracker.track_strings_at(|| all.clone(), "/f", "h", "search_strings", "min=4");
+    assert_eq!(report.tracked, 500);
+    let late = tracker.get_string_details("analyze string 400").unwrap();
+    assert!(matches!(
+        late.occurrences[0].context,
+        StringContext::FileString {
+            offset: Some(25600)
+        }
+    ));
+    assert_eq!(tracker.get_statistics(None).total_occurrences, 500);
+}
+
+#[test]
+fn the_same_file_with_two_min_lengths_counts_once() {
+    let tracker = StringTracker::new();
+    let items = vec![
+        ("/usr/lib/dyld".to_string(), 17828usize),
+        ("/usr/lib/dyld".to_string(), 66956),
+    ];
+    tracker.track_strings_at(|| items.clone(), "/f", "h", "search_strings", "min=4");
+    let report = tracker.track_strings_at(|| items.clone(), "/f", "h", "search_strings", "min=8");
+    assert_eq!((report.tracked, report.already_indexed), (0, false));
+    let entry = tracker.get_string_details("/usr/lib/dyld").unwrap();
+    assert_eq!(entry.total_occurrences, 2);
+    assert_eq!(entry.occurrences.len(), 2);
+}
+
+#[test]
+fn values_with_prefix_lists_matches_in_order() {
+    let tracker = StringTracker::new();
+    let items = vec![
+        ("alpha one".to_string(), 1usize),
+        ("alpha two".to_string(), 2),
+        ("beta".to_string(), 3),
+    ];
+    tracker.track_strings_at(|| items, "/f", "h", "t", "k");
     assert_eq!(
-        other
-            .get_string_details("msftupdater.com")
-            .unwrap()
-            .total_occurrences,
-        1
+        tracker.values_with_prefix("alpha", 5),
+        vec!["alpha one".to_string(), "alpha two".to_string()]
     );
+    assert_eq!(tracker.values_with_prefix("alpha", 1).len(), 1);
+    assert!(tracker.values_with_prefix("gamma", 5).is_empty());
 }
 
 #[test]

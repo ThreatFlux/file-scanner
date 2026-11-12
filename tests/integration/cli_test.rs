@@ -248,9 +248,11 @@ fn test_cli_mcp_stdio_command() {
             "clientInfo": { "name": "file-scanner-test", "version": "1.0" }
         }
     });
+    let cache_home = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
     let assertion = cmd
         .arg("mcp-stdio")
+        .env("FILE_SCANNER_CACHE_DIR", cache_home.path())
         .write_stdin(format!("{initialize}\n"))
         .timeout(std::time::Duration::from_secs(5))
         .assert()
@@ -266,9 +268,11 @@ fn test_cli_mcp_stdio_command() {
 #[test]
 fn test_cli_mcp_stdio_with_no_input_exits_cleanly() {
     // The Docker workflows run exactly this: stdin closed before any message.
+    let cache_home = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
     let assertion = cmd
         .arg("mcp-stdio")
+        .env("FILE_SCANNER_CACHE_DIR", cache_home.path())
         .write_stdin("")
         .timeout(std::time::Duration::from_secs(5))
         .assert()
@@ -291,9 +295,11 @@ fn test_cli_mcp_stdio_stdout_is_only_json_rpc() {
         serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}),
     ];
     let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    let cache_home = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
     let assertion = cmd
         .arg("mcp-stdio")
+        .env("FILE_SCANNER_CACHE_DIR", cache_home.path())
         .write_stdin(input)
         .timeout(std::time::Duration::from_secs(10))
         .assert()
@@ -343,9 +349,11 @@ fn test_cli_mcp_reports_partial_string_indexing() -> Result<()> {
             "arguments": { "file_path": test_file, "strings": true }
         }
     });
+    let cache_home = TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
     let assertion = cmd
         .arg("mcp-stdio")
+        .env("FILE_SCANNER_CACHE_DIR", cache_home.path())
         .write_stdin(format!("{initialize}\n{call}\n"))
         .timeout(std::time::Duration::from_secs(20))
         .assert()
@@ -370,7 +378,9 @@ fn test_cli_mcp_reports_partial_string_indexing() -> Result<()> {
 #[test]
 fn test_cli_mcp_http_command() {
     let mut cmd = Command::cargo_bin("file-scanner").unwrap();
+    let cache_home = TempDir::new().unwrap();
     cmd.arg("mcp-http")
+        .env("FILE_SCANNER_CACHE_DIR", cache_home.path())
         .arg("--port")
         .arg("0") // Use port 0 to let OS assign
         .timeout(std::time::Duration::from_secs(1))

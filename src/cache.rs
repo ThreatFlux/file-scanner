@@ -468,7 +468,15 @@ impl AnalysisCache {
         // The entries already stored for this hash, then the new one.
         let mut entries = match state.slots.get(&hash) {
             Some(slot) => self.read_slot(&hash, slot).unwrap_or_default(),
-            None => Vec::new(),
+            // No slot here: another process on this directory may have written
+            // entries for the hash since the index was read; keep them.
+            None => persist_dir
+                .as_ref()
+                .and_then(|dir| {
+                    read_private(&dir.join(entry_file_name(&hash)), self.max_total_bytes).ok()
+                })
+                .and_then(|bytes| serde_json::from_slice::<Vec<CacheEntry>>(&bytes).ok())
+                .unwrap_or_default(),
         };
         let mut rows = state
             .slots
@@ -1529,18 +1537,16 @@ mod tests {
             let cache = AnalysisCache::new(temp_dir.path()).unwrap();
             let entry = create_test_entry("persistent_hash", "test_tool", "/test/file.bin");
             cache.add_entry(entry).await.unwrap();
-
-            // Wait a bit for async save to complete
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
 
         // Create new cache instance to test loading
         let cache2 = AnalysisCache::new(temp_dir.path()).unwrap();
         let entries = cache2.get_entries("persistent_hash").await;
 
-        // May or may not find entries depending on timing of async save
-        // This test mainly ensures no errors occur during persistence operations
-        assert!(entries.is_some() || entries.is_none());
+        // add_entry is complete on return, so the second instance finds it.
+        let entries = entries.expect("the entry persisted by the first instance");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].file_path, "/test/file.bin");
     }
 }
 
@@ -1997,5 +2003,17 @@ mod storage_tests {
             max_file_size: None,
         });
         assert_eq!(rows.len(), 80);
+    }
+
+    #[test]
+    fn a_second_cache_on_one_directory_keeps_the_first_ones_entry_for_the_same_hash() {
+        let dir = TempDir::new().unwrap();
+        let a = AnalysisCache::new(dir.path()).unwrap();
+        let b = AnalysisCache::new(dir.path()).unwrap();
+        a.add_entry_sync(entry("samehash", "analyze_file", "/f", Value::Null), None);
+        b.add_entry_sync(entry("samehash", "yara_scan_file", "/f", Value::Null), None);
+        let fresh = AnalysisCache::new(dir.path()).unwrap();
+        let rows = fresh.list_summaries(&any_query());
+        assert_eq!(rows.len(), 2, "{rows:?}");
     }
 }

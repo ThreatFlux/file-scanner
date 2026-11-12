@@ -23,8 +23,8 @@ use crate::{
 
 use super::{
     output::{
-        input_schema_with_budget, page, parse_request, respond, respond_result, tool_error,
-        PageArgs,
+        fit_rows, input_schema_with_budget, page, parse_request, respond, respond_result,
+        tool_error, PageArgs,
     },
     paths::Expect,
     state::ServerState,
@@ -405,9 +405,12 @@ fn build_string_index(path: &Path, min_len: usize) -> Result<Value, String> {
         }
         // A pair straddling the end of the processed part: i may point past
         // `limit` by one after a two-byte step; carry what is left.
-        let consumed = i.min(buffer.len());
+        let mut consumed = i.min(buffer.len());
         if wide.capped {
+            // The UTF-16 pass stopped: the ASCII pass already read every
+            // byte of the buffer, so nothing needs to be kept.
             wide_run = None;
+            consumed = buffer.len();
         }
         buffer.drain(..consumed);
         buffer_start += consumed;
@@ -419,13 +422,15 @@ fn build_string_index(path: &Path, min_len: usize) -> Result<Value, String> {
         run.finish(min_len, 1, &mut wide);
     }
 
-    let index_truncated = ascii.capped || wide.capped;
+    let mut index_truncated = ascii.capped || wide.capped;
     let values_cut = ascii.cut + wide.cut;
     let mut found = ascii.found;
     found.extend(wide.found);
     found.sort_by_key(|(offset, encoding, _)| (*offset, *encoding));
     if found.len() > MAX_INDEX_STRINGS {
+        // Two passes under their own caps can add up to more than the cap.
         found.truncate(MAX_INDEX_STRINGS);
+        index_truncated = true;
     }
     let strings: Vec<Value> = found
         .into_iter()
@@ -653,7 +658,10 @@ impl FileScannerMcp {
             None => self.search_session(&request, query, pattern, paging).await,
         };
         match value {
-            Ok(value) => respond(value, budget),
+            Ok(mut value) => {
+                fit_page(&mut value, "items", budget);
+                respond(value, budget)
+            }
             Err(message) => tool_error(message),
         }
     }
@@ -916,8 +924,25 @@ impl FileScannerMcp {
                 string_details_value(&state, &request)
             })
             .await;
-        respond_result(outcome, budget)
+        respond_result(
+            outcome.map(|result| {
+                result.map(|mut value| {
+                    fit_page(&mut value, "files", budget);
+                    value
+                })
+            }),
+            budget,
+        )
     }
+}
+
+/// Cut a paged answer to the output budget with `output::fit_rows`, so
+/// `returned`, `next_offset` and the hint describe the rows actually sent.
+fn fit_page(value: &mut Value, key: &str, budget: usize) {
+    let offset = value["offset"].as_u64().map_or(0, |n| n as usize);
+    let total = value["total"].as_u64().map_or(0, |n| n as usize);
+    let start = offset.min(total);
+    fit_rows(value, key, budget, start, total);
 }
 
 fn string_details_value(
@@ -926,7 +951,35 @@ fn string_details_value(
 ) -> Result<Value, String> {
     {
         let tracker = state.string_tracker();
-        let Some(entry) = tracker.get_string_details(&request.value) else {
+        let mut lookup = request.value.clone();
+        let mut exact = tracker.get_string_details(&lookup);
+        let mut by_prefix = false;
+        if exact.is_none() {
+            // A value shown cut (`value_cut`, or blanked by the output budget)
+            // is a prefix of the real one: accept it when only one matches.
+            let marked = lookup.find("...[cut ");
+            if let Some(at) = marked {
+                lookup.truncate(at);
+            }
+            let looks_cut = marked.is_some() || lookup.chars().count() == MAX_SHOWN_VALUE_CHARS;
+            if looks_cut && !lookup.is_empty() {
+                let found = tracker.values_with_prefix(&lookup, 2);
+                match found.as_slice() {
+                    [one] => {
+                        exact = tracker.get_string_details(one);
+                        by_prefix = exact.is_some();
+                    }
+                    [_, _] => {
+                        return Err(format!(
+                            "That value is not tracked as given, and more than one tracked                              string starts with it ({} characters). A value that search_strings                              showed cut is a prefix: pass more of it, or search_strings with a                              longer `query` or a `regex` to find the whole value.",
+                            lookup.chars().count()
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some(entry) = exact else {
             return Err(if tracker.is_full() {
                 format!(
                     "That string is not tracked, and the session index is full ({} distinct \
@@ -938,7 +991,8 @@ fn string_details_value(
             } else {
                 "That string is not tracked. Find exact values with search_strings (it tracks \
                  the strings of every file it searches), or analyze the file with analyze_file \
-                 and strings: true first."
+                 and strings: true first. A value shown cut (`value_cut: true`) is accepted \
+                 when it is the start of exactly one tracked string."
                     .to_string()
             });
         };
@@ -993,6 +1047,9 @@ fn string_details_value(
         if cut {
             out["value_cut"] = true.into();
         }
+        if by_prefix {
+            out["matched_by_prefix"] = true.into();
+        }
         out["total_occurrences"] = entry.total_occurrences.into();
         out["files_total"] = entry.unique_files.len().into();
         out["categories"] = json!(sorted_categories(&entry));
@@ -1035,9 +1092,14 @@ fn cache_status_value(
                 request.limit.unwrap_or(50),
             );
             if rows.is_empty() {
-                out["hint"] = "Nothing cached matches. analyze_file and yara_scan_file calls \
-                               are recorded here."
-                    .into();
+                out["hint"] = if state.cache_enabled() {
+                    "Nothing cached matches. analyze_file and yara_scan_file calls are \
+                     recorded here."
+                } else {
+                    "Caching is off (--no-cache): nothing is recorded, so this list stays \
+                     empty. Restart without --no-cache to keep a call history."
+                }
+                .into();
             } else {
                 let tools: std::collections::BTreeSet<&str> =
                     rows.iter().map(|row| row.tool_name.as_str()).collect();
@@ -1126,7 +1188,13 @@ impl FileScannerMcp {
                 cache_status_value(&state, action, &request)
             })
             .await;
-        respond_result(outcome.map(Ok), budget)
+        respond_result(
+            outcome.map(|mut value| {
+                fit_page(&mut value, "items", budget);
+                Ok(value)
+            }),
+            budget,
+        )
     }
 
     /// The `cache_clear` tool body.
@@ -1841,5 +1909,206 @@ mod tests {
             !cache.path().join("c").exists(),
             "nothing is written to disk"
         );
+    }
+
+    #[tokio::test]
+    async fn string_details_works_for_every_value_search_strings_returns_after_analyze_file() {
+        let cache = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        // analyze_file keeps 2,000 strings; this file has more.
+        let mut body = Vec::new();
+        for n in 0..3_000 {
+            body.extend_from_slice(format!("string number {n:05} of the file\0").as_bytes());
+        }
+        let path = sample_file(files.path(), "many.bin", &body);
+        let (_state, client) = connect(cache.path()).await;
+        let (error, analyzed) = call(
+            &client,
+            "analyze_file",
+            json!({"file_path": path, "strings": true}),
+        )
+        .await;
+        assert!(!error, "{analyzed}");
+        let (_, found) = call(
+            &client,
+            "search_strings",
+            json!({"file_path": path, "query": "string number 02999"}),
+        )
+        .await;
+        assert_eq!(found["total"], 1, "{found}");
+        let value = found["items"][0]["value"].as_str().unwrap().to_string();
+        let (error, details) = call(&client, "string_details", json!({"value": value})).await;
+        assert!(!error, "{details}");
+        assert_eq!(details["total_occurrences"], 1, "{details}");
+        assert!(
+            !details["files"][0]["offsets"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "{details}"
+        );
+        // The session index knows it too.
+        let (_, session) = call(&client, "search_strings", json!({"query": "number 02999"})).await;
+        assert_eq!(session["total"], 1, "{session}");
+    }
+
+    #[test]
+    fn an_index_cut_by_the_sum_of_both_passes_says_so() {
+        let files = tempfile::tempdir().unwrap();
+        let half = MAX_INDEX_STRINGS / 2 + 10;
+        let mut body = Vec::new();
+        for n in 0..half {
+            body.extend_from_slice(format!("asc_{n:06}\0").as_bytes());
+        }
+        for n in 0..half {
+            for c in format!("wid_{n:06}").encode_utf16() {
+                body.extend_from_slice(&c.to_le_bytes());
+            }
+            body.extend_from_slice(&[0, 0]);
+        }
+        let path = sample_file(files.path(), "mixed.bin", &body);
+        let index = build_string_index(Path::new(&path), 4).unwrap();
+        assert_eq!(
+            index["strings"].as_array().unwrap().len(),
+            MAX_INDEX_STRINGS
+        );
+        assert_eq!(index["index_truncated"], true);
+    }
+
+    #[test]
+    fn a_capped_utf16_pass_does_not_keep_the_rest_of_the_file_buffered() {
+        // The buffer is not observable from the result; the index must still be right.
+        let files = tempfile::tempdir().unwrap();
+        let mut body = Vec::new();
+        for n in 0..(MAX_INDEX_STRINGS + 10) {
+            for c in format!("w{n:06}").encode_utf16() {
+                body.extend_from_slice(&c.to_le_bytes());
+            }
+            body.extend_from_slice(&[0, 0]);
+        }
+        body.extend_from_slice(b"\0plain tail string\0");
+        let path = sample_file(files.path(), "wide.bin", &body);
+        let index = build_string_index(Path::new(&path), 4).unwrap();
+        assert_eq!(index["index_truncated"], true);
+        assert_eq!(
+            index["strings"].as_array().unwrap().len(),
+            MAX_INDEX_STRINGS
+        );
+    }
+
+    #[tokio::test]
+    async fn string_details_accepts_a_value_shown_cut_and_explains_when_it_cannot() {
+        let cache = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let long = "B".repeat(450);
+        let path = sample_file(files.path(), "long.bin", format!("\0{long}\0").as_bytes());
+        let (_state, client) = connect(cache.path()).await;
+        let (_, found) = call(
+            &client,
+            "search_strings",
+            json!({"file_path": path, "regex": "^B"}),
+        )
+        .await;
+        let item = &found["items"][0];
+        assert_eq!(item["value_cut"], true, "{found}");
+        let shown_value = item["value"].as_str().unwrap().to_string();
+        assert_eq!(shown_value.len(), MAX_SHOWN_VALUE_CHARS);
+        let (error, details) = call(&client, "string_details", json!({"value": shown_value})).await;
+        assert!(!error, "{details}");
+        assert_eq!(details["matched_by_prefix"], true);
+        assert_eq!(details["total_occurrences"], 1);
+
+        // A second long value with the same start makes the prefix ambiguous.
+        let other = format!("{}C", "B".repeat(450));
+        let path2 = sample_file(files.path(), "long2.bin", format!("\0{other}\0").as_bytes());
+        call(
+            &client,
+            "search_strings",
+            json!({"file_path": path2, "regex": "^B"}),
+        )
+        .await;
+        let (error, text) =
+            call(&client, "string_details", json!({"value": "B".repeat(400)})).await;
+        assert!(error);
+        assert!(text.as_str().unwrap().contains("more than one"), "{text}");
+
+        // A short value that is not tracked says how cut values are handled.
+        let (error, text) = call(&client, "string_details", json!({"value": "nope"})).await;
+        assert!(error);
+        assert!(text.as_str().unwrap().contains("value_cut"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_page_cut_by_the_budget_reports_the_rows_sent() {
+        let cache = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let mut body = Vec::new();
+        for n in 0..1_000 {
+            body.extend_from_slice(format!("padded value {n:05} {}\0", "x".repeat(150)).as_bytes());
+        }
+        let path = sample_file(files.path(), "rows.bin", &body);
+        let (_state, client) = connect(cache.path()).await;
+        let (error, page) = call(
+            &client,
+            "search_strings",
+            json!({"file_path": path, "query": "padded", "limit": 500,
+                   "max_output_bytes": 20000}),
+        )
+        .await;
+        assert!(!error, "{page}");
+        let sent = page["items"].as_array().unwrap().len();
+        assert!(sent > 0 && sent < 500, "{sent}");
+        assert_eq!(page["returned"], sent);
+        assert_eq!(page["next_offset"], sent);
+        assert_eq!(
+            page["items"][sent - 1]["value"].as_str().unwrap()[13..18],
+            format!("{:05}", sent - 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_empty_history_hint_is_honest_without_a_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        let state = Arc::new(ServerState::new(StateConfig {
+            cache_dir: cache.path().join("c"),
+            cache_enabled: false,
+            ..StateConfig::default()
+        }));
+        let server = FileScannerMcp::with_state(Arc::clone(&state));
+        let (server_io, client_io) = tokio::io::duplex(1 << 20);
+        tokio::spawn(async move {
+            if let Ok(service) = server.serve(server_io).await {
+                let _ = service.waiting().await;
+            }
+        });
+        let client = ().serve(client_io).await.unwrap();
+        let (_, list) = call(&client, "cache_status", json!({"action": "list"})).await;
+        let hint = list["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("--no-cache") && hint.contains("nothing is recorded"),
+            "{hint}"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_file_with_two_min_lengths_is_counted_once_in_the_session_index() {
+        let cache = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let path = sample_file(
+            files.path(),
+            "two.bin",
+            b"\0/usr/lib/dyld\0..\0/usr/lib/dyld\0",
+        );
+        let (_state, client) = connect(cache.path()).await;
+        for min in [4, 8] {
+            call(
+                &client,
+                "search_strings",
+                json!({"file_path": path, "query": "dyld", "min_length": min}),
+            )
+            .await;
+        }
+        let (_, details) = call(&client, "string_details", json!({"value": "/usr/lib/dyld"})).await;
+        assert_eq!(details["total_occurrences"], 2, "{details}");
     }
 }
