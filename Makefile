@@ -234,7 +234,7 @@ install: release
 setup-optimization:
 	@echo "Setting up CI/CD optimization tools..."
 	@command -v cargo-llvm-cov >/dev/null 2>&1 || $(CARGO) install cargo-llvm-cov --version 0.9.1 --locked
-	@command -v sccache >/dev/null 2>&1 || $(CARGO) install sccache --version 0.18.0 --locked
+	@command -v sccache >/dev/null 2>&1 || $(CARGO) install sccache --version 0.19.0 --locked
 	@echo "Optimization tools installed!"
 
 # Generate code coverage with llvm-cov (faster than tarpaulin)

@@ -5,6 +5,7 @@ concurrency:
   # Dry runs and other repositories never share the real release queue.
   group: auto-release-${{ github.event.workflow_run.head_repository.full_name || github.repository }}-${{ github.event.workflow_run.head_branch || github.ref_name || 'main' }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: false
+  queue: max
 
 # workflow_run only starts the reusable release on this repository's main: the
 # reusable workflow refuses runs that did not succeed or that come from another
