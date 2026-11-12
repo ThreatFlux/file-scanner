@@ -74,12 +74,16 @@ type Client = RunningService<RoleClient, TestClient>;
 
 /// The exact inventory lives in this one list (checked by the annotations test);
 /// every other test only checks that these names are present.
-const TOOLS: [&str; 6] = [
+const TOOLS: [&str; 10] = [
     "analyze_file",
     "analyze_java_file",
     "analyze_npm_package",
     "analyze_python_package",
+    "compare_files",
+    "disassemble",
     "llm_analyze_file",
+    "query_analysis",
+    "read_hex",
     "yara_scan_file",
 ];
 
@@ -413,11 +417,9 @@ async fn analyze_file_succeeds_and_leaves_the_shared_side_effects() {
         analysis.get("binary_info").is_none(),
         "None fields are omitted"
     );
-    assert!(analysis["strings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|s| s.as_str().is_some_and(|s| s.contains("plain text marker"))));
+    // The strings section is a summary: counts and the categorized strings.
+    assert!(analysis["strings"]["total_count"].as_u64().unwrap() >= 2);
+    assert_eq!(analysis["strings"]["top"][0]["category"], "URL");
 
     // The side effects the REST routes depend on: one cache entry, strings tracked.
     let entries = harness.state.analysis_cache().get_all_entries().await;
@@ -577,8 +579,16 @@ async fn failures_are_tool_errors_with_useful_text() {
     assert_eq!(result.is_error, Some(true));
     assert_eq!(text(&result), "File does not exist: /nonexistent/x.bin");
 
-    // Directory where a file is needed: says what to do.
+    // A directory is a triage table; where a file is needed it says what to do.
     let result = call(&client, "analyze_file", json!({"file_path": dir.path()})).await;
+    assert_ne!(result.is_error, Some(true), "{}", text(&result));
+    assert_eq!(json_of(&result)["view"], "directory");
+    let result = call(
+        &client,
+        "query_analysis",
+        json!({"file_path": dir.path(), "section": "strings"}),
+    )
+    .await;
     assert_eq!(result.is_error, Some(true));
     assert!(
         text(&result).contains("is a directory"),
@@ -734,7 +744,7 @@ async fn no_result_exceeds_the_byte_ceiling() {
     let client = harness.legacy(ProtocolVersion::V_2025_11_25).await;
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_programs/c_advanced_binary");
 
-    // `all` on a real binary is megabytes of hex dump, strings and disassembly.
+    // `all` on a real binary is summaries: it fits the default budget whole.
     let result = call(
         &client,
         "analyze_file",
@@ -745,13 +755,7 @@ async fn no_result_exceeds_the_byte_ceiling() {
     let body = text(&result);
     assert!(body.len() <= DEFAULT_OUTPUT_BYTES, "{} bytes", body.len());
     let analysis: Value = serde_json::from_str(&body).unwrap();
-    assert!(analysis["truncated"]["cut"]
-        .as_array()
-        .is_some_and(|c| !c.is_empty()));
-    assert!(analysis["truncated"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("max_output_bytes"));
+    assert!(analysis.get("truncated").is_none(), "summaries fit whole");
     assert!(analysis.get("hashes").is_some(), "small sections survive");
 
     // Asking for more is honored up to the ceiling and no further.
@@ -763,7 +767,6 @@ async fn no_result_exceeds_the_byte_ceiling() {
     .await;
     let body = text(&result);
     assert!(body.len() <= MAX_OUTPUT_BYTES, "{} bytes", body.len());
-    assert!(body.len() > DEFAULT_OUTPUT_BYTES);
 
     // And a small budget is honored too.
     let result = call(

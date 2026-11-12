@@ -5,8 +5,20 @@
 //! tool surface: argument parsing, path policy, panic isolation, the section
 //! cache, the side effects the REST routes depend on, and the output budget.
 
+mod compare;
+mod inspect;
+mod llm;
+mod query;
+mod sections;
+mod triage;
+
+pub use self::{
+    compare::CompareFilesRequest,
+    inspect::{DisassembleRequest, ReadHexRequest},
+};
+
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::{Instant, UNIX_EPOCH},
 };
@@ -19,13 +31,14 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use self::sections::{Ctx, Engine, Failure, Options, Planned, ANALYSES};
 use super::{
     output::{
         input_schema_with_budget, parse_request, render, respond_result, respond_text, tool_error,
-        MAX_OUTPUT_BYTES, MIN_OUTPUT_BYTES,
+        DEFAULT_LIMIT,
     },
     paths::Expect,
-    state::{mark_section, ENTRY_RESULT_MAX_BYTES},
+    state::mark_section,
     FileScannerMcp,
 };
 use crate::{
@@ -48,29 +61,50 @@ use crate::{
 
 /// Most bytes one `analyze_file` call dumps as hex (the dump is read into memory).
 pub const MAX_HEX_DUMP_BYTES: usize = 1024 * 1024;
+/// Most bytes one `analyze_file` hex dump covers; read_hex pages further.
+pub const ANALYZE_HEX_DUMP_MAX: usize = 4096;
 
-/// Answer to an `analyze_file` call that names no analysis.
-const NO_FLAGS_HINT: &str = "No analysis was requested. Pass at least one flag: metadata and \
-hashes are a cheap start; strings, binary_info, entropy, symbols, threats, disassembly and the \
-others dig in; all:true runs everything.";
+const ANALYZE_FILE_DESCRIPTION: &str = "START HERE. Triage overview of a file: size, type, mime, \
+sha256 and md5, format facts (architecture, compiler, stripped), signature state, entropy headline, \
+counts of strings, functions and imports, the most telling categorized strings (URLs, IPs, paths, \
+secrets), and `next_steps` naming the exact call for each deeper analysis. With no section \
+named it never runs the heavy analyses. Name sections (`sections: [\"symbols\", \"vulnerabilities\"]`, \
+or the boolean flags, or `all: true`) to run them: each one is computed in full, cached by the \
+file's SHA-256, and returned as a SUMMARY (headline numbers, top few items, total counts); `all: true` \
+runs every analysis and still returns summaries only. To read the items, call query_analysis (it pages \
+and filters strings, symbols, imports, functions, vulnerabilities, ... from the cache, so it is fast). \
+A directory path returns a paged triage table, one row per file (`recursive`, `max_files`, \
+`offset`, `limit`). Pass an absolute path. Results are compact JSON capped at `max_output_bytes` \
+(default 80000, ceiling 400000); anything cut is listed under `truncated`. Sections that fail or do \
+not apply to the file's format are listed under `errors` or `notes` with the reason. Then use \
+query_analysis to dig in, llm_analyze_file for a YARA-oriented digest, or yara_scan_file to test a rule.";
 
-/// Room kept free in the budget for the `cache` members spliced into the text.
-const CACHE_FIELDS_RESERVE: usize = 400;
-
-const ANALYZE_FILE_DESCRIPTION: &str = "Comprehensive file analysis tool - use flags to control \
-which analyses to perform. Start here for an overview of a file; pass `all: true` to run every \
-analysis. Pass an absolute path. Results are compact JSON capped at `max_output_bytes` (default \
-80000, ceiling 400000); fields that do not fit are cut and listed under `truncated`. A repeated \
-identical call on an unchanged file is answered from the in-memory cache (`cache: \"hit\"`), \
-and a full run also speeds up later single-section calls on the same file. \
-Follow up with llm_analyze_file for a YARA-oriented digest or yara_scan_file to test a rule.";
+const QUERY_ANALYSIS_DESCRIPTION: &str = "Dig into one section of a file: page and filter its \
+lists. Call analyze_file first (its `next_steps` name the section and list to ask for). Sections \
+and lists: strings (strings; filter = substring or regex on the text, category = URL | IP Address | \
+Email | Password | API Key | Secret/Token | File Path | ..., encoding = ascii | utf16le | utf16be; \
+every row has offset, encoding, value, category), binary_info (sections, imports, exports), symbols \
+(functions, imports, exports, global_variables, cross_references), control_flow (functions: one \
+summary row per function), vulnerabilities, code_quality (functions, quality_issues), dependencies \
+(dependencies, compliance_issues), entropy (sections, high_entropy_regions), disassembly (functions, \
+instructions, suspicious_patterns; one function at a time via `filter`), threats and enhanced_threats \
+(matches, indicators), behavioral (findings, plus each group), yara_indicators. The answer is `{items, \
+total, returned, offset, next_offset, cache}`: `total` counts the rows that match, `next_offset` asks \
+for the next page. A section the file's cache already holds is answered at once (`cache: \"hit\"`); \
+otherwise it is computed and cached (`cache: \"miss\"`). Rows are compact; `detail: true` returns the \
+raw rows. Pass an absolute path. For raw bytes use read_hex, for machine code disassemble, to compare two files compare_files.";
 
 const LLM_ANALYZE_FILE_DESCRIPTION: &str =
-    "LLM-optimized file analysis for YARA rule generation - \
-returns focused, token-limited output. Call it after analyze_file when you want key strings, \
-hex patterns, imports and a draft YARA rule for one file; then test the rule with yara_scan_file. \
-Pass an absolute path. `token_limit` trims the digest (compact JSON bytes); the result is also \
-capped at `max_output_bytes`.";
+    "A small, fixed-size digest of one file for writing a YARA \
+rule: sha256 and md5, file type, architecture, entropy and a packed flag, the key strings (URLs, \
+IPs and other categorized strings first, no duplicates), header and footer bytes, imports, the \
+first instructions at the entry point, and a draft rule. Choose it over analyze_file when the goal \
+is a detection rule or a one-call summary that must fit a small context; choose analyze_file \
+(overview first, then query_analysis) to investigate what a file does. Call analyze_file first if \
+you do not know what the file is; test the draft rule with yara_scan_file. `token_limit` is the \
+output budget in characters of compact JSON (about 4 per token, default 25000): when the digest \
+does not fit, the answer lists under `truncated` what was cut. It is an error to ask for less than \
+the bare identity needs. Pass an absolute path.";
 
 #[tool_router(router = analyze_router, vis = "pub(crate)")]
 impl FileScannerMcp {
@@ -78,7 +112,7 @@ impl FileScannerMcp {
         name = "analyze_file",
         title = "Analyze file",
         description = ANALYZE_FILE_DESCRIPTION,
-        input_schema = input_schema_with_budget::<FileAnalysisRequest>(),
+        input_schema = input_schema_with_budget::<AnalyzeFileArgs>(),
         annotations(
             title = "Analyze file",
             read_only_hint = true,
@@ -89,6 +123,23 @@ impl FileScannerMcp {
     )]
     async fn analyze_file_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
         Ok(self.run_analyze_file(args).await)
+    }
+
+    #[tool(
+        name = "query_analysis",
+        title = "Query analysis",
+        description = QUERY_ANALYSIS_DESCRIPTION,
+        input_schema = input_schema_with_budget::<QueryAnalysisRequest>(),
+        annotations(
+            title = "Query analysis",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn query_analysis_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        Ok(self.run_query_analysis(args).await)
     }
 
     #[tool(
@@ -107,419 +158,456 @@ impl FileScannerMcp {
     async fn llm_analyze_file_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
         Ok(self.run_llm_analyze_file(args).await)
     }
+
+    #[tool(
+        name = "disassemble",
+        title = "Disassemble",
+        description = inspect::DISASSEMBLE_DESCRIPTION,
+        input_schema = input_schema_with_budget::<DisassembleRequest>(),
+        annotations(
+            title = "Disassemble",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn disassemble_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        Ok(self.run_disassemble(args).await)
+    }
+
+    #[tool(
+        name = "read_hex",
+        title = "Read hex",
+        description = inspect::READ_HEX_DESCRIPTION,
+        input_schema = input_schema_with_budget::<ReadHexRequest>(),
+        annotations(
+            title = "Read hex",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn read_hex_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        Ok(self.run_read_hex(args).await)
+    }
+
+    #[tool(
+        name = "compare_files",
+        title = "Compare files",
+        description = compare::COMPARE_FILES_DESCRIPTION,
+        input_schema = input_schema_with_budget::<CompareFilesRequest>(),
+        annotations(
+            title = "Compare files",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn compare_files_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        Ok(self.run_compare_files(args).await)
+    }
 }
 
-/// One part of an `analyze_file` result and the key it is cached under.
-struct Section {
-    /// Field name in the result.
-    field: &'static str,
-    /// Section name plus every option that changes its content.
-    key: String,
-}
-
-/// The sections a request asks for, with their cache keys, in result order.
-fn requested_sections(
-    request: &FileAnalysisRequest,
-    file_size: u64,
-    mtime_ns: u128,
-) -> Vec<Section> {
-    let all = request.all.unwrap_or(false);
-    let on = |flag: Option<bool>| flag.unwrap_or(false) || all;
-    let min = request.min_string_length.unwrap_or(4);
-    let mut out = Vec::new();
-    let mut add = |field: &'static str, key: String| out.push(Section { field, key });
-    if on(request.metadata) {
-        // Timestamps and the path are part of the metadata, so they are in the key.
-        add(
-            "metadata",
-            format!("metadata:{}:{mtime_ns}", request.file_path),
+/// The sections an `analyze_file` call asks for, in result order.
+fn requested_names(args: &AnalyzeFileArgs) -> Result<Vec<&'static str>, String> {
+    let all = args.all.unwrap_or(false);
+    let flag = |name: &str| {
+        match name {
+            "metadata" => args.metadata,
+            "hashes" => args.hashes,
+            "strings" => args.strings,
+            "hex_dump" => args.hex_dump,
+            "binary_info" => args.binary_info,
+            "signatures" => args.signatures,
+            "symbols" => args.symbols,
+            "control_flow" => args.control_flow,
+            "vulnerabilities" => args.vulnerabilities,
+            "code_quality" => args.code_quality,
+            "dependencies" => args.dependencies,
+            "entropy" => args.entropy,
+            "disassembly" => args.disassembly,
+            "threats" => args.threats,
+            "enhanced_threats" => args.enhanced_threats,
+            "behavioral" => args.behavioral,
+            _ => args.yara_indicators,
+        }
+        .unwrap_or(false)
+    };
+    let dump_asked = args.hex_dump.unwrap_or(false)
+        || all
+        || args
+            .sections
+            .iter()
+            .flatten()
+            .any(|s| s.trim().eq_ignore_ascii_case("hex_dump") || s.trim() == "hex-dump");
+    if !dump_asked && (args.hex_dump_size.is_some() || args.hex_dump_offset.is_some()) {
+        return Err(
+            "hex_dump_size and hex_dump_offset only apply together with hex_dump: true (or \
+             sections: [\"hex_dump\"]); to read bytes at an offset call read_hex."
+                .to_string(),
         );
     }
-    // `yara_indicators` also puts the hashes in the result.
-    if on(request.hashes) || on(request.yara_indicators) {
-        add("hashes", "hashes".to_string());
-    }
-    if on(request.strings) {
-        add("strings", format!("strings:min={min}"));
-    }
-    if on(request.hex_dump) {
-        let default_size = if all {
-            usize::try_from(file_size).map_or(MAX_HEX_DUMP_BYTES, |s| s.min(MAX_HEX_DUMP_BYTES))
-        } else {
-            256
+    let mut named: Vec<&'static str> = Vec::new();
+    for section in args.sections.iter().flatten() {
+        let wanted = section.trim().to_lowercase().replace('-', "_");
+        let Some(found) = ANALYSES.iter().find(|a| **a == wanted) else {
+            return Err(format!(
+                "Unknown section '{section}'. Sections: {}.",
+                ANALYSES.join(", ")
+            ));
         };
-        let size = request.hex_dump_size.unwrap_or(default_size);
-        let offset = request.hex_dump_offset.unwrap_or(0);
-        add("hex_dump", format!("hex_dump:size={size}:offset={offset}"));
+        named.push(found);
     }
-    for (field, flag) in [
-        ("binary_info", request.binary_info),
-        ("signatures", request.signatures),
-        ("symbols", request.symbols),
-        ("control_flow", request.control_flow),
-        ("vulnerabilities", request.vulnerabilities),
-        ("code_quality", request.code_quality),
-    ] {
-        if on(flag) {
-            add(field, field.to_string());
-        }
-    }
-    if on(request.dependencies) {
-        add("dependencies", format!("dependencies:min={min}"));
-    }
-    if on(request.entropy) {
-        add("entropy", "entropy".to_string());
-    }
-    if on(request.disassembly) {
-        add("disassembly", "disassembly".to_string());
-    }
-    if on(request.enhanced_threats) {
-        add("threats", "threats:enhanced".to_string());
-    } else if on(request.threats) {
-        add("threats", "threats:basic".to_string());
-    }
-    if on(request.behavioral) {
-        add("behavioral", format!("behavioral:min={min}"));
-    }
-    if on(request.yara_indicators) {
-        add("yara_indicators", format!("yara_indicators:min={min}"));
-    }
-    out
+    Ok(ANALYSES
+        .iter()
+        .copied()
+        .filter(|name| all || flag(name) || named.contains(name))
+        .collect())
 }
 
-/// A request that computes only the sections in `missing`, with the options
-/// their keys promise.
-fn request_for(
-    original: &FileAnalysisRequest,
-    missing: &[&Section],
-) -> Result<FileAnalysisRequest, String> {
-    let mut args = serde_json::Map::new();
-    args.insert("file_path".into(), original.file_path.clone().into());
-    args.insert("all".into(), false.into());
-    if let Some(min) = original.min_string_length {
-        args.insert("min_string_length".into(), min.into());
-    }
-    for section in missing {
-        match section.key.as_str() {
-            "threats:enhanced" => args.insert("enhanced_threats".into(), true.into()),
-            "threats:basic" => args.insert("threats".into(), true.into()),
-            _ => args.insert(section.field.into(), true.into()),
-        };
-        if section.field == "hex_dump" {
-            // key: hex_dump:size=N:offset=M
-            let mut parts = section.key.split(':').skip(1);
-            let size = parts
-                .next()
-                .and_then(|p| p.strip_prefix("size="))
-                .and_then(|v| v.parse::<usize>().ok());
-            let offset = parts
-                .next()
-                .and_then(|p| p.strip_prefix("offset="))
-                .and_then(|v| v.parse::<u64>().ok());
-            if let Some(size) = size {
-                args.insert("hex_dump_size".into(), size.into());
+/// A section summary as scalars and list lengths only.
+fn counts_only(section: &Value) -> Value {
+    let Some(map) = section.as_object() else {
+        return section.clone();
+    };
+    let mut out = serde_json::Map::new();
+    for (key, value) in map {
+        match value {
+            Value::Array(items) => {
+                out.insert(format!("{key}_count"), items.len().into());
             }
-            if let Some(offset) = offset {
-                args.insert("hex_dump_offset".into(), offset.into());
+            Value::String(text) if text.len() > 60 => {}
+            Value::Object(_) => {}
+            other => {
+                out.insert(key.clone(), other.clone());
             }
         }
     }
-    serde_json::from_value(Value::Object(args)).map_err(|e| format!("Internal request error: {e}"))
+    Value::Object(out)
 }
 
-/// The result of looking up, computing and assembling the sections.
-struct Assembled {
-    value: Value,
-    /// Size of the whole result as compact JSON.
-    total_bytes: usize,
-    cached: usize,
-    computed: usize,
-    /// Sections too big for the cache, with their size in bytes.
-    not_kept: Vec<(&'static str, usize)>,
-    /// Section keys of this file the cache dropped to make room.
-    evicted: Vec<String>,
-}
-
-/// The names (not the keys) of the sections in `keys`, once each, in order.
-/// Internal `render:` and `entry:` keys are left out.
-fn evicted_section_names(keys: &[String]) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    for key in keys {
-        let name = key.split(':').next().unwrap_or(key);
-        if name != "render" && name != "entry" && !names.iter().any(|n| n == name) {
-            names.push(name.to_string());
-        }
+/// A hex-dump offset as a position: negative counts back from the end of a
+/// `size`-byte file (clamped to the start).
+fn absolute_offset(offset: i64, size: u64) -> u64 {
+    if offset >= 0 {
+        offset as u64
+    } else {
+        size.saturating_sub(offset.unsigned_abs())
     }
-    names
 }
 
-/// The strings of an `analyze_file` result, for the string tracker.
-fn strings_of(result: &Value) -> Option<Vec<String>> {
-    result
-        .get("strings")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|s| s.as_str().map(str::to_string))
-                .collect()
-        })
+fn mtime_ns_of(meta: &std::fs::Metadata) -> u128 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos())
 }
 
-/// Mebibytes, for messages.
-fn mib(bytes: usize) -> f64 {
-    bytes as f64 / (1024.0 * 1024.0)
-}
-
-/// Splice `"cache":...` members into the front of a compact JSON object.
-fn with_cache_fields(text: &str, state: &str, note: Option<&str>) -> String {
-    let mut fields = format!("\"cache\":{}", Value::from(state));
-    if let Some(note) = note {
-        fields.push_str(&format!(",\"cache_note\":{}", Value::from(note)));
-    }
-    match text.strip_prefix('{') {
-        Some("}") => format!("{{{fields}}}"),
-        Some(rest) => format!("{{{fields},{rest}"),
-        None => text.to_string(),
-    }
+/// Resolve and hash the file of a call. `Err` is a finished tool error.
+async fn identify(
+    server: &FileScannerMcp,
+    raw_path: &str,
+    expect: Expect,
+) -> Result<(PathBuf, String, u64, u128), Box<CallToolResult>> {
+    let path = server
+        .state
+        .resolve_path(raw_path, "File", expect)
+        .map_err(|m| Box::new(tool_error(m)))?;
+    let sha256 = calculate_sha256_only(&path)
+        .await
+        .map_err(|error| Box::new(tool_error(format!("Cannot read {raw_path}: {error:#}"))))?;
+    let meta = std::fs::metadata(&path)
+        .map_err(|error| Box::new(tool_error(format!("Cannot read {raw_path}: {error}"))))?;
+    Ok((path, sha256, meta.len(), mtime_ns_of(&meta)))
 }
 
 impl FileScannerMcp {
     /// The `analyze_file` tool body (shared by every transport through the router).
     ///
-    /// Each section of the result is cached on its own, keyed by the file's
-    /// SHA-256 and the options that change it, so a full run answers a later
-    /// drill-down. The rendered answer is cached too, so repeating a call
-    /// verbatim costs one pass over the file for the SHA-256.
+    /// Without a named section: the triage overview. With sections: each one is
+    /// computed in full (or taken from the section cache, keyed by the file's
+    /// SHA-256 and the options that change it) and answered as a summary. A
+    /// directory gets a paged triage table.
     pub(crate) async fn run_analyze_file(&self, args: JsonObject) -> CallToolResult {
         let started = Instant::now();
-        let (mut request, budget, raw_args) = match parse_request::<FileAnalysisRequest>(args) {
+        let (request, budget, raw_args) = match parse_request::<AnalyzeFileArgs>(args) {
             Ok(parsed) => parsed,
             Err(message) => return tool_error(message),
         };
         let raw_path = request.file_path.clone();
-        let path = match self.state.resolve_path(&raw_path, "File", Expect::File) {
+        let names = match requested_names(&request) {
+            Ok(names) => names,
+            Err(message) => return tool_error(message),
+        };
+        let path = match self
+            .state
+            .resolve_path(&raw_path, "File", Expect::FileOrDir)
+        {
             Ok(path) => path,
             Err(message) => return tool_error(message),
         };
-        request.file_path = path.to_string_lossy().into_owned();
 
-        let sha256 = match calculate_sha256_only(&path).await {
-            Ok(sha256) => sha256,
-            Err(error) => return tool_error(format!("Cannot read {raw_path}: {error:#}")),
-        };
-        let (file_size, mtime_ns) = std::fs::metadata(&path).map_or((0, 0), |meta| {
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos());
-            (meta.len(), mtime)
-        });
-
-        let render_budget = budget.clamp(MIN_OUTPUT_BYTES, MAX_OUTPUT_BYTES) - CACHE_FIELDS_RESERVE;
-        let cache = self.state.section_cache();
-        // Same call, same unchanged file: the answer is already rendered, and
-        // the first call left the string and cache-entry side effects behind.
-        let render_key = format!(
-            "render:{render_budget}:{file_size}:{mtime_ns}:{}",
-            serde_json::to_string(&request).unwrap_or_default()
-        );
-        let entry_key = format!("entry:{render_key}");
-        if let Some(text) = cache.get_text(&sha256, &render_key) {
-            // Every successful call still appends its cache entry (the contract
-            // the REST routes rely on). A small result is kept whole beside the
-            // rendered text; a big one is recorded as what the caller received.
-            let full = cache
-                .get(&sha256, &entry_key)
-                .filter(|value| !value.is_null());
-            let (strings, entry_result) = match full {
-                Some(full) => (strings_of(&full), Arc::unwrap_or_clone(full)),
-                None => (None, serde_json::from_str(&text).unwrap_or(Value::Null)),
-            };
-            self.state
-                .record_analyze_file(
-                    &raw_args,
-                    &raw_path,
-                    strings,
-                    entry_result,
-                    &sha256,
-                    file_size,
-                    started,
-                )
+        if path.is_dir() {
+            let recursive = request.recursive.unwrap_or(false);
+            if let Err(message) = self.state.check_tree(&path, recursive) {
+                return tool_error(message);
+            }
+            let max_files = request
+                .max_files
+                .unwrap_or(triage::DEFAULT_MAX_FILES)
+                .clamp(1, triage::MAX_FILES_CEILING);
+            let (offset, limit) = (
+                request.offset.unwrap_or(0),
+                request.limit.unwrap_or(DEFAULT_LIMIT),
+            );
+            let runtime = tokio::runtime::Handle::current();
+            let shown = path.to_string_lossy().into_owned();
+            let dir = path.clone();
+            let ignored = names.clone();
+            let outcome = self
+                .state
+                .run_blocking("analyze_file", move || {
+                    let mut value = triage::table(
+                        &dir, &shown, recursive, max_files, offset, limit, &runtime, budget,
+                    );
+                    if !ignored.is_empty() {
+                        value["note"] = format!(
+                            "A directory gets the triage table; the analysis flags/sections ({}) \
+                             apply to one file: call analyze_file on a file from the table.",
+                            ignored.join(", ")
+                        )
+                        .into();
+                    }
+                    render(value, budget)
+                })
                 .await;
-            return respond_text(with_cache_fields(&text, "hit", None));
+            return match outcome {
+                Ok(text) => respond_text(text),
+                Err(crash) => tool_error(crash),
+            };
         }
 
-        let sections = requested_sections(&request, file_size, mtime_ns);
-        let nothing_requested = sections.is_empty();
-        let analyzer = self.clone();
+        let hex_size = request.hex_dump_size.unwrap_or(sections::DEFAULT_HEX_DUMP);
+        if names.contains(&"hex_dump") && hex_size > ANALYZE_HEX_DUMP_MAX {
+            return tool_error(format!(
+                "hex_dump_size {hex_size} is above the limit of {ANALYZE_HEX_DUMP_MAX} bytes per \
+                 call. Ask for at most {ANALYZE_HEX_DUMP_MAX} and move with hex_dump_offset, or use \
+                 read_hex (negative offsets count from the end) to page through the file."
+            ));
+        }
+        let (path, sha256, file_size, mtime_ns) =
+            match identify(self, &raw_path, Expect::File).await {
+                Ok(identity) => identity,
+                Err(error) => return *error,
+            };
+        let options = Options {
+            min: request
+                .min_string_length
+                .unwrap_or(sections::DEFAULT_MIN_STRING),
+            hex_size,
+            hex_offset: absolute_offset(request.hex_dump_offset.unwrap_or(0), file_size),
+        };
+        if names.contains(&"hex_dump") && file_size > 0 && options.hex_offset >= file_size {
+            return tool_error(format!(
+                "hex_dump_offset {} is at or past the end of the {file_size}-byte file; use an \
+                 offset below {file_size} (negative counts from the end).",
+                options.hex_offset
+            ));
+        }
+
         let state = Arc::clone(&self.state);
-        let sha = sha256.clone();
         let runtime = tokio::runtime::Handle::current();
+        let file_path = path.to_string_lossy().into_owned();
+        let sha = sha256.clone();
         let outcome = self
             .state
-            .run_blocking("analyze_file", move || -> Result<Assembled, String> {
-                let cache = state.section_cache();
-                let mut found: Vec<Option<Arc<Value>>> = Vec::with_capacity(sections.len());
-                for section in &sections {
-                    found.push(cache.get(&sha, &section.key));
-                }
-                let cached = found.iter().flatten().count();
-                let missing: Vec<&Section> = sections
-                    .iter()
-                    .zip(&found)
-                    .filter(|(_, hit)| hit.is_none())
-                    .map(|(section, _)| section)
-                    .collect();
-                let mut not_kept = Vec::new();
-                let mut evicted: Vec<String> = Vec::new();
-                let mut total_bytes = 0usize;
-                if !missing.is_empty() {
-                    let sub_request = request_for(&request, &missing)?;
-                    let result = runtime.block_on(analyzer.analyze_file(sub_request))?.0;
-                    let mut computed = match serde_json::to_value(&result) {
-                        Ok(Value::Object(map)) => map,
-                        Ok(_) => return Err("The analysis result is not an object".to_string()),
-                        Err(error) => {
-                            return Err(format!("Could not serialize the result: {error}"))
+            .run_blocking("analyze_file", move || {
+                let ctx = Ctx::new(&path, &runtime, options);
+                let mut engine = Engine::new(state.section_cache(), &sha, ctx);
+                let mut tracker_source: Option<Arc<Value>> = None;
+                let mut value;
+                if names.is_empty() {
+                    let overview = sections::overview(
+                        &mut engine,
+                        &path,
+                        &file_path,
+                        file_size,
+                        &sha,
+                        &options,
+                        mtime_ns,
+                    );
+                    tracker_source = overview.strings;
+                    value = Value::Object(overview.value);
+                } else {
+                    let mut out = serde_json::Map::new();
+                    out.insert("file_path".into(), file_path.clone().into());
+                    out.insert("sha256".into(), sha.clone().into());
+                    let mut errors = serde_json::Map::new();
+                    let mut notes = serde_json::Map::new();
+                    let mut steps: Vec<Value> = Vec::new();
+                    for name in &names {
+                        let planned: Planned = sections::plan(name, &options, &file_path, mtime_ns);
+                        match engine.load(&planned) {
+                            Ok(section) => {
+                                out.insert((*name).into(), sections::summarize(name, &section));
+                                if let Some(step) = sections::drill_down(name, &file_path, &section)
+                                {
+                                    steps.push(step);
+                                }
+                                if *name == "strings" {
+                                    tracker_source = Some(section);
+                                }
+                            }
+                            Err(Failure::Error(message)) => {
+                                errors.insert((*name).into(), message.into());
+                            }
+                            Err(Failure::NotApplicable(message)) => {
+                                notes.insert((*name).into(), message.into());
+                            }
                         }
-                    };
-                    drop(result);
-                    // A requested section the analyzer could not produce (for
-                    // example binary_info of a text file) is cached as `null`.
-                    for section in &missing {
-                        let value = computed.remove(section.field).unwrap_or(Value::Null);
-                        let outcome = cache.put(&sha, &section.key, &value);
-                        if !outcome.kept {
-                            not_kept.push((section.field, outcome.bytes));
-                        }
-                        evicted.extend(outcome.evicted_same_file);
-                        let value = Arc::new(value);
-                        if let Some(slot) = sections
+                    }
+                    if out.len() == 2 {
+                        let all: Vec<String> = errors
                             .iter()
-                            .position(|s| s.field == section.field && s.key == section.key)
-                        {
-                            found[slot] = Some(value);
-                        }
+                            .chain(notes.iter())
+                            .map(|(k, v)| format!("{k}: {}", v.as_str().unwrap_or_default()))
+                            .collect();
+                        return Err(format!(
+                            "None of the requested analyses produced a result for {file_path}. {} \
+                             Call analyze_file with only file_path for an overview and the \
+                             sections that apply to this file.",
+                            all.join("; ")
+                        ));
                     }
-                    // Hashes that `yara_indicators` brought along are worth keeping too.
-                    if let Some(hashes) = computed.remove("hashes") {
-                        if !hashes.is_null() {
-                            evicted.extend(cache.put(&sha, "hashes", &hashes).evicted_same_file);
+                    if !errors.is_empty() {
+                        out.insert("errors".into(), Value::Object(errors));
+                    }
+                    if !notes.is_empty() {
+                        out.insert("notes".into(), Value::Object(notes));
+                    }
+                    if !steps.is_empty() {
+                        out.insert("next_steps".into(), steps.into());
+                    }
+                    value = Value::Object(out);
+                    // Many sections at a small budget: keep every section but
+                    // as counts only, so the answer stays structured.
+                    let fits = serde_json::to_string(&value).map_or(0, |t| t.len()) <= budget;
+                    if !fits {
+                        for name in &names {
+                            if let Some(section) = value.get_mut(*name) {
+                                *section = counts_only(section);
+                            }
                         }
+                        value["note"] = "The section summaries were reduced to counts to fit \
+                            max_output_bytes; ask for fewer sections at once, or raise \
+                            max_output_bytes, for the details."
+                            .into();
                     }
                 }
-                let mut out = serde_json::Map::new();
-                out.insert("file_path".into(), request.file_path.clone().into());
-                for (section, value) in sections.iter().zip(found) {
-                    if let Some(value) = value.filter(|v| !v.is_null()) {
-                        total_bytes += serde_json::to_string(&value).map_or(0, |t| t.len());
-                        out.insert(section.field.to_string(), Arc::unwrap_or_clone(value));
-                    }
+                value["cache"] = engine.cache_state().into();
+                if let Some(note) = engine.cache_note() {
+                    value["cache_note"] = note.into();
                 }
-                Ok(Assembled {
-                    value: Value::Object(out),
-                    total_bytes,
-                    cached,
-                    computed: missing.len(),
-                    not_kept,
-                    evicted,
-                })
+                let strings = tracker_source.as_deref().map(sections::tracker_strings);
+                let entry = value.clone();
+                Ok((render(value, budget), entry, strings))
             })
             .await;
-        let assembled = match outcome {
+        let (text, entry, strings) = match outcome {
             Err(crash) => return tool_error(crash),
             Ok(Err(message)) => return tool_error(message),
-            Ok(Ok(assembled)) => assembled,
+            Ok(Ok(done)) => done,
         };
-        let Assembled {
-            value,
-            total_bytes,
-            cached,
-            computed,
-            not_kept,
-            mut evicted,
-        } = assembled;
-
-        if nothing_requested {
-            // Nothing was computed or cached: say what to ask for instead of
-            // reporting a cache state. The call still leaves its cache entry.
-            let mut result = value;
-            result["hint"] = NO_FLAGS_HINT.into();
-            self.state
-                .record_analyze_file(
-                    &raw_args,
-                    &raw_path,
-                    None,
-                    result.clone(),
-                    &sha256,
-                    file_size,
-                    started,
-                )
-                .await;
-            return respond_text(result.to_string());
-        }
-
-        // Side effects come from the full result, before it is trimmed.
-        let strings = strings_of(&value);
-        let small_enough = total_bytes <= ENTRY_RESULT_MAX_BYTES;
-        let full_for_entry = small_enough.then(|| value.clone());
-
-        let text = render(value, render_budget);
-        evicted.extend(
-            cache
-                .put_text(&sha256, &render_key, text.clone())
-                .evicted_same_file,
-        );
-        if let Some(full) = &full_for_entry {
-            evicted.extend(cache.put(&sha256, &entry_key, full).evicted_same_file);
-        }
-
-        let entry_result =
-            full_for_entry.unwrap_or_else(|| serde_json::from_str(&text).unwrap_or(Value::Null));
         self.state
             .record_analyze_file(
-                &raw_args,
-                &raw_path,
-                strings,
-                entry_result,
-                &sha256,
-                file_size,
-                started,
+                &raw_args, &raw_path, strings, entry, &sha256, file_size, started,
             )
             .await;
+        respond_text(text)
+    }
 
-        let cache_state = if computed == 0 {
-            "hit"
-        } else if cached > 0 {
-            "partial"
-        } else {
-            "miss"
+    /// The `query_analysis` tool body.
+    pub(crate) async fn run_query_analysis(&self, args: JsonObject) -> CallToolResult {
+        let (request, budget, _raw) = match parse_request::<QueryAnalysisRequest>(args) {
+            Ok(parsed) => parsed,
+            Err(message) => return tool_error(message),
         };
-        let mut notes = Vec::new();
-        if !not_kept.is_empty() {
-            let list = not_kept
-                .iter()
-                .map(|(field, bytes)| format!("{field} ({:.0} MiB)", mib(*bytes)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            notes.push(format!(
-                "Not kept in the section cache because it is over the cache limit: {list}. \
-                 Asking for it again recomputes it; raise FILE_SCANNER_SECTION_CACHE_MB to keep it."
+        let section = request.section.trim().to_lowercase().replace('-', "_");
+        let Some(name) = ANALYSES.iter().copied().find(|a| *a == section) else {
+            return tool_error(format!(
+                "Unknown section '{}'. Sections with lists: strings, binary_info, symbols, \
+                 control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, \
+                 threats, enhanced_threats, behavioral, yara_indicators.",
+                request.section
+            ));
+        };
+        if matches!(name, "metadata" | "hashes" | "signatures") {
+            return tool_error(format!(
+                "The {name} section is small and has no list to page: call analyze_file with \
+                 sections: [\"{name}\"]."
             ));
         }
-        let dropped = evicted_section_names(&evicted);
-        if !dropped.is_empty() {
-            notes.push(format!(
-                "Dropped from the section cache to make room for this file's other sections: {}. \
-                 Asking for one of them again recomputes it; raise FILE_SCANNER_SECTION_CACHE_MB \
-                 to keep them all.",
-                dropped.join(", ")
-            ));
+        if name == "hex_dump" {
+            return tool_error(
+                "Hex dumps are not paged here: call read_hex with offset and length (4096 bytes \
+                 per call, a negative offset counts from the end of the file)."
+                    .to_string(),
+            );
         }
-        let note = (!notes.is_empty()).then(|| notes.join(" "));
-        respond_text(with_cache_fields(&text, cache_state, note.as_deref()))
+        let (path, sha256, _size, mtime_ns) =
+            match identify(self, &request.file_path, Expect::File).await {
+                Ok(identity) => identity,
+                Err(error) => return *error,
+            };
+        let options = Options {
+            min: request
+                .min_string_length
+                .unwrap_or(sections::DEFAULT_MIN_STRING),
+            ..Options::default()
+        };
+        let state = Arc::clone(&self.state);
+        let runtime = tokio::runtime::Handle::current();
+        let file_path = path.to_string_lossy().into_owned();
+        let outcome = self
+            .state
+            .run_blocking("query_analysis", move || {
+                let ctx = Ctx::new(&path, &runtime, options);
+                let mut engine = Engine::new(state.section_cache(), &sha256, ctx);
+                let planned = sections::plan(name, &options, &file_path, mtime_ns);
+                let section = engine.load(&planned).map_err(|failure| match failure {
+                    Failure::Error(m) => format!("The {name} analysis failed: {m}"),
+                    Failure::NotApplicable(m) => format!(
+                        "The {name} analysis does not apply to this file: {m}. Call analyze_file \
+                         with only file_path to see which sections apply."
+                    ),
+                })?;
+                let params = query::Params {
+                    list: request.list.as_deref(),
+                    filter: request.filter.as_deref(),
+                    regex: request.regex.unwrap_or(false),
+                    category: request.category.as_deref(),
+                    encoding: request.encoding.as_deref(),
+                    offset: request.offset.unwrap_or(0),
+                    limit: request.limit.unwrap_or(DEFAULT_LIMIT),
+                    detail: request.detail.unwrap_or(false),
+                };
+                let mut value = query::answer(name, &section, &params, budget)?;
+                value["file_path"] = file_path.clone().into();
+                value["cache"] = engine.cache_state().into();
+                if let Some(note) = engine.cache_note() {
+                    value["cache_note"] = note.into();
+                }
+                Ok::<String, String>(render(value, budget))
+            })
+            .await;
+        match outcome {
+            Err(crash) => tool_error(crash),
+            Ok(Err(message)) => tool_error(message),
+            Ok(Ok(text)) => respond_text(text),
+        }
     }
 
     /// The `llm_analyze_file` tool body.
@@ -542,9 +630,7 @@ impl FileScannerMcp {
         let outcome = self
             .state
             .run_blocking("llm_analyze_file", move || {
-                runtime
-                    .block_on(analyzer.llm_analyze_file(request))
-                    .map(|json| json.0)
+                runtime.block_on(analyzer.llm_digest_within(&request, budget))
             })
             .await;
         respond_result(outcome, budget)
@@ -618,10 +704,9 @@ mod tests {
         assert_eq!(results[1]["file_path"], results[0]["file_path"]);
     }
 
-    /// A section bigger than the cache is not dropped silently: the call says
-    /// so, and a verbatim repeat is still answered from the rendered answer.
+    /// A section bigger than the cache is not dropped silently: the call says so.
     #[tokio::test]
-    async fn sections_over_the_cache_limit_are_reported_and_repeats_still_hit() {
+    async fn sections_over_the_cache_limit_are_reported_on_every_call() {
         let config = StateConfig {
             section_cache_max_bytes: 4_000,
             cache_dir: tempfile::tempdir().unwrap().keep(),
@@ -637,25 +722,30 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(results[0]["cache"], "miss");
-        let note = results[0]["cache_note"].as_str().expect("a cache_note");
-        assert!(note.contains("disassembly"), "{note}");
-        assert_eq!(results[1]["cache"], "hit");
+        // The section is bigger than the cache: each call says so and recomputes.
+        for result in &results {
+            assert_eq!(result["cache"], "miss");
+            let note = result["cache_note"].as_str().expect("a cache_note");
+            assert!(note.contains("disassembly"), "{note}");
+            assert!(result["disassembly"]["instructions"]["count"].is_u64());
+        }
     }
 
-    /// A call that names no analysis computed nothing: it is not a cache hit,
-    /// and it says what to ask for.
+    /// CB12 / LS02: a call that names no analysis is the triage overview, with
+    /// the exact calls for digging deeper.
     #[tokio::test]
-    async fn a_call_without_flags_gets_a_hint_not_a_cache_hit() {
+    async fn a_call_without_flags_is_the_overview() {
         let path = sample("c_advanced_binary");
         let results = call(FileScannerMcp::new(), vec![json!({"file_path": path})]).await;
-        assert!(results[0].get("cache").is_none(), "{}", results[0]);
-        let hint = results[0]["hint"].as_str().expect("a hint");
-        assert!(
-            hint.contains("all:true") && hint.contains("metadata"),
-            "{hint}"
-        );
-        assert_eq!(results[0]["file_path"], path);
+        let overview = &results[0];
+        assert_eq!(overview["view"], "overview");
+        assert_eq!(overview["sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(overview["md5"].as_str().unwrap().len(), 32);
+        assert_eq!(overview["format"]["format"], "ELF");
+        assert!(overview["counts"]["strings"].as_u64().unwrap() > 100);
+        assert!(overview["entropy"]["overall"].is_f64());
+        assert!(overview["next_steps"].as_array().unwrap().len() >= 2);
+        assert_eq!(overview["cache"], "miss");
     }
 
     /// A full run bigger than the cache must not silently evict its own
@@ -664,7 +754,7 @@ mod tests {
     #[tokio::test]
     async fn a_full_run_larger_than_the_cache_names_the_sections_it_dropped() {
         let path = sample("c_advanced_binary");
-        let limit = 20_000;
+        let limit = 12_000;
         let fresh = || {
             let config = StateConfig {
                 section_cache_max_bytes: limit,
@@ -675,7 +765,7 @@ mod tests {
         };
         let full = call(
             fresh(),
-            vec![json!({"file_path": path, "all": true, "max_output_bytes": 4000})],
+            vec![json!({"file_path": path, "all": true, "max_output_bytes": 60000})],
         )
         .await;
         let note = full[0]["cache_note"].as_str().unwrap_or("").to_string();
@@ -699,8 +789,8 @@ mod tests {
             let results = call(
                 server,
                 vec![
-                    json!({"file_path": path, "all": true, "max_output_bytes": 4000}),
-                    json!({"file_path": path, field: true, "max_output_bytes": 4000}),
+                    json!({"file_path": path, "all": true, "max_output_bytes": 60000}),
+                    json!({"file_path": path, field: true, "max_output_bytes": 60000}),
                 ],
             )
             .await;
@@ -721,10 +811,10 @@ mod tests {
         assert!(hits > 0, "the most recent sections survive");
     }
 
-    /// Every call appends its cache entry, but a big result is kept only as the
-    /// trimmed answer the caller received, so repeats cannot fill memory or disk.
+    /// Every call appends its cache entry; the entry is the summary the caller
+    /// got (never a whole section), so repeats cannot fill memory or disk.
     #[tokio::test]
-    async fn cache_entries_of_big_results_hold_the_trimmed_answer() {
+    async fn cache_entries_hold_the_summary_not_the_sections() {
         let config = StateConfig {
             cache_dir: tempfile::tempdir().unwrap().keep(),
             ..StateConfig::default()
@@ -742,11 +832,126 @@ mod tests {
             .max()
             .unwrap();
         assert!(
-            largest <= ENTRY_RESULT_MAX_BYTES + 4096,
+            largest <= ENTRY_RESULT_MAX_BYTES,
             "{largest} bytes in one entry"
         );
-        assert!(entries.iter().all(|e| e.result.get("truncated").is_some()));
+        assert!(entries
+            .iter()
+            .all(|e| e.result["symbols"]["functions"]["count"].is_u64()));
     }
+}
+
+/// The arguments of the `analyze_file` tool: the flags of [`FileAnalysisRequest`]
+/// plus `sections` and the directory-triage paging.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyzeFileArgs {
+    #[schemars(
+        description = "Absolute path of the file to analyze (a leading ~/ is expanded). A directory returns a paged triage table, one row per file"
+    )]
+    pub file_path: String,
+    #[schemars(
+        description = "Analyses to run, by name: metadata, hashes, strings, hex_dump, binary_info, signatures, symbols, control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, threats, enhanced_threats, behavioral, yara_indicators. With none named (and no flag) the answer is the triage overview. Each named section is returned as a summary; query_analysis pages its items"
+    )]
+    pub sections: Option<Vec<String>>,
+    #[schemars(
+        description = "Run every analysis and return the per-section summaries (never the full sections); each full section is cached for query_analysis"
+    )]
+    pub all: Option<bool>,
+    #[schemars(description = "Include file metadata (size, timestamps, permissions)")]
+    pub metadata: Option<bool>,
+    #[schemars(description = "Include cryptographic hashes (MD5, SHA256, SHA512, BLAKE3)")]
+    pub hashes: Option<bool>,
+    #[schemars(description = "Strings summary: counts, categories, the most telling strings")]
+    pub strings: Option<bool>,
+    #[schemars(description = "Minimum string length (default: 4)")]
+    pub min_string_length: Option<usize>,
+    #[schemars(description = "Hex dump (default 256 bytes)")]
+    pub hex_dump: Option<bool>,
+    #[schemars(
+        description = "Hex dump size in bytes (default 256; at most 4096 per call, an error above that). Up to 1024 bytes come back whole, more shows the first lines only; read_hex reads the rest (offset and length, 4096 bytes per call)"
+    )]
+    pub hex_dump_size: Option<usize>,
+    #[schemars(
+        description = "Hex dump offset from start; negative counts from the end of the file (-64 is the last 64 bytes)"
+    )]
+    pub hex_dump_offset: Option<i64>,
+    #[schemars(description = "Analyze binary format (PE/ELF/Mach-O)")]
+    pub binary_info: Option<bool>,
+    #[schemars(description = "Verify digital signatures")]
+    pub signatures: Option<bool>,
+    #[schemars(description = "Analyze function symbols")]
+    pub symbols: Option<bool>,
+    #[schemars(description = "Analyze control flow")]
+    pub control_flow: Option<bool>,
+    #[schemars(description = "Detect vulnerabilities")]
+    pub vulnerabilities: Option<bool>,
+    #[schemars(description = "Analyze code quality metrics")]
+    pub code_quality: Option<bool>,
+    #[schemars(description = "Analyze dependencies")]
+    pub dependencies: Option<bool>,
+    #[schemars(description = "Analyze entropy patterns")]
+    pub entropy: Option<bool>,
+    #[schemars(
+        description = "Disassemble code (summary; query_analysis pages functions and instructions)"
+    )]
+    pub disassembly: Option<bool>,
+    #[schemars(description = "Detect threats and malware")]
+    pub threats: Option<bool>,
+    #[schemars(
+        description = "Enhanced threat detection using threatflux-threat-detection library"
+    )]
+    pub enhanced_threats: Option<bool>,
+    #[schemars(description = "Analyze behavioral patterns")]
+    pub behavioral: Option<bool>,
+    #[schemars(description = "Extract YARA rule indicators")]
+    pub yara_indicators: Option<bool>,
+    #[schemars(description = "Directory only: descend into subdirectories (default false)")]
+    pub recursive: Option<bool>,
+    #[schemars(
+        description = "Directory only: most files to list, sorted by name (default 1000, ceiling 10000)"
+    )]
+    pub max_files: Option<usize>,
+    #[schemars(description = "Directory only: rows to skip (default 0)")]
+    pub offset: Option<usize>,
+    #[schemars(description = "Directory only: rows to return (default 50, at most 200)")]
+    pub limit: Option<usize>,
+}
+
+/// The arguments of the `query_analysis` tool.
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueryAnalysisRequest {
+    #[schemars(description = "Absolute path of the file (a leading ~/ is expanded)")]
+    pub file_path: String,
+    #[schemars(
+        description = "Section to query: strings, binary_info, symbols, control_flow, vulnerabilities, code_quality, dependencies, entropy, disassembly, threats, enhanced_threats, behavioral, yara_indicators"
+    )]
+    pub section: String,
+    #[schemars(
+        description = "List inside the section (default: its main list; see the description)"
+    )]
+    pub list: Option<String>,
+    #[schemars(
+        description = "Keep only rows containing this text (case-insensitive), or matching it when regex is true. For strings it is matched against the string's text"
+    )]
+    pub filter: Option<String>,
+    #[schemars(description = "Treat filter as a regular expression (default false)")]
+    pub regex: Option<bool>,
+    #[schemars(
+        description = "Keep only rows of this category (strings: URL, IP Address, Email, ...; vulnerabilities: category or severity; others: their type field)"
+    )]
+    pub category: Option<String>,
+    #[schemars(description = "Strings only: ascii, utf16le or utf16be")]
+    pub encoding: Option<String>,
+    #[schemars(description = "Strings only: minimum string length (default 4)")]
+    pub min_string_length: Option<usize>,
+    #[schemars(description = "Rows to skip (default 0)")]
+    pub offset: Option<usize>,
+    #[schemars(description = "Rows to return (default 50, at most 500)")]
+    pub limit: Option<usize>,
+    #[schemars(description = "Return the raw rows instead of compact ones (default false)")]
+    pub detail: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -774,8 +979,10 @@ pub struct FileAnalysisRequest {
         description = "Hex dump size in bytes (default: 256, or the first 1 MiB of the file when 'all' is true; at most 1 MiB per call, an error above that - page through larger files with hex_dump_offset)"
     )]
     pub hex_dump_size: Option<usize>,
-    #[schemars(description = "Hex dump offset from start")]
-    pub hex_dump_offset: Option<u64>,
+    #[schemars(
+        description = "Hex dump offset from start; negative counts from the end of the file (-64 is the last 64 bytes)"
+    )]
+    pub hex_dump_offset: Option<i64>,
     #[schemars(description = "Analyze binary format (PE/ELF/Mach-O)")]
     pub binary_info: Option<bool>,
     #[schemars(description = "Verify digital signatures")]
@@ -858,10 +1065,15 @@ pub struct LlmFileAnalysisRequest {
     #[schemars(description = "Absolute path of the file to analyze (a leading ~/ is expanded)")]
     pub file_path: String,
 
-    #[schemars(description = "Token limit for the response (default: 25000)")]
+    #[schemars(
+        description = "Output budget of the digest in characters of compact JSON, about 4 per token (default 25000). What does not fit is cut and listed under 'truncated'"
+    )]
     pub token_limit: Option<usize>,
 
-    #[schemars(description = "Minimum string length to extract (default: 6)")]
+    #[schemars(
+        description = "Minimum string length to extract, at least 1 (default: 6)",
+        range(min = 1)
+    )]
     pub min_string_length: Option<usize>,
 
     #[schemars(description = "Maximum number of strings to return (default: 50)")]
@@ -873,7 +1085,10 @@ pub struct LlmFileAnalysisRequest {
     #[schemars(description = "Maximum number of opcodes to return (default: 10)")]
     pub max_opcodes: Option<usize>,
 
-    #[schemars(description = "Size of hex patterns to extract (default: 32)")]
+    #[schemars(
+        description = "Bytes in each header and footer hex pattern, 1 to 1024 (default: 32)",
+        range(min = 1, max = 1024)
+    )]
     pub hex_pattern_size: Option<usize>,
 
     #[schemars(description = "Generate YARA rule suggestion (default: true)")]
@@ -1001,7 +1216,7 @@ impl FileScannerMcp {
                 ));
             }
             let hex_options = HexDumpOptions {
-                offset: request.hex_dump_offset.unwrap_or(0),
+                offset: absolute_offset(request.hex_dump_offset.unwrap_or(0), file_size),
                 length: Some(size),
                 bytes_per_line: 16,
                 max_lines: None,
@@ -1216,7 +1431,8 @@ impl FileScannerMcp {
                 .iter()
                 .filter(|s| s.value.len() >= 8 && s.value.len() <= 50)
                 .map(|s| s.value.clone())
-                .collect::<std::collections::HashSet<_>>()
+                // A sorted set, so the same file always gives the same 20 strings.
+                .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .take(20)
                 .collect();
@@ -1252,246 +1468,6 @@ impl FileScannerMcp {
         }
 
         Ok(Json(result))
-    }
-
-    pub async fn llm_analyze_file(
-        &self,
-        request: LlmFileAnalysisRequest,
-    ) -> Result<Json<LlmFileAnalysisResult>, String> {
-        use crate::{
-            binary_parser::parse_binary, entropy_analysis::analyze_entropy,
-            strings::extract_strings,
-        };
-
-        let path = PathBuf::from(&request.file_path);
-        if !path.exists() {
-            return Err(format!("File does not exist: {}", request.file_path));
-        }
-
-        // Get file metadata for MD5 hash
-        let metadata = std::fs::metadata(&path).map_err(|e| format!("{e:#}"))?;
-        let file_size = metadata.len();
-
-        // Calculate MD5 hash only
-        let md5_hash = crate::hash::calculate_md5(&path)
-            .await
-            .map_err(|e| format!("{e:#}"))?;
-
-        // Extract strings with focus on interesting patterns
-        let min_string_len = request.min_string_length.unwrap_or(6);
-        let strings = extract_strings(&path, min_string_len).map_err(|e| format!("{e:#}"))?;
-
-        // Filter and prioritize strings for YARA rules
-        let key_strings = self.extract_key_strings(&strings, request.max_strings.unwrap_or(50));
-
-        // Get hex patterns from file header/footer
-        let hex_patterns =
-            self.extract_hex_patterns(&path, request.hex_pattern_size.unwrap_or(32))?;
-
-        // Parse binary for imports
-        let imports = if let Ok(binary_info) = parse_binary(&path) {
-            binary_info
-                .imports
-                .into_iter()
-                .take(request.max_imports.unwrap_or(30))
-                .collect()
-        } else {
-            vec![]
-        };
-
-        // Get interesting opcodes/byte sequences
-        let opcodes = self.extract_key_opcodes(&path, request.max_opcodes.unwrap_or(10))?;
-
-        // Calculate entropy for packing detection
-        let entropy = analyze_entropy(&path).ok().map(|e| e.overall_entropy);
-
-        // Build focused result
-        let mut result = LlmFileAnalysisResult {
-            md5: md5_hash,
-            file_size,
-            key_strings,
-            hex_patterns,
-            imports,
-            opcodes,
-            entropy,
-            yara_rule_suggestion: None,
-        };
-
-        // Generate YARA rule suggestion if requested
-        if request.suggest_yara_rule.unwrap_or(true) {
-            result.yara_rule_suggestion =
-                super::tools_yara::suggest_yara_rule(&result, &request.file_path).ok();
-        }
-
-        // Ensure we're within token limit
-        let serialized = serde_json::to_string(&result).unwrap_or_default();
-        let token_limit = request.token_limit.unwrap_or(25000);
-
-        if serialized.len() > token_limit {
-            // Trim results to fit token limit
-            result = self.trim_results_to_token_limit(result, token_limit);
-        }
-
-        Ok(Json(result))
-    }
-
-    fn extract_key_strings(
-        &self,
-        strings: &crate::strings::ExtractedStrings,
-        max_count: usize,
-    ) -> Vec<String> {
-        let mut key_strings = Vec::new();
-
-        // Prioritize interesting strings
-        for s in &strings.interesting_strings {
-            if key_strings.len() >= max_count {
-                break;
-            }
-            if s.value.len() >= 8 && s.value.len() <= 100 {
-                key_strings.push(s.value.clone());
-            }
-        }
-
-        // Add unique ASCII strings
-        let mut seen = std::collections::HashSet::new();
-        for s in &strings.ascii_strings {
-            if key_strings.len() >= max_count {
-                break;
-            }
-            if s.len() >= 8 && s.len() <= 100 && seen.insert(s) {
-                key_strings.push(s.clone());
-            }
-        }
-
-        key_strings
-    }
-
-    fn extract_hex_patterns(
-        &self,
-        path: &PathBuf,
-        pattern_size: usize,
-    ) -> Result<Vec<String>, String> {
-        use crate::hexdump::{generate_hex_dump, HexDumpOptions};
-
-        let mut patterns = Vec::new();
-
-        // Get file header pattern
-        let header_options = HexDumpOptions {
-            offset: 0,
-            length: Some(pattern_size),
-            bytes_per_line: pattern_size,
-            max_lines: Some(1),
-        };
-
-        if let Ok(header_dump) = generate_hex_dump(path, header_options) {
-            if let Some(line) = header_dump.lines.first() {
-                let hex_pattern = line
-                    .raw_bytes
-                    .iter()
-                    .map(|b| format!("{b:02X}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                patterns.push(hex_pattern);
-            }
-        }
-
-        // Get file footer pattern if file is large enough
-        if let Ok(metadata) = std::fs::metadata(path) {
-            if metadata.len() > pattern_size as u64 {
-                let footer_options = HexDumpOptions {
-                    offset: metadata.len() - pattern_size as u64,
-                    length: Some(pattern_size),
-                    bytes_per_line: pattern_size,
-                    max_lines: Some(1),
-                };
-
-                if let Ok(footer_dump) = generate_hex_dump(path, footer_options) {
-                    if let Some(line) = footer_dump.lines.first() {
-                        let hex_pattern = line
-                            .raw_bytes
-                            .iter()
-                            .map(|b| format!("{b:02X}"))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        patterns.push(hex_pattern);
-                    }
-                }
-            }
-        }
-
-        Ok(patterns)
-    }
-
-    fn extract_key_opcodes(&self, path: &Path, max_count: usize) -> Result<Vec<String>, String> {
-        use crate::hexdump::{generate_hex_dump, HexDumpOptions};
-
-        let mut opcodes = Vec::new();
-
-        // Look for common opcode patterns in code sections
-        let options = HexDumpOptions {
-            offset: 0x1000, // Common code section offset
-            length: Some(256),
-            bytes_per_line: 16,
-            max_lines: Some(16),
-        };
-
-        if let Ok(dump) = generate_hex_dump(path, options) {
-            for line in dump.lines.iter().take(max_count) {
-                // Look for interesting opcode sequences
-                let bytes = &line.raw_bytes;
-                for window in bytes.windows(4) {
-                    // Common interesting patterns
-                    if (window[0] == 0xE8 || window[0] == 0xE9) || // CALL/JMP
-                       (window[0] == 0xFF && (window[1] & 0xF0) == 0x10) || // Indirect calls
-                       (window[0] == 0x48 && window[1] == 0x8B) || // MOV patterns
-                       (window[0] == 0x55 && window[1] == 0x48)
-                    {
-                        // Function prologue
-                        let pattern = window
-                            .iter()
-                            .map(|b| format!("{b:02X}"))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        if !opcodes.contains(&pattern) {
-                            opcodes.push(pattern);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(opcodes.into_iter().take(max_count).collect())
-    }
-
-    fn trim_results_to_token_limit(
-        &self,
-        mut result: LlmFileAnalysisResult,
-        token_limit: usize,
-    ) -> LlmFileAnalysisResult {
-        // Progressively trim results until we fit within token limit
-        loop {
-            let serialized = serde_json::to_string(&result).unwrap_or_default();
-            if serialized.len() <= token_limit {
-                break;
-            }
-
-            // Trim strategies in order of preference
-            if result.key_strings.len() > 20 {
-                result.key_strings.truncate(result.key_strings.len() - 5);
-            } else if result.imports.len() > 10 {
-                result.imports.truncate(result.imports.len() - 5);
-            } else if result.opcodes.len() > 5 {
-                result.opcodes.truncate(result.opcodes.len() - 2);
-            } else if result.key_strings.len() > 5 {
-                result.key_strings.truncate(result.key_strings.len() - 1);
-            } else {
-                // Last resort: remove YARA suggestion
-                result.yara_rule_suggestion = None;
-                break;
-            }
-        }
-
-        result
     }
 }
 

@@ -7,7 +7,10 @@
 //! so one section cannot starve the others) and a `truncated` object says what
 //! was cut and how to ask for the rest.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use rmcp::{
     handler::server::common::schema_for_input,
@@ -86,6 +89,55 @@ pub fn page<T: serde::Serialize>(items: &[T], offset: usize, limit: usize) -> Va
         out.insert("next_offset".into(), end.into());
     }
     Value::Object(out)
+}
+
+/// Make a paged answer fit `budget` by dropping whole rows from the end of
+/// `value[key]`, then make `returned`, `next_offset` and `hint` describe the
+/// rows actually sent, so following `next_offset` skips nothing.
+///
+/// `offset` is the page's first row index and `total` the number of rows the
+/// whole list has from index 0 (the same numbers `next_offset` counts in).
+/// Nothing changes when the value already fits. At least one row is kept.
+pub fn fit_rows(value: &mut Value, key: &str, budget: usize, offset: usize, total: usize) {
+    let size = |v: &Value| serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0);
+    // Room for the fields the caller adds after paging (file_path, cache...).
+    let budget = budget.saturating_sub(400);
+    if size(value) <= budget {
+        return;
+    }
+    let Some(rows) = value.get(key).and_then(Value::as_array).cloned() else {
+        return;
+    };
+    let asked = rows.len();
+    let (mut low, mut high) = (1usize, asked);
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        value[key] = Value::Array(rows[..mid].to_vec());
+        if size(value) <= budget {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let kept = low.min(asked);
+    value[key] = Value::Array(rows[..kept].to_vec());
+    if kept == asked {
+        return;
+    }
+    let next = offset + kept;
+    value["returned"] = kept.into();
+    if next < total {
+        value["next_offset"] = next.into();
+        value["hint"] = format!(
+            "The page was cut to {kept} of the {asked} rows asked for to fit max_output_bytes; \
+             repeat the call with offset {next} for the rest (a smaller limit or a larger \
+             max_output_bytes avoids the cut)."
+        )
+        .into();
+    } else if let Some(map) = value.as_object_mut() {
+        map.remove("next_offset");
+        map.remove("hint");
+    }
 }
 
 /// A failed tool call: `isError: true` with a message a model can act on.
@@ -218,6 +270,42 @@ pub fn respond(value: Value, budget: usize) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
 
+/// [`respond`] for a value that may be big: serializing and shortening run on
+/// the blocking pool, so a signal during a big result is not held up and the
+/// async workers stay free. A crash while rendering becomes a tool error.
+pub async fn respond_blocking(
+    state: &super::state::ServerState,
+    value: Value,
+    budget: usize,
+) -> CallToolResult {
+    match state
+        .run_blocking("render", move || respond(value, budget))
+        .await
+    {
+        Ok(result) => result,
+        Err(crash) => tool_error(crash),
+    }
+}
+
+/// [`respond_result`] with the conversion and rendering on the blocking pool.
+pub async fn respond_result_blocking<T: serde::Serialize + Send + 'static>(
+    state: &super::state::ServerState,
+    outcome: Result<Result<T, String>, String>,
+    budget: usize,
+) -> CallToolResult {
+    match outcome {
+        Err(crash) => tool_error(crash),
+        Ok(Err(message)) => tool_error(message),
+        Ok(Ok(result)) => match state
+            .run_blocking("render", move || respond_result(Ok(Ok(result)), budget))
+            .await
+        {
+            Ok(result) => result,
+            Err(crash) => tool_error(crash),
+        },
+    }
+}
+
 /// A tool result from text that is already rendered (compact JSON within budget).
 pub fn respond_text(text: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
@@ -231,8 +319,13 @@ pub fn render(mut value: Value, budget: usize) -> String {
         return value.to_string();
     }
 
-    let mut cuts = Vec::new();
-    shrink(&mut value, budget.saturating_sub(NOTE_RESERVE), &mut cuts);
+    let mut cuts = Cuts::default();
+    shrink(
+        &mut value,
+        budget.saturating_sub(NOTE_RESERVE),
+        original,
+        &mut cuts,
+    );
     let mut root = match value {
         Value::Object(map) => map,
         other => {
@@ -241,7 +334,7 @@ pub fn render(mut value: Value, budget: usize) -> String {
             map
         }
     };
-    root.insert("truncated".to_string(), note(budget, original, &cuts));
+    root.insert("truncated".to_string(), note(budget, original, &cuts.list));
     let text = Value::Object(root).to_string();
     if text.len() <= budget {
         return text;
@@ -386,11 +479,19 @@ fn collect(value: &Value, path: &mut String, out: &mut Vec<Candidate>) {
 /// ("water filling"), choosing the level so the cuts add up to the excess. Big
 /// sections therefore lose the most, small ones nothing, and no section is
 /// wiped out while another stays whole.
-fn shrink(value: &mut Value, target: usize, cuts: &mut Vec<Cut>) {
+///
+/// `known_len` is the compact size of `value` on entry. The size is then
+/// tracked from the cuts instead of serializing the whole value on every pass
+/// (that cost seconds on a 100 MB section); the tracked size is an estimate,
+/// so it is confirmed exactly before the loop ends.
+fn shrink(value: &mut Value, target: usize, known_len: usize, cuts: &mut Cuts) {
+    let mut total = known_len;
     for _ in 0..64 {
-        let total = compact_len(value);
         if total <= target {
-            return;
+            total = compact_len(value);
+            if total <= target {
+                return;
+            }
         }
         let mut candidates = Vec::new();
         collect(value, &mut String::new(), &mut candidates);
@@ -427,33 +528,43 @@ fn shrink(value: &mut Value, target: usize, cuts: &mut Vec<Cut>) {
             let Some(node) = value.pointer_mut(&candidate.path) else {
                 continue;
             };
-            let (original, kept) = if candidate.is_string {
+            let (original, kept, removed) = if candidate.is_string {
                 cut_string_node(node, amount)
             } else {
                 cut_array_node(node, amount)
             };
-            record(
-                cuts,
-                candidate.path.clone(),
-                candidate.is_string,
-                original,
-                kept,
-            );
+            total = if removed >= 0 {
+                total.saturating_sub(removed.unsigned_abs())
+            } else {
+                total.saturating_add(removed.unsigned_abs())
+            };
+            cuts.record(candidate.path.clone(), candidate.is_string, original, kept);
         }
     }
 }
 
-fn record(cuts: &mut Vec<Cut>, path: String, is_string: bool, original: usize, kept: usize) {
-    if let Some(existing) = cuts.iter_mut().find(|c| c.path == path) {
-        existing.kept = kept;
-        return;
+/// The cuts made so far, indexed by path so recording one is O(1) however
+/// many nodes were cut (a value with 100,000 small arrays cuts most of them).
+#[derive(Default)]
+struct Cuts {
+    list: Vec<Cut>,
+    index: HashMap<String, usize>,
+}
+
+impl Cuts {
+    fn record(&mut self, path: String, is_string: bool, original: usize, kept: usize) {
+        if let Some(&slot) = self.index.get(&path) {
+            self.list[slot].kept = kept;
+            return;
+        }
+        self.index.insert(path.clone(), self.list.len());
+        self.list.push(Cut {
+            path,
+            kind: if is_string { "string" } else { "array" },
+            original,
+            kept,
+        });
     }
-    cuts.push(Cut {
-        path,
-        kind: if is_string { "string" } else { "array" },
-        original,
-        kept,
-    });
 }
 
 /// Longest prefix of `s` of at most `max` bytes, on a character boundary.
@@ -465,9 +576,10 @@ fn cut_str(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-fn cut_string_node(node: &mut Value, amount: usize) -> (usize, usize) {
+/// Cut a string node; returns `(original, kept, bytes removed)`.
+fn cut_string_node(node: &mut Value, amount: usize) -> (usize, usize, isize) {
     let Value::String(s) = node else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     let original = s.len();
     let marker = format!("...[cut {amount} of {original} bytes]");
@@ -475,13 +587,15 @@ fn cut_string_node(node: &mut Value, amount: usize) -> (usize, usize) {
     let mut cut = cut_str(s, keep).to_string();
     let kept = cut.len();
     cut.push_str(&marker);
+    let removed = original as isize - cut.len() as isize;
     *s = cut;
-    (original, kept)
+    (original, kept, removed)
 }
 
-fn cut_array_node(node: &mut Value, amount: usize) -> (usize, usize) {
+/// Cut an array node; returns `(original, kept, bytes removed)`.
+fn cut_array_node(node: &mut Value, amount: usize) -> (usize, usize, isize) {
     let Value::Array(items) = node else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     let original = items.len();
     let mut removed = 0usize;
@@ -491,7 +605,7 @@ fn cut_array_node(node: &mut Value, amount: usize) -> (usize, usize) {
         };
         removed += compact_len(&last) + 1;
     }
-    (original, items.len())
+    (original, items.len(), removed as isize)
 }
 
 /// A map of per-path cut counts, handy in tests.
@@ -674,5 +788,66 @@ mod tests {
         let text = render(value, 8_000);
         assert!(text.len() <= 8_000);
         assert!(serde_json::from_str::<Value>(&text).is_ok());
+    }
+
+    /// The foundation's verification: rendering a value with about 100,000
+    /// small arrays took seconds (a linear scan per cut and a full
+    /// serialization per pass). It must stay fast.
+    #[test]
+    fn rendering_a_value_with_100000_small_arrays_is_fast() {
+        let started = std::time::Instant::now();
+        // 100,000 keys, each holding an array just over the minimum cuttable size.
+        let map: serde_json::Map<String, Value> = (0..100_000)
+            .map(|i| {
+                (
+                    format!("k{i}"),
+                    json!((0..30).map(|n| n + i).collect::<Vec<_>>()),
+                )
+            })
+            .collect();
+        let text = render(json!({"sections": Value::Object(map), "name": "x"}), 80_000);
+        assert!(text.len() <= 80_000, "{}", text.len());
+        // The keys alone are bigger than the budget, so this may end as a preview;
+        // what matters is that it fits and is fast.
+        // An array of 100,000 short arrays, the other common shape.
+        let rows: Vec<Value> = (0..100_000).map(|i| json!([i, i + 1, i + 2])).collect();
+        let text = render(json!({"rows": rows}), 80_000);
+        assert!(text.len() <= 80_000, "{}", text.len());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(8),
+            "rendering took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn fit_rows_reports_the_rows_actually_sent() {
+        let rows: Vec<Value> = (0..200)
+            .map(|i| json!({"n": i, "text": "x".repeat(100)}))
+            .collect();
+        let mut value = page(&rows, 10, 100);
+        assert_eq!(value["next_offset"], 110);
+        fit_rows(&mut value, "items", 5_000, 10, rows.len());
+        let kept = value["items"].as_array().unwrap().len();
+        assert!(kept > 0 && kept < 100, "{kept}");
+        assert_eq!(value["returned"], kept);
+        assert_eq!(value["next_offset"], 10 + kept);
+        assert!(value["hint"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("{}", 10 + kept)));
+        assert!(serde_json::to_string(&value).unwrap().len() <= 5_000);
+        // The first row sent is the one asked for, the next page starts after the last.
+        assert_eq!(value["items"][0]["n"], 10);
+        assert_eq!(value["items"][kept - 1]["n"], 10 + kept - 1);
+    }
+
+    #[test]
+    fn fit_rows_leaves_a_page_that_fits_alone() {
+        let rows: Vec<Value> = (0..5).map(|i| json!({"n": i})).collect();
+        let mut value = page(&rows, 0, 50);
+        let before = value.clone();
+        fit_rows(&mut value, "items", 5_000, 0, rows.len());
+        assert_eq!(value, before);
     }
 }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use encoding_rs::{UTF_16BE, UTF_16LE};
 use regex::bytes::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -24,72 +24,211 @@ pub struct InterestingString {
     pub offset: usize,
 }
 
+/// Where a string was found and how it was encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum StringEncoding {
+    /// Printable ASCII bytes.
+    Ascii,
+    /// UTF-16 little endian, printable ASCII code units only.
+    Utf16Le,
+    /// UTF-16 big endian, printable ASCII code units only.
+    Utf16Be,
+}
+
+impl StringEncoding {
+    /// The name used in tool output and filters.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ascii => "ascii",
+            Self::Utf16Le => "utf16le",
+            Self::Utf16Be => "utf16be",
+        }
+    }
+}
+
+/// One string found in a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FoundString {
+    /// Byte offset of the first byte of the string in the file.
+    pub offset: usize,
+    pub encoding: StringEncoding,
+    pub value: String,
+    /// What the string looks like (URL, IP Address, ...), when it matches one
+    /// of the categories.
+    pub category: Option<String>,
+}
+
+/// Every string of a file, uncapped, in file order.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct StringScan {
+    pub min_length: usize,
+    /// Occurrences found (ASCII plus UTF-16).
+    pub total_count: usize,
+    /// Distinct values.
+    pub unique_count: usize,
+    pub ascii_count: usize,
+    pub utf16_count: usize,
+    pub strings: Vec<FoundString>,
+}
+
+impl StringScan {
+    /// The categorized strings, in file order.
+    pub fn interesting(&self) -> impl Iterator<Item = &FoundString> {
+        self.strings.iter().filter(|s| s.category.is_some())
+    }
+
+    /// The legacy view: the first 1000 strings of each kind, and every
+    /// categorized string.
+    pub fn to_extracted(&self) -> ExtractedStrings {
+        let mut ascii_strings = Vec::new();
+        let mut unicode_strings = Vec::new();
+        let mut interesting_strings = Vec::new();
+        for found in &self.strings {
+            let list = if found.encoding == StringEncoding::Ascii {
+                &mut ascii_strings
+            } else {
+                &mut unicode_strings
+            };
+            if list.len() < MAX_LEGACY_STRINGS {
+                list.push(found.value.clone());
+            }
+            if let Some(category) = &found.category {
+                interesting_strings.push(InterestingString {
+                    category: category.clone(),
+                    value: found.value.clone(),
+                    offset: found.offset,
+                });
+            }
+        }
+        ExtractedStrings {
+            total_count: self.total_count,
+            unique_count: self.unique_count,
+            ascii_strings,
+            unicode_strings,
+            interesting_strings,
+        }
+    }
+}
+
+/// Strings per kind that the legacy [`ExtractedStrings`] view keeps.
+const MAX_LEGACY_STRINGS: usize = 1000;
+
+/// Strings of at least `min_length` characters, capped at 1000 per kind (the
+/// view the CLI prints). Use [`scan_strings`] for the whole list.
 pub fn extract_strings(path: &Path, min_length: usize) -> Result<ExtractedStrings> {
+    Ok(scan_strings(path, min_length)?.to_extracted())
+}
+
+/// Every ASCII and UTF-16 string of at least `min_length` characters, with
+/// offsets and categories, in file order.
+///
+/// UTF-16 strings contain printable ASCII code units only, so runs of zero
+/// bytes and small integers are not reported as text. A run that reads as both
+/// little and big endian (the two overlap by one byte) is reported once, as
+/// the longer reading.
+pub fn scan_strings(path: &Path, min_length: usize) -> Result<StringScan> {
     let file = File::open(path)?;
     let file_size = file.metadata()?.len() as usize;
     let mut reader = BufReader::new(file);
     let mut buffer = Vec::with_capacity(file_size.min(100_000_000)); // Cap at 100MB
     reader.read_to_end(&mut buffer)?;
+    scan_bytes(&buffer, min_length)
+}
 
-    let ascii_pattern = format!(r"[\x20-\x7E]{{{min_length},}}");
-    let ascii_regex = Regex::new(&ascii_pattern)?;
+/// [`scan_strings`] over bytes already in memory.
+pub fn scan_bytes(buffer: &[u8], min_length: usize) -> Result<StringScan> {
+    let min_length = min_length.max(1);
+    let ascii_regex = Regex::new(&format!(r"[\x20-\x7E]{{{min_length},}}"))?;
+    let utf16_le_regex = Regex::new(&format!(r"(?:[\x20-\x7E]\x00){{{min_length},}}"))?;
+    let utf16_be_regex = Regex::new(&format!(r"(?:\x00[\x20-\x7E]){{{min_length},}}"))?;
 
-    let mut ascii_strings = Vec::new();
-    let mut unicode_strings = Vec::new();
-    let mut interesting_strings = Vec::new();
-    let mut unique_strings = HashSet::new();
-
-    for mat in ascii_regex.find_iter(&buffer) {
+    let mut strings: Vec<FoundString> = Vec::new();
+    let mut ascii_count = 0usize;
+    for mat in ascii_regex.find_iter(buffer) {
         if let Ok(s) = std::str::from_utf8(mat.as_bytes()) {
-            let string = s.to_string();
-            unique_strings.insert(string.clone());
-            ascii_strings.push(string.clone());
-
-            if let Some(interesting) = categorize_string(&string, mat.start()) {
-                interesting_strings.push(interesting);
-            }
+            ascii_count += 1;
+            strings.push(found(mat.start(), StringEncoding::Ascii, s.to_string()));
         }
     }
 
-    let utf16_le_pattern = format!(r"(?:[\x00-\x7F]\x00){{{min_length},}}");
-    let utf16_le_regex = Regex::new(&utf16_le_pattern)?;
-
-    for mat in utf16_le_regex.find_iter(&buffer) {
-        let (decoded, _, _) = UTF_16LE.decode(mat.as_bytes());
-        let string = decoded.into_owned();
-        if string.len() >= min_length {
-            unique_strings.insert(string.clone());
-            unicode_strings.push(string.clone());
-
-            if let Some(interesting) = categorize_string(&string, mat.start()) {
-                interesting_strings.push(interesting);
-            }
+    // UTF-16 candidates of both byte orders; where two overlap, the longer
+    // wins and a little endian reading beats an equally long big endian one
+    // (an LE string preceded by a zero byte also matches BE one byte early).
+    let is_printable = |b: u8| (0x20..=0x7E).contains(&b);
+    let mut candidates: Vec<(usize, usize, StringEncoding)> = Vec::new();
+    for m in utf16_le_regex.find_iter(buffer) {
+        let (mut start, end) = (m.start(), m.end());
+        // The first unit may be the last character of an ASCII string that
+        // was already reported (its NUL terminator is this unit's high byte).
+        let ascii_before = buffer[..start]
+            .iter()
+            .rev()
+            .take_while(|&&b| is_printable(b))
+            .count();
+        if ascii_before >= min_length {
+            start += 2;
+        }
+        if end > start && (end - start) / 2 >= min_length {
+            candidates.push((start, end, StringEncoding::Utf16Le));
         }
     }
-
-    let utf16_be_pattern = format!(r"(?:\x00[\x00-\x7F]){{{min_length},}}");
-    let utf16_be_regex = Regex::new(&utf16_be_pattern)?;
-
-    for mat in utf16_be_regex.find_iter(&buffer) {
-        let (decoded, _, _) = UTF_16BE.decode(mat.as_bytes());
-        let string = decoded.into_owned();
-        if string.len() >= min_length {
-            unique_strings.insert(string.clone());
-            unicode_strings.push(string.clone());
-
-            if let Some(interesting) = categorize_string(&string, mat.start()) {
-                interesting_strings.push(interesting);
-            }
+    candidates.extend(
+        utf16_be_regex
+            .find_iter(buffer)
+            .map(|m| (m.start(), m.end(), StringEncoding::Utf16Be)),
+    );
+    candidates.sort_by_key(|&(start, end, encoding)| {
+        (
+            std::cmp::Reverse(end - start),
+            encoding == StringEncoding::Utf16Be,
+            start,
+        )
+    });
+    let mut taken: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut utf16_count = 0usize;
+    for (start, end, encoding) in candidates {
+        let overlaps = taken
+            .range(..end)
+            .next_back()
+            .is_some_and(|(_, &taken_end)| taken_end > start);
+        if overlaps {
+            continue;
+        }
+        taken.insert(start, end);
+        let (decoded, _, _) = if encoding == StringEncoding::Utf16Le {
+            UTF_16LE.decode(&buffer[start..end])
+        } else {
+            UTF_16BE.decode(&buffer[start..end])
+        };
+        let value = decoded.into_owned();
+        if value.len() >= min_length {
+            utf16_count += 1;
+            strings.push(found(start, encoding, value));
         }
     }
+    // File order (ASCII first on a tie, the way the two passes ran before).
+    strings.sort_by_key(|s| (s.offset, s.encoding != StringEncoding::Ascii));
 
-    Ok(ExtractedStrings {
-        total_count: ascii_strings.len() + unicode_strings.len(),
-        unique_count: unique_strings.len(),
-        ascii_strings: ascii_strings.into_iter().take(1000).collect(), // Limit output
-        unicode_strings: unicode_strings.into_iter().take(1000).collect(),
-        interesting_strings,
+    let unique: HashSet<&str> = strings.iter().map(|s| s.value.as_str()).collect();
+    Ok(StringScan {
+        min_length,
+        total_count: strings.len(),
+        unique_count: unique.len(),
+        ascii_count,
+        utf16_count,
+        strings,
     })
+}
+
+fn found(offset: usize, encoding: StringEncoding, value: String) -> FoundString {
+    let category = categorize_string(&value, offset).map(|i| i.category);
+    FoundString {
+        offset,
+        encoding,
+        value,
+        category,
+    }
 }
 
 /// Categorization patterns, compiled once and checked in order; the first
@@ -130,6 +269,15 @@ fn categorize_string(s: &str, offset: usize) -> Option<InterestingString> {
             value: s.to_string(),
             offset,
         })
+}
+
+/// Byte range of the text that made `s` a string of its category (the URL
+/// itself, the address, the key assignment), for showing the indicator
+/// instead of the start of a long string.
+pub fn category_span(s: &str) -> Option<(usize, usize)> {
+    CATEGORY_PATTERNS
+        .iter()
+        .find_map(|(regex, _)| regex.find(s.as_bytes()).map(|m| (m.start(), m.end())))
 }
 
 #[cfg(test)]
@@ -509,5 +657,88 @@ mod tests {
             deserialized.interesting_strings.len(),
             extracted.interesting_strings.len()
         );
+    }
+
+    /// CB06: runs of zero bytes and small integers are not UTF-16 "strings".
+    #[test]
+    fn utf16_extraction_returns_printable_strings_only() {
+        let mut content = vec![0u8; 64];
+        content.extend_from_slice(&[1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0]);
+        content.extend_from_slice(&[0, 1, 0, 2, 0, 3, 0, 4, 0, 5, 0, 6]);
+        content.extend_from_slice(b"H\x00e\x00l\x00l\x00o\x00");
+        let scan = scan_bytes(&content, 4).unwrap();
+        assert_eq!(scan.strings.len(), 1, "{:?}", scan.strings);
+        assert_eq!(scan.strings[0].value, "Hello");
+        assert_eq!(scan.strings[0].encoding, StringEncoding::Utf16Le);
+        assert_eq!(scan.strings[0].offset, 64 + 24);
+        for found in &scan.strings {
+            assert!(found.value.chars().all(|c| (' '..='~').contains(&c)));
+        }
+        // The legacy view is clean too.
+        let legacy = scan.to_extracted();
+        assert_eq!(legacy.unicode_strings, vec!["Hello".to_string()]);
+    }
+
+    /// A little endian string is not also reported as a shifted big endian one.
+    #[test]
+    fn utf16_runs_are_reported_once_in_the_right_byte_order() {
+        let mut content = Vec::new();
+        content.extend_from_slice(b"H\x00e\x00l\x00l\x00o\x00");
+        content.extend_from_slice(&[0xFF, 0xFF]);
+        content.extend_from_slice(b"\x00W\x00o\x00r\x00l\x00d");
+        let scan = scan_bytes(&content, 4).unwrap();
+        let values: Vec<(&str, StringEncoding)> = scan
+            .strings
+            .iter()
+            .map(|s| (s.value.as_str(), s.encoding))
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                ("Hello", StringEncoding::Utf16Le),
+                ("World", StringEncoding::Utf16Be)
+            ]
+        );
+    }
+
+    /// A little endian string after a zero byte or after an ASCII string.
+    #[test]
+    fn utf16le_after_zero_or_ascii_keeps_its_order_offset_and_text() {
+        let mut content = vec![0xFF, 0xFF, 0x00, 0x00];
+        content.extend_from_slice(b"W\x00i\x00d\x00e\x00");
+        let scan = scan_bytes(&content, 4).unwrap();
+        assert_eq!(scan.strings.len(), 1, "{:?}", scan.strings);
+        assert_eq!(scan.strings[0].encoding, StringEncoding::Utf16Le);
+        assert_eq!(scan.strings[0].offset, 4);
+        assert_eq!(scan.strings[0].value, "Wide");
+
+        let mut content = b"ASCII String\0".to_vec();
+        content.extend_from_slice(b"T\x00e\x00s\x00t\x00");
+        content.extend_from_slice(&[0xFF, 0xFE, 0, 0]);
+        content.extend_from_slice(b"Another ASCII\0");
+        let scan = scan_bytes(&content, 4).unwrap();
+        let values: Vec<&str> = scan.strings.iter().map(|s| s.value.as_str()).collect();
+        assert_eq!(values, vec!["ASCII String", "Test", "Another ASCII"]);
+    }
+
+    #[test]
+    fn scan_keeps_offsets_categories_and_every_string() {
+        let mut content = Vec::new();
+        content.extend_from_slice(b"\x00\x00see https://example.com/x now\x00");
+        for i in 0..2500 {
+            content.extend_from_slice(format!("string number {i}\x00").as_bytes());
+        }
+        let (_dir, path) = create_test_file(&content).unwrap();
+        let scan = scan_strings(&path, 4).unwrap();
+        assert_eq!(scan.total_count, 2501);
+        assert_eq!(scan.strings.len(), 2501, "not capped");
+        let url = scan.interesting().next().expect("a categorized string");
+        assert_eq!(url.category.as_deref(), Some("URL"));
+        assert_eq!(url.offset, 2);
+        // The legacy CLI view stays capped.
+        let legacy = extract_strings(&path, 4).unwrap();
+        assert_eq!(legacy.ascii_strings.len(), 1000);
+        assert_eq!(legacy.total_count, 2501);
+        assert_eq!(legacy.interesting_strings[0].offset, 2);
     }
 }
