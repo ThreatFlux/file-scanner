@@ -189,7 +189,20 @@ impl CodeQualityAnalyzer {
         let function_length = saturating_u32(function_length);
 
         // Count return paths
-        let return_paths = saturating_u32(cfg.exit_blocks.len());
+        // From the blocks, not `exit_blocks`: that list may be cut by the analysis budget.
+        let return_paths = saturating_u32(
+            cfg.basic_blocks
+                .iter()
+                .filter(|bb| {
+                    matches!(
+                        bb.block_type,
+                        crate::control_flow::BlockType::Return
+                            | crate::control_flow::BlockType::Exit
+                    )
+                })
+                .count()
+                .max(cfg.exit_blocks.len()),
+        );
 
         // Calculate Halstead metrics
         let halstead_metrics = self.calculate_halstead_metrics(&cfg.basic_blocks)?;

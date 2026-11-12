@@ -1656,8 +1656,6 @@ fn macho_with_bind_count(count: u64) -> Vec<u8> {
 /// As `macho_with_bind_count`, with the declared `bind_size` overridden (a size
 /// that ends inside the repeat count, as a hostile file can do).
 fn macho_with_bind_count_sized(count: u64, declared: Option<u32>) -> Vec<u8> {
-    let base = macho_build(CPU_X86_64, "__text", SIMPLE_FN, None, None, 0, 1);
-    let hdr_end = 32 + (u32::from_le_bytes(base[20..24].try_into().unwrap()) as usize);
     let mut uleb = Vec::new();
     let mut v = count;
     loop {
@@ -1674,6 +1672,13 @@ fn macho_with_bind_count_sized(count: u64, declared: Option<u32>) -> Vec<u8> {
     stream.extend([0x51, 0x72, 0x00, 0xC0]);
     stream.extend(&uleb);
     stream.extend([0x00, 0x00]);
+    macho_with_stream(stream, declared)
+}
+
+/// The Mach-O of `macho_with_bind_count`, with `stream` as its bind stream.
+fn macho_with_stream(stream: Vec<u8>, declared: Option<u32>) -> Vec<u8> {
+    let base = macho_build(CPU_X86_64, "__text", SIMPLE_FN, None, None, 0, 1);
+    let hdr_end = 32 + (u32::from_le_bytes(base[20..24].try_into().unwrap()) as usize);
     let bind_off = (base.len() + 48) as u32;
     let mut cmd = Vec::new();
     for v in [
@@ -1797,4 +1802,231 @@ fn r3c_many_dyld_info_commands_sharing_one_stream_stay_linear() {
     let started = std::time::Instant::now();
     let _ = resolve_import_targets(&f);
     assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+}
+
+fn uleb_bytes(mut v: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(b);
+            return out;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+#[test]
+fn r4_one_long_symbol_name_bound_many_times_is_not_copied_per_bind() {
+    // 10,000-byte name x 199,999 binds would be 2 GB of names if copied per bind.
+    for name_len in [10_000usize, 100_000] {
+        let mut stream = vec![0x11, 0x40];
+        stream.extend(std::iter::repeat_n(b'a', name_len));
+        stream.extend([0, 0x51, 0x70, 0x00, 0xC0]);
+        stream.extend(uleb_bytes(199_999));
+        stream.extend([0x00, 0x00]);
+        let bytes = macho_with_stream(stream, None);
+        let Ok(goblin::mach::Mach::Binary(m)) = goblin::mach::Mach::parse(&bytes) else {
+            panic!("fixture does not parse");
+        };
+        assert!(!file_scanner::control_flow::macho_bind_count_within_cap(
+            &m, &bytes
+        ));
+        let started = std::time::Instant::now();
+        let map = resolve_import_targets(&bytes);
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        let total: usize = map.values().map(String::len).sum();
+        assert!(total < 1_000_000, "{total} bytes of names");
+    }
+    // an ordinary long-named bind is still resolved
+    let mut stream = vec![0x11, 0x40];
+    stream.extend(std::iter::repeat_n(b'a', 300));
+    stream.extend([0, 0x51, 0x70, 0x00, 0xC0]);
+    stream.extend(uleb_bytes(50));
+    stream.extend([0x00, 0x00]);
+    let bytes = macho_with_stream(stream, None);
+    let map = resolve_import_targets(&bytes);
+    assert!(map.values().any(|n| n.len() == 300 && n.starts_with("aaa")));
+}
+
+#[test]
+fn r4_binds_with_an_out_of_range_segment_still_count_against_the_cap() {
+    // 20,000 x DO_BIND_ULEB_TIMES 200000 on a segment that does not exist
+    let mut stream = vec![0x11, 0x40, b'_', b'x', 0, 0x51, 0x7F, 0x00];
+    for _ in 0..20_000 {
+        stream.push(0xC0);
+        stream.extend(uleb_bytes(200_000));
+        stream.push(0x00);
+    }
+    let bytes = macho_with_stream(stream, None);
+    let Ok(goblin::mach::Mach::Binary(m)) = goblin::mach::Mach::parse(&bytes) else {
+        panic!("fixture does not parse");
+    };
+    let started = std::time::Instant::now();
+    assert!(!file_scanner::control_flow::macho_bind_count_within_cap(
+        &m, &bytes
+    ));
+    let _ = resolve_import_targets(&bytes);
+    assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+}
+
+#[test]
+fn r4_loop_exit_and_unreachable_lists_share_one_budget_and_say_so() {
+    use file_scanner::control_flow::{MAX_CFG_LISTED_ITEMS, MIN_CFG_LISTED_ITEMS};
+    // 8 functions of 64 KiB: self-jumping blocks (a loop per 2 bytes) and ret-filled ones
+    // (an exit block per byte, all but the first unreachable).
+    for (fill, label) in [(vec![0x75u8, 0xfe], "selfloop"), (vec![0xc3u8], "ret")] {
+        let mut code = Vec::new();
+        let mut functions = Vec::new();
+        for i in 0..8u64 {
+            functions.push(function(&format!("f{i}"), 0x1000 + i * 0x10000, 0x10000));
+            code.extend(fill.iter().cycle().take(0x10000));
+        }
+        let analyzer = ControlFlowAnalyzer::new_x86_64().unwrap();
+        let cf = analyzer.analyze_code(&code, 0x1000, functions).unwrap();
+        let listed: usize = cf
+            .cfgs
+            .iter()
+            .map(|c| c.loops.len() + c.exit_blocks.len() + c.complexity.unreachable_blocks.len())
+            .sum();
+        assert!(
+            listed <= MAX_CFG_LISTED_ITEMS + 3 * MIN_CFG_LISTED_ITEMS * cf.cfgs.len(),
+            "{label}: {listed} entries listed"
+        );
+        let note = cf
+            .analysis_stats
+            .errors
+            .iter()
+            .find(|e| e.starts_with("Limit: the lists of loops"))
+            .unwrap_or_else(|| panic!("{label}: no note in {:?}", cf.analysis_stats.errors));
+        assert!(note.contains(" of "), "{note}");
+        // counts stay true
+        if label == "selfloop" {
+            for cfg in &cf.cfgs {
+                assert_eq!(cfg.complexity.loop_count, cfg.complexity.basic_block_count);
+            }
+        }
+    }
+    // a small function keeps every entry and adds no note
+    let code = [0x75u8, 0xfe, 0xc3];
+    let cf = ControlFlowAnalyzer::new_x86_64()
+        .unwrap()
+        .analyze_code(&code, 0x1000, vec![function("f", 0x1000, 3)])
+        .unwrap();
+    assert_eq!(cf.cfgs[0].loops.len(), 1);
+    assert!(!cf
+        .analysis_stats
+        .errors
+        .iter()
+        .any(|e| e.contains("lists of loops")));
+}
+
+// ------------------------------- round 4: one long name, many references
+
+/// Offset of the first load command with command number `cmd` in a 64-bit Mach-O.
+fn macho_command_offset(bytes: &[u8], cmd: u32) -> usize {
+    let ncmds = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
+    let mut at = 32usize;
+    for _ in 0..ncmds {
+        let c = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        if c == cmd {
+            return at;
+        }
+        at += size;
+    }
+    panic!("no load command {cmd:#x}");
+}
+
+fn name_bytes_total(map: &std::collections::HashMap<u64, String>) -> usize {
+    map.values().map(String::len).sum()
+}
+
+#[test]
+fn r4_one_long_bind_name_read_by_many_stubs_stays_within_the_name_budget() {
+    const NAME: usize = 100_000;
+    const STUBS: usize = 20_000;
+    // `__stubs` section at file offset 288 + 48 (the bind command is inserted
+    // before it), address base + 288; every stub is `jmp [rip+rel]` to the slot
+    // at segment 0 offset 0 (the base address).
+    let base = 0x1_0000_0000u64;
+    let stub_addr = base + 288;
+    let mut stubs = Vec::new();
+    for i in 0..STUBS {
+        let rel = base.wrapping_sub(stub_addr + 6 * i as u64 + 6) as u32;
+        stubs.extend([0xff, 0x25]);
+        stubs.extend(rel.to_le_bytes());
+    }
+    let built = macho_build(CPU_X86_64, "__stubs", &stubs, None, Some(288 + 48), 0, 1);
+    let mut stream = vec![0x11, 0x40, b'_'];
+    stream.extend(std::iter::repeat_n(b'A', NAME - 1));
+    stream.extend([0, 0x51, 0x70, 0x00, 0x90, 0x00]);
+    // macho_with_stream rebuilds its own base: insert the command by hand here.
+    let hdr_end = 32 + (u32::from_le_bytes(built[20..24].try_into().unwrap()) as usize);
+    let bind_off = (built.len() + 48) as u32;
+    let mut cmd = Vec::new();
+    for v in [
+        0x8000_0022u32,
+        48,
+        0,
+        0,
+        bind_off,
+        stream.len() as u32,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ] {
+        cmd.extend(v.to_le_bytes());
+    }
+    let mut f = built[..hdr_end].to_vec();
+    f.extend(cmd);
+    f.extend(&built[hdr_end..]);
+    let ncmds = u32::from_le_bytes(f[16..20].try_into().unwrap()) + 1;
+    let size = u32::from_le_bytes(f[20..24].try_into().unwrap()) + 48;
+    f[16..20].copy_from_slice(&ncmds.to_le_bytes());
+    f[20..24].copy_from_slice(&size.to_le_bytes());
+    f.extend(stream);
+
+    let map = resolve_import_targets(&f);
+    let total = name_bytes_total(&map);
+    assert!(total <= 16 * 1024 * 1024, "{total} name bytes in the map");
+    assert!(map.contains_key(&base), "the slot itself is still named");
+    assert!(map.len() < STUBS, "{} entries", map.len());
+}
+
+#[test]
+fn r4_one_long_symbol_named_by_many_indirect_entries_stays_within_the_name_budget() {
+    const NAME: usize = 100_000;
+    const ENTRIES: usize = 20_000;
+    let mut f = macho_build(CPU_X86_64, "__la_symbol_ptr", SIMPLE_FN, None, None, 0, 1);
+    let sym = macho_command_offset(&f, 0x2);
+    let dys = macho_command_offset(&f, 0xb);
+    let symoff = u32::from_le_bytes(f[sym + 8..sym + 12].try_into().unwrap()) as usize;
+    // the first section's size claims ENTRIES pointers, reserved1 = 0
+    let sect = 32 + 72;
+    f[sect + 40..sect + 48].copy_from_slice(&(8 * ENTRIES as u64).to_le_bytes());
+    // new string table: one long name, referred to by symbol 0
+    let str_at = f.len();
+    f.push(0);
+    f.push(b'_');
+    f.extend(std::iter::repeat_n(b'A', NAME - 1));
+    f.push(0);
+    f[sym + 16..sym + 20].copy_from_slice(&(str_at as u32).to_le_bytes());
+    f[sym + 20..sym + 24].copy_from_slice(&((NAME + 2) as u32).to_le_bytes());
+    f[symoff..symoff + 4].copy_from_slice(&1u32.to_le_bytes());
+    // indirect table: ENTRIES entries, all symbol 0
+    let ind_at = f.len();
+    f.extend(std::iter::repeat_n(0u8, 4 * ENTRIES));
+    f[dys + 56..dys + 60].copy_from_slice(&(ind_at as u32).to_le_bytes());
+    f[dys + 60..dys + 64].copy_from_slice(&(ENTRIES as u32).to_le_bytes());
+
+    let map = resolve_import_targets(&f);
+    assert!(!map.is_empty(), "the fallback names its first entries");
+    let total = name_bytes_total(&map);
+    assert!(total <= 16 * 1024 * 1024, "{total} name bytes in the map");
+    assert!(map.len() < ENTRIES, "{} entries", map.len());
 }

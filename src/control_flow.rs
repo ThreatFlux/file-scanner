@@ -163,6 +163,58 @@ pub const MAX_CFG_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 /// for code made of one-byte instructions, where the byte budget alone allows
 /// millions of them).
 pub const MAX_CFG_TOTAL_INSTRUCTIONS: usize = 500_000;
+/// Most entries of the loop, exit-block and unreachable-block lists kept across
+/// all functions of one analysis (code made of one-byte `ret` or self-jumping
+/// blocks would otherwise list one entry per block). The counts stay true.
+pub const MAX_CFG_LISTED_ITEMS: usize = 20_000;
+/// Entries of each of those lists a function keeps even when the shared budget
+/// is used up, so every function with a loop, an exit or unreachable code still
+/// shows one (the number of functions is bounded by `MAX_CFG_FUNCTIONS`).
+pub const MIN_CFG_LISTED_ITEMS: usize = 16;
+
+/// True sizes of the lists `limit_lists` cut.
+#[derive(Default)]
+struct ListCuts {
+    loops: usize,
+    exits: usize,
+    unreachable: usize,
+    loops_kept: usize,
+    exits_kept: usize,
+    unreachable_kept: usize,
+}
+
+/// Cut the loop, exit-block and unreachable-block lists of `cfg` to what is left
+/// of `budget` (never below `MIN_CFG_LISTED_ITEMS` each), charge what is kept,
+/// and add the true sizes to `cuts`. `complexity.loop_count` keeps the true count.
+fn limit_lists(cfg: &mut ControlFlowGraph, budget: &mut usize, cuts: &mut ListCuts) {
+    fn cut<T>(list: &mut Vec<T>, budget: &mut usize, total: &mut usize, kept: &mut usize) {
+        *total += list.len();
+        let allowed = (*budget).max(MIN_CFG_LISTED_ITEMS);
+        list.truncate(allowed);
+        list.shrink_to_fit();
+        *budget = budget.saturating_sub(list.len());
+        *kept += list.len();
+    }
+    cfg.complexity.loop_count = cfg.complexity.loop_count.max(cfg.loops.len());
+    cut(
+        &mut cfg.loops,
+        budget,
+        &mut cuts.loops,
+        &mut cuts.loops_kept,
+    );
+    cut(
+        &mut cfg.exit_blocks,
+        budget,
+        &mut cuts.exits,
+        &mut cuts.exits_kept,
+    );
+    cut(
+        &mut cfg.complexity.unreachable_blocks,
+        budget,
+        &mut cuts.unreachable,
+        &mut cuts.unreachable_kept,
+    );
+}
 
 pub struct ControlFlowAnalyzer {
     pub capstone: Capstone,
@@ -234,6 +286,8 @@ impl ControlFlowAnalyzer {
         let mut errors = Vec::new();
         let mut total_instructions = 0;
         let mut bytes_analyzed: u64 = 0;
+        let mut list_budget = MAX_CFG_LISTED_ITEMS;
+        let mut cuts = ListCuts::default();
 
         candidates.sort_by_key(|f| (f.address, std::cmp::Reverse(f.size)));
         candidates.dedup_by_key(|f| f.address);
@@ -298,7 +352,8 @@ impl ControlFlowAnalyzer {
             bytes_analyzed += size as u64;
 
             match self.analyze_function(function, function_bytes) {
-                Ok(cfg) => {
+                Ok(mut cfg) => {
+                    limit_lists(&mut cfg, &mut list_budget, &mut cuts);
                     total_instructions += cfg
                         .basic_blocks
                         .iter()
@@ -330,6 +385,23 @@ impl ControlFlowAnalyzer {
         if cut_functions > 0 {
             errors.push(format!(
                 "Limit: {cut_functions} functions longer than {MAX_FUNCTION_BYTES} bytes were analyzed only up to that size"
+            ));
+        }
+
+        if cuts.loops_kept < cuts.loops
+            || cuts.exits_kept < cuts.exits
+            || cuts.unreachable_kept < cuts.unreachable
+        {
+            errors.push(format!(
+                "Limit: the lists of loops, exit blocks and unreachable blocks are cut to {MAX_CFG_LISTED_ITEMS} entries across all functions \
+                 (at least {MIN_CFG_LISTED_ITEMS} per function): loops {} of {}, exit blocks {} of {}, unreachable blocks {} of {} are listed; \
+                 the per-function counts (loop_count, basic_block_count, edge_count) are complete",
+                cuts.loops_kept,
+                cuts.loops,
+                cuts.exits_kept,
+                cuts.exits,
+                cuts.unreachable_kept,
+                cuts.unreachable
             ));
         }
 
@@ -997,12 +1069,31 @@ pub fn analyze_control_flow_with_arch(
 
 /// Most indirect-symbol entries read in total across all sections of one file.
 const MAX_INDIRECT_IMPORTS: usize = 200_000;
+/// Total bytes of symbol names the bind streams may refer to (counted per bind).
+const MAX_BIND_NAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Insert `name` under `key`, charging its length to `budget`. Returns false (and
+/// inserts nothing) once the budget cannot cover it, so a map built through this
+/// helper never holds more than the budget in name bytes, however often one long
+/// name is referred to.
+fn put_name(map: &mut HashMap<u64, String>, budget: &mut usize, key: u64, name: &str) -> bool {
+    if name.len() > *budget {
+        return false;
+    }
+    *budget -= name.len();
+    map.insert(key, name.to_string());
+    true
+}
 
 /// Imports of a Mach-O file read from LC_DYSYMTAB's indirect symbol table: the
 /// stubs (`__stubs`) and pointer sections (`__got`, `__la_symbol_ptr`,
 /// `__nl_symbol_ptr`) name their symbols through it. Used when the dyld bind
 /// information is absent (chained fixups). Empty when the table is unusable.
-fn macho_indirect_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> HashMap<u64, String> {
+fn macho_indirect_imports(
+    macho: &goblin::mach::MachO,
+    buffer: &[u8],
+    name_budget: &mut usize,
+) -> HashMap<u64, String> {
     use goblin::mach::load_command::CommandVariant;
     const SKIP: u32 = 0xC000_0000; // INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS
     let mut map = HashMap::new();
@@ -1094,8 +1185,15 @@ fn macho_indirect_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> HashMap
                     continue;
                 };
                 if let Ok((name, _)) = symbols.get(sym as usize) {
-                    if !name.is_empty() {
-                        map.insert(addr.saturating_add(k as u64 * item), name.to_string());
+                    if !name.is_empty()
+                        && !put_name(
+                            &mut map,
+                            name_budget,
+                            addr.saturating_add(k as u64 * item),
+                            name,
+                        )
+                    {
+                        return map;
                     }
                 }
             }
@@ -1127,6 +1225,11 @@ pub fn resolve_import_targets_with_arch(
     let buffer = crate::binary_parser::select_fat_slice(buffer, arch_choice)
         .map_or(buffer, |selection| selection.data);
     let mut map = HashMap::new();
+    // One budget of name bytes for everything put into the returned map; a second
+    // one for the intermediate slot table (a long name referred to by many slots
+    // or stubs is copied per reference otherwise).
+    let mut map_budget = MAX_BIND_NAME_BYTES;
+    let mut slot_budget = MAX_BIND_NAME_BYTES;
     let Ok(obj) = Object::parse(buffer) else {
         return map;
     };
@@ -1146,9 +1249,18 @@ pub fn resolve_import_targets_with_arch(
                     .get(reloc.r_sym)
                     .and_then(|sym| elf.dynstrtab.get_at(sym.st_name))
                 {
-                    if !name.is_empty() {
-                        got.insert(reloc.r_offset, name.to_string());
+                    if !name.is_empty()
+                        && !put_name(&mut got, &mut slot_budget, reloc.r_offset, name)
+                    {
+                        break;
                     }
+                }
+            }
+            // The table slots themselves first, then the stubs that read them, so a
+            // long name that exhausts the budget never crowds out its own slot.
+            for (key, name) in &got {
+                if !put_name(&mut map, &mut map_budget, *key, name) {
+                    break;
                 }
             }
             let x86 = matches!(
@@ -1177,31 +1289,46 @@ pub fn resolve_import_targets_with_arch(
                     } else {
                         16
                     };
-                    scan_jmp_stubs(bytes, section.sh_addr, entry, is_64, &got, &mut map);
+                    scan_jmp_stubs(
+                        bytes,
+                        section.sh_addr,
+                        entry,
+                        is_64,
+                        &got,
+                        &mut map,
+                        &mut map_budget,
+                    );
                 }
             }
-            map.extend(got);
         }
         Object::PE(pe) => {
             for import in &pe.imports {
                 // `offset` is the RVA of this import's slot in the address table.
                 let slot = pe.image_base.saturating_add(import.offset as u64);
-                map.insert(slot, import.name.to_string());
+                if !put_name(&mut map, &mut map_budget, slot, &import.name) {
+                    break;
+                }
             }
         }
         Object::Mach(goblin::mach::Mach::Binary(macho)) => {
             // Bounded own interpreter: goblin's imports() allocates one entry per
             // bind (repeat counts come from the file) and can panic.
-            let imports = macho_bind_imports(&macho, buffer).unwrap_or_default();
+            let (names, imports) = macho_bind_imports(&macho, buffer).unwrap_or_default();
             if imports.is_empty() {
                 // Chained fixups carry no bind opcodes: use the indirect symbol table.
-                return macho_indirect_imports(&macho, buffer);
+                return macho_indirect_imports(&macho, buffer, &mut map_budget);
             }
-            let slots: HashMap<u64, String> = imports
-                .iter()
-                .filter(|(address, _)| *address != 0)
-                .map(|(address, name)| (*address, name.clone()))
-                .collect();
+            let mut slots: HashMap<u64, String> = HashMap::new();
+            for (address, name) in imports.iter().filter(|(address, _)| *address != 0) {
+                if !put_name(&mut slots, &mut slot_budget, *address, &names[*name]) {
+                    break;
+                }
+            }
+            for (key, name) in &slots {
+                if !put_name(&mut map, &mut map_budget, *key, name) {
+                    break;
+                }
+            }
             if macho.header.cputype == goblin::mach::cputype::CPU_TYPE_X86_64 {
                 for segment in &macho.segments {
                     let Ok(sections) = segment.sections() else {
@@ -1209,12 +1336,19 @@ pub fn resolve_import_targets_with_arch(
                     };
                     for (section, data) in sections {
                         if section.name().ok() == Some("__stubs") {
-                            scan_jmp_stubs(data, section.addr, 6, true, &slots, &mut map);
+                            scan_jmp_stubs(
+                                data,
+                                section.addr,
+                                6,
+                                true,
+                                &slots,
+                                &mut map,
+                                &mut map_budget,
+                            );
                         }
                     }
                 }
             }
-            map.extend(slots);
         }
         _ => {}
     }
@@ -1226,9 +1360,16 @@ pub fn resolve_import_targets_with_arch(
 /// (instead of goblin's `imports()`, which expands repeat counts into memory and
 /// panics on a bad segment index): every number is read from the stream only,
 /// work is at most one step per stream byte, and at most `MAX_INDIRECT_IMPORTS`
-/// entries are produced. Only the last `LC_DYLD_INFO(_ONLY)` command is read, as
-/// the loader does. Returns `None` when the cap is exceeded.
-fn macho_bind_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<Vec<(u64, String)>> {
+/// binds are attempted (stored or not), and the bytes of the names the binds
+/// refer to are charged to `MAX_BIND_NAME_BYTES`. Each distinct name is kept once:
+/// the result is the name table and `(slot address, index into the table)` pairs.
+/// Only the last `LC_DYLD_INFO(_ONLY)` command is read, as the loader does.
+/// Returns `None` when a cap is exceeded.
+#[allow(clippy::type_complexity)]
+fn macho_bind_imports(
+    macho: &goblin::mach::MachO,
+    buffer: &[u8],
+) -> Option<(Vec<String>, Vec<(u64, usize)>)> {
     use goblin::mach::load_command::CommandVariant;
     fn uleb(bytes: &[u8], pos: &mut usize) -> u64 {
         let mut value = 0u64;
@@ -1245,7 +1386,10 @@ fn macho_bind_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<Vec<
         }
         value
     }
-    let mut out: Vec<(u64, String)> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    let mut out: Vec<(u64, usize)> = Vec::new();
+    let mut attempts: usize = 0;
+    let mut name_bytes: usize = 0;
     let Some(info) = macho
         .load_commands
         .iter()
@@ -1255,7 +1399,7 @@ fn macho_bind_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<Vec<
             _ => None,
         })
     else {
-        return Some(out);
+        return Some((names, out));
     };
     let ptr: u64 = if macho.is_64 { 8 } else { 4 };
     for (off, size) in [
@@ -1270,14 +1414,28 @@ fn macho_bind_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<Vec<
         let Some(stream) = buffer.get(start..end) else {
             continue;
         };
-        let (mut segment, mut offset, mut name) = (0usize, 0u64, String::new());
+        let (mut segment, mut offset, mut name) = (0usize, 0u64, usize::MAX);
         let mut pos = 0usize;
-        let push = |segment: usize, offset: u64, name: &str, out: &mut Vec<(u64, String)>| {
-            if out.len() >= MAX_INDIRECT_IMPORTS {
+        let push = |segment: usize,
+                    offset: u64,
+                    name: usize,
+                    names: &[String],
+                    out: &mut Vec<(u64, usize)>,
+                    attempts: &mut usize,
+                    name_bytes: &mut usize| {
+            if *attempts >= MAX_INDIRECT_IMPORTS {
+                return false;
+            }
+            *attempts += 1;
+            let Some(text) = names.get(name) else {
+                return true;
+            };
+            *name_bytes = name_bytes.saturating_add(text.len());
+            if *name_bytes > MAX_BIND_NAME_BYTES {
                 return false;
             }
             if let Some(seg) = macho.segments.get(segment) {
-                out.push((seg.vmaddr.wrapping_add(offset), name.to_string()));
+                out.push((seg.vmaddr.wrapping_add(offset), name));
             }
             true
         };
@@ -1294,7 +1452,8 @@ fn macho_bind_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<Vec<
                     while pos < stream.len() && stream[pos] != 0 {
                         pos += 1;
                     }
-                    name = String::from_utf8_lossy(&stream[begin..pos]).into_owned();
+                    names.push(String::from_utf8_lossy(&stream[begin..pos]).into_owned());
+                    name = names.len() - 1;
                     pos = (pos + 1).min(stream.len());
                 }
                 0x70 => {
@@ -1303,13 +1462,29 @@ fn macho_bind_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<Vec<
                 }
                 0x80 => offset = offset.wrapping_add(uleb(stream, &mut pos)),
                 0x90 => {
-                    if !push(segment, offset, &name, &mut out) {
+                    if !push(
+                        segment,
+                        offset,
+                        name,
+                        &names,
+                        &mut out,
+                        &mut attempts,
+                        &mut name_bytes,
+                    ) {
                         return None;
                     }
                     offset = offset.wrapping_add(ptr);
                 }
                 0xa0 => {
-                    if !push(segment, offset, &name, &mut out) {
+                    if !push(
+                        segment,
+                        offset,
+                        name,
+                        &names,
+                        &mut out,
+                        &mut attempts,
+                        &mut name_bytes,
+                    ) {
                         return None;
                     }
                     offset = offset
@@ -1317,7 +1492,15 @@ fn macho_bind_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<Vec<
                         .wrapping_add(uleb(stream, &mut pos));
                 }
                 0xb0 => {
-                    if !push(segment, offset, &name, &mut out) {
+                    if !push(
+                        segment,
+                        offset,
+                        name,
+                        &names,
+                        &mut out,
+                        &mut attempts,
+                        &mut name_bytes,
+                    ) {
                         return None;
                     }
                     offset = offset.wrapping_add((imm + 1).wrapping_mul(ptr));
@@ -1325,11 +1508,19 @@ fn macho_bind_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<Vec<
                 0xc0 => {
                     let count = uleb(stream, &mut pos);
                     let skip = uleb(stream, &mut pos);
-                    if count > (MAX_INDIRECT_IMPORTS - out.len()) as u64 {
+                    if count > (MAX_INDIRECT_IMPORTS - attempts) as u64 {
                         return None;
                     }
                     for _ in 0..count {
-                        if !push(segment, offset, &name, &mut out) {
+                        if !push(
+                            segment,
+                            offset,
+                            name,
+                            &names,
+                            &mut out,
+                            &mut attempts,
+                            &mut name_bytes,
+                        ) {
                             return None;
                         }
                         offset = offset.wrapping_add(ptr).wrapping_add(skip);
@@ -1339,7 +1530,7 @@ fn macho_bind_imports(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<Vec<
             }
         }
     }
-    Some(out)
+    Some((names, out))
 }
 
 /// True when the dyld bind streams of a Mach-O can be expanded within
@@ -1358,6 +1549,7 @@ fn scan_jmp_stubs(
     is_64: bool,
     slots: &HashMap<u64, String>,
     out: &mut HashMap<u64, String>,
+    name_budget: &mut usize,
 ) {
     for (index, stub) in bytes.chunks(entry).enumerate() {
         let Some(pos) = stub.windows(2).position(|w| w == [0xff, 0x25]) else {
@@ -1378,7 +1570,9 @@ fn scan_jmp_stubs(
             u64::from(raw as u32)
         };
         if let Some(name) = slots.get(&slot) {
-            out.insert(stub_addr, name.clone());
+            if !put_name(out, name_budget, stub_addr, name) {
+                return;
+            }
         }
     }
 }
