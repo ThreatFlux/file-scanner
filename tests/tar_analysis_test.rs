@@ -100,8 +100,6 @@ fn test_plain_tar_detection() {
     let temp_file = NamedTempFile::new().unwrap();
     std::fs::write(temp_file.path(), &tar_data).unwrap();
 
-    assert!(is_tar_file(temp_file.path()));
-
     let analysis = analyze_tar(temp_file.path()).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::Tar));
     assert_eq!(analysis.metadata.total_entries, 1);
@@ -121,8 +119,6 @@ fn test_tar_gz_detection() {
     data.extend_from_slice(&create_test_tar());
     std::fs::write(&tar_gz_path, &data).unwrap();
 
-    assert!(is_tar_file(&tar_gz_path));
-
     let analysis = analyze_tar(&tar_gz_path).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::TarGz));
     assert!(analysis.metadata.created_by.unwrap().contains("gzip"));
@@ -137,8 +133,6 @@ fn test_tar_bz2_detection() {
     data.extend_from_slice(&create_test_tar());
     std::fs::write(&tar_bz2_path, &data).unwrap();
 
-    assert!(is_tar_file(&tar_bz2_path));
-
     let analysis = analyze_tar(&tar_bz2_path).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::TarBz2));
     assert!(analysis.metadata.created_by.unwrap().contains("bzip2"));
@@ -152,8 +146,6 @@ fn test_tar_xz_detection() {
     let mut data = create_xz_header();
     data.extend_from_slice(&create_test_tar());
     std::fs::write(&tar_xz_path, &data).unwrap();
-
-    assert!(is_tar_file(&tar_xz_path));
 
     let analysis = analyze_tar(&tar_xz_path).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::TarXz));
@@ -204,8 +196,6 @@ fn test_invalid_tar_file() {
     let temp_file = NamedTempFile::new().unwrap();
     std::fs::write(temp_file.path(), b"This is not a TAR file").unwrap();
 
-    assert!(!is_tar_file(temp_file.path()));
-
     let result = analyze_tar(temp_file.path());
     assert!(result.is_err());
     assert!(result
@@ -217,8 +207,6 @@ fn test_invalid_tar_file() {
 #[test]
 fn test_empty_file() {
     let temp_file = NamedTempFile::new().unwrap();
-
-    assert!(!is_tar_file(temp_file.path()));
 
     let result = analyze_tar(temp_file.path());
     assert!(result.is_err());

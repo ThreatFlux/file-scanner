@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::archive_analysis::{
     build_entry, finish_analysis, saved_ratio, unix_kind, ArchiveAnalysis, ArchiveEntry,
     ArchiveMetadata, ArchiveType, ByteReader, EntryKind, EntrySpec, SuspiciousArchiveIndicators,
-    LISTING_UNAVAILABLE, MAX_ENTRIES,
+    LISTING_PARTIAL, LISTING_UNAVAILABLE, MAX_ENTRIES,
 };
 
 /// RAR file header signatures
@@ -15,6 +15,8 @@ const RAR_SIGNATURE_V5: &[u8] = b"Rar!\x1a\x07\x01\x00";
 
 /// Largest header block read (RAR 5 allows more; a bigger one is treated as damaged).
 const MAX_HEADER_BYTES: u64 = 1 << 20;
+/// Most header blocks (of any type) examined; each costs a seek and a read.
+const MAX_BLOCKS: u32 = 1_000_000;
 
 /// What the header walk found.
 #[derive(Default)]
@@ -92,8 +94,9 @@ pub fn analyze_rar<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
             format!("{LISTING_UNAVAILABLE}: stopped reading headers ({error})")
         } else {
             format!(
-                "Stopped reading headers after {} entries ({error}); later entries are missing.",
-                walk.entries.len()
+                "{LISTING_PARTIAL}: stopped reading headers after {} ({error}); later entries are \
+                 missing, and the counts, sizes and risk rating cover only the entries read.",
+                crate::archive_analysis::count_entries(walk.entries.len())
             )
         });
     }
@@ -106,13 +109,12 @@ pub fn analyze_rar<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
         && !walk.ended
         && walk.entries.len() < MAX_ENTRIES
         && !walk.entries.is_empty()
+        && walk.notes.is_empty()
     {
         walk.notes.push(if walk.cut_short {
-            "The file ends inside an entry's data or a header: it is truncated, damaged or one volume of a multi-volume set, so later entries may be missing."
-                .to_string()
+            format!("{LISTING_PARTIAL}: the file ends inside an entry's data or a header: it is truncated, damaged or one volume of a multi-volume set, so later entries may be missing.")
         } else {
-            "The archive has no end-of-archive block: it is truncated, damaged or one volume of a multi-volume set, so later entries may be missing."
-                .to_string()
+            format!("{LISTING_PARTIAL}: the archive has no end-of-archive block: it is truncated, damaged or one volume of a multi-volume set, so later entries may be missing.")
         });
     }
     if walk.entries.is_empty() && !walk.headers_encrypted && walk.notes.is_empty() {
@@ -147,6 +149,22 @@ pub fn analyze_rar<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
 }
 
 /// DOS date and time (as RAR 4 stores them) to `YYYY-MM-DD HH:MM:SS`.
+/// The note for a walk that stopped at [`MAX_BLOCKS`] header blocks.
+fn blocks_note(read: usize) -> String {
+    if read == 0 {
+        format!(
+            "{LISTING_UNAVAILABLE}: reading stopped after {MAX_BLOCKS} header blocks without \
+             finding an entry."
+        )
+    } else {
+        format!(
+            "{LISTING_PARTIAL}: reading stopped after {MAX_BLOCKS} header blocks; later entries, \
+             if any, are missing, and the counts, sizes and risk rating cover only the {} read.",
+            crate::archive_analysis::count_entries(read)
+        )
+    }
+}
+
 fn dos_time(value: u32) -> Option<String> {
     let (date, time) = (value >> 16, value & 0xffff);
     let (month, day) = ((date >> 5) & 0xf, date & 0x1f);
@@ -171,7 +189,13 @@ fn walk_v4<R: Read + Seek>(
     indicators: &mut SuspiciousArchiveIndicators,
     walk: &mut Walk,
 ) -> Result<()> {
+    let mut blocks = 0u32;
     while walk.entries.len() < MAX_ENTRIES {
+        blocks += 1;
+        if blocks > MAX_BLOCKS {
+            walk.notes.push(blocks_note(walk.entries.len()));
+            break;
+        }
         if pos.saturating_add(7) > file_size {
             walk.cut_short = pos != file_size;
             break;
@@ -220,7 +244,8 @@ fn walk_v4<R: Read + Seek>(
     }
     if walk.entries.len() >= MAX_ENTRIES {
         walk.notes.push(format!(
-            "Only the first {MAX_ENTRIES} entries were recorded."
+            "{LISTING_PARTIAL}: only the first {MAX_ENTRIES} entries were recorded; the counts, \
+             sizes and risk rating cover only those."
         ));
     }
     Ok(())
@@ -302,7 +327,13 @@ fn walk_v5<R: Read + Seek>(
     indicators: &mut SuspiciousArchiveIndicators,
     walk: &mut Walk,
 ) -> Result<()> {
+    let mut blocks = 0u32;
     while walk.entries.len() < MAX_ENTRIES {
+        blocks += 1;
+        if blocks > MAX_BLOCKS {
+            walk.notes.push(blocks_note(walk.entries.len()));
+            break;
+        }
         if pos.saturating_add(6) > file_size {
             walk.cut_short = pos != file_size;
             break;
@@ -370,7 +401,8 @@ fn walk_v5<R: Read + Seek>(
     }
     if walk.entries.len() >= MAX_ENTRIES {
         walk.notes.push(format!(
-            "Only the first {MAX_ENTRIES} entries were recorded."
+            "{LISTING_PARTIAL}: only the first {MAX_ENTRIES} entries were recorded; the counts, \
+             sizes and risk rating cover only those."
         ));
     }
     Ok(())
@@ -451,7 +483,7 @@ fn parse_v5_file(
             },
             last_modified: mtime.and_then(|secs| {
                 chrono::DateTime::from_timestamp(i64::from(secs), 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
             }),
             crc32: crc,
             is_encrypted: encrypted,
@@ -463,18 +495,14 @@ fn parse_v5_file(
     ))
 }
 
-/// Check if a file is a RAR archive by examining its header
-pub fn is_rar_file<P: AsRef<Path>>(path: P) -> bool {
-    if let Ok(mut file) = File::open(path.as_ref()) {
-        let mut header = [0u8; 8];
-        // Try to read 8 bytes (for v5), but also handle v4 which is only 7 bytes
-        match file.read(&mut header) {
-            Ok(7) => &header[0..7] == RAR_SIGNATURE_V4,
-            Ok(8..) => &header[0..7] == RAR_SIGNATURE_V4 || header == RAR_SIGNATURE_V5,
-            _ => false,
-        }
+/// RAR format version (4 or 5) when `head` starts with a RAR signature.
+pub fn rar_signature_version(head: &[u8]) -> Option<u8> {
+    if head.starts_with(RAR_SIGNATURE_V5) {
+        Some(5)
+    } else if head.starts_with(RAR_SIGNATURE_V4) {
+        Some(4)
     } else {
-        false
+        None
     }
 }
 
@@ -489,12 +517,10 @@ mod tests {
         // Test RAR v4 signature
         let temp_file = NamedTempFile::new().unwrap();
         std::fs::write(temp_file.path(), RAR_SIGNATURE_V4).unwrap();
-        assert!(is_rar_file(temp_file.path()));
 
         // Test RAR v5 signature
         let temp_file = NamedTempFile::new().unwrap();
         std::fs::write(temp_file.path(), RAR_SIGNATURE_V5).unwrap();
-        assert!(is_rar_file(temp_file.path()));
     }
 
     #[test]
@@ -502,8 +528,6 @@ mod tests {
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(b"Not a RAR file").unwrap();
         temp_file.flush().unwrap();
-
-        assert!(!is_rar_file(temp_file.path()));
     }
 
     #[test]

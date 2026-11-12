@@ -55,8 +55,6 @@ fn test_rar_v4_detection() {
     temp_file.write_all(&[0u8; 512]).unwrap(); // Add some content
     temp_file.flush().unwrap();
 
-    assert!(is_rar_file(temp_file.path()));
-
     let analysis = analyze_rar(temp_file.path()).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::Rar));
     assert_eq!(analysis.metadata.created_by, Some("RAR 4.x".to_string()));
@@ -69,8 +67,6 @@ fn test_rar_v5_detection() {
     temp_file.write_all(&[0u8; 512]).unwrap(); // Add some content
     temp_file.flush().unwrap();
 
-    assert!(is_rar_file(temp_file.path()));
-
     let analysis = analyze_rar(temp_file.path()).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::Rar));
     assert_eq!(analysis.metadata.created_by, Some("RAR 5.x".to_string()));
@@ -81,8 +77,6 @@ fn test_invalid_rar_file() {
     let mut temp_file = NamedTempFile::new().unwrap();
     temp_file.write_all(b"This is not a RAR file").unwrap();
     temp_file.flush().unwrap();
-
-    assert!(!is_rar_file(temp_file.path()));
 
     let result = analyze_rar(temp_file.path());
     assert!(result.is_err());
@@ -95,8 +89,6 @@ fn test_invalid_rar_file() {
 #[test]
 fn test_empty_file() {
     let temp_file = NamedTempFile::new().unwrap();
-
-    assert!(!is_rar_file(temp_file.path()));
 
     let result = analyze_rar(temp_file.path());
     assert!(result.is_err());

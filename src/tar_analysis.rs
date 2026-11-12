@@ -4,8 +4,9 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::archive_analysis::{
-    build_entry, finish_analysis, saved_ratio, ArchiveAnalysis, ArchiveEntry, ArchiveMetadata,
-    ArchiveType, EntryKind, EntrySpec, SuspiciousArchiveIndicators, MAX_ENTRIES, MAX_STREAM_BYTES,
+    build_entry, count_entries, finish_analysis, saved_ratio, ArchiveAnalysis, ArchiveEntry,
+    ArchiveMetadata, ArchiveType, EntryKind, EntrySpec, SuspiciousArchiveIndicators,
+    LISTING_PARTIAL, LISTING_UNAVAILABLE, MAX_ENTRIES, MAX_PATH_CHARS, MAX_STREAM_BYTES,
 };
 
 /// TAR file header structure
@@ -17,29 +18,95 @@ const MAX_RECORD_BYTES: u64 = 1 << 20;
 
 /// A tar source that can skip forward cheaply (a file seeks, a stream reads).
 trait Source: Read {
-    fn skip(&mut self, n: u64) -> std::io::Result<()>;
-}
-
-impl Source for BufReader<File> {
-    fn skip(&mut self, n: u64) -> std::io::Result<()> {
-        self.seek_relative(i64::try_from(n).unwrap_or(i64::MAX))
+    /// Skip `n` bytes; `Ok(false)` when the data ended first.
+    fn skip(&mut self, n: u64) -> std::io::Result<bool>;
+    /// Whether reading stopped because of the decompression limit rather than
+    /// the end of the data.
+    fn cut_by_limit(&self) -> bool {
+        false
     }
 }
 
-impl<R: Read> Source for std::io::Take<flate2::read::GzDecoder<R>> {
-    fn skip(&mut self, n: u64) -> std::io::Result<()> {
-        std::io::copy(&mut self.by_ref().take(n), &mut std::io::sink()).map(|_| ())
+/// A plain tar file; knows its length so a truncated archive is noticed.
+struct PlainSource {
+    reader: BufReader<File>,
+    pos: u64,
+    len: u64,
+}
+
+impl Read for PlainSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.reader.read(buf)?;
+        self.pos += n as u64;
+        Ok(n)
     }
+}
+
+impl Source for PlainSource {
+    fn skip(&mut self, n: u64) -> std::io::Result<bool> {
+        let room = self.len.saturating_sub(self.pos);
+        let step = n.min(room);
+        self.reader
+            .seek_relative(i64::try_from(step).unwrap_or(i64::MAX))?;
+        self.pos += step;
+        Ok(step == n)
+    }
+}
+
+/// A gzip stream (every member, as `tar` reads it) read through a byte limit.
+struct GzSource<R: Read> {
+    inner: std::io::Take<flate2::read::MultiGzDecoder<R>>,
+}
+
+impl<R: Read> Read for GzSource<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl<R: Read> Source for GzSource<R> {
+    fn skip(&mut self, n: u64) -> std::io::Result<bool> {
+        let copied = std::io::copy(&mut self.inner.by_ref().take(n), &mut std::io::sink())?;
+        Ok(copied == n)
+    }
+
+    fn cut_by_limit(&self) -> bool {
+        self.inner.limit() == 0
+    }
+}
+
+/// Why the walk over the headers ended.
+enum Stop {
+    /// The end-of-archive marker, or the end of the data at a header boundary.
+    Clean,
+    /// [`MAX_ENTRIES`] entries were recorded.
+    EntryCap,
+    /// The decompression limit was reached.
+    Limit,
+    /// The data ended inside a header or an entry's data.
+    Short(&'static str),
+    /// The data could not be read or a header was invalid.
+    Failed(&'static str),
 }
 
 /// Analyze a TAR archive (plain or gzip-compressed) by reading its entries.
 ///
 /// The entry list is bounded: at most [`MAX_ENTRIES`] entries are recorded, a
 /// compressed stream is read through at most [`MAX_STREAM_BYTES`] decompressed
-/// bytes and no long-name or pax record over 1 MiB is read. `.tar.bz2` and
-/// `.tar.xz` are recognized but their entries cannot be listed (no decoder is
-/// linked); the result says so in `notes`.
+/// bytes, no long-name or pax record over 1 MiB is read and a recorded path or
+/// link target is cut to 4096 characters. `.tar.bz2` and `.tar.xz` are
+/// recognized but their entries cannot be listed (no decoder is linked); the
+/// result says so in `notes`, as it does for every other way the listing can
+/// be short.
 pub fn analyze_tar<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
+    analyze_tar_limited(path, MAX_STREAM_BYTES)
+}
+
+/// [`analyze_tar`] reading a compressed stream through at most `stream_limit`
+/// decompressed bytes (at most [`MAX_STREAM_BYTES`]); the result says so in
+/// `notes` when the limit cuts the listing short.
+pub fn analyze_tar_limited<P: AsRef<Path>>(path: P, stream_limit: u64) -> Result<ArchiveAnalysis> {
+    let stream_limit = stream_limit.min(MAX_STREAM_BYTES);
     let path = path.as_ref();
     let file = File::open(path).context("Failed to open TAR file")?;
     let mut reader = BufReader::new(file);
@@ -52,31 +119,68 @@ pub fn analyze_tar<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
     let mut entries = Vec::new();
 
     reader.seek(SeekFrom::Start(0))?;
-    let outcome = match archive_type {
-        ArchiveType::Tar => walk_tar(reader, &mut entries, &mut indicators, &mut notes),
-        ArchiveType::TarGz => {
-            let decoder = flate2::read::GzDecoder::new(reader).take(MAX_STREAM_BYTES);
-            walk_tar(decoder, &mut entries, &mut indicators, &mut notes)
-        }
+    let stop = match archive_type {
+        ArchiveType::Tar => walk_tar(
+            PlainSource {
+                reader,
+                pos: 0,
+                len: file_size,
+            },
+            &mut entries,
+            &mut indicators,
+            &mut notes,
+        ),
+        ArchiveType::TarGz => walk_tar(
+            GzSource {
+                inner: flate2::read::MultiGzDecoder::new(reader).take(stream_limit + 1),
+            },
+            &mut entries,
+            &mut indicators,
+            &mut notes,
+        ),
         _ => {
             notes.push(format!(
-                "Entry listing is unavailable: this is a {} stream (a tar archive if it is a \
+                "{LISTING_UNAVAILABLE}: this is a {} stream (a tar archive if it is a \
                  .tar.bz2/.tar.xz) and no decoder for it is built in.",
                 get_tar_variant_name(&archive_type)
             ));
-            Ok(false)
+            Stop::Clean
         }
     };
-    match outcome {
-        Ok(true) => notes.push(format!(
-            "Only the first {MAX_ENTRIES} entries were recorded."
+    let listed = entries.len();
+    match stop {
+        Stop::Clean => {}
+        Stop::EntryCap => notes.push(format!(
+            "{LISTING_PARTIAL}: only the first {MAX_ENTRIES} entries were recorded; the counts, \
+             sizes and risk rating cover only those."
         )),
-        Ok(false) => {}
-        Err(reason) => notes.push(format!(
-            "Stopped reading after {} entries: {reason}. The archive may be damaged or longer \
-             than the {} MiB decompression limit.",
-            entries.len(),
-            MAX_STREAM_BYTES >> 20
+        Stop::Limit if listed == 0 => notes.push(format!(
+            "{LISTING_UNAVAILABLE}: reading stopped at the {} MiB decompression limit before \
+             the first entry was complete.",
+            stream_limit >> 20
+        )),
+        Stop::Limit => notes.push(format!(
+            "{LISTING_PARTIAL}: reading stopped at the {} MiB decompression limit after {}; \
+             later entries, if any, are missing, and the counts, sizes and risk rating \
+             cover only those read.",
+            stream_limit >> 20,
+            count_entries(listed)
+        )),
+        Stop::Short(reason) if listed == 0 => notes.push(format!(
+            "{LISTING_UNAVAILABLE}: {reason}; the archive is truncated or damaged."
+        )),
+        Stop::Short(reason) => notes.push(format!(
+            "{LISTING_PARTIAL}: {reason}, so the archive is truncated or damaged; the counts, \
+             sizes and risk rating cover only the {} read.",
+            count_entries(listed)
+        )),
+        Stop::Failed(reason) if listed == 0 => notes.push(format!(
+            "{LISTING_UNAVAILABLE}: no entry could be read ({reason}); the archive may be damaged."
+        )),
+        Stop::Failed(reason) => notes.push(format!(
+            "{LISTING_PARTIAL}: stopped reading after {}: {reason}. The archive may be \
+             damaged; the counts, sizes and risk rating cover only the entries read.",
+            count_entries(listed)
         )),
     }
 
@@ -125,39 +229,55 @@ fn read_block<S: Read>(
     Ok(got)
 }
 
-/// Walk the headers of a tar stream. Returns whether the entry limit cut the
-/// list short, or a fixed sentence saying why reading stopped.
+/// Walk the headers of a tar stream.
 fn walk_tar<S: Source>(
     mut source: S,
     entries: &mut Vec<ArchiveEntry>,
     indicators: &mut SuspiciousArchiveIndicators,
     notes: &mut Vec<String>,
-) -> Result<bool, &'static str> {
+) -> Stop {
     use tar::EntryType;
     let mut long_name: Option<Vec<u8>> = None;
     let mut long_link: Option<Vec<u8>> = None;
     let mut pax_size: Option<u64> = None;
     let mut skipped_records = 0usize;
+    let mut cut_names = 0usize;
+    let mut lone_zero = false;
+    let mut resumed_after_zero = false;
     let result = loop {
         if entries.len() >= MAX_ENTRIES {
-            break Ok(true);
+            break Stop::EntryCap;
         }
         let mut block = [0u8; TAR_BLOCK_SIZE];
         match read_block(&mut source, &mut block) {
-            Ok(0) => break Ok(false),
-            Ok(n) if n < TAR_BLOCK_SIZE => break Err("the data ended inside a header block"),
+            Ok(0) if source.cut_by_limit() => break Stop::Limit,
+            Ok(0) => break Stop::Clean,
+            Ok(_) if source.cut_by_limit() => break Stop::Limit,
+            Ok(n) if n < TAR_BLOCK_SIZE => {
+                break Stop::Short("the data ended inside a header block")
+            }
             Ok(_) => {}
-            Err(reason) => break Err(reason),
+            Err(reason) => break Stop::Failed(reason),
         }
         if block.iter().all(|&b| b == 0) {
-            break Ok(false); // end-of-archive marker
+            // Two zero blocks end the archive; a lone one followed by more
+            // headers is skipped, as `tar` does.
+            if lone_zero {
+                break Stop::Clean;
+            }
+            lone_zero = true;
+            continue;
+        }
+        if lone_zero {
+            lone_zero = false;
+            resumed_after_zero = true;
         }
         if !validate_tar_checksum(&block) {
-            break Err("a header block failed its checksum");
+            break Stop::Failed("a header block failed its checksum");
         }
         let header = tar::Header::from_byte_slice(&block);
         let Ok(mut size) = header.entry_size() else {
-            break Err("an entry has an invalid size");
+            break Stop::Failed("an entry has an invalid size");
         };
         let kind = header.entry_type();
         let is_record = matches!(
@@ -174,17 +294,25 @@ fn walk_tar<S: Source>(
                 if size > MAX_RECORD_BYTES {
                     skipped_records += 1;
                 }
-                if source.skip(size.saturating_add(padding)).is_err() {
-                    break Err("the data could not be skipped");
+                match source.skip(size.saturating_add(padding)) {
+                    Ok(true) => continue,
+                    Ok(false) if source.cut_by_limit() => break Stop::Limit,
+                    Ok(false) => break Stop::Short("the data ended inside a record"),
+                    Err(_) => break Stop::Failed("the data could not be skipped"),
                 }
-                continue;
             }
             let mut data = vec![0u8; size as usize];
             if source.read_exact(&mut data).is_err() {
-                break Err("the data ended inside a name or extended-header record");
+                if source.cut_by_limit() {
+                    break Stop::Limit;
+                }
+                break Stop::Short("the data ended inside a name or extended-header record");
             }
-            if source.skip(padding).is_err() {
-                break Err("the data could not be skipped");
+            if !matches!(source.skip(padding), Ok(true)) {
+                if source.cut_by_limit() {
+                    break Stop::Limit;
+                }
+                break Stop::Short("the data ended inside a name or extended-header record");
             }
             match kind {
                 EntryType::GNULongName => long_name = Some(cstr(&data)),
@@ -210,15 +338,15 @@ fn walk_tar<S: Source>(
         let data_len = size.saturating_add(
             (TAR_BLOCK_SIZE as u64 - size % TAR_BLOCK_SIZE as u64) % TAR_BLOCK_SIZE as u64,
         );
-        entries.push(tar_entry(
-            header,
-            size,
-            long_name.take(),
-            long_link.take(),
-            indicators,
-        ));
-        if source.skip(data_len).is_err() {
-            break Err("the data could not be skipped");
+        let (entry, was_cut) =
+            tar_entry(header, size, long_name.take(), long_link.take(), indicators);
+        cut_names += usize::from(was_cut);
+        entries.push(entry);
+        match source.skip(data_len) {
+            Ok(true) => {}
+            Ok(false) if source.cut_by_limit() => break Stop::Limit,
+            Ok(false) => break Stop::Short("an entry's data extends past the end of the archive"),
+            Err(_) => break Stop::Failed("the data could not be skipped"),
         }
     };
     if skipped_records > 0 {
@@ -226,6 +354,19 @@ fn walk_tar<S: Source>(
             "{skipped_records} long-name or extended-header record(s) over 1 MiB were skipped \
              (the affected entries show their short header names)."
         ));
+    }
+    if cut_names > 0 {
+        notes.push(format!(
+            "{cut_names} entry path(s) or link target(s) longer than {MAX_PATH_CHARS} characters \
+             were cut in the listing (the risk checks ran on the full names)."
+        ));
+    }
+    if resumed_after_zero {
+        notes.push(
+            "A lone all-zero block was followed by more entries; they are listed, though some \
+             tar tools stop at the first zero block."
+                .to_string(),
+        );
     }
     result
 }
@@ -241,7 +382,7 @@ fn tar_entry(
     long_name: Option<Vec<u8>>,
     long_link: Option<Vec<u8>>,
     indicators: &mut SuspiciousArchiveIndicators,
-) -> ArchiveEntry {
+) -> (ArchiveEntry, bool) {
     use tar::EntryType;
     let kind = match header.entry_type() {
         EntryType::Directory => EntryKind::Directory,
@@ -259,7 +400,7 @@ fn tar_entry(
         .ok()
         .and_then(|secs| i64::try_from(secs).ok())
         .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%SZ").to_string());
     let path_bytes = long_name.unwrap_or_else(|| header.path_bytes().into_owned());
     let path = String::from_utf8_lossy(&path_bytes).into_owned();
     let link_target = long_link
@@ -267,7 +408,11 @@ fn tar_entry(
         .filter(|bytes| !bytes.is_empty())
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
 
-    build_entry(
+    let was_cut = path.chars().count() > MAX_PATH_CHARS
+        || link_target
+            .as_ref()
+            .is_some_and(|t| t.chars().count() > MAX_PATH_CHARS);
+    let entry = build_entry(
         EntrySpec {
             path,
             kind,
@@ -286,7 +431,8 @@ fn tar_entry(
             link_target,
         },
         indicators,
-    )
+    );
+    (entry, was_cut)
 }
 
 /// Detect the TAR type from the content alone (magic bytes), so the same
@@ -327,7 +473,7 @@ fn detect_tar_type<R: Read + Seek>(reader: &mut BufReader<R>) -> Result<ArchiveT
 /// decompresses cleanly to something else is not a tar.
 fn gzip_holds_tar<R: Read + Seek>(reader: &mut BufReader<R>) -> Result<bool> {
     let mut block = [0u8; TAR_HEADER_SIZE];
-    let mut decoder = flate2::read::GzDecoder::new(&mut *reader);
+    let mut decoder = flate2::read::MultiGzDecoder::new(&mut *reader);
     let mut got = 0;
     let mut damaged = false;
     while got < block.len() {
@@ -348,6 +494,13 @@ fn gzip_holds_tar<R: Read + Seek>(reader: &mut BufReader<R>) -> Result<bool> {
     };
     reader.seek(SeekFrom::Start(0))?;
     Ok(holds)
+}
+
+/// Whether the first 512 bytes of `block` read as a tar header (a `ustar`
+/// magic, or a name and a valid checksum).
+pub fn is_tar_header(block: &[u8]) -> bool {
+    <&[u8; TAR_HEADER_SIZE]>::try_from(block.get(..TAR_HEADER_SIZE).unwrap_or_default())
+        .is_ok_and(has_tar_signature)
 }
 
 fn has_tar_signature(header: &[u8; TAR_HEADER_SIZE]) -> bool {
@@ -431,25 +584,6 @@ const fn get_tar_variant_name(archive_type: &ArchiveType) -> &'static str {
     }
 }
 
-/// Check if a file is a TAR archive by examining its structure
-pub fn is_tar_file<P: AsRef<Path>>(path: P) -> bool {
-    let path = path.as_ref();
-
-    if let Ok(file) = File::open(path) {
-        let mut reader = BufReader::new(file);
-
-        // Try to detect compressed TAR first
-        if let Ok(archive_type) = detect_tar_type(&mut reader) {
-            return matches!(
-                archive_type,
-                ArchiveType::Tar | ArchiveType::TarGz | ArchiveType::TarBz2 | ArchiveType::TarXz
-            );
-        }
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,16 +625,12 @@ mod tests {
         let tar_data = create_minimal_tar();
         let temp_file = NamedTempFile::new().unwrap();
         std::fs::write(temp_file.path(), &tar_data).unwrap();
-
-        assert!(is_tar_file(temp_file.path()));
     }
 
     #[test]
     fn test_non_tar_file() {
         let temp_file = NamedTempFile::new().unwrap();
         std::fs::write(temp_file.path(), b"Not a TAR file").unwrap();
-
-        assert!(!is_tar_file(temp_file.path()));
     }
 
     #[test]
@@ -701,7 +831,7 @@ mod tests {
         let analysis = analyze_tar(&path).unwrap();
         assert_eq!(analysis.metadata.total_entries, 1);
         let note = analysis.notes.join(" ");
-        assert!(note.contains("Stopped reading"), "{note}");
+        assert!(note.contains("stopped reading"), "{note}");
         assert!(!note.contains('\u{7}'), "no raw bytes in notes: {note:?}");
     }
 
@@ -843,5 +973,167 @@ mod tests {
         let path = dir.path().join("notes.txt.gz");
         std::fs::write(&path, gz.finish().unwrap()).unwrap();
         assert!(analyze_tar(&path).is_err());
+    }
+
+    fn tar_of(entries: &[(&str, &[u8])], end_marker: bool) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        for (name, data) in entries {
+            raw_entry(&mut b, name, tar::EntryType::Regular, 0o644, None, data);
+        }
+        let mut bytes = b.into_inner().unwrap();
+        if !end_marker {
+            bytes.truncate(bytes.len() - 1024.min(bytes.len()));
+            // `into_inner` wrote the marker; strip it again.
+        }
+        bytes
+    }
+
+    fn analyze_named(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> ArchiveAnalysis {
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        analyze_tar(&path).unwrap()
+    }
+
+    #[test]
+    fn every_gzip_member_is_read() {
+        let first = tar_of(&[("docs/readme.txt", b"hi")], false);
+        let second = tar_of(
+            &[("../../etc/cron.d/evil", b"x"), ("bin/payload.exe", b"y")],
+            true,
+        );
+        let mut gz = gzip_of(&first);
+        gz.extend(gzip_of(&second));
+        let dir = tempfile::tempdir().unwrap();
+        let analysis = analyze_named(&dir, "two.tar.gz", &gz);
+        assert_eq!(analysis.metadata.total_entries, 3, "{:?}", analysis.notes);
+        assert!(analysis.suspicious_indicators.has_path_traversal);
+    }
+
+    #[test]
+    fn a_stream_limit_is_reported_not_silent() {
+        let big = vec![0u8; 40_000];
+        let tar = tar_of(&[("a", &big), ("b", &big), ("c", &big)], true);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.tar.gz");
+        std::fs::write(&path, gzip_of(&tar)).unwrap();
+        let analysis = analyze_tar_limited(&path, 100_000).unwrap();
+        let notes = analysis.notes.join(" ");
+        assert!(notes.starts_with(LISTING_PARTIAL), "{notes}");
+        assert!(notes.contains("decompression limit"), "{notes}");
+        // Without the limit the same file reads clean.
+        let full = analyze_tar(&path).unwrap();
+        assert_eq!(full.metadata.total_entries, 3);
+        assert!(full.notes.is_empty(), "{:?}", full.notes);
+    }
+
+    #[test]
+    fn a_plain_tar_cut_inside_an_entry_says_so() {
+        let mut header = tar::Header::new_gnu();
+        header.set_path("big.bin").unwrap();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(1 << 30);
+        header.set_cksum();
+        let dir = tempfile::tempdir().unwrap();
+        let analysis = analyze_named(&dir, "cut.tar", header.as_bytes());
+        let notes = analysis.notes.join(" ");
+        assert!(notes.starts_with(LISTING_PARTIAL), "{notes}");
+        assert!(notes.contains("truncated"), "{notes}");
+    }
+
+    #[test]
+    fn entries_after_a_lone_zero_block_are_listed() {
+        let mut bytes = tar_of(&[("a.txt", b"hi")], false);
+        bytes.extend(vec![0u8; 512]);
+        bytes.extend(tar_of(&[("../../etc/cron.d/evil", b"x")], true));
+        let dir = tempfile::tempdir().unwrap();
+        let analysis = analyze_named(&dir, "lone.tar", &bytes);
+        assert_eq!(analysis.metadata.total_entries, 2);
+        assert!(analysis.suspicious_indicators.has_path_traversal);
+        assert!(analysis.notes.join(" ").contains("lone all-zero block"));
+    }
+
+    #[test]
+    fn a_damaged_gzip_with_no_entries_is_unavailable_not_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let analysis = analyze_named(&dir, "two.gz", &[0x1f, 0x8b]);
+        assert_eq!(analysis.metadata.total_entries, 0);
+        assert!(
+            analysis.notes.join(" ").starts_with(LISTING_UNAVAILABLE),
+            "{:?}",
+            analysis.notes
+        );
+    }
+
+    #[test]
+    fn long_names_are_cut_in_the_listing_but_checked_whole() {
+        let long = format!("{}/../../etc/passwd", "d".repeat(100_000));
+        let mut b = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        b.append_data(&mut header, &long, &b"x"[..]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let analysis = analyze_named(&dir, "long.tar", &b.into_inner().unwrap());
+        let entry = &analysis.entries[0];
+        assert!(
+            entry.path.chars().count() < MAX_PATH_CHARS + 40,
+            "{}",
+            entry.path.len()
+        );
+        assert!(entry.path.ends_with("chars in all)"));
+        assert!(analysis.suspicious_indicators.has_path_traversal);
+        assert!(analysis.notes.join(" ").contains("were cut"));
+        let modified = entry.last_modified.as_deref().unwrap();
+        assert!(modified.ends_with('Z'));
+    }
+
+    #[test]
+    fn security_lists_are_capped_and_ordinary_long_listings_get_no_cut_note() {
+        let mut b = tar::Builder::new(Vec::new());
+        for i in 0..2200 {
+            raw_entry(
+                &mut b,
+                &format!("../{i:05}/.keygen.pdf.exe"),
+                tar::EntryType::Symlink,
+                0o7777,
+                Some("../../../x"),
+                b"",
+            );
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b.into_inner().unwrap()).unwrap();
+        let analysis = analyze_tar(file.path()).unwrap();
+        let sec = &analysis.security_analysis;
+        assert_eq!(sec.path_traversal_risks.len(), 1000);
+        assert_eq!(sec.path_traversal_total, 4400);
+        assert_eq!(sec.unsafe_entries, 2200);
+        assert_eq!(sec.suspicious_files.len(), 1000);
+        assert_eq!(sec.hidden_content.len(), 1000);
+        assert!(analysis.suspicious_indicators.suspicious_patterns.len() <= 100);
+        assert!(matches!(sec.overall_risk, RiskLevel::Critical));
+
+        // Over 8 MiB of names that are all under the cap: nothing is cut, no note.
+        let mut b = tar::Builder::new(Vec::new());
+        for i in 0..99_000 {
+            raw_entry(
+                &mut b,
+                &format!("project/{}/file_{i:05}.js", "d".repeat(70)),
+                tar::EntryType::Regular,
+                0o644,
+                None,
+                b"",
+            );
+        }
+        std::fs::write(file.path(), b.into_inner().unwrap()).unwrap();
+        let analysis = analyze_tar(file.path()).unwrap();
+        assert!(
+            analysis.suspicious_indicators.name_bytes > crate::archive_analysis::NAME_BUDGET_BYTES
+        );
+        assert!(
+            analysis.notes.iter().all(|n| !n.contains("were cut")),
+            "{:?}",
+            analysis.notes
+        );
     }
 }

@@ -9,6 +9,7 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::Path,
+    sync::Arc,
 };
 
 use rmcp::{
@@ -20,15 +21,15 @@ use serde_json::{json, Value};
 
 use crate::{
     archive_analysis::{
-        analyze_zip, ArchiveAnalysis, ArchiveEntry, ArchiveType, EntryKind, RiskLevel,
+        analyze_zip, capped_text, ArchiveAnalysis, ArchiveEntry, ArchiveType, EntryKind, RiskLevel,
     },
     rar_analysis::analyze_rar,
     sevenz_analysis::analyze_7z,
-    tar_analysis::analyze_tar,
+    tar_analysis::analyze_tar_limited,
 };
 
 use super::{
-    output::{input_schema_with_budget, page, parse_request, respond, tool_error},
+    output::{input_schema_with_budget, parse_request, respond, tool_error},
     paths::Expect,
     FileScannerMcp,
 };
@@ -102,13 +103,14 @@ fn detect_from_head(path: &Path, head: &[u8], len: u64, file: &mut File) -> File
     if head.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0]) {
         return FileKind::new("xz", "xz compressed data", "application/x-xz");
     }
-    if head.starts_with(b"Rar!\x1a\x07\x01\x00") {
-        return FileKind::new("rar", "RAR archive (version 5)", "application/vnd.rar");
+    if let Some(version) = crate::rar_analysis::rar_signature_version(head) {
+        return FileKind::new(
+            "rar",
+            format!("RAR archive (version {version})"),
+            "application/vnd.rar",
+        );
     }
-    if head.starts_with(b"Rar!\x1a\x07\x00") {
-        return FileKind::new("rar", "RAR archive (version 4)", "application/vnd.rar");
-    }
-    if head.starts_with(b"7z\xbc\xaf\x27\x1c") {
+    if crate::sevenz_analysis::has_7z_signature(head) {
         let label = if head.len() > 7 {
             format!("7-Zip archive (format version {}.{})", head[6], head[7])
         } else {
@@ -139,7 +141,8 @@ fn detect_from_head(path: &Path, head: &[u8], len: u64, file: &mut File) -> File
         return FileKind::new("tar", "tar archive", "application/x-tar");
     }
 
-    if is_text(head) {
+    // A truncated "Rar!\x1a" signature is not a text file.
+    if !head.starts_with(b"Rar!\x1a") && is_text(head) {
         if let Some((language, mime)) = shebang_language(head) {
             return FileKind::new(
                 "script",
@@ -447,7 +450,7 @@ fn zip_family_kind(path: &Path, ext: &str, file: &mut File) -> FileKind {
 fn gzip_kind(file: &mut File) -> FileKind {
     let mut block = [0u8; 512];
     let inner_tar = file.seek(SeekFrom::Start(0)).is_ok()
-        && flate2::read::GzDecoder::new(&mut *file)
+        && flate2::read::MultiGzDecoder::new(&mut *file)
             .read_exact(&mut block)
             .is_ok()
         && is_tar_block(&block, 512);
@@ -464,36 +467,7 @@ fn gzip_kind(file: &mut File) -> FileKind {
 
 /// A tar header block: `ustar` at offset 257, or a name plus a valid checksum.
 fn is_tar_block(head: &[u8], len: u64) -> bool {
-    if len < 512 || head.len() < 512 {
-        return false;
-    }
-    if &head[257..262] == b"ustar" {
-        return true;
-    }
-    if head[0] == 0
-        || !head[..100]
-            .iter()
-            .take_while(|&&b| b != 0)
-            .all(|b| (0x20..0x7f).contains(b))
-    {
-        return false;
-    }
-    let stored = std::str::from_utf8(&head[148..156])
-        .ok()
-        .map(|s| s.trim_matches(|c| c == '\0' || c == ' '))
-        .and_then(|s| u32::from_str_radix(s, 8).ok());
-    let sum: u32 = head[..512]
-        .iter()
-        .enumerate()
-        .map(|(i, &b)| {
-            if (148..156).contains(&i) {
-                32
-            } else {
-                u32::from(b)
-            }
-        })
-        .sum();
-    stored == Some(sum)
+    len >= 512 && crate::tar_analysis::is_tar_header(head)
 }
 
 fn ole2_kind(file: &mut File) -> FileKind {
@@ -580,7 +554,17 @@ fn is_text(head: &[u8]) -> bool {
     if head.starts_with(&[0xff, 0xfe]) || head.starts_with(&[0xfe, 0xff]) {
         return true;
     }
+    // NUL is never text. A few other C0 control bytes (BEL, backspace overstrike,
+    // vertical tab, Ctrl-Z) occur in real scripts and man pages; more than a tenth
+    // of the head is binary data.
     if head.contains(&0) {
+        return false;
+    }
+    let controls = head
+        .iter()
+        .filter(|&&b| b < 0x20 && !matches!(b, b'\t' | b'\n' | 0x0c | b'\r' | 0x1b))
+        .count();
+    if controls * 10 > head.len() {
         return false;
     }
     match std::str::from_utf8(head) {
@@ -617,6 +601,14 @@ fn text_kind(head: &[u8], ext: &str) -> FileKind {
 
 /// Largest number of top-level names shown in an overview.
 const TOP_LEVEL_NAMES: usize = 10;
+/// Longest top-level name, and longest note, shown in an overview (characters).
+const OVERVIEW_NAME_CHARS: usize = 80;
+const OVERVIEW_NOTE_CHARS: usize = 240;
+/// Most notes shown in an overview.
+const OVERVIEW_NOTES: usize = 3;
+/// A tar.gz is read through at most this many decompressed bytes for an
+/// overview (the note says so when it cuts the listing).
+const OVERVIEW_STREAM_BYTES: u64 = 32 << 20;
 
 /// A compact, format-specific summary for the `analyze_file` overview, or
 /// `None` when the kind has nothing to add. It must stay small (a few hundred
@@ -625,6 +617,8 @@ const TOP_LEVEL_NAMES: usize = 10;
 /// Archives (ZIP family, tar, gzip-compressed tar, RAR, 7z) get entry counts,
 /// sizes, the top-level names and risk flags; documents and scripts name the
 /// tool to call; Java kinds name `analyze_java_file`.
+// The caller runs it on the blocking pool: it opens the archive and reads at
+// most 32 MiB of a compressed tar.
 pub(crate) fn format_overview(path: &Path, kind: &FileKind) -> Option<Value> {
     let file_path = path.to_string_lossy().into_owned();
     let tool = |name: &str| {
@@ -651,14 +645,18 @@ pub(crate) fn format_overview(path: &Path, kind: &FileKind) -> Option<Value> {
     }
 }
 
-fn analyze_archive(path: &Path, kind: &FileKind) -> Result<ArchiveAnalysis, String> {
+fn analyze_archive(
+    path: &Path,
+    kind: &FileKind,
+    stream_limit: u64,
+) -> Result<ArchiveAnalysis, String> {
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_default();
     let outcome = match kind.kind.as_str() {
         "zip" | "jar" | "apk" | "ooxml" => analyze_zip(path),
-        "gzip" | "tar" | "bzip2" | "xz" => analyze_tar(path),
+        "gzip" | "tar" | "bzip2" | "xz" => analyze_tar_limited(path, stream_limit),
         "rar" => analyze_rar(path),
         "7z" => analyze_7z(path),
         other => {
@@ -744,6 +742,10 @@ fn top_level_names(entries: &[ArchiveEntry]) -> (Vec<String>, usize) {
     }
     let total = seen.len();
     seen.truncate(TOP_LEVEL_NAMES);
+    let seen = seen
+        .iter()
+        .map(|name| capped_text(name, OVERVIEW_NAME_CHARS))
+        .collect();
     (seen, total)
 }
 
@@ -766,6 +768,66 @@ fn risk_name(level: &RiskLevel) -> &'static str {
         RiskLevel::Medium => "medium",
         RiskLevel::High => "high",
         RiskLevel::Critical => "critical",
+    }
+}
+
+/// What the notes of a listing say about how much of the archive was read.
+/// Counts that were not measured are reported as null, and "low" risk is not
+/// claimed for entries that were not read.
+#[derive(Clone, Copy, Default)]
+struct ListingGaps {
+    /// The entries could not be read, or only some were (counts are lower bounds).
+    counts_unknown: bool,
+    /// The header gave a total, but only the first entries were recorded.
+    capped: bool,
+    /// Some names were cut before the risk checks; counts and sizes are exact.
+    unchecked: bool,
+}
+
+impl ListingGaps {
+    fn of<'a>(notes: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut gaps = Self::default();
+        for note in notes {
+            if note.starts_with(crate::archive_analysis::LISTING_UNAVAILABLE)
+                || note.starts_with(crate::archive_analysis::LISTING_PARTIAL)
+            {
+                gaps.counts_unknown = true;
+            } else if note.starts_with(crate::archive_analysis::LISTING_CAPPED) {
+                gaps.capped = true;
+            } else if note.starts_with(crate::archive_analysis::NAMES_UNCHECKED) {
+                gaps.unchecked = true;
+            }
+        }
+        gaps
+    }
+
+    /// An entry count: the header's total survives a cap, not a read failure.
+    fn count(self, value: Value) -> Value {
+        if self.counts_unknown {
+            Value::Null
+        } else {
+            value
+        }
+    }
+
+    /// A size or ratio, which only covers the entries recorded.
+    fn sizes(self, value: Value) -> Value {
+        if self.counts_unknown || self.capped {
+            Value::Null
+        } else {
+            value
+        }
+    }
+
+    /// A risk label, "unknown" instead of "low" when part of the archive was not read.
+    fn risk(self, risk: &str) -> String {
+        if (self.counts_unknown || self.capped || self.unchecked)
+            && risk.eq_ignore_ascii_case("low")
+        {
+            "unknown".to_string()
+        } else {
+            risk.to_lowercase()
+        }
     }
 }
 
@@ -792,21 +854,35 @@ fn archive_overview(path: &Path, kind: &FileKind) -> Value {
             "note": "compressed stream; inspect_archive cannot list it (decompress it first, or it is not a tar archive)",
         });
     }
-    match analyze_archive(path, kind) {
+    match analyze_archive(path, kind, OVERVIEW_STREAM_BYTES) {
         Ok(analysis) => {
             let (top, top_total) = top_level_names(&analysis.entries);
+            let mut notes: Vec<String> = analysis
+                .notes
+                .iter()
+                .take(OVERVIEW_NOTES)
+                .map(|n| capped_text(n, OVERVIEW_NOTE_CHARS))
+                .collect();
+            if analysis.notes.len() > OVERVIEW_NOTES {
+                notes.push(format!(
+                    "{} more note(s); inspect_archive lists them all",
+                    analysis.notes.len() - OVERVIEW_NOTES
+                ));
+            }
+            let gaps = ListingGaps::of(analysis.notes.iter().map(String::as_str));
+            let risk = risk_name(&analysis.security_analysis.overall_risk);
             json!({
                 "kind": kind.kind,
                 "archive": {
                     "format": format_name(&analysis.archive_type),
-                    "entries": analysis.metadata.total_entries,
-                    "uncompressed_bytes": analysis.metadata.total_size_uncompressed,
+                    "entries": gaps.count(json!(analysis.metadata.total_entries)),
+                    "uncompressed_bytes": gaps.sizes(json!(analysis.metadata.total_size_uncompressed)),
                     "compressed_bytes": analysis.metadata.total_size_compressed,
                     "top_level": top,
                     "top_level_total": top_total,
-                    "risk": risk_name(&analysis.security_analysis.overall_risk),
+                    "risk": gaps.risk(risk),
                     "risk_flags": risk_flags(&analysis),
-                    "notes": analysis.notes,
+                    "notes": notes,
                 },
                 "next_steps": next_steps,
             })
@@ -830,7 +906,9 @@ path) or `risky_only` (entries with a medium or higher risk indicator: path trav
 leaving the extraction root, device nodes, setuid bits, executables, double extensions). \
 Encrypted or compressed RAR/7z headers cannot be listed and are reported in `notes`; .tar.bz2 \
 and .tar.xz are recognized but not listed. The complete listing is cached by the file's SHA-256, \
-so paging and filtering do not re-read the archive. Call analyze_file first for an overview. \
+so paging and filtering do not parse the archive again. Call analyze_file first for an overview. Times are UTC and end in Z for tar, 7z and RAR 5 \
+archives; ZIP and RAR 4 store DOS times with no zone, shown without a Z (local time of the \
+archiver). \
 Results are compact JSON capped at `max_output_bytes` (default 80000, ceiling 400000).";
 
 /// Arguments of `inspect_archive`.
@@ -852,7 +930,7 @@ pub struct InspectArchiveRequest {
 }
 
 /// Section-cache key for the complete listing; the file's SHA-256 is the other half.
-const ARCHIVE_CACHE_KEY: &str = "archive:listing";
+const ARCHIVE_CACHE_KEY: &str = "archive:listing:v4";
 
 #[tool_router(router = formats_router, vis = "pub(crate)")]
 impl FileScannerMcp {
@@ -891,44 +969,101 @@ impl FileScannerMcp {
             }
         };
 
-        let cache = self.state.section_cache();
-        let (listing, cache_state) = if let Some(hit) = cache.get(&sha256, ARCHIVE_CACHE_KEY) {
-            (hit, "hit")
-        } else {
-            let worker_path = path.clone();
-            let outcome = self
-                .state
-                .run_blocking("inspect_archive", move || {
+        // The cached value holds the compact rows of the listing and the
+        // content-derived kind, so paging and filtering parse neither the
+        // archive nor its central directory again. Only a Java archive's label
+        // can depend on the file name (WAR, EAR), so only that kind is
+        // detected again. Reading a large cached value back inflates and parses
+        // it, so the lookup, the analysis and the page all run off the async thread.
+        let state = Arc::clone(&self.state);
+        let worker_path = path.clone();
+        let worker_sha = sha256.clone();
+        let built = self
+            .state
+            .run_blocking("inspect_archive", move || {
+                let cache = state.section_cache();
+                let cached = cache
+                    .get(&worker_sha, ARCHIVE_CACHE_KEY)
+                    .filter(|hit| hit["listing"].is_object() && hit["detected"].is_object());
+                let (stored, cache_state) = if let Some(hit) = cached {
+                    (hit, "hit")
+                } else {
                     let kind = detect_file_kind(&worker_path)
                         .map_err(|e| format!("Could not read the file: {e}"))?;
-                    let analysis = analyze_archive(&worker_path, &kind)?;
-                    let value = serde_json::to_value(&analysis)
-                        .map_err(|e| format!("Could not serialize the listing: {e}"))?;
-                    // The label can depend on the file name (WAR, EAR), which the
-                    // content-hash cache key ignores, so it is not cached.
-                    Ok::<Value, String>(value)
-                })
-                .await;
-            let value = match outcome {
-                Ok(Ok(value)) => value,
-                Ok(Err(message)) | Err(message) => return Ok(tool_error(message)),
-            };
-            cache.put(&sha256, ARCHIVE_CACHE_KEY, &value);
-            (std::sync::Arc::new(value), "miss")
-        };
-
-        let detected = detect_file_kind(&path).map_or(
-            Value::Null,
-            |kind| json!({"kind": kind.kind, "label": kind.label}),
-        );
-        Ok(respond(
-            build_listing(&listing, &detected, &request, &sha256, cache_state),
-            budget,
-        ))
+                    let analysis = analyze_archive(
+                        &worker_path,
+                        &kind,
+                        crate::archive_analysis::MAX_STREAM_BYTES,
+                    )?;
+                    let stored = stored_listing(analysis, &kind)?;
+                    cache.put(&worker_sha, ARCHIVE_CACHE_KEY, &stored);
+                    (Arc::new(stored), "miss")
+                };
+                let mut detected = stored["detected"].clone();
+                if detected["kind"] == "jar" {
+                    if let Ok(kind) = detect_file_kind(&worker_path) {
+                        detected = json!({"kind": kind.kind, "label": kind.label});
+                    }
+                }
+                Ok::<Value, String>(build_listing(
+                    &stored["listing"],
+                    &detected,
+                    &request,
+                    &worker_sha,
+                    cache_state,
+                    budget,
+                ))
+            })
+            .await;
+        match built {
+            Ok(Ok(value)) => Ok(respond(value, budget)),
+            Ok(Err(message)) | Err(message) => Ok(tool_error(message)),
+        }
     }
 }
 
+/// The value kept in the section cache: the analysis with its entries replaced
+/// by compact rows (one allocation per entry, the full entries dropped as they
+/// are converted) and the detected kind. Rows of entries with a medium or
+/// higher risk carry `"risky": true`.
+fn stored_listing(mut analysis: ArchiveAnalysis, kind: &FileKind) -> Result<Value, String> {
+    let entries = std::mem::take(&mut analysis.entries);
+    let mut rows = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let full = serde_json::to_value(&entry)
+            .map_err(|e| format!("Could not serialize the listing: {e}"))?;
+        let mut row = compact_entry(&full);
+        if entry_is_risky(&full) {
+            row["risky"] = true.into();
+        }
+        rows.push(row);
+    }
+    // Per-entry duplicates of what the rows hold; inspect_archive does not
+    // show them, so they are dropped before serializing.
+    analysis.security_analysis.suspicious_files = Vec::new();
+    analysis.security_analysis.hidden_content = Vec::new();
+    let mut listing = serde_json::to_value(&analysis)
+        .map_err(|e| format!("Could not serialize the listing: {e}"))?;
+    drop(analysis);
+    if let Some(security) = listing["security_analysis"].as_object_mut() {
+        security.remove("suspicious_files");
+        security.remove("hidden_content");
+    }
+    listing["entries"] = Value::Array(rows);
+    let mut stored = serde_json::Map::new();
+    stored.insert("listing".into(), listing);
+    stored.insert(
+        "detected".into(),
+        json!({"kind": kind.kind, "label": kind.label}),
+    );
+    Ok(Value::Object(stored))
+}
+
 fn entry_is_risky(entry: &Value) -> bool {
+    // A stored compact row carries the answer.
+    if entry["risky"] == true {
+        return true;
+    }
     entry["risk_indicators"].as_array().is_some_and(|list| {
         list.iter()
             .any(|r| matches!(r["severity"].as_str(), Some("Medium" | "High" | "Critical")))
@@ -990,6 +1125,7 @@ fn build_listing(
     request: &InspectArchiveRequest,
     sha256: &str,
     cache: &str,
+    budget: usize,
 ) -> Value {
     let all: &[Value] = listing["entries"].as_array().map_or(&[], Vec::as_slice);
     let needle = request
@@ -998,7 +1134,7 @@ fn build_listing(
         .filter(|f| !f.is_empty())
         .map(str::to_lowercase);
     let risky_only = request.risky_only.unwrap_or(false);
-    let selected: Vec<Value> = all
+    let selected: Vec<&Value> = all
         .iter()
         .filter(|e| {
             needle.as_ref().is_none_or(|n| {
@@ -1007,45 +1143,67 @@ fn build_listing(
                     .is_some_and(|p| p.to_lowercase().contains(n.as_str()))
             }) && (!risky_only || entry_is_risky(e))
         })
-        .map(compact_entry)
         .collect();
     let offset = request.offset.unwrap_or(0);
     let limit = request.limit.unwrap_or(super::output::DEFAULT_LIMIT);
-    let entries = page(&selected, offset, limit);
+    // Only the rows of this page are put in compact form.
+    let total_selected = selected.len();
+    let start = offset.min(total_selected);
+    let end = start
+        .saturating_add(limit.clamp(1, super::output::MAX_LIMIT))
+        .min(total_selected);
+    let rows: Vec<Value> = selected[start..end]
+        .iter()
+        .map(|e| {
+            let mut row = (*e).clone();
+            if let Some(map) = row.as_object_mut() {
+                map.remove("risky");
+            }
+            row
+        })
+        .collect();
+    let mut entries = json!({
+        "items": rows,
+        "total": total_selected,
+        "returned": rows.len(),
+        "offset": offset,
+    });
+    if end < total_selected {
+        entries["next_offset"] = end.into();
+    }
 
     let security = &listing["security_analysis"];
     let traversal: Vec<&Value> = security["path_traversal_risks"]
         .as_array()
         .map_or_else(Vec::new, |l| l.iter().take(10).collect());
     let metadata = &listing["metadata"];
-    // When the entries could not be read at all, counts and sizes are unknown,
-    // not zero.
-    let unavailable = listing["notes"].as_array().is_some_and(|notes| {
-        notes.iter().any(|n| {
-            n.as_str()
-                .is_some_and(|n| n.starts_with(crate::archive_analysis::LISTING_UNAVAILABLE))
-        })
-    });
-    let known = |value: &Value| {
-        if unavailable {
-            Value::Null
-        } else {
-            value.clone()
-        }
-    };
+    // When the entries could not be read, or only part of them, counts and
+    // sizes are unknown (null), not zero, and a "low" risk is "unknown".
+    let gaps = ListingGaps::of(
+        listing["notes"]
+            .as_array()
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter_map(Value::as_str),
+    );
+    let risk = security["overall_risk"]
+        .as_str()
+        .map(|r| gaps.risk(&r.to_lowercase()));
     let mut summary = json!({
         "format": detected["label"],
         "archive_type": listing["archive_type"],
-        "entries": known(&metadata["total_entries"]),
+        "entries": gaps.count(metadata["total_entries"].clone()),
         "listed_entries": all.len(),
-        "uncompressed_bytes": known(&metadata["total_size_uncompressed"]),
+        "uncompressed_bytes": gaps.sizes(metadata["total_size_uncompressed"].clone()),
         "compressed_bytes": metadata["total_size_compressed"],
-        "compression_ratio": known(&metadata["compression_ratio"]),
+        "compression_ratio": gaps.sizes(metadata["compression_ratio"].clone()),
         "encrypted": metadata["has_encryption"],
-        "risk": security["overall_risk"].as_str().map(str::to_lowercase),
+        "risk": risk,
         "risk_score": listing["suspicious_indicators"]["risk_score"],
         "possible_bomb": security["zip_bomb_indicators"]["is_potential_bomb"],
-        "unsafe_paths": security["path_traversal_risks"].as_array().map(Vec::len),
+        "unsafe_paths": security["unsafe_entries"]
+            .as_u64()
+            .or_else(|| security["path_traversal_risks"].as_array().map(|l| l.len() as u64)),
         "nested_archives": listing["nested_archives"].as_array().map(Vec::len),
         "notes": listing["notes"],
     });
@@ -1056,6 +1214,14 @@ fn build_listing(
         summary["comment"] = comment.into();
     }
 
+    let rest_size = serde_json::to_vec(&summary).map_or(0, |b| b.len());
+    super::output::fit_rows(
+        &mut entries,
+        "items",
+        budget.saturating_sub(rest_size + 1000),
+        offset,
+        total_selected,
+    );
     let mut next_steps = Vec::new();
     if let Some(next) = entries["next_offset"].as_u64() {
         next_steps.push(format!(
@@ -1121,6 +1287,91 @@ mod tests {
             zip.finish().unwrap();
         }
         buf.into_inner()
+    }
+
+    /// 3,000 symlink headers that trip every per-entry check: the security
+    /// lists are capped, their counts stay exact, and the stored listing stays small.
+    #[test]
+    fn stored_listing_caps_the_per_entry_security_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut builder = tar::Builder::new(Vec::new());
+        for i in 0..3000 {
+            let name = format!("../{i:04}/.keygen.pdf.exe");
+            let mut header = tar::Header::new_gnu();
+            header.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_mode(0o7777);
+            header.set_size(0);
+            header.as_old_mut().linkname[..9].copy_from_slice(b"../../../");
+            header.set_cksum();
+            builder.append(&header, &b""[..]).unwrap();
+        }
+        let path = write(dir.path(), "all.tar", &builder.into_inner().unwrap());
+        let kind = detect_file_kind(&path).unwrap();
+        let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+        assert_eq!(analysis.security_analysis.path_traversal_risks.len(), 1000);
+        assert_eq!(analysis.security_analysis.path_traversal_total, 6000);
+        assert_eq!(analysis.security_analysis.unsafe_entries, 3000);
+        assert_eq!(analysis.security_analysis.suspicious_files.len(), 1000);
+        assert!(analysis.suspicious_indicators.suspicious_patterns.len() <= 100);
+        assert!(matches!(
+            analysis.security_analysis.overall_risk,
+            crate::archive_analysis::RiskLevel::Critical
+        ));
+        let stored = stored_listing(analysis, &kind).unwrap();
+        let security = &stored["listing"]["security_analysis"];
+        assert!(security.get("suspicious_files").is_none());
+        assert_eq!(
+            security["path_traversal_risks"].as_array().unwrap().len(),
+            1000
+        );
+        let request = InspectArchiveRequest {
+            file_path: "x".into(),
+            filter: None,
+            risky_only: None,
+            offset: None,
+            limit: None,
+        };
+        let page = build_listing(
+            &stored["listing"],
+            &stored["detected"],
+            &request,
+            "sha",
+            "miss",
+            80_000,
+        );
+        assert_eq!(page["summary"]["unsafe_paths"], 3000);
+    }
+
+    #[test]
+    fn a_stray_control_byte_does_not_make_a_script_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let kind = kind_of(dir.path(), "bell.sh", b"#!/bin/sh\necho 'a\x07b'\n");
+        assert_eq!(kind.kind, "script", "{}", kind.label);
+        let kind = kind_of(dir.path(), "run.bat", b"@echo off\r\necho hi\r\n\x1a");
+        assert_eq!(kind.kind, "script", "{}", kind.label);
+        // A truncated RAR signature and NUL-filled data stay binary.
+        assert_eq!(kind_of(dir.path(), "r", b"Rar!\x1a").kind, "unknown");
+        assert_eq!(kind_of(dir.path(), "z", b"ab\0cd").kind, "unknown");
+    }
+
+    #[test]
+    fn a_zip_with_a_repeated_name_is_marked_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        // The writer refuses duplicate names, so make the second one equal by hand.
+        let mut bytes = zip_with(&["toolA", "readme.txt", "toolB"]);
+        let mut at = 0;
+        while let Some(pos) = find(&bytes[at..], b"toolB") {
+            bytes[at + pos + 4] = b'A';
+            at += pos + 5;
+        }
+        let path = write(dir.path(), "dup.zip", &bytes);
+        let kind = detect_file_kind(&path).unwrap();
+        let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+        let notes = analysis.notes.join(" ");
+        assert!(notes.contains("Entry listing is incomplete"), "{notes}");
+        let gaps = ListingGaps::of(analysis.notes.iter().map(String::as_str));
+        assert_eq!(gaps.risk("low"), "unknown");
     }
 
     #[test]
@@ -1345,5 +1596,43 @@ mod tests {
         let kind = detect_file_kind(&path).unwrap();
         let overview = format_overview(&path, &kind).unwrap();
         assert!(overview.get("archive").is_none(), "{overview}");
+    }
+
+    #[test]
+    fn partial_listings_have_no_counts_and_no_low_risk() {
+        let none = ListingGaps::of(["Solid archive."]);
+        assert_eq!(none.count(json!(3)), json!(3));
+        assert_eq!(none.risk("Low"), "low");
+        let partial = ListingGaps::of([format!(
+            "{}: reading stopped",
+            crate::archive_analysis::LISTING_PARTIAL
+        )
+        .as_str()]);
+        assert_eq!(partial.count(json!(3)), Value::Null);
+        assert_eq!(partial.sizes(json!(9)), Value::Null);
+        assert_eq!(partial.risk("low"), "unknown");
+        assert_eq!(partial.risk("critical"), "critical");
+        let capped = ListingGaps::of(["Only the first 100000 of 150000 entries were analyzed."]);
+        assert_eq!(capped.count(json!(150_000)), json!(150_000));
+        assert_eq!(capped.sizes(json!(9)), Value::Null);
+        assert_eq!(capped.risk("low"), "unknown");
+    }
+
+    #[test]
+    fn the_overview_of_a_tar_gz_cut_by_the_stream_limit_has_no_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = vec![0u8; (OVERVIEW_STREAM_BYTES as usize) + (4 << 20)];
+        let tar = tar_with(&[("a.bin", &big), ("b.txt", b"x")]);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tar).unwrap();
+        let path = write(dir.path(), "big.tar.gz", &gz.finish().unwrap());
+        let kind = detect_file_kind(&path).unwrap();
+        let overview = format_overview(&path, &kind).unwrap();
+        let archive = &overview["archive"];
+        assert_eq!(archive["entries"], Value::Null, "{archive}");
+        assert_eq!(archive["uncompressed_bytes"], Value::Null);
+        // Zeros compress so well that the bomb rule may rate it; never "low".
+        assert_ne!(archive["risk"], "low", "{archive}");
+        assert!(archive["notes"].to_string().contains("incomplete"));
     }
 }

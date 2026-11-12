@@ -27,8 +27,65 @@ pub const MAX_STREAM_BYTES: u64 = 1 << 30;
 /// Prefix of the note an analyzer adds when the entries could not be read at
 /// all, so callers can tell "nothing readable" from "an empty archive".
 pub const LISTING_UNAVAILABLE: &str = "Entry listing is unavailable";
+/// Prefix of the note an analyzer adds when the entries it read are only part of
+/// the archive, so the counts and sizes are lower bounds and are not reported
+/// as totals.
+pub const LISTING_PARTIAL: &str = "Entry listing is incomplete";
+/// Prefix of the note an analyzer adds when a name was cut before the risk
+/// checks ran, so a "low" risk cannot be claimed for the archive.
+pub const NAMES_UNCHECKED: &str = "Some names were cut before the risk checks";
+/// "1 entry" or "N entries".
+pub(crate) fn count_entries(n: usize) -> String {
+    if n == 1 {
+        "1 entry".to_string()
+    } else {
+        format!("{n} entries")
+    }
+}
+
+/// Start of the note an analyzer adds when the header gives a total entry count
+/// but only the first [`MAX_ENTRIES`] were recorded: the entry count is true, the
+/// sizes and the risk level cover the recorded entries only.
+pub const LISTING_CAPPED: &str = "Only the first";
 /// Longest archive or entry comment kept in a result (bytes).
 pub(crate) const MAX_COMMENT_BYTES: usize = 512;
+
+/// Longest entry path or link target kept in a result (characters); PATH_MAX.
+pub(crate) const MAX_PATH_CHARS: usize = 4096;
+/// Archive-wide budget for the names and link targets kept in a listing
+/// (bytes). A hostile archive can name 100,000 entries with 4,096 characters
+/// each; once the budget is spent, names are kept to [`SHORT_PATH_CHARS`].
+pub(crate) const NAME_BUDGET_BYTES: usize = 8 << 20;
+/// Longest name kept once [`NAME_BUDGET_BYTES`] is spent (characters).
+pub(crate) const SHORT_PATH_CHARS: usize = 255;
+/// Longest path shown in the security lists, which repeat the paths of risky entries.
+const MAX_RISK_PATH_CHARS: usize = 256;
+/// Longest name copied into a pattern or indicator text.
+const MAX_PATTERN_CHARS: usize = 256;
+/// Most rows kept in each per-entry security list (the counts stay exact).
+pub(crate) const MAX_SECURITY_ROWS: usize = 1000;
+/// Most strings kept in `suspicious_patterns`.
+const MAX_PATTERNS: usize = 100;
+
+fn push_pattern(indicators: &mut SuspiciousArchiveIndicators, text: impl FnOnce() -> String) {
+    if indicators.suspicious_patterns.len() < MAX_PATTERNS {
+        indicators.suspicious_patterns.push(text());
+    }
+}
+
+/// A name cut to `max` characters, with its full length when cut. The risk
+/// checks run on the whole name before it is cut.
+pub(crate) fn capped_text(text: &str, max: usize) -> String {
+    let mut chars = text.char_indices();
+    match chars.nth(max) {
+        None => text.to_string(),
+        Some((end, _)) => format!(
+            "{}... ({} chars in all)",
+            &text[..end],
+            text.chars().count()
+        ),
+    }
+}
 
 /// Space saved by compression, from 0.0 (none, or the container is larger
 /// than its content) to 1.0.
@@ -154,6 +211,13 @@ pub struct ArchiveSecurityAnalysis {
     pub path_traversal_risks: Vec<PathTraversalRisk>,
     pub zip_bomb_indicators: ZipBombIndicators,
     pub hidden_content: Vec<HiddenContent>,
+    /// Number of traversal and link-escape risks found; the list above keeps
+    /// only the first 1,000 of them.
+    #[serde(default)]
+    pub path_traversal_total: usize,
+    /// Number of entries with at least one traversal or link-escape risk.
+    #[serde(default)]
+    pub unsafe_entries: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,6 +271,13 @@ pub struct SuspiciousArchiveIndicators {
     pub script_count: u32,
     pub suspicious_patterns: Vec<String>,
     pub risk_score: u8,
+    /// Bytes of names and link targets kept so far across the whole archive;
+    /// past 8 MiB further names are cut much shorter.
+    #[serde(default, skip_serializing)]
+    pub name_bytes: usize,
+    /// Names or link targets that were cut under the short cap.
+    #[serde(default, skip_serializing)]
+    pub names_cut: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,10 +300,19 @@ pub fn analyze_zip<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
     let mut suspicious_indicators = SuspiciousArchiveIndicators::default();
     let mut notes = Vec::new();
 
+    let declared = zip_declared_entries(path);
+    if let Some(declared) = declared.filter(|d| *d > archive.len()) {
+        let unlisted_duplicates = declared - archive.len();
+        notes.push(format!(
+            "{LISTING_PARTIAL}: {unlisted_duplicates} entries share a name with a later entry \
+             and are not listed; sizes and the risk level cover only the listed entries."
+        ));
+    }
     let listed = archive.len().min(MAX_ENTRIES);
     if archive.len() > listed {
         notes.push(format!(
-            "Only the first {listed} of {} entries were analyzed.",
+            "{LISTING_CAPPED} {listed} of {} entries were analyzed; sizes and the risk level \
+             cover only those.",
             archive.len()
         ));
     }
@@ -254,6 +334,30 @@ pub fn analyze_zip<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
         suspicious_indicators,
         notes,
     )
+}
+
+/// The entry count the end-of-central-directory record declares, read from
+/// the end of the file. `None` when it cannot be found or is a ZIP64 marker.
+/// The zip reader keeps one record per name, so this can exceed its length.
+fn zip_declared_entries(path: &Path) -> Option<usize> {
+    use std::io::SeekFrom;
+    let mut file = File::open(path).ok()?;
+    let size = file.seek(SeekFrom::End(0)).ok()?;
+    let take = size.min(22 + 65_535);
+    file.seek(SeekFrom::Start(size - take)).ok()?;
+    let mut tail = vec![0u8; usize::try_from(take).ok()?];
+    file.read_exact(&mut tail).ok()?;
+    let mut pos = tail.len().checked_sub(22)?;
+    loop {
+        if tail[pos..].starts_with(b"PK\x05\x06") {
+            let comment = usize::from(u16::from_le_bytes([tail[pos + 20], tail[pos + 21]]));
+            if pos + 22 + comment == tail.len() {
+                let total = u16::from_le_bytes([tail[pos + 10], tail[pos + 11]]);
+                return (total != 0xFFFF).then_some(usize::from(total));
+            }
+        }
+        pos = pos.checked_sub(1)?;
+    }
 }
 
 /// A bounds-checked little-endian reader over a header buffer. Every read
@@ -386,6 +490,28 @@ pub(crate) fn path_risk(path: &str) -> Option<&'static str> {
 
 /// `path` with `.` and `..` components resolved lexically; leading `..`
 /// components that climb out of the root are kept.
+/// A name without the " (N chars in all)" marker [`capped_text`] appends.
+fn uncut(name: &str) -> &str {
+    if name.ends_with(" chars in all)") {
+        if let Some(at) = name.rfind("... (") {
+            return &name[..at];
+        }
+    }
+    name
+}
+
+/// A name already cut by [`capped_text`] shortened further for the security
+/// lists, keeping the original full length in its marker.
+fn short_path(name: &str) -> String {
+    match (name.ends_with(" chars in all)"), name.rfind("... (")) {
+        (true, Some(at)) => {
+            let head: String = name[..at].chars().take(MAX_RISK_PATH_CHARS).collect();
+            format!("{head}{}", &name[at..])
+        }
+        _ => capped_text(name, MAX_RISK_PATH_CHARS),
+    }
+}
+
 fn lexical_resolve(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let mut parts: Vec<&str> = Vec::new();
@@ -445,7 +571,8 @@ pub(crate) fn build_entry(
     spec: EntrySpec,
     indicators: &mut SuspiciousArchiveIndicators,
 ) -> ArchiveEntry {
-    let path = spec.path;
+    let full_path = spec.path;
+    let path = full_path.clone();
     let normalized = path.replace('\\', "/");
     let file_name = normalized
         .trim_end_matches('/')
@@ -515,20 +642,27 @@ pub(crate) fn build_entry(
                 indicators.has_path_traversal = true;
                 flag(
                     "LinkEscape",
-                    format!("Link points outside the extraction directory: {target}"),
+                    format!(
+                        "Link points outside the extraction directory: {}",
+                        capped_text(target, MAX_PATTERN_CHARS)
+                    ),
                     RiskLevel::Critical,
                 );
             } else {
-                flag("Link", format!("Link to {target}"), RiskLevel::Low);
+                flag(
+                    "Link",
+                    format!("Link to {}", capped_text(target, MAX_PATTERN_CHARS)),
+                    RiskLevel::Low,
+                );
             }
         }
         (EntryKind::Symlink | EntryKind::Hardlink, None) => {
             flag("Link", "Link entry".to_string(), RiskLevel::Low);
         }
         (EntryKind::CharDevice | EntryKind::BlockDevice, _) => {
-            indicators
-                .suspicious_patterns
-                .push(format!("device node: {path}"));
+            push_pattern(indicators, || {
+                format!("device node: {}", capped_text(&path, MAX_PATTERN_CHARS))
+            });
             flag(
                 "DeviceNode",
                 "Device node entry (extracting as root would create it)".to_string(),
@@ -543,9 +677,9 @@ pub(crate) fn build_entry(
 
     if let Some(mode) = spec.permissions {
         if mode & 0o4000 != 0 {
-            indicators
-                .suspicious_patterns
-                .push(format!("setuid: {path}"));
+            push_pattern(indicators, || {
+                format!("setuid: {}", capped_text(&path, MAX_PATTERN_CHARS))
+            });
             flag(
                 "Setuid",
                 format!("Setuid bit set (mode {:o})", mode & 0o7777),
@@ -553,9 +687,9 @@ pub(crate) fn build_entry(
             );
         }
         if mode & 0o2000 != 0 && !is_directory {
-            indicators
-                .suspicious_patterns
-                .push(format!("setgid: {path}"));
+            push_pattern(indicators, || {
+                format!("setgid: {}", capped_text(&path, MAX_PATTERN_CHARS))
+            });
             flag(
                 "Setgid",
                 format!("Setgid bit set (mode {:o})", mode & 0o7777),
@@ -578,12 +712,38 @@ pub(crate) fn build_entry(
 
     if is_suspicious_filename(&file_name) {
         indicators.has_suspicious_names = true;
-        indicators.suspicious_patterns.push(file_name.clone());
+        push_pattern(indicators, || capped_text(&file_name, MAX_PATTERN_CHARS));
     }
 
+    let name_cap = if indicators.name_bytes > NAME_BUDGET_BYTES {
+        SHORT_PATH_CHARS
+    } else {
+        MAX_PATH_CHARS
+    };
+    let kept_path = capped_text(&full_path, name_cap);
+    let kept_file_name = capped_text(&file_name, name_cap);
+    let kept_target = spec
+        .link_target
+        .as_deref()
+        .map(|target| capped_text(target, name_cap));
+    if name_cap == SHORT_PATH_CHARS
+        && (kept_path != full_path
+            || kept_file_name != file_name
+            || spec
+                .link_target
+                .as_deref()
+                .zip(kept_target.as_deref())
+                .is_some_and(|(a, b)| a != b))
+    {
+        indicators.names_cut += 1;
+    }
+    indicators.name_bytes = indicators
+        .name_bytes
+        .saturating_add(kept_path.len() + kept_file_name.len())
+        .saturating_add(kept_target.as_ref().map_or(0, String::len));
     ArchiveEntry {
-        path,
-        file_name,
+        path: kept_path,
+        file_name: kept_file_name,
         is_directory,
         size_compressed: spec.size_compressed,
         size_uncompressed: spec.size_uncompressed,
@@ -598,7 +758,7 @@ pub(crate) fn build_entry(
         file_type,
         risk_indicators,
         entry_kind: spec.kind,
-        link_target: spec.link_target,
+        link_target: kept_target,
     }
 }
 
@@ -622,6 +782,16 @@ pub(crate) fn finish_analysis(
         })
         .collect();
 
+    let mut notes = notes;
+    if suspicious_indicators.names_cut > 0 {
+        notes.push(format!(
+            "The names and link targets of this archive are very long: after the first {} MiB, \
+             {} names were cut to {SHORT_PATH_CHARS} characters (risk checks still ran on the \
+             whole names).",
+            NAME_BUDGET_BYTES >> 20,
+            suspicious_indicators.names_cut
+        ));
+    }
     let compressed = !matches!(archive_type, ArchiveType::Tar);
     let security_analysis = perform_security_analysis(&entries, &metadata, compressed)?;
     suspicious_indicators.risk_score =
@@ -757,8 +927,15 @@ fn analyze_zip_entry<R: std::io::Read>(
     ))
 }
 
+/// The last 16 characters of a name, lowercased: all the extension checks
+/// need, without lowercasing a 4,096-character name once per check.
+fn lower_tail(name: &str) -> String {
+    let start = name.char_indices().rev().nth(15).map_or(0, |(i, _)| i);
+    name[start..].to_lowercase()
+}
+
 fn determine_file_type(file_name: &str, _path: &str) -> FileType {
-    let lower_name = file_name.to_lowercase();
+    let lower_name = lower_tail(file_name);
 
     // Check extensions
     if lower_name.ends_with(".exe")
@@ -818,7 +995,7 @@ fn determine_file_type(file_name: &str, _path: &str) -> FileType {
 }
 
 fn has_double_extension(file_name: &str) -> bool {
-    let lower_name = file_name.to_lowercase();
+    let lower_name = lower_tail(file_name);
 
     // Common double extension patterns
     let suspicious_patterns = [
@@ -873,7 +1050,7 @@ fn is_suspicious_filename(file_name: &str) -> bool {
 }
 
 fn detect_archive_type(file_name: &str) -> ArchiveType {
-    let lower_name = file_name.to_lowercase();
+    let lower_name = lower_tail(file_name);
 
     if lower_name.ends_with(".zip") {
         ArchiveType::Zip
@@ -903,20 +1080,32 @@ fn perform_security_analysis(
     let mut suspicious_files = Vec::new();
     let mut path_traversal_risks = Vec::new();
     let mut hidden_content = Vec::new();
+    // Exact counts: the lists keep only the first MAX_SECURITY_ROWS rows.
+    let mut traversal_total = 0usize;
+    let mut unsafe_entries = 0usize;
+    let mut any_critical = false;
+    let mut any_high = false;
+    let mut any_suspicious = false;
 
     // Check for malicious patterns
     for entry in entries {
+        let mut entry_unsafe = false;
         // Path traversal and links that leave the extraction root
         for indicator in &entry.risk_indicators {
             if indicator.indicator_type == "PathTraversal"
                 || indicator.indicator_type == "LinkEscape"
             {
+                entry_unsafe = true;
+                traversal_total += 1;
+                if path_traversal_risks.len() >= MAX_SECURITY_ROWS {
+                    continue;
+                }
                 path_traversal_risks.push(PathTraversalRisk {
-                    entry_path: entry.path.clone(),
+                    entry_path: short_path(&entry.path),
                     resolved_path: if indicator.indicator_type == "LinkEscape" {
-                        entry.link_target.clone().unwrap_or_default()
+                        short_path(entry.link_target.as_deref().unwrap_or_default())
                     } else {
-                        lexical_resolve(&entry.path)
+                        capped_text(&lexical_resolve(uncut(&entry.path)), MAX_RISK_PATH_CHARS)
                     },
                     risk_type: if indicator.indicator_type == "LinkEscape" {
                         "Link Escape".to_string()
@@ -925,6 +1114,10 @@ fn perform_security_analysis(
                     },
                 });
             }
+        }
+
+        if entry_unsafe {
+            unsafe_entries += 1;
         }
 
         // Suspicious files: a hidden file or an ordinary link alone (Low) is
@@ -946,23 +1139,35 @@ fn perform_security_analysis(
                 })
                 .unwrap_or(&RiskLevel::Low);
 
-            suspicious_files.push(SuspiciousFile {
-                path: entry.path.clone(),
-                reason: entry.risk_indicators[0].description.clone(),
-                risk_level: max_risk.clone(),
-                indicators: entry
-                    .risk_indicators
-                    .iter()
-                    .map(|r| r.indicator_type.clone())
-                    .collect(),
-            });
+            any_suspicious = true;
+            match max_risk {
+                RiskLevel::Critical => any_critical = true,
+                RiskLevel::High => any_high = true,
+                _ => {}
+            }
+            if suspicious_files.len() < MAX_SECURITY_ROWS {
+                suspicious_files.push(SuspiciousFile {
+                    path: short_path(&entry.path),
+                    reason: entry.risk_indicators[0].description.clone(),
+                    risk_level: max_risk.clone(),
+                    indicators: entry
+                        .risk_indicators
+                        .iter()
+                        .map(|r| r.indicator_type.clone())
+                        .collect(),
+                });
+            }
         }
 
         // Check for hidden content
-        if entry.file_name.starts_with('.') && entry.file_name != "." && entry.file_name != ".." {
+        if hidden_content.len() < MAX_SECURITY_ROWS
+            && entry.file_name.starts_with('.')
+            && entry.file_name != "."
+            && entry.file_name != ".."
+        {
             hidden_content.push(HiddenContent {
                 content_type: "Hidden File".to_string(),
-                location: entry.path.clone(),
+                location: short_path(&entry.path),
                 description: "File name starts with dot".to_string(),
             });
         }
@@ -973,8 +1178,10 @@ fn perform_security_analysis(
 
     // Determine overall risk
     let overall_risk = determine_overall_risk(
-        &suspicious_files,
-        &path_traversal_risks,
+        any_critical,
+        any_high,
+        any_suspicious,
+        traversal_total > 0,
         &zip_bomb_indicators,
     );
 
@@ -985,12 +1192,14 @@ fn perform_security_analysis(
         path_traversal_risks,
         zip_bomb_indicators,
         hidden_content,
+        path_traversal_total: traversal_total,
+        unsafe_entries,
     })
 }
 
 /// Uncompressed size below which a high ratio is not worth a bomb flag (10 MiB).
 const BOMB_MIN_BYTES: u64 = 10 * 1024 * 1024;
-/// Uncompressed total that is a bomb risk by itself (4 GiB).
+/// Uncompressed total that is a bomb risk when it also compresses 10:1 (4 GiB).
 const BOMB_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Bomb rules compare compressed and uncompressed sizes, so they apply only
@@ -1016,7 +1225,11 @@ fn check_zip_bomb(
     {
         indicators.is_potential_bomb = true;
     }
-    if compressed && metadata.total_size_uncompressed >= BOMB_TOTAL_BYTES {
+    // A large total alone is not a bomb: content stored 1:1 is just big.
+    if compressed
+        && metadata.total_size_uncompressed >= BOMB_TOTAL_BYTES
+        && metadata.compression_ratio > 0.9
+    {
         indicators.is_potential_bomb = true;
     }
 
@@ -1030,7 +1243,9 @@ fn check_zip_bomb(
             || extreme_ratio
         {
             indicators.is_potential_bomb = true;
-            indicators.recursive_entries.push(entry.path.clone());
+            if indicators.recursive_entries.len() < MAX_SECURITY_ROWS {
+                indicators.recursive_entries.push(entry.path.clone());
+            }
         }
 
         // Check for nested archives
@@ -1043,27 +1258,17 @@ fn check_zip_bomb(
 }
 
 fn determine_overall_risk(
-    suspicious_files: &[SuspiciousFile],
-    path_traversal_risks: &[PathTraversalRisk],
+    any_critical: bool,
+    any_high: bool,
+    any_suspicious: bool,
+    any_traversal: bool,
     zip_bomb_indicators: &ZipBombIndicators,
 ) -> RiskLevel {
-    let critical_count = suspicious_files
-        .iter()
-        .filter(|f| matches!(f.risk_level, RiskLevel::Critical))
-        .count();
-    let high_count = suspicious_files
-        .iter()
-        .filter(|f| matches!(f.risk_level, RiskLevel::High))
-        .count();
-
-    if critical_count > 0
-        || !path_traversal_risks.is_empty()
-        || zip_bomb_indicators.is_potential_bomb
-    {
+    if any_critical || any_traversal || zip_bomb_indicators.is_potential_bomb {
         RiskLevel::Critical
-    } else if high_count > 0 {
+    } else if any_high {
         RiskLevel::High
-    } else if !suspicious_files.is_empty() {
+    } else if any_suspicious {
         RiskLevel::Medium
     } else {
         RiskLevel::Low
@@ -1230,5 +1435,22 @@ mod tests {
         assert!(analysis.suspicious_indicators.has_executable);
         assert!(analysis.suspicious_indicators.has_suspicious_names);
         assert!(analysis.suspicious_indicators.risk_score > 0);
+    }
+
+    #[test]
+    fn content_stored_one_to_one_is_not_a_bomb_however_big() {
+        let metadata = |ratio: f64| ArchiveMetadata {
+            total_entries: 2,
+            total_size_compressed: 8 << 30,
+            total_size_uncompressed: 8 << 30,
+            compression_ratio: ratio,
+            has_encryption: false,
+            has_password: false,
+            comment: None,
+            created_by: None,
+            creation_date: None,
+        };
+        assert!(!check_zip_bomb(&[], &metadata(0.0), true).is_potential_bomb);
+        assert!(check_zip_bomb(&[], &metadata(0.95), true).is_potential_bomb);
     }
 }

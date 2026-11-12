@@ -419,3 +419,67 @@ async fn results_do_not_depend_on_the_file_name_and_unknown_counts_are_null() {
     assert!(summary["uncompressed_bytes"].is_null());
     assert!(summary["compression_ratio"].is_null());
 }
+
+fn gz(bytes: &[u8]) -> Vec<u8> {
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(bytes).unwrap();
+    gz.finish().unwrap()
+}
+
+/// A tar.gz of symlinks with 200-character names and 4,000-character targets
+/// uses a bounded amount of text once the archive-wide name budget is spent,
+/// paging and filtering still work from the cache, and the long traversal
+/// examples are short.
+#[tokio::test]
+async fn long_names_share_an_archive_wide_budget_and_examples_stay_short() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut builder = tar::Builder::new(Vec::new());
+    for i in 0..2500 {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        let name = format!("{i:05}{}", "n".repeat(200));
+        let target = format!("{}{}", "../".repeat(1300), i);
+        builder.append_link(&mut header, name, target).unwrap();
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_size(1);
+    builder
+        .append_data(&mut header, "x".repeat(4000) + "/../../etc/evil", &b"x"[..])
+        .unwrap();
+    let path = dir.path().join("names.tar.gz");
+    std::fs::write(&path, gz(&builder.into_inner().unwrap())).unwrap();
+    let p = path.to_str().unwrap();
+
+    let results = call_all(
+        "inspect_archive",
+        vec![
+            json!({"file_path": p, "offset": 2490, "limit": 10}),
+            json!({"file_path": p, "filter": "02499", "limit": 5}),
+            json!({"file_path": p, "risky_only": true, "limit": 1}),
+        ],
+    )
+    .await;
+    let first = ok(&results[0]);
+    let notes = first["summary"]["notes"].to_string();
+    assert!(notes.contains("very long"), "{notes}");
+    let rows = first["entries"]["items"].as_array().unwrap();
+    assert!(!rows.is_empty());
+    for row in rows {
+        // The names near the end were cut to 255 characters plus the marker.
+        let len = row["path"].as_str().unwrap().len();
+        assert!(len < 300, "{len}");
+        let target = row["link_target"].as_str().unwrap_or_default().len();
+        assert!(target < 300, "{target}");
+    }
+    for example in first["summary"]["unsafe_path_examples"].as_array().unwrap() {
+        assert!(example["entry_path"].as_str().unwrap().len() < 300);
+        assert!(example["resolved_path"].as_str().unwrap().len() < 300);
+    }
+    let filtered = ok(&results[1]);
+    assert_eq!(filtered["cache"], "hit");
+    assert_eq!(filtered["entries"]["total"], 1);
+    let risky = ok(&results[2]);
+    assert!(risky["entries"]["total"].as_u64().unwrap() >= 1);
+    assert!(risky["entries"]["items"][0].get("risky").is_none());
+}

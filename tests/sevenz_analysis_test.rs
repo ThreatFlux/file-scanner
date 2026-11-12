@@ -55,8 +55,6 @@ fn test_7z_detection() {
     content.extend_from_slice(&[0u8; 512]); // Add some content
     std::fs::write(temp_file.path(), &content).unwrap();
 
-    assert!(is_7z_file(temp_file.path()));
-
     let analysis = analyze_7z(temp_file.path()).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::SevenZip));
     assert_eq!(analysis.metadata.created_by, Some("7-Zip".to_string()));
@@ -66,8 +64,6 @@ fn test_7z_detection() {
 fn test_invalid_7z_file() {
     let temp_file = NamedTempFile::new().unwrap();
     std::fs::write(temp_file.path(), b"This is not a 7z file").unwrap();
-
-    assert!(!is_7z_file(temp_file.path()));
 
     let result = analyze_7z(temp_file.path());
     assert!(result.is_err());
@@ -80,8 +76,6 @@ fn test_invalid_7z_file() {
 #[test]
 fn test_empty_file() {
     let temp_file = NamedTempFile::new().unwrap();
-
-    assert!(!is_7z_file(temp_file.path()));
 
     let result = analyze_7z(temp_file.path());
     assert!(result.is_err());
@@ -311,8 +305,6 @@ fn test_short_file_handling() {
     // File too short to be a valid 7z
     std::fs::write(temp_file.path(), b"7z").unwrap();
 
-    assert!(!is_7z_file(temp_file.path()));
-
     let result = analyze_7z(temp_file.path());
     assert!(result.is_err());
 }
@@ -322,8 +314,6 @@ fn test_exact_signature_match() {
     let temp_file = NamedTempFile::new().unwrap();
     // Test with exact signature only
     std::fs::write(temp_file.path(), SEVENZ_SIGNATURE).unwrap();
-
-    assert!(is_7z_file(temp_file.path()));
 
     let analysis = analyze_7z(temp_file.path()).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::SevenZip));

@@ -6,7 +6,7 @@ use std::path::Path;
 use crate::archive_analysis::{
     build_entry, finish_analysis, saved_ratio, unix_kind, ArchiveAnalysis, ArchiveEntry,
     ArchiveMetadata, ArchiveType, ByteReader, EntryKind, EntrySpec, SuspiciousArchiveIndicators,
-    LISTING_UNAVAILABLE, MAX_ENTRIES,
+    LISTING_CAPPED, LISTING_UNAVAILABLE, MAX_ENTRIES, NAMES_UNCHECKED,
 };
 
 /// 7-Zip file header signatures
@@ -18,6 +18,9 @@ const START_HEADER: u64 = 32;
 const MAX_HEADER_BYTES: u64 = 64 << 20;
 /// Cap on any count read from a header.
 const MAX_COUNT: u64 = 1 << 24;
+/// Longest file name read, in UTF-16 units; the rest of a longer name is
+/// dropped before the risk checks, and the result says so.
+const NAME_UNITS: usize = 1 << 18;
 /// Most coders in a folder, and most streams in or out of all of them; real
 /// archives use a handful.
 const MAX_CODERS: u64 = 32;
@@ -195,21 +198,29 @@ fn parse_streams_info(r: &mut ByteReader<'_>) -> Option<StreamsInfo> {
     let mut counts: Option<Vec<u64>> = None;
     let mut sizes: Option<Vec<u64>> = None;
     let mut stream_crcs: Option<Vec<Option<u32>>> = None;
+    let (mut seen_pack, mut seen_folders, mut seen_substreams) = (false, false, false);
     loop {
         match r.u8()? {
             0x00 => break,
             0x06 => {
                 info.pack_pos = r.sevenz_number()?;
+                if seen_pack {
+                    return None;
+                }
+                seen_pack = true;
                 let n = bounded_count(r, 1)?;
+                let (mut seen_sizes, mut seen_digests) = (false, false);
                 loop {
                     match r.u8()? {
                         0x00 => break,
-                        0x09 => {
+                        0x09 if !seen_sizes => {
+                            seen_sizes = true;
                             for _ in 0..n {
                                 info.pack_sizes.push(r.sevenz_number()?);
                             }
                         }
-                        0x0a => {
+                        0x0a if !seen_digests => {
+                            seen_digests = true;
                             digests(r, n)?;
                         }
                         _ => return None,
@@ -217,6 +228,10 @@ fn parse_streams_info(r: &mut ByteReader<'_>) -> Option<StreamsInfo> {
                 }
             }
             0x07 => {
+                if seen_folders {
+                    return None;
+                }
+                seen_folders = true;
                 if r.u8()? != 0x0b {
                     return None;
                 }
@@ -227,17 +242,20 @@ fn parse_streams_info(r: &mut ByteReader<'_>) -> Option<StreamsInfo> {
                 for _ in 0..n {
                     info.folders.push(parse_folder(r)?);
                 }
+                let (mut seen_sizes, mut seen_crcs) = (false, false);
                 loop {
                     match r.u8()? {
                         0x00 => break,
-                        0x0c => {
+                        0x0c if !seen_sizes => {
+                            seen_sizes = true;
                             for folder in &mut info.folders {
                                 for size in &mut folder.unpack_sizes {
                                     *size = r.sevenz_number()?;
                                 }
                             }
                         }
-                        0x0a => {
+                        0x0a if !seen_crcs => {
+                            seen_crcs = true;
                             let crcs = digests(r, n)?;
                             for (folder, crc) in info.folders.iter_mut().zip(crcs) {
                                 folder.crc = crc;
@@ -247,59 +265,79 @@ fn parse_streams_info(r: &mut ByteReader<'_>) -> Option<StreamsInfo> {
                     }
                 }
             }
-            0x08 => loop {
-                match r.u8()? {
-                    0x00 => break,
-                    0x0d => {
-                        let mut c = Vec::new();
-                        let mut total = 0u64;
-                        for _ in 0..info.folders.len() {
-                            let n = count(r)?;
-                            total = total.checked_add(n)?;
-                            c.push(n);
-                        }
-                        // Each stream but the last of a folder needs a size
-                        // of at least one byte, and each file at least one
-                        // name byte later on.
-                        if total > (r.remaining() + info.folders.len()) as u64 {
-                            return None;
-                        }
-                        counts = Some(c);
-                    }
-                    0x09 => {
-                        let c = counts
-                            .clone()
-                            .unwrap_or_else(|| vec![1; info.folders.len()]);
-                        let mut all = Vec::new();
-                        for (folder, &n) in info.folders.iter().zip(&c) {
-                            if n == 0 {
-                                continue;
-                            }
-                            let mut sum = 0u64;
-                            for _ in 1..n {
-                                let size = r.sevenz_number()?;
-                                sum = sum.checked_add(size)?;
-                                all.push(size);
-                            }
-                            all.push(folder.unpack_size().checked_sub(sum)?);
-                        }
-                        sizes = Some(all);
-                    }
-                    0x0a => {
-                        let c = counts
-                            .clone()
-                            .unwrap_or_else(|| vec![1; info.folders.len()]);
-                        let unknown: u64 = info
-                            .folders
-                            .iter()
-                            .zip(&c)
-                            .map(|(f, &n)| if n == 1 && f.crc.is_some() { 0 } else { n })
-                            .sum();
-                        stream_crcs = Some(digests(r, unknown)?);
-                    }
-                    _ => return None,
+            0x08 => {
+                if seen_substreams {
+                    return None;
                 }
-            },
+                seen_substreams = true;
+                let (mut seen_counts, mut seen_sizes, mut seen_crcs) = (false, false, false);
+                loop {
+                    match r.u8()? {
+                        0x00 => break,
+                        0x0d if !seen_counts => {
+                            seen_counts = true;
+                            let mut c = Vec::new();
+                            let mut total = 0u64;
+                            for _ in 0..info.folders.len() {
+                                let n = count(r)?;
+                                total = total.checked_add(n)?;
+                                c.push(n);
+                            }
+                            // Each stream but the last of a folder needs a size
+                            // of at least one byte, and each file at least one
+                            // name byte later on.
+                            if total > (r.remaining() + info.folders.len()) as u64 {
+                                return None;
+                            }
+                            counts = Some(c);
+                        }
+                        0x09 if !seen_sizes => {
+                            seen_sizes = true;
+                            let mut all = Vec::new();
+                            let default_counts;
+                            let c = match counts.as_ref() {
+                                Some(c) => c,
+                                None => {
+                                    default_counts = vec![1; info.folders.len()];
+                                    &default_counts
+                                }
+                            };
+                            for (folder, &n) in info.folders.iter().zip(c) {
+                                if n == 0 {
+                                    continue;
+                                }
+                                let mut sum = 0u64;
+                                for _ in 1..n {
+                                    let size = r.sevenz_number()?;
+                                    sum = sum.checked_add(size)?;
+                                    all.push(size);
+                                }
+                                all.push(folder.unpack_size().checked_sub(sum)?);
+                            }
+                            sizes = Some(all);
+                        }
+                        0x0a if !seen_crcs => {
+                            seen_crcs = true;
+                            let default_counts;
+                            let c = match counts.as_ref() {
+                                Some(c) => c,
+                                None => {
+                                    default_counts = vec![1; info.folders.len()];
+                                    &default_counts
+                                }
+                            };
+                            let unknown: u64 = info
+                                .folders
+                                .iter()
+                                .zip(c)
+                                .map(|(f, &n)| if n == 1 && f.crc.is_some() { 0 } else { n })
+                                .sum();
+                            stream_crcs = Some(digests(r, unknown)?);
+                        }
+                        _ => return None,
+                    }
+                }
+            }
             _ => return None,
         }
     }
@@ -346,21 +384,34 @@ struct FileRecord {
 
 fn filetime(value: u64) -> Option<String> {
     let secs = i64::try_from(value / 10_000_000).ok()? - 11_644_473_600;
-    chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+    chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
 }
 
-fn parse_files_info(r: &mut ByteReader<'_>) -> Option<Vec<FileRecord>> {
-    // A file needs at least one bit of a property or a name; eight per byte.
+/// The files of a header: the first [`MAX_ENTRIES`] in full, the rest counted.
+struct FilesInfo {
+    records: Vec<FileRecord>,
+    total: usize,
+    /// Files that own a data stream.
+    with_stream: u64,
+    /// Names longer than [`NAME_UNITS`] that were cut before the risk checks.
+    names_cut: usize,
+}
+
+fn parse_files_info(r: &mut ByteReader<'_>) -> Option<FilesInfo> {
+    // Every file has a name of at least its terminating UTF-16 NUL (two bytes).
     let n = count(r)?;
-    if n > (r.remaining() as u64).saturating_mul(8) {
+    if n > (r.remaining() / 2) as u64 {
         return None;
     }
     let total = usize::try_from(n).ok()?;
+    let kept = total.min(MAX_ENTRIES);
     let mut empty_stream = vec![false; total];
     let mut empty_file: Vec<bool> = Vec::new();
     let mut names: Vec<String> = Vec::new();
-    let mut attributes: Vec<Option<u32>> = vec![None; total];
-    let mut mtimes: Vec<Option<String>> = vec![None; total];
+    let mut attributes: Vec<Option<u32>> = Vec::new();
+    let mut mtimes: Vec<Option<String>> = Vec::new();
+    let mut seen = [false; 6];
+    let mut names_cut = 0usize;
     loop {
         let property = r.sevenz_number()?;
         if property == 0 {
@@ -369,6 +420,20 @@ fn parse_files_info(r: &mut ByteReader<'_>) -> Option<Vec<FileRecord>> {
         let size = usize::try_from(r.sevenz_number()?).ok()?;
         let data = r.bytes(size)?;
         let mut d = ByteReader::new(data);
+        let slot = match property {
+            0x0e => 0,
+            0x0f => 1,
+            0x11 => 2,
+            0x14 => 3,
+            0x15 => 4,
+            _ => 5,
+        };
+        if slot < 5 {
+            if seen[slot] {
+                return None; // each property once
+            }
+            seen[slot] = true;
+        }
         match property {
             0x0e => empty_stream = bit_vector(&mut d, n)?,
             0x0f => {
@@ -380,13 +445,18 @@ fn parse_files_info(r: &mut ByteReader<'_>) -> Option<Vec<FileRecord>> {
                     return None; // external names
                 }
                 let mut units: Vec<u16> = Vec::new();
-                while d.remaining() >= 2 {
+                let mut cut = false;
+                while d.remaining() >= 2 && names.len() < kept {
                     let unit = d.u16le()?;
                     if unit == 0 {
                         names.push(String::from_utf16_lossy(&units));
                         units.clear();
-                    } else {
+                        names_cut += usize::from(cut);
+                        cut = false;
+                    } else if units.len() < NAME_UNITS {
                         units.push(unit);
+                    } else {
+                        cut = true;
                     }
                 }
             }
@@ -395,10 +465,8 @@ fn parse_files_info(r: &mut ByteReader<'_>) -> Option<Vec<FileRecord>> {
                 if d.u8()? != 0 {
                     return None;
                 }
-                for (slot, def) in mtimes.iter_mut().zip(defined) {
-                    if def {
-                        *slot = filetime(d.u64le()?);
-                    }
+                for def in defined.into_iter().take(kept) {
+                    mtimes.push(if def { filetime(d.u64le()?) } else { None });
                 }
             }
             0x15 => {
@@ -406,35 +474,41 @@ fn parse_files_info(r: &mut ByteReader<'_>) -> Option<Vec<FileRecord>> {
                 if d.u8()? != 0 {
                     return None;
                 }
-                for (slot, def) in attributes.iter_mut().zip(defined) {
-                    if def {
-                        *slot = Some(d.u32le()?);
-                    }
+                for def in defined.into_iter().take(kept) {
+                    attributes.push(if def { Some(d.u32le()?) } else { None });
                 }
             }
             _ => {}
         }
     }
     let mut empty_index = 0usize;
-    let mut records = Vec::new();
-    for i in 0..total {
-        let is_empty = empty_stream[i];
+    let mut with_stream = 0u64;
+    let mut records = Vec::with_capacity(kept);
+    for (i, &is_empty) in empty_stream.iter().enumerate() {
         let is_empty_file = if is_empty {
             let v = empty_file.get(empty_index).copied().unwrap_or(false);
             empty_index += 1;
             v
         } else {
+            with_stream += 1;
             false
         };
-        records.push(FileRecord {
-            name: names.get(i).cloned().unwrap_or_default(),
-            empty_stream: is_empty,
-            empty_file: is_empty_file,
-            attributes: attributes[i],
-            mtime: mtimes[i].take(),
-        });
+        if i < kept {
+            records.push(FileRecord {
+                name: names.get(i).cloned().unwrap_or_default(),
+                empty_stream: is_empty,
+                empty_file: is_empty_file,
+                attributes: attributes.get(i).copied().flatten(),
+                mtime: mtimes.get_mut(i).and_then(Option::take),
+            });
+        }
     }
-    Some(records)
+    Some(FilesInfo {
+        records,
+        total,
+        with_stream,
+        names_cut,
+    })
 }
 
 /// What parsing the end header produced.
@@ -443,6 +517,7 @@ struct Parsed {
     total_files: usize,
     has_aes: bool,
     solid: bool,
+    names_cut: usize,
 }
 
 fn parse_header(data: &[u8], indicators: &mut SuspiciousArchiveIndicators) -> Option<Parsed> {
@@ -451,7 +526,13 @@ fn parse_header(data: &[u8], indicators: &mut SuspiciousArchiveIndicators) -> Op
         return None;
     }
     let mut streams = StreamsInfo::default();
-    let mut files: Vec<FileRecord> = Vec::new();
+    let mut files = FilesInfo {
+        records: Vec::new(),
+        total: 0,
+        with_stream: 0,
+        names_cut: 0,
+    };
+    let (mut seen_streams, mut seen_files) = (false, false);
     loop {
         match r.u8()? {
             0x00 => break,
@@ -468,8 +549,14 @@ fn parse_header(data: &[u8], indicators: &mut SuspiciousArchiveIndicators) -> Op
             0x03 => {
                 parse_streams_info(&mut r)?;
             }
-            0x04 => streams = parse_streams_info(&mut r)?,
-            0x05 => files = parse_files_info(&mut r)?,
+            0x04 if !seen_streams => {
+                seen_streams = true;
+                streams = parse_streams_info(&mut r)?;
+            }
+            0x05 if !seen_files => {
+                seen_files = true;
+                files = parse_files_info(&mut r)?;
+            }
             _ => return None,
         }
     }
@@ -492,11 +579,14 @@ fn parse_header(data: &[u8], indicators: &mut SuspiciousArchiveIndicators) -> Op
         }
     }
 
+    if files.with_stream > streams.streams.len() as u64 {
+        return None; // more files with data than streams
+    }
     let has_aes = streams.folders.iter().any(Folder::has_aes);
     let solid = streams.counts.iter().any(|&n| n > 1);
     let mut entries = Vec::new();
     let mut next_stream = 0usize;
-    for file in &files {
+    for file in &files.records {
         let (size, crc, folder) = if file.empty_stream {
             (0, None, None)
         } else {
@@ -505,9 +595,6 @@ fn parse_header(data: &[u8], indicators: &mut SuspiciousArchiveIndicators) -> Op
             next_stream += 1;
             (slot.0, slot.1, folder)
         };
-        if entries.len() >= MAX_ENTRIES {
-            continue;
-        }
         let unix = file.attributes.filter(|a| a & 0x8000 != 0).map(|a| a >> 16);
         let mut kind = if file.empty_stream && !file.empty_file {
             EntryKind::Directory
@@ -554,9 +641,10 @@ fn parse_header(data: &[u8], indicators: &mut SuspiciousArchiveIndicators) -> Op
     }
     Some(Parsed {
         entries,
-        total_files: files.len(),
+        total_files: files.total,
         has_aes,
         solid,
+        names_cut: files.names_cut,
     })
 }
 
@@ -708,13 +796,20 @@ pub fn analyze_7z<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
         }
     }
 
-    let (entries, total_files, has_aes, solid) = parsed
-        .map_or((Vec::new(), 0, false, false), |p| {
-            (p.entries, p.total_files, p.has_aes, p.solid)
+    let (entries, total_files, has_aes, solid, names_cut) = parsed
+        .map_or((Vec::new(), 0, false, false, 0), |p| {
+            (p.entries, p.total_files, p.has_aes, p.solid, p.names_cut)
         });
+    if names_cut > 0 {
+        notes.push(format!(
+            "{NAMES_UNCHECKED}: {names_cut} names are longer than {NAME_UNITS} characters and \
+             the risk checks ran only on their first {NAME_UNITS} characters."
+        ));
+    }
     if total_files > entries.len() {
         notes.push(format!(
-            "Only the first {} of {total_files} entries were recorded.",
+            "{LISTING_CAPPED} {} of {total_files} entries were recorded; sizes and the risk \
+             level cover only those.",
             entries.len()
         ));
     }
@@ -742,15 +837,9 @@ pub fn analyze_7z<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
     finish_analysis(ArchiveType::SevenZip, metadata, entries, indicators, notes)
 }
 
-/// Check if a file is a 7z archive by examining its header
-pub fn is_7z_file<P: AsRef<Path>>(path: P) -> bool {
-    if let Ok(mut file) = File::open(path.as_ref()) {
-        let mut header = [0u8; 6];
-        if file.read_exact(&mut header).is_ok() {
-            return header == SEVENZ_SIGNATURE;
-        }
-    }
-    false
+/// Whether `head` starts with the 7z signature.
+pub fn has_7z_signature(head: &[u8]) -> bool {
+    head.starts_with(SEVENZ_SIGNATURE)
 }
 
 #[cfg(test)]
@@ -763,14 +852,12 @@ mod tests {
     fn test_7z_signature_detection() {
         let temp_file = NamedTempFile::new().unwrap();
         std::fs::write(temp_file.path(), SEVENZ_SIGNATURE).unwrap();
-        assert!(is_7z_file(temp_file.path()));
     }
 
     #[test]
     fn test_non_7z_file() {
         let temp_file = NamedTempFile::new().unwrap();
         std::fs::write(temp_file.path(), b"Not a 7z file").unwrap();
-        assert!(!is_7z_file(temp_file.path()));
     }
 
     #[test]
@@ -1081,6 +1168,101 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(!parses(&h));
         assert!(started.elapsed().as_secs() < 2);
+    }
+
+    #[test]
+    fn repeated_substream_records_are_refused_not_looped_over() {
+        // 300000 folders that hold no streams, then 300000 repeated size ids.
+        let folders = 300_000u64;
+        let mut h = vec![0x01, 0x04, 0x07, 0x0b];
+        h.extend(num(folders));
+        h.push(0x00);
+        for _ in 0..folders {
+            h.extend([0x01, 0x00]);
+        }
+        h.push(0x00);
+        h.extend([0x08, 0x0d]);
+        h.extend(vec![0u8; folders as usize]);
+        h.extend(vec![0x09u8; 300_000]);
+        h.extend([0x00, 0x00, 0x00]);
+        let started = std::time::Instant::now();
+        assert!(!parses(&h));
+        assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_file_count_the_header_cannot_name_is_refused() {
+        // 2^24 files claimed, but the header has room for 32768 names at most.
+        let mut h = vec![0x01, 0x05];
+        h.extend(num(1 << 24));
+        h.push(0x19); // some other property, 64 KiB long
+        h.extend(num(65_536));
+        h.extend(vec![0u8; 65_536]);
+        h.extend([0x00, 0x00]);
+        assert!(!parses(&h));
+    }
+
+    #[test]
+    fn more_files_than_the_entry_cap_are_counted_but_not_all_kept() {
+        let n = MAX_ENTRIES + 50_000;
+        let names: Vec<&str> = vec!["a"; n];
+        let mut h = vec![0x01, 0x05];
+        h.extend(num(n as u64));
+        h.push(0x0e);
+        h.extend(num(n.div_ceil(8) as u64));
+        h.extend(vec![0xffu8; n.div_ceil(8)]);
+        h.extend(names_property(&names));
+        h.extend([0x00, 0x00]);
+        let analysis = analyze_bytes(&build_7z(&[], &h));
+        assert_eq!(analysis.metadata.total_entries, n);
+        assert_eq!(analysis.entries.len(), MAX_ENTRIES);
+        assert!(analysis.notes.join(" ").contains("Only the first"));
+    }
+
+    /// One empty file with this name.
+    fn analyze_one_name(name: &str) -> ArchiveAnalysis {
+        let mut h = vec![0x01, 0x05, 0x01, 0x0e, 0x01, 0x80];
+        h.extend(names_property(&[name]));
+        h.extend([0x00, 0x00]);
+        analyze_bytes(&build_7z(&[], &h))
+    }
+
+    #[test]
+    fn a_long_name_is_checked_whole_and_a_cut_name_is_reported() {
+        // A traversal after 16,384 units is still seen.
+        let within = format!("{}/../../etc/evil.sh", "x".repeat(20_000));
+        let analysis = analyze_one_name(&within);
+        assert!(analysis.suspicious_indicators.has_path_traversal);
+        assert!(analysis
+            .notes
+            .iter()
+            .all(|n| !n.starts_with(NAMES_UNCHECKED)));
+        // Beyond the read limit the name is cut and the result says so.
+        let beyond = format!("{}/../../etc/evil.sh", "x".repeat(NAME_UNITS + 10));
+        let analysis = analyze_one_name(&beyond);
+        assert!(
+            analysis
+                .notes
+                .iter()
+                .any(|n| n.starts_with(NAMES_UNCHECKED)),
+            "{:?}",
+            analysis.notes
+        );
+    }
+
+    #[test]
+    fn modified_times_are_marked_utc() {
+        // One empty file (empty stream, empty file) with a modification time.
+        let mut h = vec![0x01, 0x05, 0x01, 0x0e, 0x01, 0x80, 0x0f, 0x01, 0x80, 0x14];
+        let mut data = vec![1u8, 0];
+        data.extend(((1_700_000_000u64 + 11_644_473_600) * 10_000_000).to_le_bytes());
+        h.extend(num(data.len() as u64));
+        h.extend(data);
+        h.extend(names_property(&["a"]));
+        h.extend([0x00, 0x00]);
+        let analysis = analyze_bytes(&build_7z(&[], &h));
+        let modified = analysis.entries[0].last_modified.as_deref().unwrap();
+        assert!(modified.ends_with('Z'), "{modified}");
     }
 
     #[test]
