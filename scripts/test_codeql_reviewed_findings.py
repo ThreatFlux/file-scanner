@@ -1,4 +1,4 @@
-"""Retain historical SARIF; test source-re-reviewed 1.22 tuples with simulated paths."""
+"""Retain historical SARIF; test source-re-reviewed 1.23 tuples with simulated paths."""
 
 import argparse
 import contextlib
@@ -23,7 +23,7 @@ SPEC = importlib.util.spec_from_file_location(
 REVIEW = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REVIEW)
 HISTORICAL_FIXTURE = REPOSITORY / "scripts/codeql-reviewed-findings-fixture.sarif"
-FIXTURE = REPOSITORY / "scripts/codeql-reviewed-findings-fixture-1.22-simulated.sarif"
+FIXTURE = REPOSITORY / "scripts/codeql-reviewed-findings-fixture-1.23-simulated.sarif"
 RAW_FIXTURE = REPOSITORY / "scripts/codeql-reviewed-findings-raw-25c41d9.sarif.gz"
 
 
@@ -73,9 +73,9 @@ class ReviewedFindingsTests(unittest.TestCase):
         self.assertIn("blocked", self.stdout.getvalue())
         self.assertTrue(self.stderr.getvalue().strip())
 
-    def test_simulated_122_sarif_is_annotated_and_retains_rule_extensions(self):
+    def test_simulated_123_sarif_is_annotated_and_retains_rule_extensions(self):
         digest = hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
-        self.assertEqual(digest, "4b0090fdf898f2ba40ff1b564c6750bcd628917887172263c967ef364b0ad7e4")
+        self.assertEqual(digest, "9c18d68126bb8fac0abdc84907c4b9790c10902be5038ae5781646b4614e7061")
         status, report, upload, annotated = self.run_review()
         self.assertEqual(status, 0)
         self.assertEqual(report["raw_count"], 9)
@@ -113,7 +113,7 @@ class ReviewedFindingsTests(unittest.TestCase):
     def test_simulated_raw_regions_match_without_altering_input(self):
         # Only path migration is simulated: do not claim a fresh hosted run.
         raw = gzip.decompress(RAW_FIXTURE.read_bytes()).replace(
-            b"vendor/yara-x-1.21.0/", b"vendor/yara-x-1.22.0/")
+            b"vendor/yara-x-1.21.0/", b"vendor/yara-x-1.23.0/")
         self.sarif = json.loads(raw)
         (self.args.input / "rust.sarif").write_bytes(raw)
         status, report, upload, annotated = self.run_review()
@@ -166,7 +166,7 @@ class ReviewedFindingsTests(unittest.TestCase):
 
     def test_raw_and_canonical_duplicates_block_every_omission(self):
         raw = json.loads(gzip.decompress(RAW_FIXTURE.read_bytes()).replace(
-            b"vendor/yara-x-1.21.0/", b"vendor/yara-x-1.22.0/"))
+            b"vendor/yara-x-1.21.0/", b"vendor/yara-x-1.23.0/"))
         self.sarif["runs"][0]["results"].append(raw["runs"][0]["results"][0])
         self.save_input(self.sarif)
         self.assert_blocked_without_omissions()
@@ -202,7 +202,7 @@ class ReviewedFindingsTests(unittest.TestCase):
                 self.assertEqual(REVIEW.filter_documents(documents, keys), documents)
 
     def test_changed_existing_verification_call_path_blocks_every_omission(self):
-        path = self.root / "vendor/yara-x-1.22.0/src/modules/utils/crypto.rs"
+        path = self.root / "vendor/yara-x-1.23.0/src/modules/utils/crypto.rs"
         path.write_text(path.read_text() + "\n// Changed verification implementation.\n")
         self.assert_blocked_without_omissions()
 
@@ -213,7 +213,7 @@ class ReviewedFindingsTests(unittest.TestCase):
         self.assert_blocked_without_omissions()
 
     def test_added_vendor_caller_blocks_every_omission(self):
-        path = self.root / "vendor/yara-x-1.22.0/src/new_authentication.rs"
+        path = self.root / "vendor/yara-x-1.23.0/src/new_authentication.rs"
         path.write_text('fn authenticate(cert: Certificate) -> bool { cert.thumbprint == "trusted" }\n')
         self.assert_blocked_without_omissions()
 
@@ -242,7 +242,7 @@ class ReviewedFindingsTests(unittest.TestCase):
                 path.unlink()
 
     def test_missing_reviewed_source_blocks_every_omission(self):
-        (self.root / "vendor/yara-x-1.22.0/src/modules/utils/asn1.rs").unlink()
+        (self.root / "vendor/yara-x-1.23.0/src/modules/utils/asn1.rs").unlink()
         self.assert_blocked_without_omissions()
 
     def test_duplicate_reviewed_finding_blocks_every_omission(self):
@@ -259,8 +259,8 @@ class ReviewedFindingsTests(unittest.TestCase):
 
     def test_changed_yara_graph_blocks_every_omission(self):
         path = self.root / "Cargo.lock"
-        text = path.read_text().replace('name = "yara-x"\nversion = "1.22.0"',
-                                        'name = "yara-x"\nversion = "1.23.0"')
+        text = path.read_text().replace('name = "yara-x"\nversion = "1.23.0"',
+                                        'name = "yara-x"\nversion = "1.24.0"')
         path.write_text(text)
         self.assert_blocked_without_omissions()
 

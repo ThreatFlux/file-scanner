@@ -11,11 +11,6 @@ ignore = [
     # Existing warning-only exception: YARA-X still uses unmaintained bincode.
     # The local YARA-X patch resolves the previous Wasmtime advisories.
     "RUSTSEC-2025-0141",
-    # Existing RSA exemption: RUSTSEC-2023-0071 has no patched stable release.
-    # YARA-X uses RsaPublicKey/PKCS#1 signature verification only; it never loads
-    # private keys or invokes RSA signing/decryption (vendor source crypto.rs).
-    # Reassess this exemption if upstream or scanner usage adds private operations.
-    "RUSTSEC-2023-0071",
 ]
 
 [licenses]
