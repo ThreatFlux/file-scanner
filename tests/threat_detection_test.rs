@@ -681,6 +681,9 @@ async fn enhanced_analysis_keeps_ordinary_files_clean() {
     // programs (it beacons to msftupdater.com) and is a positive control below.
     let mut files: Vec<std::path::PathBuf> = vec![
         root.join("README.md"),
+        // Documentation that quotes the simulated malware's domain, ptrace and
+        // "Debugger detected!" is prose, not malware.
+        root.join("test_programs/README.md"),
         root.join("Cargo.lock"),
         root.join("CHANGELOG.md"),
     ];

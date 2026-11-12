@@ -17,33 +17,33 @@ use serde_json::Value;
 use super::{
     output::{
         fit_rows, input_schema_with_budget, page, parse_request, respond, tool_error,
-        DEFAULT_LIMIT, MAX_OUTPUT_BYTES, MIN_OUTPUT_BYTES,
+        DEFAULT_LIMIT, MAX_LIMIT, MAX_OUTPUT_BYTES, MIN_OUTPUT_BYTES,
     },
-    paths::Expect,
+    paths::{Expect, PathPolicy},
     tools_analyze::LlmFileAnalysisResult,
     FileScannerMcp,
 };
 use crate::threat_detection::{
     builtin_rule_sources, compile_rule_sources_with_warnings, load_rule_sources,
-    scan_path_with_rules, CustomYaraScanResult, RuleHitCount, YaraFileMatch, YaraScanError,
-    YaraScanOptions, YaraSkippedFile, DEFAULT_MAX_FILES, DEFAULT_MAX_MATCHES_PER_RULE,
-    DEFAULT_MAX_RULES_PER_FILE, DEFAULT_TIMEOUT_SECONDS,
+    scan_path_with_rules, CustomYaraScanResult, EntryCheck, RuleHitCount, YaraFileMatch,
+    YaraScanError, YaraScanOptions, YaraSkippedFile, DEFAULT_MAX_FILES,
+    DEFAULT_MAX_MATCHES_PER_RULE, DEFAULT_MAX_RULES_PER_FILE, DEFAULT_TIMEOUT_SECONDS,
 };
 
 const YARA_SCAN_DESCRIPTION: &str = "Scan a file or directory with YARA rules and get a summary \
 first: files scanned and matched, how many files each rule hit, skipped and unscanned files, and \
 a paged list of matching files (`offset`, `limit`) whose rule matches carry tags, metadata and the \
 first matched strings with their offsets (text, or hex for binary bytes). Give the rules as \
-`yara_rule` (rule text, or the word `builtin` for the scanner's own 10 rules) and/or `rule_path` \
+`yara_rule` (rule text, or the word `builtin` for the scanner's own built-in rules) and/or `rule_path` \
 (a .yar/.yara file, or a directory of them); `include` directives are not supported. A rule that \
 does not compile is an error that carries the compiler's message, line and column, so fix the \
 rule and call again. Draft a rule with llm_analyze_file first. Listing is capped: \
 `max_matches_per_rule` string matches per rule (the rest are counted in `strings_total`), \
 `max_rules_per_file`, `max_files` (the walk stops there; `files_not_scanned` is then a lower bound) \
 and `timeout_seconds` for the scan and its own directory walk; whatever was cut is named in \
-`limits_reached`. Before the scan starts the server checks every entry under `path` against the \
-allowed folders, and that check is not covered by `max_files` or `timeout_seconds`, so a huge tree \
-can take longer than `timeout_seconds` to answer. A call without `offset` always scans anew. Later pages (`offset` above 0) are a snapshot of \
+`limits_reached`. The walk checks each entry against the allowed folders as it meets it, inside \
+`max_files` and `timeout_seconds`: a symlink leaving them refuses the call, and a FIFO, socket or \
+device is listed under `skipped` and never opened. A call without `offset` always scans anew. Later pages (`offset` above 0) are a snapshot of \
 that first call, served from the kept result (`cache: \"hit\"`) for 10 minutes. Files over `max_file_size`, symlinks and \
 unreadable directories are listed under `skipped`; unreadable files are listed under `errors`. Results are compact JSON capped at `max_output_bytes` \
 (default 80000, ceiling 400000).";
@@ -236,11 +236,6 @@ impl FileScannerMcp {
             Ok(path) => path,
             Err(message) => return tool_error(message),
         };
-        let recursive = request.recursive.unwrap_or(true);
-        // The scan reads what is inside a directory, so vet its members too.
-        if let Err(message) = self.state.check_tree(&path, recursive) {
-            return tool_error(message);
-        }
 
         let mut sources = Vec::new();
         if let Some(rule) = request.yara_rule.as_deref() {
@@ -281,10 +276,13 @@ impl FileScannerMcp {
             );
         }
 
-        let options = match options_from_args(&request) {
+        let mut options = match options_from_args(&request) {
             Ok(options) => options,
             Err(message) => return tool_error(message),
         };
+        // Each entry is vetted as the walk meets it, inside max_files and the
+        // deadline, so a huge tree is not walked twice or to its end.
+        options.entry_check = Some(entry_check_for(self.state.config(), &path));
         let offset = request.offset.unwrap_or(0);
         let limit = request.limit.unwrap_or(DEFAULT_LIMIT);
         let rule_text_is_a_path = request.yara_rule.as_deref().is_some_and(looks_like_a_path);
@@ -335,6 +333,18 @@ impl FileScannerMcp {
         }
         respond(value, budget)
     }
+}
+
+/// The path policy applied to each entry the scan's walk meets under `root`.
+fn entry_check_for(
+    config: &crate::mcp_server::state::StateConfig,
+    root: &std::path::Path,
+) -> EntryCheck {
+    let policy = PathPolicy::new(config.allow_roots.clone());
+    let root = root.to_path_buf();
+    EntryCheck(Arc::new(move |path, file_type, is_symlink| {
+        policy.check_entry(&root, path, file_type, is_symlink)
+    }))
 }
 
 /// A `yara_rule` value that reads like a file name, not like rule text.
@@ -516,6 +526,8 @@ fn reply_value(
     summary.limits_reached = limits;
 
     let mut value = serde_json::to_value(&summary).unwrap_or(Value::Null);
+    // A page holds at most MAX_LIMIT rows, so a larger ask is not a byte cut.
+    let limit = limit.clamp(1, MAX_LIMIT);
     let take = rows_that_fit(&result.matches, offset, limit, budget);
     let paged = page(&result.matches, offset, take);
     let Some(map) = value.as_object_mut() else {
@@ -629,6 +641,7 @@ fn options_from_args(request: &YaraScanArgs) -> Result<YaraScanOptions, String> 
             MAX_RULES_PER_FILE_CEILING,
         )?,
         timeout: Duration::from_secs(timeout_seconds),
+        entry_check: None,
     })
 }
 
@@ -638,6 +651,9 @@ fn execute_scan(plan: &ScanPlan) -> Result<YaraScanResult, String> {
     let (rules, warnings) = compile_rule_sources_with_warnings(&plan.sources)?;
     let rules_compiled = rules.iter().count();
     let mut scan = scan_path_with_rules(&plan.path, &rules, &plan.options);
+    if let Some(reason) = scan.refused.take() {
+        return Err(reason);
+    }
     scan.rule_warnings = warnings;
     Ok(summarize(
         scan,
@@ -1049,6 +1065,20 @@ mod tests {
         assert_eq!(value["next_offset"], 1);
     }
 
+    #[test]
+    fn a_limit_above_the_row_ceiling_is_not_blamed_on_the_byte_budget() {
+        use crate::threat_detection::YaraFileMatch;
+        let rows: Vec<YaraFileMatch> = (0..700).map(|_| YaraFileMatch::default()).collect();
+        let result = YaraScanResult {
+            matches: rows,
+            ..Default::default()
+        };
+        let value = reply_value(&result, 0, 600, 400_000, None);
+        assert_eq!(value["matches_returned"], 500);
+        assert_eq!(value["next_offset"], 500);
+        assert!(value.get("hint").is_none(), "{value}");
+    }
+
     fn create_test_file(content: &[u8]) -> Result<(TempDir, std::path::PathBuf), std::io::Error> {
         let temp_dir = TempDir::new()?;
         let file_path = temp_dir.path().join("test_file.bin");
@@ -1444,6 +1474,85 @@ rule TestRule {
         FileScannerMcp::new()
     }
 
+    fn mcp_with_root(root: &std::path::Path) -> FileScannerMcp {
+        use crate::mcp_server::state::{ServerState, StateConfig};
+        FileScannerMcp::with_state(Arc::new(ServerState::new(StateConfig {
+            allow_roots: vec![root.to_path_buf()],
+            ..StateConfig::default()
+        })))
+    }
+
+    #[tokio::test]
+    async fn a_tree_larger_than_max_files_stops_at_the_limit() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..200 {
+            write(dir.path(), &format!("f{i:03}.txt"), b"x");
+        }
+        let (err, body) = call(
+            &mcp(),
+            json!({"path": dir.path(), "yara_rule": "rule t { condition: true }",
+                   "max_files": 5}),
+        )
+        .await;
+        assert!(!err, "{body}");
+        assert_eq!(body["total_files_scanned"], 5);
+        // The walk stopped at the limit: it counted one file past it, not 195.
+        assert_eq!(body["files_not_scanned"], 1, "{body}");
+        assert!(body["limits_reached"][0]
+            .as_str()
+            .unwrap()
+            .contains("max_files 5 reached"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fifo_in_the_tree_is_skipped_and_never_opened() {
+        let dir = TempDir::new().unwrap();
+        write(dir.path(), "a.txt", b"hello");
+        let fifo = dir.path().join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        for server in [mcp(), mcp_with_root(&root)] {
+            let (err, body) = call(
+                &server,
+                json!({"path": root, "yara_rule": "rule t { condition: true }"}),
+            )
+            .await;
+            assert!(!err, "{body}");
+            assert_eq!(body["total_files_scanned"], 1, "{body}");
+            let skipped = body["skipped"].as_array().unwrap();
+            assert_eq!(skipped.len(), 1, "{body}");
+            assert!(skipped[0]["file_path"].as_str().unwrap().ends_with("pipe"));
+            assert!(skipped[0]["reason"].as_str().unwrap().contains("FIFO"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_that_leaves_the_allowed_root_still_refuses_the_call() {
+        let outside = TempDir::new().unwrap();
+        let secret = write(outside.path(), "secret.txt", b"secret");
+        let inside = TempDir::new().unwrap();
+        write(inside.path(), "a.txt", b"hello");
+        let root = std::fs::canonicalize(inside.path()).unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("link.txt")).unwrap();
+        let (err, body) = call(
+            &mcp_with_root(&root),
+            json!({"path": root, "yara_rule": "rule t { condition: true }"}),
+        )
+        .await;
+        assert!(err, "{body}");
+        let text = body.as_str().unwrap();
+        assert!(
+            text.contains("link.txt") && text.contains("outside"),
+            "{text}"
+        );
+    }
+
     #[tokio::test]
     async fn listed_matches_are_capped_and_the_totals_are_reported() {
         let dir = TempDir::new().unwrap();
@@ -1701,7 +1810,8 @@ rule TestRule {
             .collect();
         let (is_error, body) = call(
             &mcp(),
-            json!({"path": dir.path(), "yara_rule": rules, "max_rules_per_file": 100}),
+            json!({"path": dir.path(), "yara_rule": rules, "max_rules_per_file": 100,
+                   "timeout_seconds": 600}),
         )
         .await;
         assert!(!is_error, "{body}");
@@ -1804,7 +1914,11 @@ rule TestRule {
             write(dir.path(), &format!("f{i:04}.txt"), b"needle in a haystack");
         }
         let rule = "rule needle { strings: $a = \"needle\" condition: $a }";
-        let (err, body) = call(&mcp(), json!({"path": dir.path(), "yara_rule": rule})).await;
+        let (err, body) = call(
+            &mcp(),
+            json!({"path": dir.path(), "yara_rule": rule, "timeout_seconds": 600}),
+        )
+        .await;
         assert!(!err, "{body}");
         assert_eq!(body["total_files_scanned"], 1500);
         assert_eq!(body["files_matched"], 1500);

@@ -971,9 +971,15 @@ rule update_lookalike_domain : c2 {
         severity = "high"
         category = "command_and_control"
     strings:
-        $dom = /\b(msft|msoft|ms|adobe|flash|java|chrome)[-_]?updat(e|er|es)\.(com|net|org|info|biz|xyz|top|ru|cn)/ ascii nocase
+        // Where the name stands as a domain, not as code or a path: after a
+        // URL scheme, as a whole NUL-terminated string in a binary's string
+        // table, or as a Host header. An identifier (`chrome_update.info(`),
+        // a member access or an import path never has these around it.
+        $url = /:\/\/(msft|msoft|ms|adobe|flash|java|chrome)[-_]?updat(e|er|es)\.(com|net|org|info|biz|xyz|top|ru|cn)/ ascii nocase
+        $cstr = /\x00(msft|msoft|ms|adobe|flash|java|chrome)[-_]?updat(e|er|es)\.(com|net|org|info|biz|xyz|top|ru|cn)\x00/ ascii nocase
+        $host = /Host: (msft|msoft|ms|adobe|flash|java|chrome)[-_]?updat(e|er|es)\.(com|net|org|info|biz|xyz|top|ru|cn)[\r\n:\x00]/ ascii nocase
     condition:
-        $dom
+        any of them
 }"#,
         // Rule 12: Programs that announce their own evasion checks
         r#"
@@ -983,7 +989,9 @@ rule self_announcing_evasion : anti_debug {
         severity = "high"
         category = "evasion"
     strings:
-        $ptrace = "ptrace" ascii
+        // The import as a symbol-table entry (NUL on both sides, `_` on
+        // Mach-O); prose that mentions ptrace has no NUL around it.
+        $ptrace = /\x00_?ptrace\x00/ ascii
         $announce = /(debugger|sandbox|virtual machine) (environment )?detected/ ascii nocase
     condition:
         $ptrace and $announce
@@ -996,9 +1004,10 @@ rule hardcoded_xor_key : obfuscation {
         severity = "high"
         category = "obfuscation"
     strings:
-        // A key literal: the name, then letters and a run of digits. The
-        // standard library's XORKeyStream has no digits after the name.
-        $key = /XOR_?Key[A-Za-z]{0,12}[0-9]{6,}/ ascii nocase
+        // A key literal: the name in its constant spellings with a run of
+        // digits right after it. Identifiers such as xorKeyStream123 and
+        // the standard library's XORKeyStream do not have that shape.
+        $key = /XOR_?(Key|KEY)[0-9]{6,}/ ascii
     condition:
         $key
 }"#,
@@ -1199,6 +1208,25 @@ pub struct YaraScanOptions {
     pub max_rules_per_file: usize,
     /// Wall-clock budget for the whole scan.
     pub timeout: Duration,
+    /// Vets each entry the walk meets before it is counted or opened (the
+    /// caller's path policy). `None`: no vetting.
+    pub entry_check: Option<EntryCheck>,
+}
+
+/// What an [`EntryCheck`] is called with: the entry's path, its own file type
+/// (a link is not followed) and whether it is a symlink. `Err` carries the
+/// refusal text.
+pub type EntryCheckFn =
+    dyn Fn(&Path, std::fs::FileType, bool) -> std::result::Result<(), String> + Send + Sync;
+
+/// A shareable entry check for [`YaraScanOptions::entry_check`].
+#[derive(Clone)]
+pub struct EntryCheck(pub std::sync::Arc<EntryCheckFn>);
+
+impl std::fmt::Debug for EntryCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EntryCheck")
+    }
 }
 
 impl Default for YaraScanOptions {
@@ -1211,6 +1239,7 @@ impl Default for YaraScanOptions {
             max_matches_per_rule: DEFAULT_MAX_MATCHES_PER_RULE,
             max_rules_per_file: DEFAULT_MAX_RULES_PER_FILE,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+            entry_check: None,
         }
     }
 }
@@ -1255,6 +1284,11 @@ pub struct CustomYaraScanResult {
     #[serde(default)]
     pub detail_trimmed_files: usize,
     pub timed_out: bool,
+    /// Set when the entry check refused an entry that makes the whole scan
+    /// unacceptable (a symlink leaving the allowed folders); the walk stopped
+    /// there and the other members of this result are partial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
     /// How many files each rule matched, most hits first.
     pub rule_hits: Vec<RuleHitCount>,
     /// Compiler warnings about the rules (first 10).
@@ -1297,6 +1331,25 @@ const MAX_DETAIL_BYTES: usize = 24 * 1024 * 1024;
 /// Rules still listed for a file whose detail was dropped.
 const TRIMMED_RULES_PER_FILE: usize = 3;
 
+/// Most detail one file may build (estimated bytes), so several files
+/// scanned together reserve a small part of the shared budget each.
+const MAX_FILE_DETAIL_BYTES: usize = 2 * 1024 * 1024;
+
+/// Take up to `want` bytes from what is left of the shared detail budget
+/// (`reserved` counts what files hold now) and return how many were taken.
+fn reserve_detail(reserved: &std::sync::atomic::AtomicUsize, want: usize) -> usize {
+    use std::sync::atomic::Ordering;
+    let mut held = reserved.load(Ordering::SeqCst);
+    loop {
+        let taken = want.min(MAX_DETAIL_BYTES.saturating_sub(held));
+        match reserved.compare_exchange_weak(held, held + taken, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => return taken,
+            Err(now) => held = now,
+        }
+    }
+}
+
 /// A rough size of what one file's match keeps in memory.
 fn estimate_match_bytes(file_match: &YaraFileMatch) -> usize {
     let rules: usize = file_match
@@ -1336,7 +1389,7 @@ pub fn scan_path_with_rules(
     use std::sync::Mutex;
 
     let deadline = Instant::now() + options.timeout;
-    let candidates = collect_files_to_scan(path, options, deadline);
+    let mut candidates = collect_files_to_scan(path, options, deadline);
 
     let mut result = CustomYaraScanResult {
         skipped: candidates.skipped,
@@ -1345,8 +1398,12 @@ pub fn scan_path_with_rules(
         more_files_not_counted: candidates.more_files,
         walk_timed_out: candidates.walk_timed_out,
         timed_out: candidates.walk_timed_out,
+        refused: candidates.refused.take(),
         ..CustomYaraScanResult::default()
     };
+    if result.refused.is_some() {
+        return result;
+    }
 
     let files = candidates.files;
     let next = AtomicUsize::new(0);
@@ -1377,14 +1434,18 @@ pub fn scan_path_with_rules(
                         continue;
                     }
                     scanner.set_timeout(deadline - now);
-                    // Each file may build only what is left of the shared
-                    // detail budget (and at most a worker's share of it), so
-                    // the detail is never built first and thrown away after.
-                    let allowance = MAX_DETAIL_BYTES
-                        .saturating_sub(detail_bytes.load(Ordering::SeqCst))
-                        .min(MAX_DETAIL_BYTES / MAX_SCAN_WORKERS);
+                    // Each file reserves its allowance (at most
+                    // MAX_FILE_DETAIL_BYTES) from the shared detail budget
+                    // before it is scanned, so workers running together can
+                    // not overshoot it, and gives back what it did not use.
+                    let allowance = reserve_detail(&detail_bytes, MAX_FILE_DETAIL_BYTES);
                     let (mut outcome, trimmed) =
                         scan_one_file(&mut scanner, file, options, allowance);
+                    let used = match &outcome {
+                        FileOutcome::Scanned(Some(file_match)) => estimate_match_bytes(file_match),
+                        _ => 0,
+                    };
+                    detail_bytes.fetch_sub(allowance.saturating_sub(used), Ordering::SeqCst);
                     if let FileOutcome::Scanned(Some(file_match)) = &mut outcome {
                         {
                             let mut hits = hits.lock().expect("rule hit lock");
@@ -1392,7 +1453,6 @@ pub fn scan_path_with_rules(
                                 *hits.entry(rule).or_default() += 1;
                             }
                         }
-                        detail_bytes.fetch_add(estimate_match_bytes(file_match), Ordering::SeqCst);
                         if trimmed {
                             trimmed_files.fetch_add(1, Ordering::SeqCst);
                         }
@@ -1490,6 +1550,8 @@ struct Candidates {
     walk_timed_out: bool,
     /// Regular files taken or skipped by size so far (toward `max_files`).
     examined: usize,
+    /// An entry the check refused for the whole scan.
+    refused: Option<String>,
 }
 
 /// Walk the tree lazily: stop at the first regular file beyond `max_files`
@@ -1504,6 +1566,7 @@ fn collect_files_to_scan(path: &Path, options: &YaraScanOptions, deadline: Insta
         more_files: false,
         walk_timed_out: false,
         examined: 0,
+        refused: None,
     };
 
     if path.is_file() {
@@ -1532,6 +1595,22 @@ fn collect_files_to_scan(path: &Path, options: &YaraScanOptions, deadline: Insta
                     continue;
                 }
             };
+            if entry.depth() > 0 {
+                if let Some(check) = &options.entry_check {
+                    if let Err(reason) =
+                        (check.0)(entry.path(), entry.file_type(), entry.path_is_symlink())
+                    {
+                        if entry.path_is_symlink() {
+                            // A link that leaves the allowed folders refuses the call.
+                            candidates.refused = Some(reason);
+                            break;
+                        }
+                        // A FIFO, socket or device is never opened.
+                        candidates.skip(entry.path().display().to_string(), reason);
+                        continue;
+                    }
+                }
+            }
             // `file_type` does not follow symlinks, so a link is skipped.
             if entry.file_type().is_file() {
                 let size = entry.metadata().ok().map(|m| m.len());
@@ -3028,7 +3107,7 @@ mod tests {
     fn the_added_rules_flag_their_pattern_and_not_ordinary_text() {
         let flagged = [
             ("update_lookalike_domain", "http://msftupdater.com/x"),
-            ("self_announcing_evasion", "ptrace\0Debugger detected!"),
+            ("self_announcing_evasion", "\0ptrace\0Debugger detected!"),
             ("hardcoded_xor_key", "key=ThisIsASecretXORKey123456789012"),
         ];
         let ordinary = [
@@ -3036,6 +3115,11 @@ mod tests {
             "debugger detected in the list of options (no system call named)",
             "ptrace is a system call; sandbox settings",
             "crypto/cipher XORKeyStream and xorKeyStreamBlocks",
+            "chrome_update.info('x'); java_update.run(); ms_update.compute();",
+            "import './chrome-update.component'; x = foo.chrome_update.com",
+            "ptrace was used and the note says debugger detected",
+            "xorKeyStream123456",
+            "Target non-existent domains (msftupdater.com), \"msftupdater.com\"",
         ];
         let dir = tempdir().unwrap();
         for (i, (rule, text)) in flagged.iter().enumerate() {
@@ -3064,5 +3148,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The entry check runs on each walked entry inside `max_files`: a tree
+    /// far past the limit is checked only up to it, and a refused symlink
+    /// stops the scan with its reason.
+    #[test]
+    fn the_entry_check_runs_inside_max_files_and_a_refusal_stops_the_scan() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let dir = tempdir().unwrap();
+        for i in 0..200 {
+            std::fs::write(dir.path().join(format!("f{i:03}.txt")), "x").unwrap();
+        }
+        let rules =
+            compile_rule_sources(&[("t".to_string(), "rule t { condition: true }".to_string())])
+                .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let options = YaraScanOptions {
+            max_files: 5,
+            entry_check: Some(EntryCheck(Arc::new(move |_, _, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }))),
+            ..YaraScanOptions::default()
+        };
+        let result = scan_path_with_rules(dir.path(), &rules, &options);
+        assert_eq!(result.total_files_scanned, 5);
+        assert_eq!(calls.load(Ordering::SeqCst), 6, "five taken, one past");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/hosts", dir.path().join("a-link")).unwrap();
+            let options = YaraScanOptions {
+                entry_check: Some(EntryCheck(Arc::new(|_, _, is_link| {
+                    if is_link {
+                        Err("link refused".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }))),
+                ..YaraScanOptions::default()
+            };
+            let result = scan_path_with_rules(dir.path(), &rules, &options);
+            assert_eq!(result.refused.as_deref(), Some("link refused"));
+            assert_eq!(result.total_files_scanned, 0);
+        }
+    }
+
+    /// Files reserve their detail allowance from the shared budget before the
+    /// scan and the total never passes it, however many reserve together.
+    #[test]
+    fn detail_reservations_never_pass_the_shared_budget() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let held = AtomicUsize::new(0);
+        let mut total = 0;
+        for _ in 0..100 {
+            total += reserve_detail(&held, MAX_FILE_DETAIL_BYTES);
+        }
+        assert_eq!(total, MAX_DETAIL_BYTES);
+        assert_eq!(held.load(Ordering::SeqCst), MAX_DETAIL_BYTES);
+        assert_eq!(reserve_detail(&held, MAX_FILE_DETAIL_BYTES), 0);
+        held.fetch_sub(MAX_FILE_DETAIL_BYTES, Ordering::SeqCst);
+        assert_eq!(
+            reserve_detail(&held, MAX_FILE_DETAIL_BYTES),
+            MAX_FILE_DETAIL_BYTES
+        );
     }
 }
