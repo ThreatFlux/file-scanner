@@ -645,7 +645,7 @@ fn class_view(
 
     Ok(json!({
         "view": "class",
-        "filter": request.filter,
+        "filter": request.filter.as_deref().map(|f| clip(f, MAX_FILTER_ECHO_CHARS)),
         "class": header,
         "dangerous_apis": dangerous_apis,
         "also_in": also_in_page,
@@ -662,9 +662,13 @@ fn class_view(
 /// Bytes kept back for each list still to come: an empty page with its counters.
 const EMPTY_LIST_BYTES: usize = 150;
 
+/// The echoed `filter` is clipped to this many characters so it stays a small part of the
+/// fixed byte cost of a class page.
+const MAX_FILTER_ECHO_CHARS: usize = 200;
+
 /// [`fit_page`] for one of several lists sharing a byte budget. A page is cut to `share`
-/// bytes; when even one row is larger than that, the page is cut again to `most` (every
-/// byte not yet spent). Only when the row does not fit even then does the page carry no
+/// bytes; when even one row is larger than that, the page is the one row alone, kept when
+/// it fits `most` (every byte not yet spent). Only when the row does not fit even then does the page carry no
 /// rows (`returned` 0, `next_offset` equal to `offset`), and its hint says how many bytes
 /// that row needs instead of pointing at the next row, which would skip it.
 fn fit_list<T: Serialize>(
@@ -684,7 +688,8 @@ fn fit_list<T: Serialize>(
     if size_of(&value) <= share || !has_rows(&value) {
         return value;
     }
-    let mut value = fit_page(items, offset, limit, most);
+    // Only the one row that missed its share, so later lists keep their bytes.
+    let mut value = fit_page(items, offset, limit, 0);
     if size_of(&value) <= most || !has_rows(&value) {
         return value;
     }
@@ -1801,7 +1806,7 @@ mod tests {
             )
             .await;
             assert!(!is_error, "{text}");
-            assert!(text.len() <= budget + 1_000, "{} > {budget}", text.len());
+            assert!(text.len() <= budget, "{} > {budget}", text.len());
             assert!(
                 page.get("truncated").is_none(),
                 "cut at {limit}/{budget}: {text}"
@@ -1843,52 +1848,131 @@ mod tests {
         }
     }
 
-    /// Rows of 150 to 250 bytes walked at 4,000 bytes by the smallest next_offset: every
-    /// method is seen once and no page is empty while rows remain.
+    /// A class shaped like GraphManagerImpl walked at 4,000 and 5,000 bytes by the smallest
+    /// next_offset: no list stalls on an empty page and every row of every list is seen.
     #[tokio::test]
-    async fn class_view_walk_at_a_small_budget_sees_every_row_once() {
+    async fn class_view_walk_at_small_budgets_sees_every_row_of_every_list() {
         let dir = TempDir::new().unwrap();
         let mcp = FileScannerMcp::new();
-        let mut b = ClassBuilder::new("p/W");
-        for i in 0..40 {
-            let desc = format!("({})V", "I".repeat(150 + (i * 7) % 100));
-            b = b.method(&format!("m{i:02}"), &desc, 1);
+        let mut b = ClassBuilder::new("p/G");
+        let pad = "x".repeat(150);
+        for i in 0..100 {
+            let desc = format!("({})V", "I".repeat(350 + i % 7));
+            b = b.method(&format!("method{i:03}"), &desc, 1);
         }
-        for i in 0..30 {
-            b = b
-                .refers_to(&format!("p/Ref{i:02}"))
-                .calls("p/Q", &format!("c{i:02}"), "()V");
+        for i in 0..300 {
+            b = b.refers_to(&format!("p/{pad}/Ref{i:03}")).calls(
+                "p/Q",
+                &format!("call{pad}{i:03}"),
+                "()V",
+            );
         }
-        let inner: Vec<String> = (0..10).map(|i| format!("p/W$In{i}")).collect();
+        let inner: Vec<String> = (0..240).map(|i| format!("p/G$In{i:03}")).collect();
         let inner_refs: Vec<&str> = inner.iter().map(String::as_str).collect();
         b = b.inner_classes(&inner_refs);
-        let path = write(&dir, "walk.jar", &zip_bytes(&[("p/W.class", &b.build())]));
-        let mut seen = Vec::new();
-        let mut offset = 0u64;
-        for _ in 0..200 {
-            let (is_error, page, text) = call(
-                &mcp,
-                json!({"file_path": path, "class": "p.W", "limit": 500,
-                       "max_output_bytes": 4_000, "offset": offset}),
-            )
-            .await;
-            assert!(!is_error, "{text}");
-            assert_hints_agree(&page);
-            let m = &page["methods"];
-            let rows = m["items"].as_array().unwrap();
-            for r in rows {
-                seen.push(r["name"].as_str().unwrap().to_string());
-            }
-            match m["next_offset"].as_u64() {
-                Some(next) => {
-                    assert!(next > offset, "stalled at {offset}: {text}");
-                    offset = next;
+        let path = write(&dir, "walk.jar", &zip_bytes(&[("p/G.class", &b.build())]));
+        // The true row counts: pages of 500 at a budget with room for everything.
+        let lists = [
+            "inner_classes",
+            "methods",
+            "referenced_classes",
+            "method_refs",
+        ];
+        let mut totals = [0usize; 4];
+        for (n, list) in lists.iter().enumerate() {
+            let mut offset = 0u64;
+            loop {
+                let (_, all, _) = call(
+                    &mcp,
+                    json!({"file_path": path, "class": "p.G", "limit": 500,
+                           "max_output_bytes": 4_000_000, "offset": offset}),
+                )
+                .await;
+                totals[n] += all[*list]["items"].as_array().unwrap().len();
+                match all[*list]["next_offset"].as_u64() {
+                    Some(next) => offset = next,
+                    None => break,
                 }
-                None => break,
             }
         }
-        let expected: Vec<String> = (0..40).map(|i| format!("m{i:02}")).collect();
-        assert_eq!(seen, expected);
+        let expected = [
+            (lists[0], totals[0]),
+            (lists[1], totals[1]),
+            (lists[2], totals[2]),
+            (lists[3], totals[3]),
+        ];
+        assert_eq!(expected[0].1, 240);
+        assert_eq!(expected[1].1, 100);
+        assert!(expected[2].1 >= 300 && expected[3].1 >= 300, "{expected:?}");
+        for budget in [4_000u64, 5_000] {
+            let mut seen: std::collections::BTreeMap<&str, std::collections::BTreeSet<u64>> =
+                std::collections::BTreeMap::new();
+            let mut offset = 0u64;
+            for _ in 0..5_000 {
+                let (is_error, page, text) = call(
+                    &mcp,
+                    json!({"file_path": path, "class": "p.G", "limit": 500,
+                           "max_output_bytes": budget, "offset": offset}),
+                )
+                .await;
+                assert!(!is_error, "{text}");
+                assert!(text.len() as u64 <= budget, "{} > {budget}", text.len());
+                assert_hints_agree(&page);
+                let mut next_min: Option<u64> = None;
+                for (list, _) in expected {
+                    let l = &page[list];
+                    let rows = l["items"].as_array().unwrap().len() as u64;
+                    if let Some(next) = l["next_offset"].as_u64() {
+                        assert!(
+                            next > offset,
+                            "{list} stalled at {offset} ({budget} bytes): {text}"
+                        );
+                        next_min = Some(next_min.map_or(next, |m| m.min(next)));
+                    }
+                    let set = seen.entry(list).or_default();
+                    for i in 0..rows {
+                        set.insert(offset + i);
+                    }
+                }
+                match next_min {
+                    Some(next) => offset = next,
+                    None => break,
+                }
+            }
+            for (list, count) in expected {
+                let set = &seen[list];
+                assert_eq!(
+                    set.len(),
+                    count,
+                    "{list} at {budget} bytes: rows seen {}",
+                    set.len()
+                );
+            }
+        }
+    }
+
+    /// A multi-kilobyte filter is echoed clipped, so it cannot starve the lists of bytes.
+    #[tokio::test]
+    async fn class_view_clips_a_long_filter_echo() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let class = ClassBuilder::new("p/S").method("m", "()V", 1).build();
+        let path = write(
+            &dir,
+            "f.jar",
+            &zip_bytes(&[("p/S.class", &class), ("q/S.class", &class)]),
+        );
+        let (is_error, page, text) = call(
+            &mcp,
+            json!({"file_path": path, "class": "p.S", "max_output_bytes": 4_000,
+                   "filter": "x".repeat(2_500)}),
+        )
+        .await;
+        assert!(!is_error, "{text}");
+        assert!(page["filter"].as_str().unwrap().len() < 250, "{text}");
+        assert!(page.get("truncated").is_none(), "{text}");
+        assert_eq!(page["also_in"]["returned"], 1, "{text}");
+        assert_eq!(page["also_in"]["items"].as_array().unwrap().len(), 1);
     }
 
     /// One 33 KB row (a method with 64 long throws) is returned when it fits what is left
