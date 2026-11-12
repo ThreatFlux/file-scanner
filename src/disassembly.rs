@@ -227,43 +227,135 @@ pub struct GraphEdge {
     pub label: Option<String>,
 }
 
-pub fn disassemble_binary(path: &Path, symbol_table: &SymbolTable) -> Result<DisassemblyResult> {
-    let buffer = fs::read(path).context("Failed to read file for disassembly")?;
+/// Upper bound on the bytes of one code section that are decoded. Larger
+/// sections are decoded up to this limit and the coverage report says so.
+pub const MAX_DISASSEMBLY_BYTES: usize = 8 * 1024 * 1024;
 
+/// Upper bound on instructions kept from one code section (memory bound for
+/// code made of one-byte instructions).
+pub const MAX_DISASSEMBLY_INSTRUCTIONS: usize = 1_000_000;
+
+/// Upper bound on functions grouped out of the symbol table.
+pub const MAX_GROUPED_FUNCTIONS: usize = 5_000;
+
+/// Instructions decoded per Capstone call.
+const DISASSEMBLY_CHUNK: usize = 4096;
+
+/// How much of the code section was decoded, and what was skipped.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DisassemblyCoverage {
+    /// Size of the code section in the file.
+    pub section_size: u64,
+    /// Bytes handed to the decoder (the section, or its first `MAX_DISASSEMBLY_BYTES`).
+    pub bytes_examined: u64,
+    /// Bytes that decoded to real instructions.
+    pub bytes_decoded: u64,
+    /// Bytes that could not be decoded and were skipped (listed as `.byte` entries).
+    pub bytes_skipped: u64,
+    /// Number of separate undecodable runs.
+    pub skipped_runs: u64,
+    /// True when the section was larger than the decode limit.
+    pub truncated: bool,
+    /// Human-readable summary of limits that applied.
+    pub notes: Vec<String>,
+}
+
+pub fn disassemble_binary(path: &Path, symbol_table: &SymbolTable) -> Result<DisassemblyResult> {
+    disassemble_binary_with_coverage(path, symbol_table).map(|(result, _)| result)
+}
+
+/// Like [`disassemble_binary`], and also returns how much of the code section
+/// was decoded. The same coverage figures are placed in
+/// `output_formats.json_structured["coverage"]`.
+pub fn disassemble_binary_with_coverage(
+    path: &Path,
+    symbol_table: &SymbolTable,
+) -> Result<(DisassemblyResult, DisassemblyCoverage)> {
+    let buffer = fs::read(path).context("Failed to read file for disassembly")?;
+    disassemble_buffer(&buffer, symbol_table)
+}
+
+fn disassemble_buffer(
+    buffer: &[u8],
+    symbol_table: &SymbolTable,
+) -> Result<(DisassemblyResult, DisassemblyCoverage)> {
     // Detect architecture
-    let (arch, mode, code_section) = detect_architecture_and_code(&buffer)?;
+    let (arch, mode, code_section) = detect_architecture_and_code(buffer)?;
     let architecture = format_architecture(arch, mode);
 
     // Create Capstone instance
     let cs = create_capstone(arch, mode)?;
 
-    // Disassemble code section
-    let instructions = disassemble_code(&cs, &code_section.data, code_section.address)?;
+    // Disassemble code section (skipping undecodable bytes)
+    let (instructions, mut coverage) =
+        disassemble_code_with_coverage(&cs, &code_section.data, code_section.address)?;
 
-    // Analyze instructions
-    let analysis = analyze_instructions(&instructions);
+    // Analyze instructions (skipped data bytes are not instructions)
+    let analysis = if coverage.bytes_skipped > 0 {
+        let real: Vec<Instruction> = instructions
+            .iter()
+            .filter(|i| i.mnemonic != SKIPPED_MNEMONIC)
+            .cloned()
+            .collect();
+        analyze_instructions(&real)
+    } else {
+        analyze_instructions(&instructions)
+    };
 
     // Group into functions
-    let functions = group_into_functions(&instructions, symbol_table);
+    let (functions, functions_capped) = group_into_functions(&instructions, symbol_table);
+    if functions_capped {
+        coverage.truncated = true;
+        coverage.notes.push(format!(
+            "functions are grouped for the first {MAX_GROUPED_FUNCTIONS} function symbols only; later functions are not listed"
+        ));
+    }
 
     // Generate output formats
-    let output_formats = generate_output_formats(&instructions, &functions, &architecture);
+    let mut output_formats = generate_output_formats(&instructions, &functions, &architecture);
+    if let (Some(obj), Ok(cov)) = (
+        output_formats.json_structured.as_object_mut(),
+        serde_json::to_value(&coverage),
+    ) {
+        obj.insert("coverage".to_string(), cov);
+    }
 
-    Ok(DisassemblyResult {
-        architecture,
-        instructions,
-        analysis,
-        functions,
-        output_formats,
-    })
+    Ok((
+        DisassemblyResult {
+            architecture,
+            instructions,
+            analysis,
+            functions,
+            output_formats,
+        },
+        coverage,
+    ))
 }
 
-struct CodeSection {
-    data: Vec<u8>,
-    address: u64,
+/// The executable code of a binary, located from its section headers.
+pub(crate) struct CodeSection {
+    pub(crate) data: Vec<u8>,
+    pub(crate) address: u64,
 }
 
-fn detect_architecture_and_code(buffer: &[u8]) -> Result<(Arch, Mode, CodeSection)> {
+/// Slice `size` bytes at `offset` out of `buffer`, or say why that is impossible.
+fn checked_slice<'a>(buffer: &'a [u8], offset: u64, size: u64, what: &str) -> Result<&'a [u8]> {
+    let end = offset.checked_add(size);
+    let range = usize::try_from(offset)
+        .ok()
+        .zip(end.and_then(|e| usize::try_from(e).ok()));
+    range
+        .and_then(|(start, end)| buffer.get(start..end))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Malformed binary: {what} claims {size} bytes at file offset {offset}, \
+                 but the file is only {} bytes long",
+                buffer.len()
+            )
+        })
+}
+
+pub(crate) fn detect_architecture_and_code(buffer: &[u8]) -> Result<(Arch, Mode, CodeSection)> {
     match Object::parse(buffer)? {
         Object::Elf(elf) => {
             let (arch, mode) = match elf.header.e_machine {
@@ -271,24 +363,39 @@ fn detect_architecture_and_code(buffer: &[u8]) -> Result<(Arch, Mode, CodeSectio
                 goblin::elf::header::EM_386 => (Arch::X86, Mode::Mode32),
                 goblin::elf::header::EM_ARM => (Arch::ARM, Mode::Arm),
                 goblin::elf::header::EM_AARCH64 => (Arch::ARM64, Mode::Arm),
-                _ => return Err(anyhow::anyhow!("Unsupported ELF architecture")),
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "Unsupported ELF architecture (e_machine {other}); supported: x86, x86-64, ARM, ARM64"
+                    ))
+                }
             };
 
             // Find .text section
             for section in &elf.section_headers {
                 if let Some(name) = elf.shdr_strtab.get_at(section.sh_name) {
                     if name == ".text" {
-                        let start = section.sh_offset as usize;
-                        let end = start + section.sh_size as usize;
+                        if section.sh_type == goblin::elf::section_header::SHT_NOBITS {
+                            return Err(anyhow::anyhow!(
+                                "Malformed ELF: .text section is marked NOBITS and has no file contents"
+                            ));
+                        }
+                        let data = checked_slice(
+                            buffer,
+                            section.sh_offset,
+                            section.sh_size,
+                            "the .text section header",
+                        )?;
                         let code_section = CodeSection {
-                            data: buffer[start..end].to_vec(),
+                            data: data.to_vec(),
                             address: section.sh_addr,
                         };
                         return Ok((arch, mode, code_section));
                     }
                 }
             }
-            Err(anyhow::anyhow!("No .text section found"))
+            Err(anyhow::anyhow!(
+                "No .text section found (the section headers may be stripped or damaged)"
+            ))
         }
         Object::PE(pe) => {
             let arch = if pe.is_64 {
@@ -301,11 +408,23 @@ fn detect_architecture_and_code(buffer: &[u8]) -> Result<(Arch, Mode, CodeSectio
             for section in &pe.sections {
                 let name = String::from_utf8_lossy(&section.name);
                 if name.trim_end_matches('\0') == ".text" {
-                    let start = section.pointer_to_raw_data as usize;
-                    let end = start + section.size_of_raw_data as usize;
+                    // Raw size is padded to the file alignment; the virtual size
+                    // is the real code length when it is smaller.
+                    let mut size = u64::from(section.size_of_raw_data);
+                    if section.virtual_size != 0 {
+                        size = size.min(u64::from(section.virtual_size));
+                    }
+                    let data = checked_slice(
+                        buffer,
+                        u64::from(section.pointer_to_raw_data),
+                        size,
+                        "the .text section header",
+                    )?;
                     let code_section = CodeSection {
-                        data: buffer[start..end].to_vec(),
-                        address: pe.image_base + u64::from(section.virtual_address),
+                        data: data.to_vec(),
+                        address: pe
+                            .image_base
+                            .saturating_add(u64::from(section.virtual_address)),
                     };
                     return Ok((arch.0, arch.1, code_section));
                 }
@@ -336,7 +455,9 @@ fn detect_architecture_and_code(buffer: &[u8]) -> Result<(Arch, Mode, CodeSectio
                     }
                     Err(anyhow::anyhow!("No __text section found"))
                 }
-                _ => Err(anyhow::anyhow!("Fat binaries not yet supported")),
+                _ => Err(anyhow::anyhow!(
+                    "Fat (universal) Mach-O binaries are not supported; extract one slice first (for example with lipo -thin)"
+                )),
             }
         }
         _ => Err(anyhow::anyhow!("Unknown binary format")),
@@ -344,49 +465,152 @@ fn detect_architecture_and_code(buffer: &[u8]) -> Result<(Arch, Mode, CodeSectio
 }
 
 fn create_capstone(arch: Arch, mode: Mode) -> Result<Capstone> {
-    let cs = Capstone::new_raw(arch, mode, NO_EXTRA_MODE, None)
+    let mut cs = Capstone::new_raw(arch, mode, NO_EXTRA_MODE, None)
         .map_err(|e| anyhow::anyhow!("Failed to create Capstone instance: {e:?}"))?;
+    // Undecodable bytes (jump tables, data in code) are returned as `.byte`
+    // pseudo-instructions instead of ending the listing.
+    cs.set_skipdata(true)
+        .map_err(|e| anyhow::anyhow!("Failed to enable skip-data mode: {e:?}"))?;
     Ok(cs)
 }
 
+/// Mnemonic Capstone gives to bytes it skipped in skip-data mode.
+const SKIPPED_MNEMONIC: &str = ".byte";
+
+/// Disassemble a whole code buffer. Undecodable bytes are skipped and appear
+/// as `.byte` entries.
+#[cfg(test)]
 fn disassemble_code(cs: &Capstone, code: &[u8], base_address: u64) -> Result<Vec<Instruction>> {
-    let mut instructions = Vec::new();
+    disassemble_code_with_coverage(cs, code, base_address).map(|(insns, _)| insns)
+}
 
-    let insns = cs
-        .disasm_all(code, base_address)
-        .map_err(|e| anyhow::anyhow!("Disassembly failed: {e:?}"))?;
+fn disassemble_code_with_coverage(
+    cs: &Capstone,
+    code: &[u8],
+    base_address: u64,
+) -> Result<(Vec<Instruction>, DisassemblyCoverage)> {
+    let mut coverage = DisassemblyCoverage {
+        section_size: code.len() as u64,
+        ..DisassemblyCoverage::default()
+    };
+    let examined = if code.len() > MAX_DISASSEMBLY_BYTES {
+        coverage.truncated = true;
+        coverage.notes.push(format!(
+            "code section is {} bytes; only the first {MAX_DISASSEMBLY_BYTES} bytes were disassembled",
+            code.len()
+        ));
+        &code[..MAX_DISASSEMBLY_BYTES]
+    } else {
+        code
+    };
+    coverage.bytes_examined = examined.len() as u64;
 
-    for insn in insns.iter() {
-        let flow_control = detect_flow_control(insn);
-        let instruction_type = classify_instruction(insn);
+    let mut instructions: Vec<Instruction> = Vec::new();
+    let mut offset = 0usize;
+    let mut in_skipped_run = false;
+    // Decode in chunks so memory follows the instruction cap, not the byte window.
+    'chunks: while offset < examined.len() {
+        let remaining = MAX_DISASSEMBLY_INSTRUCTIONS.saturating_sub(instructions.len());
+        if remaining == 0 {
+            // At the cap: is there anything left to decode?
+            let rest = cs
+                .disasm_count(&examined[offset..], base_address + offset as u64, 1)
+                .map_err(|e| anyhow::anyhow!("Disassembly failed: {e:?}"))?;
+            if let Some(next) = rest.iter().next() {
+                coverage.truncated = true;
+                coverage.notes.push(format!(
+                    "stopped after {MAX_DISASSEMBLY_INSTRUCTIONS} instructions (at address 0x{:x})",
+                    next.address()
+                ));
+            }
+            break;
+        }
+        let insns = cs
+            .disasm_count(
+                &examined[offset..],
+                base_address + offset as u64,
+                remaining.min(DISASSEMBLY_CHUNK),
+            )
+            .map_err(|e| anyhow::anyhow!("Disassembly failed: {e:?}"))?;
+        let mut consumed = 0usize;
+        for insn in insns.iter() {
+            consumed += insn.bytes().len();
+            let mnemonic = insn.mnemonic().unwrap_or("");
+            let size = insn.bytes().len();
+            if mnemonic == SKIPPED_MNEMONIC {
+                coverage.bytes_skipped += size as u64;
+                if !in_skipped_run {
+                    coverage.skipped_runs += 1;
+                    in_skipped_run = true;
+                }
+                instructions.push(Instruction {
+                    address: insn.address(),
+                    bytes: insn.bytes().to_vec(),
+                    mnemonic: SKIPPED_MNEMONIC.to_string(),
+                    operands: insn.op_str().unwrap_or("").to_string(),
+                    instruction_type: InstructionType::Other,
+                    flow_control: None,
+                    size,
+                });
+                continue;
+            }
+            in_skipped_run = false;
+            coverage.bytes_decoded += size as u64;
 
-        instructions.push(Instruction {
-            address: insn.address(),
-            bytes: insn.bytes().to_vec(),
-            mnemonic: insn.mnemonic().unwrap_or("").to_string(),
-            operands: insn.op_str().unwrap_or("").to_string(),
-            instruction_type,
-            flow_control,
-            size: insn.bytes().len(),
-        });
+            let flow_control = detect_flow_control(insn);
+            let instruction_type = classify_instruction(insn);
+
+            instructions.push(Instruction {
+                address: insn.address(),
+                bytes: insn.bytes().to_vec(),
+                mnemonic: mnemonic.to_string(),
+                operands: insn.op_str().unwrap_or("").to_string(),
+                instruction_type,
+                flow_control,
+                size,
+            });
+        }
+        if consumed == 0 {
+            break 'chunks;
+        }
+        offset += consumed;
     }
 
-    Ok(instructions)
+    if coverage.truncated {
+        // Report what was really covered, not what was handed to the decoder.
+        coverage.bytes_examined = coverage.bytes_decoded + coverage.bytes_skipped;
+    }
+    if coverage.bytes_skipped > 0 {
+        coverage.notes.push(format!(
+            "{} bytes in {} runs could not be decoded as instructions and were skipped (data in the code section, or non-code bytes)",
+            coverage.bytes_skipped, coverage.skipped_runs
+        ));
+    }
+
+    Ok((instructions, coverage))
+}
+
+/// Target of a direct branch operand such as `0x401136` or `#0x401136`.
+fn parse_branch_target(operands: &str) -> Option<u64> {
+    let text = operands.trim().trim_start_matches('#');
+    let hex = text.strip_prefix("0x")?;
+    u64::from_str_radix(hex, 16).ok()
 }
 
 fn detect_flow_control(insn: &capstone::Insn) -> Option<FlowControl> {
     let mnemonic = insn.mnemonic()?;
+    let operands = insn.op_str().unwrap_or("");
 
-    if mnemonic.starts_with('j') {
-        let conditional = mnemonic != "jmp";
-        let target = None; // Would need detail access
+    if mnemonic.starts_with('j') || mnemonic == "b" || mnemonic.starts_with("b.") {
+        let conditional = mnemonic != "jmp" && mnemonic != "b";
+        let target = parse_branch_target(operands);
         Some(FlowControl::Jump {
             target,
             conditional,
         })
-    } else if mnemonic == "call" {
-        let target = None; // Would need detail access
-        let is_indirect = insn.op_str().is_some_and(|ops| ops.contains('['));
+    } else if mnemonic == "call" || mnemonic == "bl" || mnemonic == "blr" {
+        let target = parse_branch_target(operands);
+        let is_indirect = target.is_none();
         Some(FlowControl::Call {
             target,
             is_indirect,
@@ -394,7 +618,12 @@ fn detect_flow_control(insn: &capstone::Insn) -> Option<FlowControl> {
     } else if mnemonic == "ret" || mnemonic == "retn" {
         Some(FlowControl::Return)
     } else if mnemonic == "int" {
-        let number = 0; // Would need detail access
+        let number = operands
+            .trim()
+            .strip_prefix("0x")
+            .and_then(|h| u8::from_str_radix(h, 16).ok())
+            .or_else(|| operands.trim().parse().ok())
+            .unwrap_or(0);
         Some(FlowControl::Interrupt { number })
     } else if mnemonic.starts_with("cmov") {
         Some(FlowControl::ConditionalMove)
@@ -689,27 +918,55 @@ fn detect_suspicious_patterns(instructions: &[Instruction]) -> Vec<SuspiciousPat
 fn group_into_functions(
     instructions: &[Instruction],
     symbol_table: &SymbolTable,
-) -> Vec<DisassembledFunction> {
+) -> (Vec<DisassembledFunction>, bool) {
+    let (Some(first), Some(last)) = (instructions.first(), instructions.last()) else {
+        return (Vec::new(), false);
+    };
+    let code_start = first.address;
+    let code_end = last.address.saturating_add(last.size as u64);
+
+    // Candidate functions: those whose start lies inside the disassembled code.
+    // Imports carry import-table addresses, not code addresses.
+    let mut candidates: Vec<(u64, u64, &str)> = symbol_table
+        .functions
+        .iter()
+        .filter(|f| !f.is_imported && f.address >= code_start && f.address < code_end)
+        .map(|f| (f.address, f.size, f.name.as_str()))
+        .collect();
+    candidates.sort_by_key(|(address, size, _)| (*address, std::cmp::Reverse(*size)));
+    candidates.dedup_by_key(|(address, _, _)| *address);
+
     let mut functions = Vec::new();
+    let mut capped = false;
+    for (i, (func_start, declared_size, name)) in candidates.iter().enumerate() {
+        if functions.len() >= MAX_GROUPED_FUNCTIONS {
+            capped = true;
+            break;
+        }
+        // PE and Mach-O symbols carry no size: run to the next symbol.
+        let size = if *declared_size > 0 {
+            *declared_size
+        } else {
+            candidates
+                .get(i + 1)
+                .map_or(code_end, |(next, _, _)| *next)
+                .saturating_sub(*func_start)
+        };
+        let func_end = func_start.saturating_add(size);
 
-    for func_info in &symbol_table.functions {
-        let func_start = func_info.address;
-        let func_end = func_start + func_info.size;
-
-        let func_instructions: Vec<Instruction> = instructions
-            .iter()
-            .filter(|insn| insn.address >= func_start && insn.address < func_end)
-            .cloned()
-            .collect();
+        // Instructions are in address order: find the range by binary search.
+        let lo = instructions.partition_point(|insn| insn.address < *func_start);
+        let hi = instructions.partition_point(|insn| insn.address < func_end);
+        let func_instructions: Vec<Instruction> = instructions[lo..hi].to_vec();
 
         if !func_instructions.is_empty() {
             let basic_blocks = identify_basic_blocks(&func_instructions);
             let complexity = calculate_complexity(&basic_blocks);
 
             functions.push(DisassembledFunction {
-                address: func_start,
-                name: func_info.name.clone(),
-                size: func_info.size as usize,
+                address: *func_start,
+                name: (*name).to_string(),
+                size: usize::try_from(size).unwrap_or(usize::MAX),
                 instructions: func_instructions,
                 basic_blocks,
                 complexity,
@@ -717,7 +974,7 @@ fn group_into_functions(
         }
     }
 
-    functions
+    (functions, capped)
 }
 
 fn identify_basic_blocks(instructions: &[Instruction]) -> Vec<BasicBlock> {
@@ -1497,7 +1754,8 @@ mod tests {
             },
         };
 
-        let functions = group_into_functions(&instructions, &symbol_table);
+        let (functions, capped) = group_into_functions(&instructions, &symbol_table);
+        assert!(!capped);
 
         assert_eq!(functions.len(), 2);
         assert_eq!(functions[0].name, "func1");

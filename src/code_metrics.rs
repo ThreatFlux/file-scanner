@@ -119,6 +119,11 @@ pub struct QualityAnalysisStats {
 
 pub struct CodeQualityAnalyzer;
 
+/// `usize` to `u32`, clamped at `u32::MAX` instead of wrapping.
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 impl Default for CodeQualityAnalyzer {
     fn default() -> Self {
         Self::new()
@@ -173,17 +178,18 @@ impl CodeQualityAnalyzer {
         let cyclomatic_complexity = cfg.complexity.cyclomatic_complexity;
         let cognitive_complexity = cfg.complexity.cognitive_complexity;
         let nesting_depth = cfg.complexity.nesting_depth;
-        let basic_block_count = cfg.basic_blocks.len() as u32;
+        let basic_block_count = saturating_u32(cfg.basic_blocks.len());
 
         // Count total instructions
         let function_length = cfg
             .basic_blocks
             .iter()
             .map(|bb| bb.instruction_count)
-            .sum::<usize>() as u32;
+            .fold(0usize, |total, count| total.saturating_add(count));
+        let function_length = saturating_u32(function_length);
 
         // Count return paths
-        let return_paths = cfg.exit_blocks.len() as u32;
+        let return_paths = saturating_u32(cfg.exit_blocks.len());
 
         // Calculate Halstead metrics
         let halstead_metrics = self.calculate_halstead_metrics(&cfg.basic_blocks)?;
@@ -225,8 +231,8 @@ impl CodeQualityAnalyzer {
     fn calculate_halstead_metrics(&self, basic_blocks: &[BasicBlock]) -> Result<HalsteadMetrics> {
         let mut operators = HashMap::new();
         let mut operands = HashMap::new();
-        let mut total_operators = 0;
-        let mut total_operands = 0;
+        let mut total_operators = 0u32;
+        let mut total_operands = 0u32;
 
         for block in basic_blocks {
             for instruction in &block.instructions {
@@ -238,8 +244,11 @@ impl CodeQualityAnalyzer {
                     | InstructionType::Call
                     | InstructionType::Jump
                     | InstructionType::Conditional => {
-                        *operators.entry(instruction.mnemonic.clone()).or_insert(0) += 1;
-                        total_operators += 1;
+                        let count = operators
+                            .entry(instruction.mnemonic.clone())
+                            .or_insert(0u32);
+                        *count = count.saturating_add(1);
+                        total_operators = total_operators.saturating_add(1);
                     }
                     _ => {}
                 }
@@ -247,14 +256,15 @@ impl CodeQualityAnalyzer {
                 // Extract operands from instruction
                 let operand_tokens = self.extract_operand_tokens(&instruction.operands);
                 for token in operand_tokens {
-                    *operands.entry(token).or_insert(0) += 1;
-                    total_operands += 1;
+                    let count = operands.entry(token).or_insert(0u32);
+                    *count = count.saturating_add(1);
+                    total_operands = total_operands.saturating_add(1);
                 }
             }
         }
 
-        let distinct_operators = operators.len() as u32;
-        let distinct_operands = operands.len() as u32;
+        let distinct_operators = saturating_u32(operators.len());
+        let distinct_operands = saturating_u32(operands.len());
         let vocabulary = distinct_operators + distinct_operands;
         let length = total_operators + total_operands;
 
@@ -264,7 +274,7 @@ impl CodeQualityAnalyzer {
             0.0
         };
 
-        let difficulty = if distinct_operands > 0 && operands.values().sum::<u32>() > 0 {
+        let difficulty = if distinct_operands > 0 && operands.values().any(|&n| n > 0) {
             (f64::from(distinct_operators) / 2.0)
                 * (f64::from(total_operands) / f64::from(distinct_operands))
         } else {
@@ -373,7 +383,7 @@ impl CodeQualityAnalyzer {
                 }
             }
 
-            max_param as u32
+            saturating_u32(max_param)
         } else {
             0
         }
