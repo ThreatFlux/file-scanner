@@ -534,6 +534,10 @@ impl AnalysisCache {
             for row in read_index(dir) {
                 adopt_row(&mut state, dir, row);
             }
+            // Hashes this process already holds may have grown on disk (another
+            // process added an entry): take what is on disk before writing,
+            // or this write would hide those rows from the index.
+            refresh_changed_slots(&mut state, dir, &hash, self.max_total_bytes);
         }
         self.evict(&mut state, &hash);
         self.save_index(&state);
@@ -952,6 +956,44 @@ fn adopt_row(state: &mut State, dir: &Path, mut row: IndexRow) {
             mem: None,
         },
     );
+}
+
+/// For every disk-backed slot except `except`, compare the entry file's size
+/// with what the slot recorded; when another process rewrote it, rebuild the
+/// slot's rows from the file so a following index write keeps them.
+fn refresh_changed_slots(state: &mut State, dir: &Path, except: &str, max_file_bytes: u64) {
+    let hashes: Vec<String> = state
+        .slots
+        .iter()
+        .filter(|(hash, slot)| slot.mem.is_none() && hash.as_str() != except)
+        .map(|(hash, _)| hash.clone())
+        .collect();
+    for hash in hashes {
+        let path = dir.join(entry_file_name(&hash));
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let unchanged = state
+            .slots
+            .get(&hash)
+            .is_none_or(|slot| slot.bytes == meta.len());
+        if unchanged || !meta.is_file() || meta.len() > max_file_bytes {
+            continue;
+        }
+        let Ok(bytes) = read_private(&path, max_file_bytes) else {
+            continue;
+        };
+        let Ok(entries) = serde_json::from_slice::<Vec<CacheEntry>>(&bytes) else {
+            continue;
+        };
+        if entries.is_empty() || entries.iter().any(|entry| entry.file_hash != hash) {
+            continue;
+        }
+        if let Some(slot) = state.slots.get_mut(&hash) {
+            slot.rows = entries.iter().map(summary_of).collect();
+            slot.bytes = meta.len();
+        }
+    }
 }
 
 /// Adopt the entry files the index does not list: another process using the
@@ -1878,6 +1920,32 @@ mod storage_tests {
             .collect();
         hashes.sort();
         assert_eq!(hashes, ["hash-a", "hash-b", "hash-c"]);
+    }
+
+    #[tokio::test]
+    async fn a_row_the_other_cache_added_to_a_held_hash_survives_our_next_write() {
+        let dir = TempDir::new().unwrap();
+        let a = AnalysisCache::new(dir.path()).unwrap();
+        let b = AnalysisCache::new(dir.path()).unwrap();
+        a.add_entry(entry("shared", "t1", "/f", Value::Null))
+            .await
+            .unwrap();
+        // B adopts the hash and adds a second entry; A still holds one row.
+        b.add_entry(entry("shared", "t2", "/f", Value::Null))
+            .await
+            .unwrap();
+        // A writes a different hash.
+        a.add_entry(entry("other", "t3", "/g", Value::Null))
+            .await
+            .unwrap();
+        let later = AnalysisCache::new(dir.path()).unwrap();
+        let rows = later.list_summaries(&any_query());
+        assert_eq!(
+            rows.iter().filter(|row| row.file_hash == "shared").count(),
+            2,
+            "{rows:?}"
+        );
+        assert_eq!(rows.len(), 3);
     }
 
     #[tokio::test]

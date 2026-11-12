@@ -479,8 +479,13 @@ async fn shutdown_ends_an_open_event_stream_and_the_server_returns() {
 async fn binding_a_taken_port_names_the_fix() {
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = taken.local_addr().unwrap().port();
+    let cache_dir = TempDir::new().unwrap();
+    let state = Arc::new(ServerState::new(StateConfig {
+        cache_dir: cache_dir.path().to_path_buf(),
+        ..StateConfig::default()
+    }));
     let error = match BoundServer::bind(
-        FileScannerMcp::new(),
+        FileScannerMcp::with_state(state),
         &HttpConfig::on_port(port),
         CancellationToken::new(),
     )

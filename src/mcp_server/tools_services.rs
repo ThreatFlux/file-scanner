@@ -57,7 +57,7 @@ reports each match's offset; without it, searches every string indexed this sess
 analyzed files. Pass at least one of `query` (case-insensitive substring), `regex`, `category`, \
 `min_entropy` or `suspicious_only`: the tool never lists every string. Results are paged \
 (`offset`, `limit`; `next_offset` asks for the next page). Follow up with `string_details` for \
-every file and offset a string occurs at. Strings are tracked from `analyze_file` (strings: true) \
+the files and offsets a string occurs at (the most recent occurrences only for very common strings). Strings are tracked from `analyze_file` (strings: true) \
 and from this tool.";
 
 const STRING_DETAILS_DESCRIPTION: &str = "Everything known about one exact string value: its \
@@ -601,7 +601,7 @@ fn search_session_blocking(
         out["hint"] = no_match_hint(&tracker, category).into();
     } else {
         out["next_steps"] = json!([
-            "string_details {value} for every file and offset a string occurs at",
+            "string_details {value} for the files and offsets a string occurs at",
             "search_strings with file_path to search one file and get offsets"
         ]);
     }
@@ -884,18 +884,25 @@ impl FileScannerMcp {
                     .into();
                 }
                 if report.skipped > 0 {
+                    // Only say the search covered the whole file when it did.
+                    let whole_file = index["index_truncated"] != true
+                        && index["scanned_bytes"].as_u64() >= index["file_size"].as_u64();
                     out["tracker_note"] = format!(
                         "{} strings of this file are not in the session index (too long, or the \
                          tracker is full: cache_clear with scope \"strings\" frees it); \
-                         session searches and string_details will not find them. This search \
-                         of the file is complete.",
-                        report.skipped
+                         session searches and string_details will not find them.{}",
+                        report.skipped,
+                        if whole_file {
+                            " This search of the file is complete."
+                        } else {
+                            ""
+                        }
                     )
                     .into();
                 }
                 if total > 0 {
                     out["next_steps"] =
-                        json!(["string_details {value} lists every file and offset of one string"]);
+                        json!(["string_details {value} lists the files and offsets of one string"]);
                 }
                 Ok(out)
             })
@@ -971,7 +978,10 @@ fn string_details_value(
                     }
                     [_, _] => {
                         return Err(format!(
-                            "That value is not tracked as given, and more than one tracked                              string starts with it ({} characters). A value that search_strings                              showed cut is a prefix: pass more of it, or search_strings with a                              longer `query` or a `regex` to find the whole value.",
+                            "That value is not tracked as given, and more than one tracked \
+                             string starts with it ({} characters). A value that search_strings \
+                             showed cut is a prefix: pass more of it, or search_strings with a \
+                             longer `query` or a `regex` to find the whole value.",
                             lookup.chars().count()
                         ));
                     }
@@ -1029,7 +1039,7 @@ fn string_details_value(
             .collect();
         let related = tracker
             .try_get_related_strings(
-                &request.value,
+                &entry.value,
                 request.related_limit.unwrap_or(10).clamp(1, 50),
             )
             .unwrap_or_default();
@@ -1049,6 +1059,17 @@ fn string_details_value(
         }
         if by_prefix {
             out["matched_by_prefix"] = true.into();
+        }
+        let detailed: usize = files.iter().map(|file| file.2).sum();
+        if detailed < entry.total_occurrences || files.len() < entry.unique_files.len() {
+            out["detail_note"] = format!(
+                "Only the most recent {detailed} of {} occurrences are kept in detail, so the \
+                 per-file counts and offsets below cover those and some files or offsets may be \
+                 missing. For the exact count and first offsets in one file, use search_strings \
+                 with file_path and query.",
+                entry.total_occurrences
+            )
+            .into();
         }
         out["total_occurrences"] = entry.total_occurrences.into();
         out["files_total"] = entry.unique_files.len().into();
@@ -1976,8 +1997,9 @@ mod tests {
     }
 
     #[test]
-    fn a_capped_utf16_pass_does_not_keep_the_rest_of_the_file_buffered() {
-        // The buffer is not observable from the result; the index must still be right.
+    fn a_capped_utf16_pass_keeps_the_first_strings_and_flags_the_cut() {
+        // The buffer size is not observable from the result (measured by hand on
+        // a 204 MB file instead); the index must still be right and flagged.
         let files = tempfile::tempdir().unwrap();
         let mut body = Vec::new();
         for n in 0..(MAX_INDEX_STRINGS + 10) {
@@ -2031,11 +2053,77 @@ mod tests {
             call(&client, "string_details", json!({"value": "B".repeat(400)})).await;
         assert!(error);
         assert!(text.as_str().unwrap().contains("more than one"), "{text}");
+        assert!(!text.as_str().unwrap().contains("  "), "{text}");
 
         // A short value that is not tracked says how cut values are handled.
         let (error, text) = call(&client, "string_details", json!({"value": "nope"})).await;
         assert!(error);
         assert!(text.as_str().unwrap().contains("value_cut"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn the_tracker_note_does_not_call_a_cut_index_complete() {
+        let cache = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let mut body = Vec::new();
+        for n in 0..(MAX_INDEX_STRINGS + 10) {
+            body.extend_from_slice(format!("wid_{n:07}\0").as_bytes());
+        }
+        let path = sample_file(files.path(), "dense.bin", &body);
+        let (_state, client) = connect(cache.path()).await;
+        let (error, found) = call(
+            &client,
+            "search_strings",
+            json!({"file_path": path, "query": "wid_0000001"}),
+        )
+        .await;
+        assert!(!error, "{found}");
+        assert!(found["note"]
+            .as_str()
+            .unwrap()
+            .contains("rest are not searchable"));
+        let tracker_note = found["tracker_note"].as_str().expect("a tracker note");
+        assert!(!tracker_note.contains("is complete"), "{tracker_note}");
+    }
+
+    #[tokio::test]
+    async fn string_details_says_when_it_keeps_only_the_recent_occurrences() {
+        let cache = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let body = "repeated_value\0".repeat(1500);
+        let path = sample_file(files.path(), "rep.bin", body.as_bytes());
+        let (_state, client) = connect(cache.path()).await;
+        call(
+            &client,
+            "search_strings",
+            json!({"file_path": path, "query": "repeated_value"}),
+        )
+        .await;
+        let (error, details) = call(
+            &client,
+            "string_details",
+            json!({"value": "repeated_value"}),
+        )
+        .await;
+        assert!(!error, "{details}");
+        assert_eq!(details["total_occurrences"], 1500);
+        let note = details["detail_note"].as_str().expect("a detail note");
+        assert!(note.contains("search_strings"), "{note}");
+        // A string with few occurrences carries no such note.
+        let path = sample_file(files.path(), "few.bin", b"\0few_times_value\0");
+        call(
+            &client,
+            "search_strings",
+            json!({"file_path": path, "query": "few_times"}),
+        )
+        .await;
+        let (_, few) = call(
+            &client,
+            "string_details",
+            json!({"value": "few_times_value"}),
+        )
+        .await;
+        assert!(few.get("detail_note").is_none(), "{few}");
     }
 
     #[tokio::test]

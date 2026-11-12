@@ -222,15 +222,27 @@ fn post_call(port: u16, body: &str) -> (u16, String) {
 #[test]
 fn a_signal_with_a_rest_call_in_flight_stops_the_server_promptly() {
     let mut server = Server::start(&["mcp-http"], &[]);
-    let sample = format!(
-        "{}/test_programs/rust_test_binary",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    // A file that takes long enough to analyse that the call is normally
+    // still running when the signal lands: 64 MiB of distinct text lines.
+    let scratch = TempDir::new().unwrap();
+    let sample = scratch.path().join("slow_sample.bin");
+    {
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&sample).unwrap());
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..(2 * 1024 * 1024) {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            writeln!(file, "line_{state:016x}_padding_text_here").unwrap();
+        }
+    }
     let port = server.port;
-    let body =
-        format!(r#"{{"name":"analyze_file","arguments":{{"file_path":"{sample}","all":true}}}}"#);
+    let body = format!(
+        r#"{{"name":"analyze_file","arguments":{{"file_path":{},"all":true}}}}"#,
+        serde_json::to_string(&sample.to_string_lossy()).unwrap()
+    );
     let caller = std::thread::spawn(move || post_call(port, &body));
-    std::thread::sleep(Duration::from_millis(700));
+    std::thread::sleep(Duration::from_millis(500));
     let started = Instant::now();
     server.signal("INT");
     assert_eq!(server.wait(Duration::from_secs(8)), Some(0));
@@ -239,9 +251,20 @@ fn a_signal_with_a_rest_call_in_flight_stops_the_server_promptly() {
         "took {:?}",
         started.elapsed()
     );
+    // The call in flight gets a clean answer. Which one depends on timing: a
+    // call cut by the shutdown is refused with 503 ("shutting down"); a call
+    // that finished just before the signal is answered 200 with a complete
+    // JSON body. Anything else (a reset, an empty or half answer) fails.
     let (status, answer) = caller.join().unwrap();
-    assert_eq!(status, 503, "{answer}");
-    assert!(answer.contains("shutting down"), "{answer}");
+    match status {
+        503 => assert!(answer.contains("shutting down"), "{answer}"),
+        200 => {
+            let parsed: serde_json::Value = serde_json::from_str(&answer)
+                .unwrap_or_else(|error| panic!("200 with an incomplete body ({error}): {answer}"));
+            assert!(parsed.is_object(), "{answer}");
+        }
+        other => panic!("status {other}: {answer}"),
+    }
     assert!(
         !server.drain().contains("grace period"),
         "the grace period should not have been needed"
