@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - .github/workflows/**
+      - .github/actionlint.yaml
       - .yamllint.yml
       - scripts/check-workflows.sh
   push:
     paths:
       - .github/workflows/**
+      - .github/actionlint.yaml
       - .yamllint.yml
       - scripts/check-workflows.sh
   workflow_dispatch:
@@ -23,7 +25,7 @@ concurrency:
 env:
   ACTIONLINT_VERSION: v1.7.12
   YAMLLINT_VERSION: 1.38.0
-  ZIZMOR_VERSION: 1.31.1
+  ZIZMOR_VERSION: 1.32.0
 
 jobs:
   validate-workflows:
@@ -55,7 +57,7 @@ jobs:
 
       - name: Validate YAML syntax
         run: |
-          yamllint -c .yamllint.yml .github/workflows/
+          yamllint -c .yamllint.yml .github/workflows/ .github/actionlint.yaml
 
       - name: Validate GitHub Actions syntax
         run: |

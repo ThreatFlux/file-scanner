@@ -1,0 +1,6 @@
+# Stable actionlint 1.7.12 predates GitHub's documented queue: max field.
+# Scope only that exact parser diagnostic to the release serialization lock.
+paths:
+  .github/workflows/auto-release.yml:
+    ignore:
+      - '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'
