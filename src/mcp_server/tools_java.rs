@@ -62,12 +62,13 @@ const CACHE_KEY: &str = "java_analysis:v5";
 type RecentResults = Vec<(Weak<ServerState>, String, Arc<JavaAnalysisResult>)>;
 static RECENT: Mutex<RecentResults> = Mutex::new(Vec::new());
 
-/// Empties the in-memory result store (cache_clear calls this so the next call recomputes).
-pub(crate) fn forget_recent() {
+/// Drops this server's entries from the in-memory result store (cache_clear calls this so
+/// the next call recomputes). Entries of other servers in the same process are kept.
+pub(crate) fn forget_recent(state: &ServerState) {
     RECENT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
+        .retain(|(weak, _, _)| weak.strong_count() > 0 && !std::ptr::eq(weak.as_ptr(), state));
 }
 const RECENT_RESULTS: usize = 2;
 const RECENT_MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
@@ -233,7 +234,8 @@ pub struct JavaAnalysisRequest {
     )]
     pub view: Option<JavaView>,
     #[schemars(
-        description = "Class to describe for view=class, as named in view=classes (dots or slashes)"
+        description = "Class to describe for view=class, as named in view=classes (dots or slashes), \
+                       or <container>!<class> as findings and also_in list one copy of it"
     )]
     pub class: Option<String>,
     #[schemars(
@@ -532,40 +534,47 @@ fn class_view(
     limit: usize,
     budget: usize,
 ) -> Result<Value, String> {
-    let wanted = request.class.as_deref().unwrap_or("");
-    let wanted = wanted.replace('/', ".");
-    let wanted = wanted.strip_suffix(".class").unwrap_or(&wanted).to_string();
-    // `<container>!<class>` (as findings list it) picks one copy; a bare name matches all.
-    let (want_container, wanted) = match wanted.rsplit_once('!') {
-        Some((c, n)) if !c.is_empty() && !n.is_empty() => (Some(c.to_string()), n.to_string()),
-        _ => (None, wanted),
+    // `<container>!<class>` (as findings and `also_in` list it) picks one copy; a bare name
+    // matches all. The container is a path and is compared as given, so only the class part
+    // has its slashes turned into dots.
+    let raw = request.class.as_deref().unwrap_or("");
+    let (want_container, name_part) = match raw.rsplit_once('!') {
+        Some((c, n)) if !c.is_empty() && !n.is_empty() => (Some(c), n),
+        _ => (None, raw),
     };
+    let wanted = name_part.replace('/', ".");
+    let wanted = wanted.strip_suffix(".class").unwrap_or(&wanted).to_string();
     let matching: Vec<&ClassInfo> = result
         .classes
         .iter()
         .filter(|c| {
-            c.name == wanted
-                && want_container
-                    .as_deref()
-                    .is_none_or(|w| c.container.as_deref() == Some(w))
+            c.name == wanted && want_container.is_none_or(|w| c.container.as_deref() == Some(w))
         })
         .collect();
     let Some(class) = matching.first() else {
         let lower = wanted.to_lowercase();
-        let close: Vec<&str> = result
+        let close: Vec<String> = result
             .classes
             .iter()
             .filter(|c| c.name.to_lowercase().contains(&lower))
             .take(5)
-            .map(|c| c.name.as_str())
+            .map(|c| match c.container.as_deref() {
+                Some(container) => format!("{container}!{}", c.name),
+                None => c.name.clone(),
+            })
             .collect();
         let hint = if close.is_empty() {
             "Use view=classes with filter=<part of the name> to find it.".to_string()
         } else {
             format!("Close matches: {}.", close.join(", "))
         };
+        let place = match want_container {
+            Some(container) => format!("in '{}' inside this file", clip(container, 200)),
+            None => "in this file".to_string(),
+        };
         return Err(format!(
-            "No class named '{wanted}' in this file ({} classes). {hint}",
+            "No class named '{}' {place} ({} classes in all). {hint}",
+            clip(&wanted, 200),
             result.classes.len()
         ));
     };
@@ -1794,6 +1803,48 @@ mod tests {
         assert_eq!(page["class"]["container"], "y.war", "{text}");
     }
 
+    /// The same holds when the copy sits in a library whose path has slashes, as every
+    /// library under WEB-INF/lib does, and for the `also_in` spelling of a copy.
+    #[tokio::test]
+    async fn findings_example_classes_open_a_copy_in_a_slashed_container() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let bad = ClassBuilder::new("p/S")
+            .calls("sun/misc/Unsafe", "boom", "()V")
+            .build();
+        let x = zip_bytes(&[("p/S.class", &minimal_class("p/S"))]);
+        let y = zip_bytes(&[("p/S.class", &bad)]);
+        let path = write(
+            &dir,
+            "slash.war",
+            &zip_bytes(&[("x.jar", &x), ("WEB-INF/lib/y.jar", &y)]),
+        );
+        let (is_error, page, text) =
+            call(&mcp, json!({"file_path": path, "view": "findings"})).await;
+        assert!(!is_error, "{text}");
+        let example = page["findings"]["items"][0]["example_classes"][0]
+            .as_str()
+            .unwrap_or_else(|| panic!("{text}"))
+            .to_string();
+        assert_eq!(example, "WEB-INF/lib/y.jar!p.S", "{text}");
+        for name in [example.as_str(), "WEB-INF/lib/y.jar!p/S.class"] {
+            let (is_error, page, text) =
+                call(&mcp, json!({"file_path": path, "class": name})).await;
+            assert!(!is_error, "{name}: {text}");
+            assert_eq!(page["class"]["dangerous_api_count"], 1, "{text}");
+            assert_eq!(page["class"]["container"], "WEB-INF/lib/y.jar", "{text}");
+        }
+        // A container that holds no such class is named in the error with the copies that exist.
+        let (is_error, _, text) = call(
+            &mcp,
+            json!({"file_path": path, "class": "WEB-INF/lib/z.jar!p.S"}),
+        )
+        .await;
+        assert!(is_error, "{text}");
+        assert!(text.contains("WEB-INF/lib/z.jar"), "{text}");
+        assert!(text.contains("WEB-INF/lib/y.jar!p.S"), "{text}");
+    }
+
     /// view=nested says when the rows stop short of the real count.
     #[tokio::test]
     async fn nested_view_states_the_count_when_rows_stop() {
@@ -1834,9 +1885,9 @@ mod tests {
         }
     }
 
-    /// forget_recent empties the in-memory store, so the next call is a miss again.
+    /// cache_clear also empties the in-memory store, so the next call is a miss again.
     #[tokio::test]
-    async fn forget_recent_makes_the_next_call_recompute() {
+    async fn cache_clear_makes_the_next_call_recompute() {
         let dir = TempDir::new().unwrap();
         let mcp = FileScannerMcp::new();
         let path = write(
@@ -1848,8 +1899,12 @@ mod tests {
         assert_eq!(first["cache"], "miss");
         let (_, second, _) = call(&mcp, json!({"file_path": path})).await;
         assert_eq!(second["cache"], "hit");
-        forget_recent();
-        mcp.state.section_cache().clear();
+        crate::mcp_server::tools_services::clear_scope(
+            &mcp.state,
+            crate::mcp_server::tools_services::ClearScope::Analysis,
+        )
+        .await
+        .unwrap();
         let (_, third, _) = call(&mcp, json!({"file_path": path})).await;
         assert_eq!(third["cache"], "miss");
     }

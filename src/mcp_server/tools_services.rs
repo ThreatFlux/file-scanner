@@ -1300,7 +1300,8 @@ pub(crate) async fn clear_scope(
                  is writable (cache_status shows where it is)."
             )
         })?;
-        // LEAD: call super::tools_java::forget_recent() here (the Java tool's in-memory store)
+        // The Java tool keeps its last results in memory outside the section cache.
+        super::tools_java::forget_recent(state);
         cleared.push(if state.cache_enabled() {
             "analysis history, cached sections and files on disk"
         } else {
