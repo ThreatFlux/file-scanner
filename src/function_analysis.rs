@@ -148,6 +148,8 @@ pub fn analyze_symbols_with_arch(path: &Path, arch: Option<&str>) -> Result<Symb
 
     crate::binary_parser::check_mach_load_commands(&buffer)
         .map_err(|why| anyhow::anyhow!("The Mach-O file was not analyzed: {why}"))?;
+    crate::binary_parser::check_pe_imports(&buffer)
+        .map_err(|why| anyhow::anyhow!("The PE file was not analyzed: {why}"))?;
     match Object::parse(&buffer)? {
         Object::Elf(elf) => analyze_elf_symbols(elf, &buffer),
         Object::PE(pe) => analyze_pe_symbols(pe, &buffer),

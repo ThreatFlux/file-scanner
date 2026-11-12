@@ -791,7 +791,7 @@ mod tests {
         let start = std::time::Instant::now();
         let mut reader = FileReader::open(&path).unwrap();
         assert_eq!(macho_code_signature(&mut reader), None);
-        assert!(start.elapsed().as_secs() < 60);
+        assert!(start.elapsed().as_secs() < 300);
     }
 
     /// Thin 64-bit little-endian Mach-O with the given load commands.

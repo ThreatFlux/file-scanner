@@ -78,7 +78,14 @@ fn convert_threatflux_to_binary_info(
         });
     }
     let mut imports = Vec::new();
+    let mut seen_imports = std::collections::HashSet::new();
     for i in &analysis.imports {
+        if imports.len() >= MAX_LISTED_IMPORTS {
+            notes.push(format!(
+                "Only the first {MAX_LISTED_IMPORTS} distinct imports are listed; the file has more."
+            ));
+            break;
+        }
         let name = capped_name(&i.name);
         let entry = match &i.library {
             Some(library) => {
@@ -95,7 +102,9 @@ fn convert_threatflux_to_binary_info(
                 name.into_owned()
             }
         };
-        imports.push(entry);
+        if seen_imports.insert(entry.clone()) {
+            imports.push(entry);
+        }
     }
     let mut exports = Vec::new();
     for e in &analysis.exports {
@@ -383,6 +392,11 @@ fn parse_native_buffer(buffer: &[u8]) -> Result<BinaryInfo> {
     if let Some(why) = guard.as_ref().and_then(|g| g.reject.as_ref()) {
         anyhow::bail!("The Mach-O file was not analyzed: {why}");
     }
+    // A PE whose import thunks all name one long string makes goblin read it
+    // once per thunk.
+    if let Err(why) = check_pe_imports(buffer) {
+        anyhow::bail!("The PE file was not analyzed: {why}");
+    }
     let vendored_ok = guard
         .as_ref()
         .is_none_or(MachGuard::vendored_analyzer_is_safe);
@@ -454,7 +468,7 @@ pub fn needed_libraries(path: &Path) -> Vec<String> {
         return Vec::new();
     };
     let data = select_fat_slice(&buffer, None).map_or(&buffer[..], |s| s.data);
-    if check_mach_load_commands(data).is_err() {
+    if check_mach_load_commands(data).is_err() || check_pe_imports(data).is_err() {
         return Vec::new();
     }
     let mut notes = Vec::new();
@@ -994,6 +1008,142 @@ pub(crate) fn mach_guard(buf: &[u8]) -> Option<MachGuard> {
     Some(g)
 }
 
+/// Most distinct-or-not import thunks one PE may have before goblin's import
+/// parse is skipped (the file is not analyzed).
+pub(crate) const MAX_PE_THUNKS: usize = 1 << 19;
+/// Most import descriptors (DLLs) one PE may have.
+const MAX_PE_IMPORT_DESCRIPTORS: usize = 1 << 14;
+/// Most names listed as imports of one PE.
+const MAX_LISTED_IMPORTS: usize = 1 << 16;
+
+fn le_u16(buf: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        buf.get(at..at.checked_add(2)?)?.try_into().ok()?,
+    ))
+}
+
+fn le_u32(buf: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        buf.get(at..at.checked_add(4)?)?.try_into().ok()?,
+    ))
+}
+
+fn le_u64(buf: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(
+        buf.get(at..at.checked_add(8)?)?.try_into().ok()?,
+    ))
+}
+
+/// `Err` with the reason when `buf` is a PE whose import tables would make
+/// goblin's import parse slow or large: goblin reads (and, for the callers
+/// that copy it, copies) the hint/name string once per import thunk, so
+/// thunks that all point at one long name cost thunk count times name length.
+/// The check walks the import lookup tables itself, measures each distinct
+/// name once, and refuses when the names goblin would read add up to more than
+/// [`SYMBOL_NAME_BUDGET`] bytes or the table has more than [`MAX_PE_THUNKS`]
+/// thunks. Returns `Ok` for anything that is not a PE (or whose tables are
+/// not readable: goblin fails fast on those). Every caller that hands a PE to
+/// goblin should ask first.
+pub(crate) fn check_pe_imports(buf: &[u8]) -> Result<(), String> {
+    pe_import_cost(buf).map_or(Ok(()), Err)
+}
+
+/// Length of the NUL-terminated string at `at`, scanning no further than
+/// `limit` bytes (so `limit + 1` means "at least that long or unterminated").
+fn bounded_strlen(buf: &[u8], at: usize, limit: usize) -> Option<usize> {
+    let tail = buf.get(at..)?;
+    let window = &tail[..tail.len().min(limit.saturating_add(1))];
+    Some(window.iter().position(|&b| b == 0).unwrap_or(window.len()))
+}
+
+fn pe_import_cost(buf: &[u8]) -> Option<String> {
+    use goblin::pe::{options::ParseOptions, utils::find_offset};
+    // goblin's own section table and RVA mapping, with its import parse off,
+    // so every RVA below resolves exactly as goblin will resolve it.
+    let opts = ParseOptions::default().with_parse_imports(false);
+    let pe = goblin::pe::PE::parse_with_opts(buf, &opts).ok()?;
+    let optional = pe.header.optional_header?;
+    let file_alignment = optional.windows_fields.file_alignment;
+    let import_rva = optional
+        .data_directories
+        .get_import_table()
+        .copied()?
+        .virtual_address as usize;
+    if import_rva == 0 {
+        return None;
+    }
+    let thunk_size = if pe.is_64 { 8usize } else { 4usize };
+    let offset = |rva: usize| -> Option<usize> {
+        find_offset(rva, &pe.sections, file_alignment, &opts).filter(|off| *off < buf.len())
+    };
+
+    let mut remaining = SYMBOL_NAME_BUDGET;
+    let mut thunks = 0usize;
+    let mut measured: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let over_budget = || {
+        Some(format!(
+            "The PE import tables name more than {} MiB of import and DLL names (every import thunk that points at a name counts it again), or have more than {MAX_PE_THUNKS} thunks.",
+            SYMBOL_NAME_BUDGET >> 20
+        ))
+    };
+    let mut at = offset(import_rva)?;
+    for _ in 0..MAX_PE_IMPORT_DESCRIPTORS {
+        let ilt = le_u32(buf, at)? as usize;
+        let name_rva = le_u32(buf, at + 12)? as usize;
+        let iat = le_u32(buf, at + 16)? as usize;
+        // goblin stops at an all-zero descriptor or one without a name or address table
+        if (ilt == 0 && name_rva == 0 && iat == 0) || name_rva == 0 || iat == 0 {
+            return None;
+        }
+        if let Some(name_at) = offset(name_rva) {
+            let len = bounded_strlen(buf, name_at, remaining)?;
+            if len > remaining {
+                return over_budget();
+            }
+            remaining -= len;
+        }
+        // goblin reads the lookup table when its RVA maps, else the address table
+        if let Some(mut entry) = offset(ilt).or_else(|| offset(iat)) {
+            loop {
+                let value = if thunk_size == 8 {
+                    le_u64(buf, entry)?
+                } else {
+                    u64::from(le_u32(buf, entry)?)
+                };
+                if value == 0 {
+                    break;
+                }
+                thunks += 1;
+                if thunks > MAX_PE_THUNKS {
+                    return over_budget();
+                }
+                let ordinal_bit = 1u64 << (thunk_size * 8 - 1);
+                if value & ordinal_bit == 0 {
+                    // hint (2 bytes) then the name
+                    let rva = (value & 0x7fff_ffff) as usize;
+                    let len = match measured.get(&rva) {
+                        Some(len) => *len,
+                        None => {
+                            let len = offset(rva + 2)
+                                .and_then(|n| bounded_strlen(buf, n, remaining))
+                                .unwrap_or(0);
+                            measured.insert(rva, len);
+                            len
+                        }
+                    };
+                    if len > remaining {
+                        return over_budget();
+                    }
+                    remaining -= len;
+                }
+                entry += thunk_size;
+            }
+        }
+        at += 20;
+    }
+    over_budget()
+}
+
 /// `Err` with the reason when `buf` is a Mach-O whose load commands would make
 /// goblin's own parse slow (see [`MachGuard::reject`]). Every caller that hands
 /// a Mach-O to goblin should ask first.
@@ -1337,12 +1487,25 @@ fn parse_pe(pe: pe::PE, _buffer: &[u8]) -> Result<BinaryInfo> {
         });
     }
 
+    // A name that many thunks share is stored once, and the list is capped.
+    let mut seen_imports: std::collections::HashSet<std::borrow::Cow<'_, str>> =
+        std::collections::HashSet::new();
     for import in &pe.imports {
         let kept = capped_name(&import.name);
+        if seen_imports.contains(&kept) {
+            continue;
+        }
+        if info.imports.len() >= MAX_LISTED_IMPORTS {
+            notes.push(format!(
+                "Only the first {MAX_LISTED_IMPORTS} distinct imported names are listed; the file imports more."
+            ));
+            break;
+        }
         if !budget.charge(&kept, 1) {
             break;
         }
-        info.imports.push(kept.into_owned());
+        info.imports.push(kept.to_string());
+        seen_imports.insert(kept);
     }
 
     for export in &pe.exports {

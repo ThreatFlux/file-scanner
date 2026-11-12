@@ -721,6 +721,23 @@ fn macho_signature_is_valid(data: &[u8], off: u64, size: u64) -> bool {
     extras <= MAX_EXEMPT_SIGNATURE_EXTRAS && length >= cursor && length - cursor <= 16
 }
 
+/// goblin's PE parse, unless the import tables would make it slow (see
+/// `binary_parser::check_pe_imports`).
+fn parse_pe_checked(buffer: &[u8]) -> Option<PE<'_>> {
+    parse_pe_checked_flag(buffer).map(|(pe, _)| pe)
+}
+
+/// Like [`parse_pe_checked`]; the flag is true when the import tables were
+/// refused and the PE was parsed with import parsing off (sections only, so
+/// the entropy verdict keeps its section table).
+fn parse_pe_checked_flag(buffer: &[u8]) -> Option<(PE<'_>, bool)> {
+    if crate::binary_parser::check_pe_imports(buffer).is_ok() {
+        return PE::parse(buffer).ok().map(|pe| (pe, false));
+    }
+    let opts = goblin::pe::options::ParseOptions::default().with_parse_imports(false);
+    PE::parse_with_opts(buffer, &opts).ok().map(|pe| (pe, true))
+}
+
 /// goblin's Mach-O parse, unless the load commands would make it slow (see
 /// `binary_parser::check_mach_load_commands`).
 fn parse_mach_checked(buffer: &[u8]) -> Option<Mach<'_>> {
@@ -763,7 +780,7 @@ fn analyze_sections(
             hi: buffer.len() as u64,
             covered: elf_covered_ranges(&elf),
         });
-    } else if let Ok(pe) = goblin::pe::PE::parse(buffer) {
+    } else if let Some(pe) = parse_pe_checked(buffer) {
         sections.extend(analyze_pe_sections(&pe, buffer, budget)?);
         scope = Some(Scope {
             lo: 0,
@@ -1123,8 +1140,9 @@ fn detect_packing(
     }
 
     // Check import table (simplified check)
-    if let Ok(pe) = goblin::pe::PE::parse(buffer) {
-        if pe.imports.is_empty() || pe.imports.len() < 3 {
+    if let Some((pe, imports_skipped)) = parse_pe_checked_flag(buffer) {
+        // an import table that was refused is not an "unusually small" one
+        if !imports_skipped && pe.imports.len() < 3 {
             import_table_anomalies.push("Unusually small import table".to_string());
         }
 

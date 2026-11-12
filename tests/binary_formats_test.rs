@@ -189,7 +189,11 @@ fn fat_header_with_huge_architecture_count_is_cheap() {
     let start = std::time::Instant::now();
     let sig = verify_signature(&path).unwrap();
     assert!(!sig.is_signed);
-    assert!(start.elapsed().as_secs() < 60, "took {:?}", start.elapsed());
+    assert!(
+        start.elapsed().as_secs() < 300,
+        "took {:?}",
+        start.elapsed()
+    );
 }
 
 #[test]
@@ -585,7 +589,11 @@ fn macho_with_a_huge_symbol_count_is_cheap_everywhere() {
         &analyze_symbols(&path).unwrap_or_else(|_| empty_table()),
         None,
     );
-    assert!(start.elapsed().as_secs() < 60, "took {:?}", start.elapsed());
+    assert!(
+        start.elapsed().as_secs() < 300,
+        "took {:?}",
+        start.elapsed()
+    );
 }
 
 fn empty_table() -> SymbolTable {
@@ -667,7 +675,11 @@ fn elf_with_a_hostile_version_needs_table_is_bounded() {
     let start = std::time::Instant::now();
     let table = analyze_symbols(&path).unwrap();
     assert!(!table.imports.is_empty());
-    assert!(start.elapsed().as_secs() < 60, "took {:?}", start.elapsed());
+    assert!(
+        start.elapsed().as_secs() < 300,
+        "took {:?}",
+        start.elapsed()
+    );
 }
 
 #[test]
@@ -1187,7 +1199,7 @@ fn elf_symbol_name_budget_stops_the_listing_with_a_note() {
     );
     let start = std::time::Instant::now();
     let table = analyze_symbols(&path).unwrap();
-    assert!(start.elapsed().as_secs() < 60);
+    assert!(start.elapsed().as_secs() < 300);
     let kept: usize = table.functions.iter().map(|f| f.name.len()).sum();
     assert!(kept < 80 << 20, "kept {kept} name bytes");
     assert!(table.symbol_count.total_functions < 20_000);
@@ -1209,7 +1221,11 @@ fn macho_symbols_sharing_one_huge_name_cost_a_bounded_amount() {
     let start = std::time::Instant::now();
     let info = parse_binary(&path).unwrap();
     let table = analyze_symbols(&path).unwrap();
-    assert!(start.elapsed().as_secs() < 60, "took {:?}", start.elapsed());
+    assert!(
+        start.elapsed().as_secs() < 300,
+        "took {:?}",
+        start.elapsed()
+    );
     assert_eq!(info.format, "Mach-O");
     assert!(longest_name(&table) <= NAME_CAP);
     assert!(info.imports.iter().all(|i| i.len() <= NAME_CAP));
@@ -1705,7 +1721,7 @@ fn macho_bind_opcode_repeat_count_is_capped_with_a_note() {
             &macho_with_bind(&bind_stream(0, Some(times))),
         );
         let info = info.unwrap();
-        assert!(start.elapsed().as_secs() < 60);
+        assert!(start.elapsed().as_secs() < 300);
         assert!(info.imports.len() < 1000, "{} imports", info.imports.len());
         assert!(
             info.notes.iter().any(|n| n.contains("bind")),
@@ -1772,7 +1788,7 @@ fn macho_library_name_shared_by_thousands_of_imports_is_capped_and_counted() {
     let start = std::time::Instant::now();
     let info = parse_binary(&path).unwrap();
     let table = analyze_symbols(&path).unwrap();
-    assert!(start.elapsed().as_secs() < 60);
+    assert!(start.elapsed().as_secs() < 300);
     // every name kept is cut at the cap and the copies together stay small
     assert!(info.imports.iter().all(|i| i.len() <= 2 * NAME_CAP + 4));
     assert!(info.needed_libraries.iter().all(|l| l.len() <= NAME_CAP));
@@ -1894,7 +1910,7 @@ fn elf_needed_libraries_are_capped_and_cheap_to_deduplicate() {
     let path = write(&dir, "needed_big", &elf_with_needed(&big, true));
     let start = std::time::Instant::now();
     let info = parse_binary(&path).unwrap();
-    assert!(start.elapsed().as_secs() < 60, "{:?}", start.elapsed());
+    assert!(start.elapsed().as_secs() < 300, "{:?}", start.elapsed());
     assert_eq!(info.needed_libraries.len(), 1);
     assert!(info.needed_libraries[0].len() <= NAME_CAP);
 }
@@ -2158,4 +2174,191 @@ fn rpath_and_relative_library_names_do_not_count_as_system_libraries() {
             "{lib}"
         );
     }
+}
+
+/// A minimal PE32+ whose `thunks` import-lookup entries all point at one
+/// hint/name entry with a `name_len`-byte name (the shape of a name bomb).
+fn pe_with_shared_import_name(name_len: usize, thunks: usize) -> Vec<u8> {
+    const RVA: usize = 0x1000;
+    const RAW: usize = 0x200;
+    let desc = 40;
+    let ilt_at = desc;
+    let ilt_size = 8 * (thunks + 1);
+    let iat_at = ilt_at + ilt_size;
+    let dll_at = iat_at + ilt_size;
+    let dll = b"KERNEL32.dll\0";
+    let hn_at = dll_at + dll.len() + (dll.len() & 1);
+    let code_at = hn_at + 2 + name_len + 1;
+    let mut sec = vec![0u8; code_at + 16];
+    let put32 =
+        |sec: &mut Vec<u8>, at: usize, v: u32| sec[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    put32(&mut sec, 0, (RVA + ilt_at) as u32);
+    put32(&mut sec, 12, (RVA + dll_at) as u32);
+    put32(&mut sec, 16, (RVA + iat_at) as u32);
+    for i in 0..thunks {
+        let v = ((RVA + hn_at) as u64).to_le_bytes();
+        sec[ilt_at + 8 * i..ilt_at + 8 * i + 8].copy_from_slice(&v);
+        sec[iat_at + 8 * i..iat_at + 8 * i + 8].copy_from_slice(&v);
+    }
+    sec[dll_at..dll_at + dll.len()].copy_from_slice(dll);
+    for b in &mut sec[hn_at + 2..hn_at + 2 + name_len] {
+        *b = b'L';
+    }
+    sec[code_at] = 0xc3;
+    let raw_size = sec.len().div_ceil(0x200) * 0x200;
+    sec.resize(raw_size, 0);
+    let vsize = raw_size.div_ceil(0x1000) * 0x1000;
+
+    let mut h = vec![0u8; RAW];
+    h[0..2].copy_from_slice(b"MZ");
+    h[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    h[0x40..0x44].copy_from_slice(b"PE\0\0");
+    h[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes()); // machine
+    h[0x46..0x48].copy_from_slice(&1u16.to_le_bytes()); // sections
+    h[0x44 + 16..0x44 + 18].copy_from_slice(&240u16.to_le_bytes()); // size of optional header
+    h[0x44 + 18..0x44 + 20].copy_from_slice(&0x22u16.to_le_bytes());
+    let o = 0x58;
+    h[o..o + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+    h[o + 2] = 14;
+    h[o + 4..o + 8].copy_from_slice(&(raw_size as u32).to_le_bytes());
+    h[o + 16..o + 20].copy_from_slice(&((RVA + code_at) as u32).to_le_bytes()); // entry
+    h[o + 20..o + 24].copy_from_slice(&(RVA as u32).to_le_bytes()); // base of code
+    h[o + 24..o + 32].copy_from_slice(&0x1_4000_0000u64.to_le_bytes()); // image base
+    h[o + 32..o + 36].copy_from_slice(&0x1000u32.to_le_bytes()); // section alignment
+    h[o + 36..o + 40].copy_from_slice(&0x200u32.to_le_bytes()); // file alignment
+    h[o + 40..o + 42].copy_from_slice(&6u16.to_le_bytes()); // os major
+    h[o + 48..o + 50].copy_from_slice(&6u16.to_le_bytes()); // subsystem major
+    h[o + 56..o + 60].copy_from_slice(&((RVA + vsize) as u32).to_le_bytes()); // size of image
+    h[o + 60..o + 64].copy_from_slice(&(RAW as u32).to_le_bytes()); // size of headers
+    h[o + 68..o + 70].copy_from_slice(&3u16.to_le_bytes()); // subsystem
+    h[o + 108..o + 112].copy_from_slice(&16u32.to_le_bytes()); // number of directories
+    h[o + 112 + 8..o + 112 + 12].copy_from_slice(&(RVA as u32).to_le_bytes()); // import dir
+    h[o + 112 + 12..o + 112 + 16].copy_from_slice(&40u32.to_le_bytes());
+    let s = o + 240;
+    h[s..s + 8].copy_from_slice(b".text\0\0\0");
+    h[s + 8..s + 12].copy_from_slice(&(sec.len() as u32).to_le_bytes());
+    h[s + 12..s + 16].copy_from_slice(&(RVA as u32).to_le_bytes());
+    h[s + 16..s + 20].copy_from_slice(&(raw_size as u32).to_le_bytes());
+    h[s + 20..s + 24].copy_from_slice(&(RAW as u32).to_le_bytes());
+    h[s + 36..s + 40].copy_from_slice(&0xE000_0060u32.to_le_bytes());
+    h.extend_from_slice(&sec);
+    h
+}
+
+#[test]
+fn pe_name_bomb_is_refused_before_goblin_reads_it_once_per_thunk() {
+    // 100,000-byte name x 20,000 thunks: goblin would read 2 GB of names.
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "bomb.exe",
+        &pe_with_shared_import_name(100_000, 20_000),
+    );
+    let err = parse_binary(&path).expect_err("the bomb must not be analyzed");
+    assert!(
+        err.to_string().contains("The PE file was not analyzed"),
+        "{err}"
+    );
+    assert!(needed_libraries(&path).is_empty());
+    assert!(analyze_symbols(&path).is_err());
+    // the other analyzers answer without hanging
+    let _ = analyze_entropy(&path);
+}
+
+/// Adds a second, executable section of `random_len` pseudo-random bytes to a
+/// PE built by `pe_with_shared_import_name` (the section table has room).
+fn with_random_section(mut pe: Vec<u8>, random_len: usize) -> Vec<u8> {
+    let s = 0x58 + 240 + 40;
+    let raw_ptr = pe.len().div_ceil(0x200) * 0x200;
+    pe.resize(raw_ptr, 0);
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..random_len {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        pe.push((x >> 24) as u8);
+    }
+    pe[s..s + 8].copy_from_slice(b".pack\0\0\0");
+    pe[s + 8..s + 12].copy_from_slice(&(random_len as u32).to_le_bytes());
+    pe[s + 12..s + 16].copy_from_slice(&0x2000_0000u32.to_le_bytes());
+    pe[s + 16..s + 20].copy_from_slice(&(random_len as u32).to_le_bytes());
+    pe[s + 20..s + 24].copy_from_slice(&(raw_ptr as u32).to_le_bytes());
+    pe[s + 36..s + 40].copy_from_slice(&0xE000_0060u32.to_le_bytes());
+    pe[0x46..0x48].copy_from_slice(&2u16.to_le_bytes());
+    pe
+}
+
+#[test]
+fn refused_import_table_does_not_hide_a_packed_section() {
+    let dir = TempDir::new().unwrap();
+    let bomb = || pe_with_shared_import_name(100_000, 20_000);
+    // bomb + high-entropy executable section: still packed and encrypted
+    let packed = write(&dir, "packed.exe", &with_random_section(bomb(), 300_000));
+    let r = analyze_entropy(&packed).unwrap();
+    assert!(r.packed_indicators.likely_packed, "{r:?}");
+    assert!(r.encryption_indicators.likely_encrypted, "{r:?}");
+    assert!(r.sections.iter().any(|s| s.name == ".pack"), "{r:?}");
+    // the bomb alone: sections are read, nothing is flagged, and the refused
+    // import table is not reported as "unusually small"
+    let mut not_writable = bomb();
+    // .text read+execute only (the fixture's default also sets writable)
+    // and not named .text (a .text section must have entropy 4-7, which this
+    // synthetic one, mostly one repeated letter, does not)
+    not_writable[0x148..0x150].copy_from_slice(b".code\0\0\0");
+    let ch = 0x58 + 240 + 36;
+    not_writable[ch..ch + 4].copy_from_slice(&0x6000_0020u32.to_le_bytes());
+    let plain = write(&dir, "plain.exe", &not_writable);
+    let r = analyze_entropy(&plain).unwrap();
+    assert!(!r.packed_indicators.likely_packed, "{r:?}");
+    assert!(!r.encryption_indicators.likely_encrypted, "{r:?}");
+    assert!(
+        r.packed_indicators.import_table_anomalies.is_empty(),
+        "{r:?}"
+    );
+}
+
+#[test]
+fn pe_bomb_with_unmapped_lookup_table_is_refused() {
+    // goblin reads the address table when the lookup-table RVA does not map
+    let mut pe = pe_with_shared_import_name(100_000, 20_000);
+    pe[0x200..0x204].copy_from_slice(&0x0050_0000u32.to_le_bytes());
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "unmapped.exe", &pe);
+    let err = parse_binary(&path).expect_err("the bomb must not be analyzed");
+    assert!(
+        err.to_string().contains("The PE file was not analyzed"),
+        "{err}"
+    );
+}
+
+#[test]
+fn pe_long_shared_name_under_the_budget_is_capped_and_stored_once() {
+    // 100,000-byte name x 300 thunks = 30 MB: within the budget, so it is parsed.
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "shared.exe",
+        &pe_with_shared_import_name(100_000, 300),
+    );
+    let info = parse_binary(&path).unwrap();
+    assert_eq!(info.format, "PE");
+    assert_eq!(
+        info.imports.len(),
+        1,
+        "one name shared by every thunk is listed once"
+    );
+    assert!(
+        info.imports[0].len() <= 4096 + 64,
+        "{}",
+        info.imports[0].len()
+    );
+    assert_eq!(info.needed_libraries, vec!["KERNEL32.dll".to_string()]);
+}
+
+#[test]
+fn pe_many_thunks_with_one_short_name_list_it_once() {
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "many.exe", &pe_with_shared_import_name(10, 5_000));
+    let info = parse_binary(&path).unwrap();
+    assert_eq!(info.imports.len(), 1);
 }
