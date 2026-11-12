@@ -36,6 +36,11 @@ pub struct BinaryInfo {
     /// For a universal Mach-O: the architecture that this analysis describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub analyzed_slice: Option<String>,
+    /// Where the analysis was cut or a structure of the file was not trusted
+    /// (a name budget, a library cap, a bind stream or export trie that was
+    /// not walked). Empty for an ordinary file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -54,7 +59,57 @@ fn convert_threatflux_to_binary_info(
     linker_info: Option<String>,
     java_analysis: Option<JavaAnalysisResult>,
 ) -> BinaryInfo {
+    // Every name copied out of the analysis is capped and charged to one budget
+    // (a library or section name that thousands of records share would
+    // otherwise be copied once per record).
+    let mut budget = NameBudget::default();
+    let mut notes = Vec::new();
+    let mut sections = Vec::new();
+    for s in &analysis.sections {
+        let name = capped_name(&s.name);
+        if !budget.charge(&name, 1) {
+            break;
+        }
+        sections.push(SectionInfo {
+            name: name.into_owned(),
+            size: s.size,
+            virtual_address: s.address,
+            characteristics: format!("{:?}", s.permissions),
+        });
+    }
+    let mut imports = Vec::new();
+    for i in &analysis.imports {
+        let name = capped_name(&i.name);
+        let entry = match &i.library {
+            Some(library) => {
+                let library = capped_name(library);
+                if !budget.charge(&name, 1) || !budget.charge(&library, 1) {
+                    break;
+                }
+                format!("{name} ({library})")
+            }
+            None => {
+                if !budget.charge(&name, 1) {
+                    break;
+                }
+                name.into_owned()
+            }
+        };
+        imports.push(entry);
+    }
+    let mut exports = Vec::new();
+    for e in &analysis.exports {
+        let name = capped_name(&e.name);
+        if !budget.charge(&name, 1) {
+            break;
+        }
+        exports.push(name.into_owned());
+    }
+    if budget.is_cut() {
+        notes.push(name_budget_note("sections, imports and exports"));
+    }
     BinaryInfo {
+        notes,
         format: match analysis.format {
             TfFormat::Elf => "ELF".to_string(),
             TfFormat::Pe => "PE".to_string(),
@@ -81,28 +136,9 @@ fn convert_threatflux_to_binary_info(
         },
         compiler: compiler_info,
         linker: linker_info,
-        sections: analysis
-            .sections
-            .iter()
-            .map(|s| SectionInfo {
-                name: s.name.clone(),
-                size: s.size,
-                virtual_address: s.address,
-                characteristics: format!("{:?}", s.permissions),
-            })
-            .collect(),
-        imports: analysis
-            .imports
-            .iter()
-            .map(|i| {
-                if let Some(ref library) = i.library {
-                    format!("{} ({})", i.name, library)
-                } else {
-                    i.name.clone()
-                }
-            })
-            .collect(),
-        exports: analysis.exports.iter().map(|e| e.name.clone()).collect(),
+        sections,
+        imports,
+        exports,
         entry_point: analysis.entry_point,
         is_stripped: analysis.symbols.is_empty(),
         has_debug_info: analysis.sections.iter().any(|s| s.name.contains("debug")),
@@ -340,19 +376,32 @@ fn parse_binary_buffer(path: &Path, buffer: Vec<u8>) -> Result<BinaryInfo> {
 
 /// Parse a thin native image (ELF, PE or Mach-O).
 fn parse_native_buffer(buffer: &[u8]) -> Result<BinaryInfo> {
+    // A thin Mach-O is scanned first: goblin's export-trie and bind-opcode
+    // walks (also run inside the vendored analyzer) recurse on, or allocate
+    // from, numbers in the file.
+    let guard = mach_guard(buffer);
+    if let Some(why) = guard.as_ref().and_then(|g| g.reject.as_ref()) {
+        anyhow::bail!("The Mach-O file was not analyzed: {why}");
+    }
+    let vendored_ok = guard
+        .as_ref()
+        .is_none_or(MachGuard::vendored_analyzer_is_safe);
+
     // Try ThreatFlux first (enhanced analysis), fallback to goblin if needed
-    if let Ok(analyzer) = try_create_threatflux_analyzer() {
-        if let Ok(analysis) = analyzer.analyze(buffer) {
-            // Extract compiler/linker info using legacy methods for enhanced detection
-            if let Ok((compiler_info, linker_info)) = extract_legacy_compiler_info(buffer) {
-                let mut info = convert_threatflux_to_binary_info(
-                    &analysis,
-                    compiler_info,
-                    linker_info,
-                    None, // No Java analysis for native binaries
-                );
-                complete_from_goblin(&mut info, buffer);
-                return Ok(info);
+    if vendored_ok {
+        if let Ok(analyzer) = try_create_threatflux_analyzer() {
+            if let Ok(analysis) = analyzer.analyze(buffer) {
+                // Extract compiler/linker info using legacy methods for enhanced detection
+                if let Ok((compiler_info, linker_info)) = extract_legacy_compiler_info(buffer) {
+                    let mut info = convert_threatflux_to_binary_info(
+                        &analysis,
+                        compiler_info,
+                        linker_info,
+                        None, // No Java analysis for native binaries
+                    );
+                    complete_from_goblin(&mut info, buffer);
+                    return Ok(info);
+                }
             }
         }
     }
@@ -361,7 +410,7 @@ fn parse_native_buffer(buffer: &[u8]) -> Result<BinaryInfo> {
     match Object::parse(buffer)? {
         Object::Elf(elf) => parse_elf(elf, buffer),
         Object::PE(pe) => parse_pe(pe, buffer),
-        Object::Mach(mach) => parse_mach(mach, buffer),
+        Object::Mach(mach) => parse_mach(mach, buffer, guard.as_ref()),
         _ => anyhow::bail!("Unsupported binary format"),
     }
 }
@@ -369,17 +418,22 @@ fn parse_native_buffer(buffer: &[u8]) -> Result<BinaryInfo> {
 /// Fill what the ThreatFlux result lacks: the needed-library list, and for
 /// Mach-O the imports of chained-fixup binaries (which have no bind opcodes).
 fn complete_from_goblin(info: &mut BinaryInfo, buffer: &[u8]) {
+    let mut notes = Vec::new();
     match Object::parse(buffer) {
         Ok(Object::Elf(elf)) => {
-            info.needed_libraries = unique_strings(elf.libraries.iter().map(|l| (*l).to_string()));
+            info.needed_libraries = unique_names(elf.libraries.iter().copied(), &mut notes);
         }
         Ok(Object::PE(pe)) => {
-            info.needed_libraries = unique_strings(pe.libraries.iter().map(|l| (*l).to_string()));
+            info.needed_libraries = unique_names(pe.libraries.iter().copied(), &mut notes);
         }
         Ok(Object::Mach(goblin::mach::Mach::Binary(macho))) => {
-            info.needed_libraries = mach_needed_libraries(&macho);
+            info.needed_libraries = mach_needed_libraries(&macho, &mut notes);
             if info.imports.is_empty() {
-                info.imports = mach_undefined_imports(&macho, buffer);
+                let (imports, cut) = mach_undefined_imports(&macho, buffer);
+                info.imports = imports;
+                if cut {
+                    notes.push(name_budget_note("imports"));
+                }
             }
             let name = mach_architecture_name(macho.header.cputype, macho.header.cpusubtype);
             // The Mach-O header is the authority (ARM64E vs ARM64 is a subtype
@@ -388,6 +442,7 @@ fn complete_from_goblin(info: &mut BinaryInfo, buffer: &[u8]) {
         }
         _ => {}
     }
+    info.notes.extend(notes);
 }
 
 /// Shared libraries a native binary needs at load time (ELF `DT_NEEDED`, PE
@@ -399,29 +454,29 @@ pub fn needed_libraries(path: &Path) -> Vec<String> {
         return Vec::new();
     };
     let data = select_fat_slice(&buffer, None).map_or(&buffer[..], |s| s.data);
+    if check_mach_load_commands(data).is_err() {
+        return Vec::new();
+    }
+    let mut notes = Vec::new();
     match Object::parse(data) {
-        Ok(Object::Elf(elf)) => unique_strings(elf.libraries.iter().map(|l| (*l).to_string())),
-        Ok(Object::PE(pe)) => unique_strings(pe.libraries.iter().map(|l| (*l).to_string())),
-        Ok(Object::Mach(goblin::mach::Mach::Binary(m))) => mach_needed_libraries(&m),
+        Ok(Object::Elf(elf)) => unique_names(elf.libraries.iter().copied(), &mut notes),
+        Ok(Object::PE(pe)) => unique_names(pe.libraries.iter().copied(), &mut notes),
+        Ok(Object::Mach(goblin::mach::Mach::Binary(m))) => mach_needed_libraries(&m, &mut notes),
         _ => Vec::new(),
     }
 }
 
-fn unique_strings(items: impl Iterator<Item = String>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    items.filter(|s| seen.insert(s.clone())).collect()
-}
-
 /// Dependent libraries of a Mach-O (`LC_LOAD_DYLIB` and friends; goblin keeps
 /// the image itself in slot 0, which is not a dependency).
-fn mach_needed_libraries(macho: &goblin::mach::MachO) -> Vec<String> {
-    unique_strings(
+fn mach_needed_libraries(macho: &goblin::mach::MachO, notes: &mut Vec<String>) -> Vec<String> {
+    unique_names(
         macho
             .libs
             .iter()
             .skip(1)
             .filter(|l| !l.is_empty() && **l != "self")
-            .map(|l| (*l).to_string()),
+            .copied(),
+        notes,
     )
 }
 
@@ -469,6 +524,524 @@ impl NameBudget {
     pub(crate) fn is_cut(&self) -> bool {
         self.cut
     }
+}
+
+/// Most names (libraries, imports, sections) of one kind that are kept.
+pub(crate) const MAX_LISTED_NAMES: usize = 4096;
+
+/// The note that says a name budget cut a list.
+pub(crate) fn name_budget_note(what: &str) -> String {
+    format!(
+        "Names of {what} were kept only up to a budget of {} MiB (each name is also cut at {MAX_SYMBOL_NAME} bytes); the rest are not listed.",
+        SYMBOL_NAME_BUDGET >> 20
+    )
+}
+
+/// Unique names from `items`, each cut at [`MAX_SYMBOL_NAME`], at most
+/// [`MAX_LISTED_NAMES`] of them. The names are compared in their capped form,
+/// so the work per entry does not depend on how long the string it points at
+/// is; `notes` gets a line when the list was cut.
+fn unique_names<'a>(items: impl Iterator<Item = &'a str>, notes: &mut Vec<String>) -> Vec<String> {
+    let mut seen: std::collections::HashSet<std::borrow::Cow<'a, str>> =
+        std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let mut cut = false;
+    for item in items {
+        let name = capped_name(item);
+        if seen.contains(&name) {
+            continue;
+        }
+        if out.len() >= MAX_LISTED_NAMES {
+            cut = true;
+            break;
+        }
+        out.push(name.to_string());
+        seen.insert(name);
+    }
+    if cut {
+        notes.push(format!(
+            "Only the first {MAX_LISTED_NAMES} distinct needed libraries are listed; the file names more."
+        ));
+    }
+    out
+}
+
+/// Most bind records (imports) one Mach-O analysis expands.
+const MAX_MACH_BINDS: u64 = 1 << 18;
+/// Most export-trie nodes one Mach-O analysis visits.
+const MAX_TRIE_NODES: usize = 1 << 20;
+/// Most bytes of export-trie labels and offsets one analysis reads.
+const MAX_TRIE_WORK: usize = 64 << 20;
+
+/// What a scan of a thin Mach-O's load commands found before any lazy goblin
+/// walk (export trie, bind opcodes) is allowed to run on it.
+#[derive(Debug, Default)]
+pub(crate) struct MachGuard {
+    /// A structure that makes goblin's own parse slow (a library name outside
+    /// its load command); the file is not analyzed.
+    pub reject: Option<String>,
+    /// Why goblin's bind-opcode walk must not run (`imports()`).
+    pub bind_problem: Option<String>,
+    /// Why the export trie was not fully walked.
+    pub trie_problem: Option<String>,
+    /// Export names, read by the bounded walker.
+    pub exports: Vec<String>,
+    /// The export names were cut by the name budget.
+    pub exports_cut: bool,
+}
+
+impl MachGuard {
+    /// True when the vendored analyzer (which calls goblin's `imports()` and
+    /// `exports()`) may be given the file.
+    pub(crate) fn vendored_analyzer_is_safe(&self) -> bool {
+        self.reject.is_none() && self.bind_problem.is_none() && self.trie_problem.is_none()
+    }
+
+    /// Notes a result built on this guard should carry.
+    pub(crate) fn notes(&self) -> Vec<String> {
+        let mut notes = Vec::new();
+        if let Some(why) = &self.bind_problem {
+            notes.push(format!(
+                "The Mach-O bind opcodes were not run ({why}); imports come from the symbol table and may be incomplete."
+            ));
+        }
+        if let Some(why) = &self.trie_problem {
+            notes.push(format!(
+                "The Mach-O export trie was only partly read ({why}); the export list may be incomplete."
+            ));
+        }
+        if self.exports_cut {
+            notes.push(name_budget_note("exports"));
+        }
+        notes
+    }
+}
+
+fn mach_u32(buf: &[u8], at: usize, little: bool) -> Option<u32> {
+    let b: [u8; 4] = buf.get(at..at.checked_add(4)?)?.try_into().ok()?;
+    Some(if little {
+        u32::from_le_bytes(b)
+    } else {
+        u32::from_be_bytes(b)
+    })
+}
+
+fn read_uleb(buf: &[u8], at: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let byte = *buf.get(*at)?;
+        *at += 1;
+        if shift >= 64 {
+            return None;
+        }
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+    }
+}
+
+fn skip_sleb(buf: &[u8], at: &mut usize) -> Option<()> {
+    for _ in 0..10 {
+        let byte = *buf.get(*at)?;
+        *at += 1;
+        if byte & 0x80 == 0 {
+            return Some(());
+        }
+    }
+    None
+}
+
+/// A load command that carries a string at an offset inside itself (dylib
+/// name, rpath): the string must start inside the command and end (NUL) inside
+/// it, as a linker always writes it. goblin reads such a string to its NUL
+/// anywhere in the file, so a name pointing at one huge shared string would
+/// cost the length of that string per command.
+fn mach_command_string_ok(buf: &[u8], cmd_at: usize, cmd_size: usize, little: bool) -> bool {
+    let Some(off) = mach_u32(buf, cmd_at + 8, little) else {
+        return false;
+    };
+    let off = off as usize;
+    if off < 12 || off >= cmd_size {
+        return false;
+    }
+    buf.get(cmd_at + off..cmd_at + cmd_size)
+        .is_some_and(|s| s.contains(&0))
+}
+
+/// Dry run of the dyld bind opcodes of one stream, with goblin's semantics
+/// (`goblin::mach::imports::BindInterpreter`): rejects a stream that would
+/// expand to more than the shared `budget` of bind records, or bind with a
+/// segment or library ordinal that does not exist (goblin indexes both
+/// without a check). Stops quietly at the end of the file, where goblin
+/// itself stops with an error.
+fn scan_bind_stream(
+    buf: &[u8],
+    start: usize,
+    size: usize,
+    lazy: bool,
+    nsegs: usize,
+    nlibs: usize,
+    total: &mut u64,
+) -> Result<(), String> {
+    let end = start.saturating_add(size);
+    let mut at = start;
+    let mut seg = 0usize;
+    let mut ordinal = 0u8;
+    let _ = lazy;
+    let bind = |times: u64, seg: usize, ordinal: u8, total: &mut u64| -> Result<(), String> {
+        if times == 0 {
+            return Ok(());
+        }
+        if seg >= nsegs {
+            return Err(format!("a bind names segment {seg} of {nsegs}"));
+        }
+        if usize::from(ordinal) >= nlibs {
+            return Err(format!("a bind names library ordinal {ordinal} of {nlibs}"));
+        }
+        *total = total.saturating_add(times);
+        if *total > MAX_MACH_BINDS {
+            return Err(format!(
+                "the bind opcodes expand to more than {MAX_MACH_BINDS} records"
+            ));
+        }
+        Ok(())
+    };
+    while at < end {
+        let Some(&op) = buf.get(at) else {
+            return Ok(());
+        };
+        at += 1;
+        let imm = op & 0x0f;
+        match op & 0xf0 {
+            0x10 => ordinal = imm,
+            0x20 => match read_uleb(buf, &mut at) {
+                Some(v) => ordinal = v as u8,
+                None => return Ok(()),
+            },
+            0x40 => {
+                let Some(rest) = buf.get(at..) else {
+                    return Ok(());
+                };
+                let Some(nul) = rest.iter().position(|b| *b == 0) else {
+                    return Ok(());
+                };
+                at += nul + 1;
+            }
+            0x60 => {
+                if skip_sleb(buf, &mut at).is_none() {
+                    return Ok(());
+                }
+            }
+            0x70 => {
+                seg = usize::from(imm);
+                if read_uleb(buf, &mut at).is_none() {
+                    return Ok(());
+                }
+            }
+            0x00 => {
+                seg = 0;
+                ordinal = 0;
+            }
+            0x80 => {
+                if read_uleb(buf, &mut at).is_none() {
+                    return Ok(());
+                }
+            }
+            0x90 | 0xb0 => bind(1, seg, ordinal, total)?,
+            0xa0 => {
+                bind(1, seg, ordinal, total)?;
+                if read_uleb(buf, &mut at).is_none() {
+                    return Ok(());
+                }
+            }
+            0xc0 => {
+                let (Some(count), Some(skip)) = (read_uleb(buf, &mut at), read_uleb(buf, &mut at))
+                else {
+                    return Ok(());
+                };
+                if skip > u64::MAX - 16 {
+                    return Err("a bind skip count overflows".to_string());
+                }
+                bind(count, seg, ordinal, total)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Export names of a Mach-O export trie in `buf[start..start + size]`, read
+/// iteratively (goblin's `exports()` recurses once per trie level, so a node
+/// that points back at itself overflows the stack). Every node is visited at
+/// most once, the node count, the bytes read and the length of a name are
+/// capped, and every name is charged to `budget`. Returns the names and, when
+/// the walk was cut or the trie was not a tree, why.
+fn walk_export_trie(
+    buf: &[u8],
+    start: usize,
+    size: usize,
+    budget: &mut NameBudget,
+) -> (Vec<String>, Option<String>) {
+    let mut names = Vec::new();
+    let mut problem: Option<String> = None;
+    let Some(end) = start.checked_add(size) else {
+        return (names, None);
+    };
+    if size == 0 || buf.get(start..end).is_none() {
+        return (names, None);
+    }
+    let flag = |why: &str, problem: &mut Option<String>| {
+        if problem.is_none() {
+            *problem = Some(why.to_string());
+        }
+    };
+    // Arena of edges: (parent, label start, label length, name length so far)
+    let mut arena: Vec<(u32, u32, u32, u32)> = vec![(0, 0, 0, 0)];
+    let mut visited = std::collections::HashSet::new();
+    let mut stack: Vec<(usize, u32)> = vec![(start, 0)];
+    let mut work = 0usize;
+    while let Some((node, idx)) = stack.pop() {
+        if node >= end {
+            continue;
+        }
+        if !visited.insert(node) {
+            flag(
+                "a node is reached twice (the trie is not a tree)",
+                &mut problem,
+            );
+            continue;
+        }
+        if visited.len() > MAX_TRIE_NODES {
+            flag("more nodes than the walk allows", &mut problem);
+            break;
+        }
+        let mut at = node;
+        let Some(terminal) = read_uleb(buf, &mut at) else {
+            flag("a node is cut by the end of the file", &mut problem);
+            continue;
+        };
+        let nbranches = if terminal == 0 {
+            read_uleb(buf, &mut at)
+        } else {
+            let Some(mut kids) = usize::try_from(terminal)
+                .ok()
+                .and_then(|t| at.checked_add(t))
+            else {
+                flag("a node has a bad terminal size", &mut problem);
+                continue;
+            };
+            let count = read_uleb(buf, &mut kids);
+            at = kids;
+            // The export of this node
+            let (_, name_len) = (idx, arena[idx as usize].3 as usize);
+            if name_len > 0 {
+                let mut parts = Vec::new();
+                let mut cursor = idx;
+                while cursor != 0 {
+                    let (parent, ls, ll, _) = arena[cursor as usize];
+                    parts.push((ls as usize, ll as usize));
+                    cursor = parent;
+                }
+                let mut name = String::with_capacity(name_len);
+                for (ls, ll) in parts.iter().rev() {
+                    name.push_str(&String::from_utf8_lossy(&buf[*ls..*ls + *ll]));
+                }
+                if !budget.charge(&name, 1) {
+                    flag("the name budget was reached", &mut problem);
+                    return (names, problem);
+                }
+                names.push(name);
+            }
+            count
+        };
+        let Some(nbranches) = nbranches else {
+            flag("a node is cut by the end of the file", &mut problem);
+            continue;
+        };
+        if nbranches > buf.len() as u64 {
+            flag(
+                "a node claims more branches than the file has bytes",
+                &mut problem,
+            );
+            continue;
+        }
+        for _ in 0..nbranches {
+            let window_end = buf.len().min(at.saturating_add(MAX_SYMBOL_NAME + 1));
+            let Some(label) = buf.get(at..window_end) else {
+                flag("a label is cut by the end of the file", &mut problem);
+                break;
+            };
+            let Some(nul) = label.iter().position(|b| *b == 0) else {
+                flag("a label is longer than the name cap", &mut problem);
+                break;
+            };
+            work = work.saturating_add(nul + 11);
+            if work > MAX_TRIE_WORK {
+                flag("more bytes than the walk allows", &mut problem);
+                return (names, problem);
+            }
+            let label_start = at;
+            at += nul + 1;
+            let Some(offset) = read_uleb(buf, &mut at) else {
+                flag("a node is cut by the end of the file", &mut problem);
+                break;
+            };
+            let Some(next) = usize::try_from(offset)
+                .ok()
+                .and_then(|o| o.checked_add(start))
+            else {
+                continue;
+            };
+            let so_far = arena[idx as usize].3 as usize + nul;
+            if nul == 0 || so_far > MAX_SYMBOL_NAME {
+                // An empty label never occurs in a linker's trie; a name this
+                // long is cut rather than followed.
+                if nul != 0 {
+                    flag("a name is longer than the name cap", &mut problem);
+                }
+                continue;
+            }
+            if arena.len() >= MAX_TRIE_NODES {
+                flag("more nodes than the walk allows", &mut problem);
+                return (names, problem);
+            }
+            arena.push((idx, label_start as u32, nul as u32, so_far as u32));
+            stack.push((next, (arena.len() - 1) as u32));
+        }
+    }
+    (names, problem)
+}
+
+/// Scan the load commands of a thin Mach-O before goblin's lazy walkers touch
+/// it. `None` when `buf` is not a thin Mach-O that goblin would accept (goblin
+/// then fails cheaply on its own).
+pub(crate) fn mach_guard(buf: &[u8]) -> Option<MachGuard> {
+    let (is_64, little) = match buf.get(0..4)? {
+        [0xCE, 0xFA, 0xED, 0xFE] => (false, true),
+        [0xCF, 0xFA, 0xED, 0xFE] => (true, true),
+        [0xFE, 0xED, 0xFA, 0xCE] => (false, false),
+        [0xFE, 0xED, 0xFA, 0xCF] => (true, false),
+        _ => return None,
+    };
+    let header = if is_64 { 32 } else { 28 };
+    let ncmds = mach_u32(buf, 16, little)? as usize;
+    let sizeofcmds = mach_u32(buf, 20, little)? as usize;
+    if ncmds > sizeofcmds / 8 || sizeofcmds > buf.len() {
+        return None;
+    }
+    let mut g = MachGuard::default();
+    if let Some(why) = mach_guard_light(buf) {
+        g.reject = Some(why);
+        return Some(g);
+    }
+    let mut nsegs = 0usize;
+    let mut nlibs = 1usize; // goblin keeps the image itself in slot 0
+    let mut trie: Option<(usize, usize)> = None;
+    let mut binds: Vec<(usize, usize, bool)> = Vec::new();
+    let mut at = header;
+    for _ in 0..ncmds {
+        let (Some(cmd), Some(size)) = (mach_u32(buf, at, little), mach_u32(buf, at + 4, little))
+        else {
+            break;
+        };
+        let size = size as usize;
+        if size < 8 || at.checked_add(size).is_none_or(|e| e > buf.len()) {
+            break;
+        }
+        let field = |o: usize| mach_u32(buf, at + o, little).map(|v| v as usize);
+        match cmd {
+            0x1 | 0x19 => nsegs += 1,
+            // LOAD_DYLIB, LAZY_LOAD, WEAK, REEXPORT, UPWARD
+            0xc | 0x20 | 0x8000_0018 | 0x8000_001f | 0x8000_0023 => nlibs += 1,
+            0x22 | 0x8000_0022 if size >= 48 => {
+                binds.clear();
+                if let (Some(o), Some(n)) = (field(16), field(20)) {
+                    binds.push((o, n, false));
+                }
+                if let (Some(o), Some(n)) = (field(32), field(36)) {
+                    binds.push((o, n, true));
+                }
+                if let (Some(o), Some(n)) = (field(40), field(44)) {
+                    trie = Some((o, n));
+                }
+            }
+            0x8000_0033 if size >= 16 => {
+                if let (Some(o), Some(n)) = (field(8), field(12)) {
+                    trie = Some((o, n));
+                }
+            }
+            _ => {}
+        }
+        at += size;
+    }
+    let mut total = 0u64;
+    for (off, size, lazy) in binds {
+        if let Err(why) = scan_bind_stream(buf, off, size, lazy, nsegs, nlibs, &mut total) {
+            g.bind_problem = Some(why);
+            break;
+        }
+    }
+    if let Some((off, size)) = trie {
+        let mut budget = NameBudget::default();
+        let (names, problem) = walk_export_trie(buf, off, size, &mut budget);
+        g.exports = names;
+        g.exports_cut = budget.is_cut();
+        g.trie_problem = problem;
+    }
+    Some(g)
+}
+
+/// `Err` with the reason when `buf` is a Mach-O whose load commands would make
+/// goblin's own parse slow (see [`MachGuard::reject`]). Every caller that hands
+/// a Mach-O to goblin should ask first.
+pub(crate) fn check_mach_load_commands(buf: &[u8]) -> Result<(), String> {
+    match mach_guard_light(buf) {
+        Some(why) => Err(why),
+        None => Ok(()),
+    }
+}
+
+/// The reject check of [`mach_guard`] alone (no bind or trie work).
+fn mach_guard_light(buf: &[u8]) -> Option<String> {
+    let (is_64, little) = match buf.get(0..4)? {
+        [0xCE, 0xFA, 0xED, 0xFE] => (false, true),
+        [0xCF, 0xFA, 0xED, 0xFE] => (true, true),
+        [0xFE, 0xED, 0xFA, 0xCE] => (false, false),
+        [0xFE, 0xED, 0xFA, 0xCF] => (true, false),
+        _ => return None,
+    };
+    let header = if is_64 { 32 } else { 28 };
+    let ncmds = mach_u32(buf, 16, little)? as usize;
+    let sizeofcmds = mach_u32(buf, 20, little)? as usize;
+    if ncmds > sizeofcmds / 8 || sizeofcmds > buf.len() {
+        return None;
+    }
+    let mut at = header;
+    for _ in 0..ncmds {
+        let (Some(cmd), Some(size)) = (mach_u32(buf, at, little), mach_u32(buf, at + 4, little))
+        else {
+            break;
+        };
+        let size = size as usize;
+        if size < 8 || at.checked_add(size).is_none_or(|e| e > buf.len()) {
+            break;
+        }
+        if matches!(
+            cmd,
+            0xc | 0x20 | 0x8000_0018 | 0x8000_001f | 0x8000_0023 | 0xd | 0x8000_001c
+        ) && !mach_command_string_ok(buf, at, size, little)
+        {
+            return Some(
+                "a library or rpath name of the load commands points outside its command"
+                    .to_string(),
+            );
+        }
+        at += size;
+    }
+    None
 }
 
 /// The readable, non-debugger entries of a Mach-O symbol table, read straight
@@ -558,8 +1131,9 @@ pub(crate) fn mach_symbols_bounded<'a>(
 }
 
 /// Imports as `name (library)` taken from the undefined symbols, for binaries
-/// whose bind info is absent.
-fn mach_undefined_imports(macho: &goblin::mach::MachO, data: &[u8]) -> Vec<String> {
+/// whose bind info is absent. The flag is true when the name budget cut the
+/// list.
+fn mach_undefined_imports(macho: &goblin::mach::MachO, data: &[u8]) -> (Vec<String>, bool) {
     let mut budget = NameBudget::default();
     let mut out = Vec::new();
     for (name, nlist) in mach_symbols_bounded(macho, data) {
@@ -568,7 +1142,8 @@ fn mach_undefined_imports(macho: &goblin::mach::MachO, data: &[u8]) -> Vec<Strin
         }
         match crate::function_analysis::mach_import_library(macho, &nlist) {
             Some(lib) => {
-                if !budget.charge(&name, 1) {
+                let lib = capped_name(lib);
+                if !budget.charge(&name, 1) || !budget.charge(&lib, 1) {
                     break;
                 }
                 out.push(format!("{name} ({lib})"));
@@ -581,7 +1156,7 @@ fn mach_undefined_imports(macho: &goblin::mach::MachO, data: &[u8]) -> Vec<Strin
             }
         }
     }
-    out
+    (out, budget.is_cut())
 }
 
 /// Try to create `ThreatFlux` analyzer, return error if library has compilation issues
@@ -645,6 +1220,8 @@ fn extract_legacy_compiler_info(buffer: &[u8]) -> Result<(Option<String>, Option
 }
 
 fn parse_elf(elf: elf::Elf, _buffer: &[u8]) -> Result<BinaryInfo> {
+    let mut notes = Vec::new();
+    let mut budget = NameBudget::default();
     let mut info = BinaryInfo {
         format: "ELF".to_string(),
         architecture: match elf.header.e_machine {
@@ -664,14 +1241,18 @@ fn parse_elf(elf: elf::Elf, _buffer: &[u8]) -> Result<BinaryInfo> {
         is_stripped: elf.syms.is_empty(),
         has_debug_info: false,
         java_analysis: None,
-        needed_libraries: unique_strings(elf.libraries.iter().map(|l| (*l).to_string())),
+        needed_libraries: unique_names(elf.libraries.iter().copied(), &mut notes),
         ..Default::default()
     };
 
     for section in &elf.section_headers {
         if let Some(name) = elf.shdr_strtab.get_at(section.sh_name) {
+            let kept = capped_name(name);
+            if !budget.charge(&kept, 1) {
+                break;
+            }
             info.sections.push(SectionInfo {
-                name: name.to_string(),
+                name: kept.into_owned(),
                 size: section.sh_size,
                 virtual_address: section.sh_addr,
                 characteristics: format!("{:x}", section.sh_flags),
@@ -683,14 +1264,16 @@ fn parse_elf(elf: elf::Elf, _buffer: &[u8]) -> Result<BinaryInfo> {
         }
     }
 
-    for import in &elf.libraries {
-        info.imports.push(import.to_string());
-    }
+    info.imports = info.needed_libraries.clone();
 
     for sym in &elf.dynsyms {
         if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
             if sym.is_function() && sym.st_bind() == elf::sym::STB_GLOBAL {
-                info.exports.push(name.to_string());
+                let kept = capped_name(name);
+                if !budget.charge(&kept, 1) {
+                    break;
+                }
+                info.exports.push(kept.into_owned());
             }
         }
     }
@@ -699,17 +1282,25 @@ fn parse_elf(elf: elf::Elf, _buffer: &[u8]) -> Result<BinaryInfo> {
     // For simplicity, we'll check for common compiler signatures
     for section in &elf.section_headers {
         if let Some(name) = elf.shdr_strtab.get_at(section.sh_name) {
-            if name.contains(".note.gnu") || name.contains(".note.ABI-tag") {
+            if name.len() <= MAX_SYMBOL_NAME
+                && (name.contains(".note.gnu") || name.contains(".note.ABI-tag"))
+            {
                 info.compiler = Some("GCC/GNU".to_string());
                 break;
             }
         }
     }
 
+    if budget.is_cut() {
+        notes.push(name_budget_note("sections and exports"));
+    }
+    info.notes = notes;
     Ok(info)
 }
 
 fn parse_pe(pe: pe::PE, _buffer: &[u8]) -> Result<BinaryInfo> {
+    let mut notes = Vec::new();
+    let mut budget = NameBudget::default();
     let mut info = BinaryInfo {
         format: "PE".to_string(),
         architecture: match pe.header.coff_header.machine {
@@ -728,13 +1319,18 @@ fn parse_pe(pe: pe::PE, _buffer: &[u8]) -> Result<BinaryInfo> {
         is_stripped: pe.debug_data.is_none(),
         has_debug_info: pe.debug_data.is_some(),
         java_analysis: None,
-        needed_libraries: unique_strings(pe.libraries.iter().map(|l| (*l).to_string())),
+        needed_libraries: unique_names(pe.libraries.iter().copied(), &mut notes),
         ..Default::default()
     };
 
     for section in &pe.sections {
+        let name = section.name()?;
+        let kept = capped_name(name);
+        if !budget.charge(&kept, 1) {
+            break;
+        }
         info.sections.push(SectionInfo {
-            name: section.name()?.to_string(),
+            name: kept.into_owned(),
             size: u64::from(section.virtual_size),
             virtual_address: u64::from(section.virtual_address),
             characteristics: format!("{:x}", section.characteristics),
@@ -742,15 +1338,20 @@ fn parse_pe(pe: pe::PE, _buffer: &[u8]) -> Result<BinaryInfo> {
     }
 
     for import in &pe.imports {
-        info.imports.push(import.name.to_string());
-        // Note: In goblin 0.8, imports are handled differently
-        // We already have the DLL name in import.name
+        let kept = capped_name(&import.name);
+        if !budget.charge(&kept, 1) {
+            break;
+        }
+        info.imports.push(kept.into_owned());
     }
 
-    // Export handling for goblin 0.8
     for export in &pe.exports {
         if let Some(name) = export.name {
-            info.exports.push(name.to_string());
+            let kept = capped_name(name);
+            if !budget.charge(&kept, 1) {
+                break;
+            }
+            info.exports.push(kept.into_owned());
         }
     }
 
@@ -776,10 +1377,18 @@ fn parse_pe(pe: pe::PE, _buffer: &[u8]) -> Result<BinaryInfo> {
         }
     }
 
+    if budget.is_cut() {
+        notes.push(name_budget_note("sections, imports and exports"));
+    }
+    info.notes = notes;
     Ok(info)
 }
 
-fn parse_mach(mach: goblin::mach::Mach, data: &[u8]) -> Result<BinaryInfo> {
+fn parse_mach(
+    mach: goblin::mach::Mach,
+    data: &[u8],
+    guard: Option<&MachGuard>,
+) -> Result<BinaryInfo> {
     use goblin::mach::Mach;
 
     let mut info = BinaryInfo {
@@ -799,14 +1408,21 @@ fn parse_mach(mach: goblin::mach::Mach, data: &[u8]) -> Result<BinaryInfo> {
 
     match mach {
         Mach::Binary(mach_o) => {
+            let mut notes = Vec::new();
+            let mut budget = NameBudget::default();
             info.architecture =
                 mach_architecture_name(mach_o.header.cputype, mach_o.header.cpusubtype);
-            info.needed_libraries = mach_needed_libraries(&mach_o);
+            info.needed_libraries = mach_needed_libraries(&mach_o, &mut notes);
             info.entry_point = Some(mach_o.entry);
-            for segment in &mach_o.segments {
+            'sections: for segment in &mach_o.segments {
                 for (section, _) in &segment.sections()? {
+                    let name = section.name()?;
+                    let kept = capped_name(name);
+                    if !budget.charge(&kept, 1) {
+                        break 'sections;
+                    }
                     info.sections.push(SectionInfo {
-                        name: section.name()?.to_string(),
+                        name: kept.into_owned(),
                         size: section.size,
                         virtual_address: section.addr,
                         characteristics: format!("{:x}", section.flags),
@@ -816,19 +1432,42 @@ fn parse_mach(mach: goblin::mach::Mach, data: &[u8]) -> Result<BinaryInfo> {
 
             info.is_stripped = mach_o.symbols.is_none();
 
-            for import in &mach_o.imports()? {
-                info.imports.push(import.name.to_string());
-            }
-            if info.imports.is_empty() {
-                info.imports = mach_undefined_imports(&mach_o, data);
-            }
-
-            let exports = mach_o.exports()?;
-            if !exports.is_empty() {
-                for export in exports {
-                    info.exports.push(export.name.clone());
+            // goblin's bind interpreter allocates from counts in the file and
+            // indexes with numbers from it: it runs only on a stream the
+            // guard has checked (a caller without a guard builds one).
+            let local_guard;
+            let guard = match guard {
+                Some(g) => g,
+                None => {
+                    local_guard = mach_guard(data).unwrap_or_default();
+                    &local_guard
+                }
+            };
+            if guard.bind_problem.is_none() {
+                if let Ok(imports) = mach_o.imports() {
+                    for import in &imports {
+                        let kept = capped_name(import.name);
+                        if !budget.charge(&kept, 1) {
+                            break;
+                        }
+                        info.imports.push(kept.into_owned());
+                    }
                 }
             }
+            if info.imports.is_empty() {
+                let (imports, cut) = mach_undefined_imports(&mach_o, data);
+                info.imports = imports;
+                if cut {
+                    notes.push(name_budget_note("imports"));
+                }
+            }
+
+            info.exports = guard.exports.clone();
+            notes.extend(guard.notes());
+            if budget.is_cut() {
+                notes.push(name_budget_note("sections and imports"));
+            }
+            info.notes = notes;
         }
         Mach::Fat(_) => {
             info.architecture = "Universal".to_string();

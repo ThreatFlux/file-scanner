@@ -86,11 +86,29 @@ struct Budget {
     /// Facts worth knowing that do not mean the analysis was cut (ranges that
     /// were validated and deliberately not measured).
     info: Vec<String>,
+    /// Section names kept so far (a name is cut and every copy is charged).
+    names: crate::binary_parser::NameBudget,
 }
 
 impl Budget {
+    /// A section name to keep: cut at the name cap and charged to the shared
+    /// name budget. Once the budget is used up every further name reads
+    /// "[name omitted]" (the section is still measured) and a note says so.
+    fn keep_name(&mut self, name: &str) -> String {
+        let capped = crate::binary_parser::capped_name(name);
+        if self.names.charge(&capped, 1) {
+            return capped.into_owned();
+        }
+        let note = crate::binary_parser::name_budget_note("sections");
+        if !self.notes.contains(&note) {
+            self.notes.push(note);
+        }
+        "[name omitted]".to_string()
+    }
+
     fn new() -> Self {
         Self {
+            names: crate::binary_parser::NameBudget::default(),
             measured: 0,
             sections: 0,
             outside_file: 0,
@@ -119,8 +137,9 @@ impl Budget {
         if self.sections >= MAX_SECTIONS || self.measured.saturating_add(size) > MAX_MEASURED_BYTES
         {
             if self.notes.is_empty() {
+                let shown = crate::binary_parser::capped_name(name);
                 self.notes.push(format!(
-                    "Some sections were not measured: from section '{name}' on, the section table exceeds {MAX_SECTIONS} sections or {} MiB of content (overlapping sections?).",
+                    "Some sections were not measured: from section '{shown}' on, the section table exceeds {MAX_SECTIONS} sections or {} MiB of content (overlapping sections?).",
                     MAX_MEASURED_BYTES >> 20
                 ));
             }
@@ -568,7 +587,9 @@ fn pe_certificate_table_is_valid(buffer: &[u8], start: u64, size: u64) -> bool {
             return false;
         }
         let body = &buffer[(cursor + 8) as usize..(cursor + length) as usize];
-        if !der_sequence_fills(body) {
+        // A PKCS#7 record starts like a CMS signedData (SEQUENCE, then the
+        // signedData OID); random bytes behind a forged length do not.
+        if !der_sequence_fills(body) || (kind == 2 && !cms_blob_has_signed_data_header(body)) {
             return false;
         }
         cursor += (length + 7) & !7;
@@ -576,22 +597,52 @@ fn pe_certificate_table_is_valid(buffer: &[u8], start: u64, size: u64) -> bool {
     cursor - end < 8
 }
 
-/// Largest total of non-code-directory blobs in an exempted code signature.
-const MAX_EXEMPT_SIGNATURE_EXTRAS: usize = 256 << 10;
+/// Largest total of non-code-directory blobs (certificate chain, requirements,
+/// entitlements) in an exempted code signature.
+const MAX_EXEMPT_SIGNATURE_EXTRAS: usize = 64 << 10;
+/// Most bytes a CodeDirectory may spend before its hash slots (header,
+/// identifier, team id and the special-slot hashes after them).
+const MAX_CODE_DIRECTORY_PREFIX: usize = 2048;
 
-/// True when `data[off..off+size]` is a well-formed embedded code signature
-/// (`SuperBlob` 0xfade0cc0): sane index, every blob inside it with a
-/// `0xfade....` magic, the blobs reaching the end of it, each CodeDirectory's
-/// hash slots exactly as many as its `codeLimit` needs at a page size of 4 KiB
-/// or more (so its hashes cannot hold more than a small fraction of the file),
-/// and the other blobs small. Anything else is measured.
+/// The DER of a CMS `ContentInfo` for `signedData` (`06 09 2a 86 48 86 f7 0d
+/// 01 07 02`) right after the `SEQUENCE` header, indefinite or definite length.
+fn cms_blob_has_signed_data_header(payload: &[u8]) -> bool {
+    const OID: [u8; 11] = [
+        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02,
+    ];
+    let Some((&0x30, rest)) = payload.split_first() else {
+        return false;
+    };
+    let Some((&len_byte, rest)) = rest.split_first() else {
+        return false;
+    };
+    let rest = match len_byte {
+        0x80 => rest,
+        0x81 => rest.get(1..).unwrap_or_default(),
+        0x82 => rest.get(2..).unwrap_or_default(),
+        0x83 => rest.get(3..).unwrap_or_default(),
+        b if b < 0x80 => rest,
+        _ => return false,
+    };
+    rest.starts_with(&OID)
+}
+
+/// True when `data[off..off+size]` has the layout of an embedded code
+/// signature (`SuperBlob` 0xfade0cc0): a sane index; every blob inside it with
+/// a `0xfade....` magic; the blobs tiling it from the end of the index to its
+/// end (no gap of more than a few bytes of padding, no overlap), so no bytes
+/// hide between them; each CodeDirectory with hash slots exactly as many as its
+/// `codeLimit` needs at a page size of 4 KiB or more and a small header and
+/// identifier before them; a certificate blob that starts like a CMS
+/// `signedData`; and the blobs other than CodeDirectories at most
+/// [`MAX_EXEMPT_SIGNATURE_EXTRAS`] together. Anything else is measured.
 fn macho_signature_is_valid(data: &[u8], off: u64, size: u64) -> bool {
     let Some(end) = off.checked_add(size).filter(|e| *e <= data.len() as u64) else {
         return false;
     };
     let blob = &data[off as usize..end as usize];
     let be32 = |o: usize| {
-        blob.get(o..o + 4)
+        blob.get(o..o.checked_add(4)?)
             .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
     };
     let (Some(magic), Some(length), Some(count)) = (be32(0), be32(4), be32(8)) else {
@@ -607,7 +658,7 @@ fn macho_signature_is_valid(data: &[u8], off: u64, size: u64) -> bool {
         return false;
     }
     let mut extras = 0usize;
-    let mut max_end = 12 + count * 8;
+    let mut blobs: Vec<(usize, usize)> = Vec::with_capacity(count);
     for i in 0..count {
         let Some(at) = be32(12 + i * 8 + 4) else {
             return false;
@@ -618,10 +669,10 @@ fn macho_signature_is_valid(data: &[u8], off: u64, size: u64) -> bool {
         if sub_magic >> 16 != 0xfade || sub_len < 8 || at.saturating_add(sub_len) > length {
             return false;
         }
-        max_end = max_end.max(at + sub_len);
+        blobs.push((at, sub_len));
         if sub_magic == 0xfade_0c02 {
-            let (Some(hash_off), Some(n_code), Some(code_limit)) =
-                (be32(at + 16), be32(at + 28), be32(at + 32))
+            let (Some(hash_off), Some(n_special), Some(n_code), Some(code_limit)) =
+                (be32(at + 16), be32(at + 24), be32(at + 28), be32(at + 32))
             else {
                 return false;
             };
@@ -637,19 +688,44 @@ fn macho_signature_is_valid(data: &[u8], off: u64, size: u64) -> bool {
                 return false;
             };
             let hash_end = hash_off.saturating_add(n_code.saturating_mul(usize::from(hash_size)));
+            let specials = n_special.saturating_mul(usize::from(hash_size));
             if !(20..=64).contains(&hash_size)
                 || hash_end > sub_len
                 || sub_len - hash_end > 64
-                || code_limit as u64 > data.len() as u64
+                || code_limit as u64 > off
                 || n_code != code_limit.div_ceil(page)
+                || n_special > 16
+                || hash_off.saturating_sub(specials) > MAX_CODE_DIRECTORY_PREFIX
             {
                 return false;
             }
         } else {
             extras = extras.saturating_add(sub_len);
+            if sub_magic == 0xfade_0b01 {
+                let payload = blob.get(at + 8..at + sub_len).unwrap_or_default();
+                if !cms_blob_has_signed_data_header(payload) {
+                    return false;
+                }
+            }
         }
     }
-    extras <= MAX_EXEMPT_SIGNATURE_EXTRAS && length - max_end <= 16
+    // The blobs must tile the SuperBlob
+    blobs.sort_unstable();
+    let mut cursor = 12 + count * 8;
+    for (at, len) in blobs {
+        if at < cursor || at - cursor > 8 {
+            return false;
+        }
+        cursor = at + len;
+    }
+    extras <= MAX_EXEMPT_SIGNATURE_EXTRAS && length >= cursor && length - cursor <= 16
+}
+
+/// goblin's Mach-O parse, unless the load commands would make it slow (see
+/// `binary_parser::check_mach_load_commands`).
+fn parse_mach_checked(buffer: &[u8]) -> Option<Mach<'_>> {
+    crate::binary_parser::check_mach_load_commands(buffer).ok()?;
+    Mach::parse(buffer).ok()
 }
 
 fn analyze_sections(
@@ -663,7 +739,7 @@ fn analyze_sections(
     // Try to parse as different binary formats
     if let Some(selection) = crate::binary_parser::select_fat_slice(buffer, None) {
         // Universal Mach-O: measure the chosen slice; offsets stay file offsets
-        if let Ok(mach) = goblin::mach::Mach::parse(selection.data) {
+        if let Some(mach) = parse_mach_checked(selection.data) {
             let base = selection.slices[selection.selected].offset;
             let mut found = analyze_mach_sections(&mach, selection.data, budget)?;
             for section in &mut found {
@@ -694,7 +770,7 @@ fn analyze_sections(
             hi: buffer.len() as u64,
             covered: pe_covered_ranges(&pe, buffer, budget),
         });
-    } else if let Ok(mach) = goblin::mach::Mach::parse(buffer) {
+    } else if let Some(mach) = parse_mach_checked(buffer) {
         sections.extend(analyze_mach_sections(&mach, buffer, budget)?);
         scope = Some(Scope {
             lo: 0,
@@ -767,7 +843,7 @@ fn pe_covered_ranges(pe: &PE, buffer: &[u8], budget: &mut Budget) -> Vec<(u64, u
             if pe_certificate_table_is_valid(buffer, start, size) {
                 covered.push((start, start + size));
                 budget.info.push(format!(
-                    "The Authenticode certificate table ({size} bytes at offset {start}) is a well-formed chain of certificate records and was not measured."
+                    "The Authenticode certificate table ({size} bytes at offset {start}) is laid out like an Authenticode certificate table (records, a DER sequence and the signedData header) and was not measured; at most {} KiB are exempted this way.", MAX_EXEMPT_CERTIFICATE_TABLE >> 10
                 ));
             }
         }
@@ -791,7 +867,7 @@ fn mach_covered_ranges(mach: &Mach, data: &[u8], budget: &mut Budget) -> Vec<(u6
             if macho_signature_is_valid(data, off, size) {
                 covered.push((off, off + size));
                 budget.info.push(format!(
-                    "The embedded code signature ({size} bytes at offset {off}) is well-formed and was not measured."
+                    "The embedded code signature ({size} bytes at offset {off}) has the layout of a code signature (hash slots that match the code size, at most {} KiB of other blobs) and was not measured.", MAX_EXEMPT_SIGNATURE_EXTRAS >> 10
                 ));
             }
         }
@@ -846,7 +922,7 @@ fn analyze_elf_sections(
                 determine_suspicious_entropy(name, entropy, section.sh_size, &characteristics);
 
             sections.push(SectionEntropy {
-                name: name.to_string(),
+                name: budget.keep_name(name),
                 offset: section.sh_offset,
                 size: section.sh_size,
                 entropy,
@@ -863,6 +939,7 @@ fn analyze_pe_sections(pe: &PE, buffer: &[u8], budget: &mut Budget) -> Result<Ve
     let mut sections = Vec::new();
 
     for section in &pe.sections {
+        // A PE section name is at most 8 bytes
         let name = String::from_utf8_lossy(&section.name)
             .trim_end_matches('\0')
             .to_string();
@@ -935,7 +1012,7 @@ fn analyze_mach_sections(
                         );
 
                         sections.push(SectionEntropy {
-                            name: name.to_string(),
+                            name: budget.keep_name(name),
                             offset: u64::from(section.offset),
                             size: section.size,
                             entropy,
@@ -1150,7 +1227,7 @@ fn detect_encryption(buffer: &[u8], sections: &[SectionEntropy]) -> EncryptionIn
                     )
                 } else if section.characteristics.iter().any(|c| c == ZSTD_UNVERIFIED) {
                     format!(
-                        "Section {} is zstd-compressed debug data (frame header checked, stream not decompressed); high entropy is expected",
+                        "Section {} is zstd-compressed debug data (only the frame header was checked, the stream was not decompressed); this could not be verified, so treat it as unexplained high entropy",
                         section.name
                     )
                 } else if compressed {

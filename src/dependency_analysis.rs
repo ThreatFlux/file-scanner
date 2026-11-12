@@ -706,9 +706,11 @@ impl DependencyAnalyzer {
         if Self::is_system_library_path(name) {
             return true;
         }
-        // An absolute path is judged by its directory alone: `libSystem.B.dylib`
-        // loaded from /tmp is not the system's.
-        if Self::is_absolute_library_path(name) {
+        // A name with any directory part (absolute, `@rpath/`, `@executable_path/`,
+        // relative) is judged by its directory alone: `libSystem.B.dylib` loaded
+        // from /tmp or `@rpath/` is not the system's. Only a bare name is
+        // matched by its file name.
+        if Self::is_absolute_library_path(name) || name.contains(['/', '\\']) {
             return false;
         }
         let file_name = name
@@ -1334,6 +1336,17 @@ mod tests {
         assert!(!DependencyAnalyzer::is_system_library_file_name(
             "/usr/lib/../../tmp/libc.so.6"
         ));
+        for name in [
+            "@rpath/libSystem.B.dylib",
+            "@executable_path/libc.dylib",
+            "evil/libSystem.B.dylib",
+            "@loader_path/kernel32.dll",
+        ] {
+            assert!(
+                !DependencyAnalyzer::is_system_library_file_name(name),
+                "{name}"
+            );
+        }
     }
 
     #[test]

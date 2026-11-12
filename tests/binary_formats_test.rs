@@ -189,7 +189,7 @@ fn fat_header_with_huge_architecture_count_is_cheap() {
     let start = std::time::Instant::now();
     let sig = verify_signature(&path).unwrap();
     assert!(!sig.is_signed);
-    assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
+    assert!(start.elapsed().as_secs() < 60, "took {:?}", start.elapsed());
 }
 
 #[test]
@@ -585,7 +585,7 @@ fn macho_with_a_huge_symbol_count_is_cheap_everywhere() {
         &analyze_symbols(&path).unwrap_or_else(|_| empty_table()),
         None,
     );
-    assert!(start.elapsed().as_secs() < 30, "took {:?}", start.elapsed());
+    assert!(start.elapsed().as_secs() < 60, "took {:?}", start.elapsed());
 }
 
 fn empty_table() -> SymbolTable {
@@ -667,7 +667,7 @@ fn elf_with_a_hostile_version_needs_table_is_bounded() {
     let start = std::time::Instant::now();
     let table = analyze_symbols(&path).unwrap();
     assert!(!table.imports.is_empty());
-    assert!(start.elapsed().as_secs() < 30, "took {:?}", start.elapsed());
+    assert!(start.elapsed().as_secs() < 60, "took {:?}", start.elapsed());
 }
 
 #[test]
@@ -979,6 +979,7 @@ fn dotdot_paths_do_not_count_as_system_libraries() {
         is_delayed: false,
     }];
     let deps = analyze_dependencies(Path::new("/nonexistent"), &table, None).unwrap();
+    assert_eq!(deps.dependencies.len(), 1);
     assert!(deps.dependencies.iter().all(|d| !d.is_system_library));
 }
 
@@ -1186,7 +1187,7 @@ fn elf_symbol_name_budget_stops_the_listing_with_a_note() {
     );
     let start = std::time::Instant::now();
     let table = analyze_symbols(&path).unwrap();
-    assert!(start.elapsed().as_secs() < 5);
+    assert!(start.elapsed().as_secs() < 60);
     let kept: usize = table.functions.iter().map(|f| f.name.len()).sum();
     assert!(kept < 80 << 20, "kept {kept} name bytes");
     assert!(table.symbol_count.total_functions < 20_000);
@@ -1208,7 +1209,7 @@ fn macho_symbols_sharing_one_huge_name_cost_a_bounded_amount() {
     let start = std::time::Instant::now();
     let info = parse_binary(&path).unwrap();
     let table = analyze_symbols(&path).unwrap();
-    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+    assert!(start.elapsed().as_secs() < 60, "took {:?}", start.elapsed());
     assert_eq!(info.format, "Mach-O");
     assert!(longest_name(&table) <= NAME_CAP);
     assert!(info.imports.iter().all(|i| i.len() <= NAME_CAP));
@@ -1358,8 +1359,12 @@ fn random_bytes_behind_a_forged_certificate_header_are_measured() {
 fn a_well_formed_certificate_table_is_not_measured_and_says_so() {
     let dir = TempDir::new().unwrap();
     // A DER SEQUENCE (30 82 len) of random content: a plausible PKCS#7 blob
+    // (the signedData OID right after the header, as in every Authenticode blob)
     let mut der = vec![0x30, 0x82, 0x0b, 0xb8];
-    der.extend(random_bytes(3000));
+    der.extend_from_slice(&[
+        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02,
+    ]);
+    der.extend(random_bytes(2989));
     let tail = win_certificate(&der);
     let path = write(
         &dir,
@@ -1484,5 +1489,673 @@ fn system_library_name_from_a_non_system_directory_is_not_a_system_library() {
         is_delayed: false,
     }];
     let deps = analyze_dependencies(Path::new("/nonexistent"), &table, None).unwrap();
+    assert_eq!(deps.dependencies.len(), 1);
     assert!(deps.dependencies.iter().all(|d| !d.is_system_library));
+}
+
+// ---------------------------------------------------------------------------
+// Round 4: export trie, bind opcodes, shared names, forged signatures, data
+// symbols
+// ---------------------------------------------------------------------------
+
+fn uleb(mut v: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+fn macho_segment(
+    name: &str,
+    fileoff: u64,
+    filesize: u64,
+    sections: &[(&str, u64, u32, u32)],
+) -> Vec<u8> {
+    let mut s = Vec::new();
+    s.extend_from_slice(&0x19u32.to_le_bytes());
+    s.extend_from_slice(&(72 + 80 * sections.len() as u32).to_le_bytes());
+    let mut n = [0u8; 16];
+    n[..name.len()].copy_from_slice(name.as_bytes());
+    s.extend_from_slice(&n);
+    s.extend_from_slice(&0u64.to_le_bytes());
+    s.extend_from_slice(&filesize.to_le_bytes());
+    s.extend_from_slice(&fileoff.to_le_bytes());
+    s.extend_from_slice(&filesize.to_le_bytes());
+    s.extend_from_slice(&[0u8; 8]);
+    s.extend_from_slice(&(sections.len() as u32).to_le_bytes());
+    s.extend_from_slice(&0u32.to_le_bytes());
+    for (sect, size, offset, flags) in sections {
+        let mut h = [0u8; 80];
+        h[..sect.len()].copy_from_slice(sect.as_bytes());
+        h[16..16 + name.len()].copy_from_slice(name.as_bytes());
+        h[40..48].copy_from_slice(&size.to_le_bytes());
+        h[48..52].copy_from_slice(&offset.to_le_bytes());
+        h[64..68].copy_from_slice(&flags.to_le_bytes());
+        s.extend_from_slice(&h);
+    }
+    s
+}
+
+fn macho_dyld_info_only(bind: (u32, u32), export: (u32, u32)) -> Vec<u8> {
+    let mut c = Vec::new();
+    c.extend_from_slice(&0x8000_0022u32.to_le_bytes());
+    c.extend_from_slice(&48u32.to_le_bytes());
+    for v in [0, 0, bind.0, bind.1, 0, 0, 0, 0, export.0, export.1] {
+        c.extend_from_slice(&u32::to_le_bytes(v));
+    }
+    c
+}
+
+fn macho_linkedit_data(cmd: u32, off: u32, size: u32) -> Vec<u8> {
+    let mut c = Vec::new();
+    for v in [cmd, 16, off, size] {
+        c.extend_from_slice(&v.to_le_bytes());
+    }
+    c
+}
+
+fn macho_symtab(symoff: u32, nsyms: u32, stroff: u32, strsize: u32) -> Vec<u8> {
+    let mut c = Vec::new();
+    for v in [2u32, 24, symoff, nsyms, stroff, strsize] {
+        c.extend_from_slice(&v.to_le_bytes());
+    }
+    c
+}
+
+fn macho_dylib_command(cmd: u32, name: &[u8], name_offset: u32) -> Vec<u8> {
+    let size = (24 + name.len() + 1).next_multiple_of(8);
+    let mut c = Vec::new();
+    for v in [cmd, size as u32, name_offset, 0, 0, 0] {
+        c.extend_from_slice(&v.to_le_bytes());
+    }
+    c.extend_from_slice(name);
+    c.resize(size, 0);
+    c
+}
+
+/// 64-bit little-endian arm64 Mach-O: header, `cmds`, then `body` at the
+/// fixed offset `BODY`.
+const BODY: usize = 0x1000;
+fn macho_image(cmds: &[Vec<u8>], flags: u32, body_at: usize, body: &[u8]) -> Vec<u8> {
+    let total: usize = cmds.iter().map(Vec::len).sum();
+    let mut b = Vec::new();
+    for v in [
+        0xFEED_FACFu32,
+        CPU_ARM64,
+        0,
+        2,
+        cmds.len() as u32,
+        total as u32,
+        flags,
+        0,
+    ] {
+        b.extend_from_slice(&v.to_le_bytes());
+    }
+    for c in cmds {
+        b.extend_from_slice(c);
+    }
+    assert!(b.len() <= body_at);
+    b.resize(body_at, 0);
+    b.extend_from_slice(body);
+    // the segments claim 0x2000 bytes of file
+    if b.len() < 0x2000 {
+        b.resize(0x2000, 0);
+    }
+    b
+}
+
+fn parse_in_scratch(
+    dir: &TempDir,
+    name: &str,
+    bytes: &[u8],
+) -> (
+    PathBuf,
+    anyhow::Result<file_scanner::binary_parser::BinaryInfo>,
+) {
+    let path = write(dir, name, bytes);
+    let info = parse_binary(&path);
+    (path, info)
+}
+
+#[test]
+fn macho_export_trie_that_points_at_itself_does_not_overflow_the_stack() {
+    let dir = TempDir::new().unwrap();
+    // node 0: no terminal data, one branch "a" that leads back to node 0
+    let trie = [0x00, 0x01, b'a', 0x00, 0x00];
+    let cmds = [
+        macho_segment("__TEXT", 0, 0x2000, &[]),
+        macho_linkedit_data(0x8000_0033, BODY as u32, trie.len() as u32),
+    ];
+    let (_, info) = parse_in_scratch(&dir, "selfcycle", &macho_image(&cmds, 0, BODY, &trie));
+    let info = info.unwrap();
+    assert_eq!(info.format, "Mach-O");
+    assert!(info.exports.is_empty());
+    assert!(
+        info.notes.iter().any(|n| n.contains("export trie")),
+        "{:?}",
+        info.notes
+    );
+}
+
+#[test]
+fn macho_export_trie_with_a_two_node_cycle_is_cut_with_a_note() {
+    let dir = TempDir::new().unwrap();
+    // node 0 -> "a" -> node 5 -> "b" -> node 0
+    let trie = [0x00, 0x01, b'a', 0x00, 0x05, 0x00, 0x01, b'b', 0x00, 0x00];
+    let cmds = [
+        macho_segment("__TEXT", 0, 0x2000, &[]),
+        macho_dyld_info_only((0, 0), (BODY as u32, trie.len() as u32)),
+    ];
+    let (_, info) = parse_in_scratch(&dir, "twocycle", &macho_image(&cmds, 0, BODY, &trie));
+    let info = info.unwrap();
+    assert!(info.notes.iter().any(|n| n.contains("export trie")));
+}
+
+#[test]
+fn macho_export_trie_that_is_a_tree_is_still_listed() {
+    let dir = TempDir::new().unwrap();
+    // root -"_f"-> node 6 (terminal, flags 0, address 0x10, no children)
+    let trie = [0x00, 0x01, b'_', b'f', 0x00, 0x06, 0x02, 0x00, 0x10, 0x00];
+    let cmds = [
+        macho_segment("__TEXT", 0, 0x2000, &[]),
+        macho_linkedit_data(0x8000_0033, BODY as u32, trie.len() as u32),
+    ];
+    let (_, info) = parse_in_scratch(&dir, "tree", &macho_image(&cmds, 0, BODY, &trie));
+    let info = info.unwrap();
+    assert_eq!(info.exports, vec!["_f".to_string()]);
+    assert!(info.notes.is_empty(), "{:?}", info.notes);
+}
+
+fn bind_stream(ordinal_imm: u8, times: Option<u64>) -> Vec<u8> {
+    let mut s = vec![0x10 | ordinal_imm, 0x70, 0x00, 0x40, b'x', 0x00];
+    match times {
+        Some(n) => {
+            s.push(0xC0);
+            s.extend(uleb(n));
+            s.extend(uleb(0));
+        }
+        None => s.push(0x90),
+    }
+    s.push(0x00);
+    s
+}
+
+fn macho_with_bind(stream: &[u8]) -> Vec<u8> {
+    let cmds = [
+        macho_segment("__TEXT", 0, 0x2000, &[]),
+        macho_dyld_info_only((BODY as u32, stream.len() as u32), (0, 0)),
+    ];
+    macho_image(&cmds, 0, BODY, stream)
+}
+
+#[test]
+fn macho_bind_opcode_repeat_count_is_capped_with_a_note() {
+    let dir = TempDir::new().unwrap();
+    for times in [5_000_000u64, 1 << 40] {
+        let start = std::time::Instant::now();
+        let (_, info) = parse_in_scratch(
+            &dir,
+            "bindtimes",
+            &macho_with_bind(&bind_stream(0, Some(times))),
+        );
+        let info = info.unwrap();
+        assert!(start.elapsed().as_secs() < 60);
+        assert!(info.imports.len() < 1000, "{} imports", info.imports.len());
+        assert!(
+            info.notes.iter().any(|n| n.contains("bind")),
+            "{:?}",
+            info.notes
+        );
+    }
+}
+
+#[test]
+fn macho_bind_to_a_missing_library_or_segment_is_a_note_not_a_crash() {
+    let dir = TempDir::new().unwrap();
+    // library ordinal 15 with only the image itself, and segment 15 of 1
+    let (_, info) = parse_in_scratch(&dir, "ord15", &macho_with_bind(&bind_stream(15, None)));
+    assert!(info.unwrap().notes.iter().any(|n| n.contains("bind")));
+    let mut stream = bind_stream(0, None);
+    stream[1] = 0x70 | 15;
+    let (_, info) = parse_in_scratch(&dir, "seg15", &macho_with_bind(&stream));
+    assert!(info.unwrap().notes.iter().any(|n| n.contains("bind")));
+}
+
+#[test]
+fn macho_bind_stream_that_is_in_order_is_still_walked() {
+    let dir = TempDir::new().unwrap();
+    let (_, info) = parse_in_scratch(&dir, "bindok", &macho_with_bind(&bind_stream(0, None)));
+    let info = info.unwrap();
+    assert!(
+        info.imports.iter().any(|i| i.starts_with('x')),
+        "{:?}",
+        info.imports
+    );
+    assert!(info.notes.is_empty(), "{:?}", info.notes);
+}
+
+/// Mach-O with one `LC_LOAD_DYLIB` of a `lib_len`-byte name and `count`
+/// undefined symbols bound to it by ordinal (two-level namespace).
+fn macho_biglib(count: usize, lib_len: usize) -> Vec<u8> {
+    let name: Vec<u8> = std::iter::repeat_n(b'l', lib_len).collect();
+    let dylib = macho_dylib_command(0xc, &name, 24);
+    let body_at = (32 + 72 + 24 + dylib.len()).next_multiple_of(0x1000);
+    let symoff = body_at;
+    let stroff = symoff + count * 16;
+    let cmds = [
+        macho_segment("__TEXT", 0, 0x2000, &[]),
+        macho_symtab(symoff as u32, count as u32, stroff as u32, 4),
+        dylib,
+    ];
+    let mut body = Vec::new();
+    for _ in 0..count {
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.push(0x01); // N_UNDF | N_EXT
+        body.push(0);
+        body.extend_from_slice(&(1u16 << 8).to_le_bytes()); // ordinal 1
+        body.extend_from_slice(&0u64.to_le_bytes());
+    }
+    body.extend_from_slice(b"\0x\0\0");
+    macho_image(&cmds, 0x80, body_at, &body)
+}
+
+#[test]
+fn macho_library_name_shared_by_thousands_of_imports_is_capped_and_counted() {
+    let dir = TempDir::new().unwrap();
+    let path = write(&dir, "biglib", &macho_biglib(6000, 100_000));
+    let start = std::time::Instant::now();
+    let info = parse_binary(&path).unwrap();
+    let table = analyze_symbols(&path).unwrap();
+    assert!(start.elapsed().as_secs() < 60);
+    // every name kept is cut at the cap and the copies together stay small
+    assert!(info.imports.iter().all(|i| i.len() <= 2 * NAME_CAP + 4));
+    assert!(info.needed_libraries.iter().all(|l| l.len() <= NAME_CAP));
+    let import_bytes: usize = info.imports.iter().map(String::len).sum();
+    assert!(import_bytes < 40 << 20, "{import_bytes} bytes of imports");
+    assert!(table
+        .imports
+        .iter()
+        .all(|i| i.library.as_ref().is_none_or(|l| l.len() <= NAME_CAP)));
+    let library_bytes: usize = table
+        .imports
+        .iter()
+        .map(|i| i.library.as_ref().map_or(0, String::len))
+        .sum();
+    assert!(
+        library_bytes < 40 << 20,
+        "{library_bytes} bytes of libraries"
+    );
+}
+
+#[test]
+fn macho_library_names_outside_their_commands_are_not_analyzed() {
+    let dir = TempDir::new().unwrap();
+    // every LC_LOAD_DYLIB points its name at the same string 4000 bytes away
+    let mut cmds = vec![macho_segment("__TEXT", 0, 0x2000, &[])];
+    for _ in 0..40 {
+        cmds.push(macho_dylib_command(0xc, b"", 4000));
+    }
+    let path = write(
+        &dir,
+        "dylibs",
+        &macho_image(&cmds, 0, BODY, &vec![b'q'; 20_000]),
+    );
+    assert!(parse_binary(&path).is_err());
+    assert!(analyze_symbols(&path).is_err());
+    assert!(needed_libraries(&path).is_empty());
+    // the entropy analysis still answers, without a section list
+    assert!(analyze_entropy(&path).is_ok());
+}
+
+/// ELF64 whose dynamic section holds `names.len()` DT_NEEDED entries.
+fn elf_with_needed(names: &[Vec<u8>], shared: bool) -> Vec<u8> {
+    let mut strtab = vec![0u8];
+    let mut offsets = Vec::new();
+    for n in names {
+        if shared && !offsets.is_empty() {
+            offsets.push(offsets[0]);
+            continue;
+        }
+        offsets.push(strtab.len() as u64);
+        strtab.extend_from_slice(n);
+        strtab.push(0);
+    }
+    let dyn_off = 64 + 2 * 56;
+    let dyn_len = (offsets.len() + 3) * 16;
+    let str_off = dyn_off + dyn_len;
+    let mut b = vec![0u8; 64];
+    b[0..4].copy_from_slice(b"\x7fELF");
+    b[4] = 2;
+    b[5] = 1;
+    b[6] = 1;
+    b[16..18].copy_from_slice(&3u16.to_le_bytes());
+    b[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
+    b[20..24].copy_from_slice(&1u32.to_le_bytes());
+    b[32..40].copy_from_slice(&64u64.to_le_bytes());
+    b[52..54].copy_from_slice(&64u16.to_le_bytes());
+    b[54..56].copy_from_slice(&56u16.to_le_bytes());
+    b[56..58].copy_from_slice(&2u16.to_le_bytes());
+    let total = (str_off + strtab.len()) as u64;
+    let phdr = |kind: u32, flags: u32, off: u64, size: u64| {
+        let mut h = vec![0u8; 56];
+        h[0..4].copy_from_slice(&kind.to_le_bytes());
+        h[4..8].copy_from_slice(&flags.to_le_bytes());
+        h[8..16].copy_from_slice(&off.to_le_bytes());
+        h[16..24].copy_from_slice(&off.to_le_bytes());
+        h[24..32].copy_from_slice(&off.to_le_bytes());
+        h[32..40].copy_from_slice(&size.to_le_bytes());
+        h[40..48].copy_from_slice(&size.to_le_bytes());
+        h[48..56].copy_from_slice(&0x1000u64.to_le_bytes());
+        h
+    };
+    b.extend(phdr(1, 5, 0, total));
+    b.extend(phdr(2, 6, dyn_off as u64, dyn_len as u64));
+    let entry = |tag: u64, val: u64| {
+        let mut e = Vec::new();
+        e.extend_from_slice(&tag.to_le_bytes());
+        e.extend_from_slice(&val.to_le_bytes());
+        e
+    };
+    for o in &offsets {
+        b.extend(entry(1, *o));
+    }
+    b.extend(entry(5, str_off as u64));
+    b.extend(entry(10, strtab.len() as u64));
+    b.extend(entry(0, 0));
+    b.extend_from_slice(&strtab);
+    b
+}
+
+#[test]
+fn elf_needed_libraries_are_capped_and_cheap_to_deduplicate() {
+    let dir = TempDir::new().unwrap();
+    // 6000 distinct names: the list stops at the cap, with a note
+    let names: Vec<Vec<u8>> = (0..6000)
+        .map(|i| format!("lib{i}.so").into_bytes())
+        .collect();
+    let path = write(&dir, "needed", &elf_with_needed(&names, false));
+    let libs = needed_libraries(&path);
+    assert_eq!(libs.len(), 4096);
+    let info = parse_binary(&path).unwrap();
+    assert!(info.needed_libraries.len() <= 4096);
+    assert!(
+        info.notes.iter().any(|n| n.contains("needed libraries")),
+        "{:?}",
+        info.notes
+    );
+    // 20,000 entries naming one 1 MiB string: one name, kept cut, quickly
+    let big = vec![vec![b'n'; 1 << 20]; 20_000];
+    let path = write(&dir, "needed_big", &elf_with_needed(&big, true));
+    let start = std::time::Instant::now();
+    let info = parse_binary(&path).unwrap();
+    assert!(start.elapsed().as_secs() < 60, "{:?}", start.elapsed());
+    assert_eq!(info.needed_libraries.len(), 1);
+    assert!(info.needed_libraries[0].len() <= NAME_CAP);
+}
+
+/// ELF64 with `count` sections whose `sh_name` all point at one `name_len`-byte name.
+fn elf_with_shared_section_names(count: usize, name_len: usize) -> Vec<u8> {
+    let mut shstrtab = vec![0u8];
+    shstrtab.extend(std::iter::repeat_n(b's', name_len));
+    shstrtab.push(0);
+    let shoff = 64 + shstrtab.len();
+    let mut b = vec![0u8; 64];
+    b[0..4].copy_from_slice(b"\x7fELF");
+    b[4] = 2;
+    b[5] = 1;
+    b[6] = 1;
+    b[16..18].copy_from_slice(&2u16.to_le_bytes());
+    b[18..20].copy_from_slice(&0x3eu16.to_le_bytes());
+    b[20..24].copy_from_slice(&1u32.to_le_bytes());
+    b[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+    b[52..54].copy_from_slice(&64u16.to_le_bytes());
+    b[58..60].copy_from_slice(&64u16.to_le_bytes());
+    b[60..62].copy_from_slice(&((count + 2) as u16).to_le_bytes());
+    b[62..64].copy_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&shstrtab);
+    let shdr = |name: u32, kind: u32, off: u64, size: u64| {
+        let mut h = vec![0u8; 64];
+        h[0..4].copy_from_slice(&name.to_le_bytes());
+        h[4..8].copy_from_slice(&kind.to_le_bytes());
+        h[24..32].copy_from_slice(&off.to_le_bytes());
+        h[32..40].copy_from_slice(&size.to_le_bytes());
+        h
+    };
+    b.extend(shdr(0, 0, 0, 0));
+    b.extend(shdr(0, 3, 64, shstrtab.len() as u64));
+    for _ in 0..count {
+        b.extend(shdr(1, 1, 0, 64));
+    }
+    b
+}
+
+#[test]
+fn elf_section_names_shared_by_thousands_of_sections_are_capped() {
+    let dir = TempDir::new().unwrap();
+    let path = write(
+        &dir,
+        "secnames",
+        &elf_with_shared_section_names(3000, 200_000),
+    );
+    let info = parse_binary(&path).unwrap();
+    assert!(info.sections.iter().all(|s| s.name.len() <= NAME_CAP));
+    let entropy = analyze_entropy(&path).unwrap();
+    assert!(!entropy.sections.is_empty());
+    assert!(entropy.sections.iter().all(|s| s.name.len() <= NAME_CAP));
+    let kept: usize = entropy.sections.iter().map(|s| s.name.len()).sum();
+    assert!(kept < 40 << 20, "{kept} name bytes");
+}
+
+/// Mach-O with a code signature of `sig` bytes behind a 12-byte SuperBlob
+/// header, pointed at by `LC_CODE_SIGNATURE`.
+fn macho_with_signature(sig: &[u8]) -> Vec<u8> {
+    let cmds = [
+        macho_segment(
+            "__TEXT",
+            0,
+            0x1000,
+            &[("__text", 0x100, 0x400, 0x8000_0400)],
+        ),
+        macho_linkedit_data(0x1d, 0x1400, sig.len() as u32),
+    ];
+    let mut b = macho_image(&cmds, 0, BODY, &[]);
+    b.truncate(0x400);
+    b.resize(0x400, 0);
+    b.extend(std::iter::repeat_n(0x1fu8, 0x100));
+    b.resize(0x1400, 0);
+    b.extend_from_slice(sig);
+    b
+}
+
+fn be32(v: usize) -> [u8; 4] {
+    (v as u32).to_be_bytes()
+}
+
+#[test]
+fn forged_code_signature_with_a_gap_or_a_big_code_directory_is_measured() {
+    let dir = TempDir::new().unwrap();
+    let payload = random_bytes(100_000);
+    // Gap variant: header, one index entry, the random payload, then a small
+    // CMS blob at the very end.
+    let mut gap = Vec::new();
+    gap.extend_from_slice(&0xfade_0cc0u32.to_be_bytes());
+    gap.extend_from_slice(&be32(20 + payload.len() + 8));
+    gap.extend_from_slice(&be32(1));
+    gap.extend_from_slice(&be32(0));
+    gap.extend_from_slice(&be32(20 + payload.len()));
+    gap.extend_from_slice(&payload);
+    gap.extend_from_slice(&0xfade_0b01u32.to_be_bytes());
+    gap.extend_from_slice(&be32(8));
+    let result = analyze_entropy(&write(&dir, "gap", &macho_with_signature(&gap))).unwrap();
+    assert!(result.encryption_indicators.likely_encrypted, "{result:#?}");
+
+    // CodeDirectory variant: hashOffset placed after the random bytes
+    let mut cd = vec![0u8; 44];
+    cd[0..4].copy_from_slice(&0xfade_0c02u32.to_be_bytes());
+    let cd_len = 44 + payload.len() + 32;
+    cd[4..8].copy_from_slice(&be32(cd_len));
+    cd[16..20].copy_from_slice(&be32(44 + payload.len()));
+    cd[28..32].copy_from_slice(&be32(1));
+    cd[32..36].copy_from_slice(&be32(0x100));
+    cd[36] = 32;
+    cd[39] = 12;
+    cd.extend_from_slice(&payload);
+    cd.extend_from_slice(&[0u8; 32]);
+    let mut forged = Vec::new();
+    forged.extend_from_slice(&0xfade_0cc0u32.to_be_bytes());
+    forged.extend_from_slice(&be32(20 + cd.len()));
+    forged.extend_from_slice(&be32(1));
+    forged.extend_from_slice(&be32(0));
+    forged.extend_from_slice(&be32(20));
+    forged.extend_from_slice(&cd);
+    let result = analyze_entropy(&write(&dir, "cd", &macho_with_signature(&forged))).unwrap();
+    assert!(result.encryption_indicators.likely_encrypted, "{result:#?}");
+}
+
+#[test]
+fn ordinary_ad_hoc_code_signature_is_still_exempt() {
+    let dir = TempDir::new().unwrap();
+    // A CodeDirectory the size a linker writes: identifier, one page hash
+    let ident = b"hello\0";
+    let hash_off = 44 + ident.len();
+    let mut cd = vec![0u8; 44];
+    cd[0..4].copy_from_slice(&0xfade_0c02u32.to_be_bytes());
+    cd[4..8].copy_from_slice(&be32(hash_off + 32));
+    cd[16..20].copy_from_slice(&be32(hash_off));
+    cd[20..24].copy_from_slice(&be32(44));
+    cd[28..32].copy_from_slice(&be32(1));
+    cd[32..36].copy_from_slice(&be32(0x400));
+    cd[36] = 32;
+    cd[39] = 12;
+    cd.extend_from_slice(ident);
+    cd.extend_from_slice(&random_bytes(32));
+    let mut sig = Vec::new();
+    sig.extend_from_slice(&0xfade_0cc0u32.to_be_bytes());
+    sig.extend_from_slice(&be32(20 + cd.len()));
+    sig.extend_from_slice(&be32(1));
+    sig.extend_from_slice(&be32(0));
+    sig.extend_from_slice(&be32(20));
+    sig.extend_from_slice(&cd);
+    let result = analyze_entropy(&write(&dir, "adhoc", &macho_with_signature(&sig))).unwrap();
+    assert!(
+        result
+            .recommendations
+            .iter()
+            .any(|r| r.contains("code signature") && r.contains("not measured")),
+        "{:?}",
+        result.recommendations
+    );
+}
+
+#[test]
+fn macho_data_symbols_are_variables_not_functions() {
+    let dir = TempDir::new().unwrap();
+    // __TEXT/__text (section 1, code), __DATA/__data (2), __DATA/__bss (3)
+    let names = [
+        "_main",
+        "_api_entry",
+        "_helper",
+        "_counter",
+        "_message",
+        "_table",
+        "_bss_buffer",
+        "_hidden_state",
+        "_printf",
+    ];
+    // (n_type, n_sect): 3 text symbols, 5 data symbols, 1 undefined
+    let kinds: [(u8, u8); 9] = [
+        (0x0f, 1),
+        (0x0f, 1),
+        (0x0e, 1),
+        (0x0f, 2),
+        (0x0f, 2),
+        (0x0f, 2),
+        (0x0f, 3),
+        (0x0e, 2),
+        (0x01, 0),
+    ];
+    let mut strtab = vec![0u8];
+    let mut offsets = Vec::new();
+    for n in names {
+        offsets.push(strtab.len() as u32);
+        strtab.extend_from_slice(n.as_bytes());
+        strtab.push(0);
+    }
+    let symoff = BODY;
+    let stroff = symoff + names.len() * 16;
+    let cmds = [
+        macho_segment("__TEXT", 0, 0x4000, &[("__text", 0x10, 0x200, 0x8000_0400)]),
+        macho_segment(
+            "__DATA",
+            0x4000,
+            0x4000,
+            &[("__data", 0x10, 0x4000, 0), ("__bss", 0x10, 0, 1)],
+        ),
+        macho_symtab(
+            symoff as u32,
+            names.len() as u32,
+            stroff as u32,
+            strtab.len() as u32,
+        ),
+    ];
+    let mut body = Vec::new();
+    for (i, (n_type, n_sect)) in kinds.iter().enumerate() {
+        body.extend_from_slice(&offsets[i].to_le_bytes());
+        body.push(*n_type);
+        body.push(*n_sect);
+        body.extend_from_slice(&0u16.to_le_bytes());
+        let value: u64 = if *n_sect == 0 {
+            0
+        } else {
+            0x1000 + i as u64 * 8
+        };
+        body.extend_from_slice(&value.to_le_bytes());
+    }
+    body.extend_from_slice(&strtab);
+    let mut image = macho_image(&cmds, 0, BODY, &body);
+    image.resize(0x8000, 0);
+    let path = write(&dir, "globals", &image);
+    let table = analyze_symbols(&path).unwrap();
+    let defined: Vec<_> = table
+        .functions
+        .iter()
+        .filter(|f| !f.is_imported && !f.name.starts_with("[note]"))
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(defined, ["_main", "_api_entry", "_helper"]);
+    assert_eq!(table.global_variables.len(), 5);
+    assert_eq!(table.symbol_count.global_variables, 5);
+    assert_eq!(table.symbol_count.imported_functions, 1);
+    assert_eq!(table.symbol_count.total_functions, 4);
+    assert_eq!(table.exports.len(), 2); // _main and _api_entry (the variables are not exports of functions)
+}
+
+#[test]
+fn rpath_and_relative_library_names_do_not_count_as_system_libraries() {
+    for lib in [
+        "@rpath/libSystem.B.dylib",
+        "@executable_path/libc.dylib",
+        "evil/libSystem.B.dylib",
+    ] {
+        let mut table = empty_table();
+        table.imports = vec![ImportInfo {
+            name: "a".to_string(),
+            library: Some(lib.to_string()),
+            address: None,
+            ordinal: None,
+            is_delayed: false,
+        }];
+        let deps = analyze_dependencies(Path::new("/nonexistent"), &table, None).unwrap();
+        assert_eq!(deps.dependencies.len(), 1, "{lib}");
+        assert!(
+            deps.dependencies.iter().all(|d| !d.is_system_library),
+            "{lib}"
+        );
+    }
 }

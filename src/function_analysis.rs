@@ -134,6 +134,8 @@ pub fn analyze_symbols_with_arch(path: &Path, arch: Option<&str>) -> Result<Symb
     file.read_to_end(&mut buffer)?;
 
     if let Some(selection) = crate::binary_parser::select_fat_slice(&buffer, arch) {
+        crate::binary_parser::check_mach_load_commands(selection.data)
+            .map_err(|why| anyhow::anyhow!("The Mach-O file was not analyzed: {why}"))?;
         return match Object::parse(selection.data)? {
             Object::Mach(mach @ mach::Mach::Binary(_)) => {
                 analyze_mach_symbols(mach, selection.data)
@@ -144,6 +146,8 @@ pub fn analyze_symbols_with_arch(path: &Path, arch: Option<&str>) -> Result<Symb
         };
     }
 
+    crate::binary_parser::check_mach_load_commands(&buffer)
+        .map_err(|why| anyhow::anyhow!("The Mach-O file was not analyzed: {why}"))?;
     match Object::parse(&buffer)? {
         Object::Elf(elf) => analyze_elf_symbols(elf, &buffer),
         Object::PE(pe) => analyze_pe_symbols(pe, &buffer),
@@ -170,12 +174,14 @@ fn budget_note() -> String {
     )
 }
 
-/// Appends one marker entry per note to the function list, after the counts were
-/// taken, so a cut is visible in every listing of the table. The markers are not
+/// Puts one marker entry per note at the front of the function list, after the
+/// counts were taken, so a cut is visible in every listing of the table and in
+/// the first rows of an overview sample. The markers are not
 /// counted in `symbol_count`.
 fn push_notes(functions: &mut Vec<FunctionInfo>, notes: &[String]) {
-    for note in notes {
-        functions.push(FunctionInfo {
+    let markers: Vec<FunctionInfo> = notes
+        .iter()
+        .map(|note| FunctionInfo {
             name: format!("[note] {note}"),
             address: 0,
             size: 0,
@@ -185,8 +191,9 @@ fn push_notes(functions: &mut Vec<FunctionInfo>, notes: &[String]) {
             is_entry_point: false,
             is_exported: false,
             is_imported: false,
-        });
-    }
+        })
+        .collect();
+    functions.splice(0..0, markers);
 }
 
 pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable> {
@@ -584,9 +591,15 @@ pub(crate) fn mach_import_library<'a>(
     macho.libs.get(ordinal).copied()
 }
 
+/// True for a Mach-O section that holds instructions (`S_ATTR_PURE_INSTRUCTIONS`
+/// or `S_ATTR_SOME_INSTRUCTIONS`).
+fn mach_section_holds_code(flags: u32) -> bool {
+    flags & 0x8000_0000 != 0 || flags & 0x0000_0400 != 0
+}
+
 pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTable> {
     let mut functions = Vec::new();
-    let global_variables = Vec::new();
+    let mut global_variables = Vec::new();
     let mut imports = Vec::new();
     let mut exports = Vec::new();
     let cross_references = Vec::new();
@@ -607,6 +620,15 @@ pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTab
             }
         }
         mach::Mach::Binary(macho) => {
+            // The sections of every segment in load-command order: an `n_sect`
+            // of a symbol is a 1-based index into this list. A symbol is a
+            // function only when its section holds code.
+            let code_sections: Vec<bool> = macho
+                .segments
+                .iter()
+                .flat_map(|segment| segment.sections().unwrap_or_default())
+                .map(|(section, _)| mach_section_holds_code(section.flags))
+                .collect();
             // Analyze Mach-O symbols
             for (name, nlist) in crate::binary_parser::mach_symbols_bounded(&macho, buffer) {
                 if nlist.is_stab() {
@@ -623,8 +645,34 @@ pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTab
                 let address = nlist.n_value;
                 let is_external = nlist.is_global();
 
-                // Check if this is a function symbol (simplified check)
                 if nlist.n_type & mach::symbols::N_TYPE == mach::symbols::N_SECT {
+                    // `n_sect` is 1-based; one that names no section (a file
+                    // without a section table) cannot be told apart and keeps
+                    // the symbol in the function list.
+                    let holds_code = nlist
+                        .n_sect
+                        .checked_sub(1)
+                        .and_then(|i| code_sections.get(i))
+                        .copied()
+                        .unwrap_or(true);
+                    if !holds_code {
+                        // A variable (data, bss, constants): never a function
+                        if !budget.charge(&name, 1) {
+                            break;
+                        }
+                        global_variables.push(VariableInfo {
+                            name: name.to_string(),
+                            address,
+                            size: 0,
+                            var_type: if is_external {
+                                VariableType::Global
+                            } else {
+                                VariableType::Static
+                            },
+                            section: None,
+                        });
+                        continue;
+                    }
                     let function_type = if is_external {
                         FunctionType::Exported
                     } else {
@@ -666,12 +714,18 @@ pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTab
                     break;
                 }
                 if !nlist.is_stab() && nlist.is_undefined() && !name.is_empty() {
-                    if !budget.charge(&name, 2) {
+                    // The library name is shared by every import of it: cap it
+                    // and charge each copy like a symbol name.
+                    let library =
+                        mach_import_library(&macho, &nlist).map(crate::binary_parser::capped_name);
+                    if !budget.charge(&name, 2)
+                        || !library.as_ref().is_none_or(|lib| budget.charge(lib, 1))
+                    {
                         break;
                     }
                     imports.push(ImportInfo {
                         name: name.to_string(),
-                        library: mach_import_library(&macho, &nlist).map(str::to_owned),
+                        library: library.map(std::borrow::Cow::into_owned),
                         address: None,
                         ordinal: None,
                         is_delayed: false,
