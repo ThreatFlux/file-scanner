@@ -2402,3 +2402,262 @@ fn long_name_headers_past_the_work_budget_stop_the_listing_with_a_note() {
     let error = analyze_npm_package(&path).unwrap_err().to_string();
     assert!(error.contains("stopped at a limit"), "{error}");
 }
+
+// ---------------------------------------------------------------------------
+// Inputs that were not read as code are never Safe; a known advisory lifts them
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_dependency_list_is_never_safe_and_a_vulnerable_pin_lifts_it() {
+    let dir = TempDir::new().unwrap();
+    let current = write(dir.path(), "ok/requirements.txt", b"requests==2.32.3\n");
+    let vulnerable = write(dir.path(), "bad/requirements.txt", b"requests==2.5.0\n");
+    let ok = analyze_python_package(&current).unwrap();
+    assert!(!ok.input.content_scanned);
+    assert!(ok.dependencies.vulnerability_summary.total_count == 0);
+    assert!(
+        matches!(ok.malicious_indicators.risk_level, PyRisk::Low),
+        "{:?}",
+        ok.malicious_indicators
+    );
+    let bad = analyze_python_package(&vulnerable).unwrap();
+    assert!(bad.dependencies.vulnerability_summary.total_count > 0);
+    assert!(
+        matches!(
+            bad.malicious_indicators.risk_level,
+            PyRisk::Medium | PyRisk::High | PyRisk::Critical
+        ),
+        "{:?}",
+        bad.malicious_indicators
+    );
+    assert!(
+        bad.malicious_indicators.overall_risk_score > ok.malicious_indicators.overall_risk_score
+    );
+}
+
+#[test]
+fn an_npm_manifest_or_lock_file_alone_is_never_safe_and_a_vulnerable_pin_lifts_it() {
+    let dir = TempDir::new().unwrap();
+    let manifest = |name: &str, version: &str| {
+        write(
+            dir.path(),
+            &format!("{name}/package.json"),
+            format!(
+                r#"{{"name":"app","version":"1.0.0","dependencies":{{"lodash":"{version}"}}}}"#
+            )
+            .as_bytes(),
+        )
+    };
+    let lock = |name: &str, version: &str| {
+        write(
+            dir.path(),
+            &format!("{name}/package-lock.json"),
+            format!(
+                r#"{{"name":"app","version":"1.0.0","lockfileVersion":3,"packages":{{"":{{"name":"app","version":"1.0.0","dependencies":{{"lodash":"{version}"}}}},"node_modules/lodash":{{"version":"{version}"}}}}}}"#
+            )
+            .as_bytes(),
+        )
+    };
+    // A package.json is read with its directory, which here holds no source: the
+    // advisory alone must still lift the rating off Safe.
+    let bad = analyze_npm_package(&manifest("m_bad", "4.17.11")).unwrap();
+    assert!(bad.dependencies.vulnerability_summary.total_count > 0);
+    assert!(
+        !matches!(bad.malicious_indicators.risk_level, NpmRisk::Safe),
+        "{:?}",
+        bad.malicious_indicators
+    );
+    {
+        let (current, vulnerable) = (lock("l_ok", "4.17.21"), lock("l_bad", "4.17.11"));
+        let ok = analyze_npm_package(&current).unwrap();
+        let bad = analyze_npm_package(&vulnerable).unwrap();
+        assert!(!ok.input.content_scanned, "{current:?}");
+        assert!(
+            !matches!(ok.malicious_indicators.risk_level, NpmRisk::Safe),
+            "{current:?} {:?}",
+            ok.malicious_indicators
+        );
+        assert!(
+            bad.dependencies.vulnerability_summary.total_count > 0,
+            "{vulnerable:?}"
+        );
+        assert!(
+            matches!(
+                bad.malicious_indicators.risk_level,
+                NpmRisk::Medium | NpmRisk::High | NpmRisk::Critical
+            ),
+            "{vulnerable:?} {:?}",
+            bad.malicious_indicators
+        );
+        assert!(
+            bad.malicious_indicators.overall_risk_score
+                > ok.malicious_indicators.overall_risk_score
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_same_size_edit_of_a_source_file_still_invalidates_the_cache() {
+    let dir = TempDir::new().unwrap();
+    let manifest = write(dir.path(), "package.json", PKG.as_bytes());
+    let source = "module.exports = 1;\n";
+    write(dir.path(), "lib/index.js", source.as_bytes());
+    let client = client().await;
+    let first = summary(&client, "analyze_npm_package", &manifest).await;
+    assert_eq!(first["cache"], "miss");
+    let again = summary(&client, "analyze_npm_package", &manifest).await;
+    assert_eq!(again["cache"], "hit", "{again}");
+    // Same length, so only the change time tells the two apart.
+    let edited = "module.exports = 2;\n";
+    assert_eq!(edited.len(), source.len());
+    write(dir.path(), "lib/index.js", edited.as_bytes());
+    let after = summary(&client, "analyze_npm_package", &manifest).await;
+    assert_eq!(after["cache"], "miss", "{after}");
+    client.cancel().await.unwrap();
+}
+
+#[test]
+fn a_directory_of_many_sources_is_read_in_full_and_in_order() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "package.json", PKG.as_bytes());
+    for i in 0..120 {
+        write(
+            dir.path(),
+            &format!("src/f{i:03}.js"),
+            format!("module.exports = {i};\n").as_bytes(),
+        );
+    }
+    write(dir.path(), "src/zz_evil.js", evil_js().as_bytes());
+    let analysis = analyze_npm_package(dir.path()).unwrap();
+    assert_eq!(analysis.input.files_scanned, 121);
+    assert!(
+        analysis
+            .source_findings
+            .iter()
+            .any(|f| f.file.ends_with("zz_evil.js")),
+        "{:?}",
+        analysis.source_findings
+    );
+}
+
+#[test]
+fn bytes_after_the_last_gzip_member_are_ignored_with_a_note() {
+    let dir = TempDir::new().unwrap();
+    let evil = evil_js();
+    let archive = tgz(&[
+        ("package/package.json", PKG.as_bytes()),
+        ("package/index.js", evil.as_bytes()),
+    ]);
+    let mut with_junk = archive.clone();
+    with_junk.extend_from_slice(b"not gzip data at all");
+    let path = write(dir.path(), "junk.tgz", &with_junk);
+    let analysis = analyze_npm_package(&path).unwrap();
+    assert!(
+        analysis
+            .source_findings
+            .iter()
+            .any(|f| f.file.ends_with("index.js")),
+        "{:?}",
+        analysis.source_findings
+    );
+    let notes = analysis.input.notes.join(" ");
+    assert!(notes.contains("after its last gzip member"), "{notes}");
+    // The same archive without the trailing bytes has no such note.
+    let clean = write(dir.path(), "clean.tgz", &archive);
+    let analysis = analyze_npm_package(&clean).unwrap();
+    assert!(!analysis
+        .input
+        .notes
+        .join(" ")
+        .contains("after its last gzip member"));
+    // A second complete member is still read, not treated as trailing bytes.
+    let mut two = archive.clone();
+    two.extend_from_slice(&gz(&[0u8; 1024]));
+    let path = write(dir.path(), "two.tgz", &two);
+    let analysis = analyze_npm_package(&path).unwrap();
+    assert!(!analysis
+        .input
+        .notes
+        .join(" ")
+        .contains("after its last gzip member"));
+    assert!(!analysis.source_findings.is_empty());
+}
+
+/// One gzip member holding `data`, padded with an FEXTRA field to exactly `size` bytes.
+fn gz_member_of_size(data: &[u8], size: usize) -> Vec<u8> {
+    let build = |extra: usize| {
+        let mut enc = flate2::GzBuilder::new()
+            .extra(vec![0u8; extra])
+            .write(Vec::new(), flate2::Compression::fast());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    };
+    let base = build(0).len();
+    assert!(size > base);
+    let out = build(size - base);
+    assert_eq!(out.len(), size);
+    out
+}
+
+#[test]
+fn a_second_gzip_member_is_read_wherever_the_buffer_ends_or_zeros_pad() {
+    let dir = TempDir::new().unwrap();
+    let evil = evil_js();
+    let first_tar = open_tar(
+        &[
+            ("package/package.json", PKG.as_bytes()),
+            ("package/index.js", b"module.exports = 1;\n"),
+        ],
+        &[],
+    );
+    let mut second_tar = hidden_entry("package/evil.js", &evil);
+    second_tar.extend(vec![0u8; 1024]);
+    let second = gz(&second_tar);
+    // Member 1 ends one byte before, on, and one byte after an 8192-byte boundary.
+    for size in [8190usize, 8191, 8192] {
+        let mut bytes = gz_member_of_size(&first_tar, size);
+        bytes.extend_from_slice(&second);
+        let path = write(dir.path(), &format!("split_{size}.tgz"), &bytes);
+        let analysis = analyze_npm_package(&path).unwrap();
+        assert!(
+            analysis
+                .source_findings
+                .iter()
+                .any(|f| f.file == "package/evil.js"),
+            "{size}: {:?}",
+            analysis.source_findings
+        );
+        assert!(
+            !analysis
+                .input
+                .notes
+                .join(" ")
+                .contains("after its last gzip member"),
+            "{size}"
+        );
+    }
+    // Zero padding between members is skipped, as Python's gzip does.
+    let sdist_first = open_tar(
+        &[(
+            "p-1.0/setup.py",
+            b"from setuptools import setup\nsetup(name='p', version='1.0')\n",
+        )],
+        &[],
+    );
+    let body = format!("import os\nos.system('{}')\n", dl_run_line());
+    let mut sdist = gz(&sdist_first);
+    sdist.extend(vec![0u8; 512]);
+    sdist.extend(gz(&hidden_entry("p-1.0/setup.py", &body)));
+    let path = write(dir.path(), "padded-1.0.tar.gz", &sdist);
+    // Reading on and finding the payload, or refusing the archive, are both fine.
+    if let Ok(analysis) = analyze_python_package(&path) {
+        assert!(
+            matches!(
+                analysis.malicious_indicators.risk_level,
+                PyRisk::High | PyRisk::Critical
+            ),
+            "{:?}",
+            analysis.malicious_indicators.risk_level
+        );
+    }
+}

@@ -605,13 +605,7 @@ fn analyze_package_with_metadata(
         &scan.findings,
         true,
     )?;
-    if let Some(reason) = input.incomplete_reason() {
-        if malicious_indicators.overall_risk_score < package_scan::INCOMPLETE_FLOOR {
-            malicious_indicators.overall_risk_score = package_scan::INCOMPLETE_FLOOR;
-            malicious_indicators.risk_level = RiskLevel::Low;
-        }
-        malicious_indicators.risk_reasons.push(reason);
-    }
+    apply_input_floor(&mut malicious_indicators, &input, &dependencies);
     let maintainer_analysis = analyze_maintainers(&package_info)?;
     let quality_metrics = calculate_quality_metrics(&files)?;
 
@@ -716,13 +710,7 @@ fn analyze_package_with_files(
         &scan.findings,
         true,
     )?;
-    if let Some(reason) = input.incomplete_reason() {
-        if malicious_indicators.overall_risk_score < package_scan::INCOMPLETE_FLOOR {
-            malicious_indicators.overall_risk_score = package_scan::INCOMPLETE_FLOOR;
-            malicious_indicators.risk_level = RiskLevel::Low;
-        }
-        malicious_indicators.risk_reasons.push(reason);
-    }
+    apply_input_floor(&mut malicious_indicators, &input, &dependencies);
 
     // Analyze maintainers
     let maintainer_analysis = analyze_maintainers(&package_info)?;
@@ -1134,8 +1122,9 @@ fn dependency_list_analysis(
     let scan = SourceScan::default();
     let security_analysis =
         perform_security_analysis(&package_info, &dependencies, &[], &setup_analysis, &scan)?;
-    let malicious_indicators =
+    let mut malicious_indicators =
         detect_malicious_indicators(&package_info, &dependencies, &security_analysis, &[], false)?;
+    apply_input_floor(&mut malicious_indicators, &input, &dependencies);
     let maintainer_analysis = analyze_maintainers(&package_info)?;
     let quality_metrics = calculate_quality_metrics(&[])?;
     Ok(PythonPackageAnalysis {
@@ -2041,14 +2030,33 @@ fn calculate_supply_chain_risk(
     risk_score.min(100.0)
 }
 
+/// Raise the rating of an input that was not read in full (see
+/// `package_scan::input_floor`).
+fn apply_input_floor(
+    indicators: &mut MaliciousPackageIndicators,
+    input: &InputInfo,
+    dependencies: &PythonDependencyAnalysis,
+) {
+    let has_advisory = dependencies.vulnerability_summary.total_count > 0
+        || !dependencies.package_vulnerabilities.is_empty();
+    if let Some((floor, reason)) = package_scan::input_floor(input, has_advisory) {
+        if indicators.overall_risk_score < floor {
+            indicators.overall_risk_score = floor;
+            indicators.risk_level = match package_scan::level_for_score(floor) {
+                "Medium" => RiskLevel::Medium,
+                _ => RiskLevel::Low,
+            };
+        }
+        indicators.risk_reasons.push(reason);
+    }
+}
+
 /// Points the dependency vulnerability counts add to the risk score.
 fn vulnerability_points(critical: usize, high: usize, medium: usize) -> f32 {
     if critical > 0 {
         40.0
-    } else if high > 0 {
+    } else if high > 0 || medium > 0 {
         20.0
-    } else if medium > 0 {
-        5.0
     } else {
         0.0
     }

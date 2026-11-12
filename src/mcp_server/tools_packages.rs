@@ -35,7 +35,7 @@ const ANALYZE_NPM_DESCRIPTION: &str = "Vet an npm package for malicious code, vu
 dependencies and typosquatting. Offline: pass the absolute path of a LOCAL .tgz/.tar.gz (what \
 `npm pack` writes; detected by content), an unpacked package directory, or a package-lock.json / \
 npm-shrinkwrap.json (dependency list only). A registry name such as `express` or `lodash@4.17.4` \
-is rejected: nothing is downloaded. Source files (.js .mjs .cjs .ts .sh, up to 400 files, 1 MiB \
+is rejected: nothing is downloaded. Source files (.js .mjs .cjs .jsx .ts .tsx .mts .cts and scripts .sh .bash .zsh .cmd .bat .ps1, up to 400 files, 1 MiB \
 each, 16 MiB in all) are scanned for download-and-execute, eval of decoded payloads, credential and wallet \
 access, exfiltration endpoints, miners, reverse shells and obfuscation, with file and line \
 evidence. Vulnerability data is a SMALL OFFLINE TABLE (6 packages, newest advisory 2022): an empty \
@@ -50,7 +50,7 @@ const ANALYZE_PYTHON_DESCRIPTION: &str = "Vet a Python package for malicious cod
 dependencies and typosquatting. Offline: pass the absolute path of a LOCAL wheel (.whl), sdist \
 (.tar.gz/.tgz) or .zip (all detected by content), a source directory, a setup.py / pyproject.toml, \
 or a dependency list (requirements.txt, poetry.lock). A PyPI name such as `requests` or \
-`requests==2.5.0` is rejected: nothing is downloaded. Source files (.py .pth .sh, up to 400 files, \
+`requests==2.5.0` is rejected: nothing is downloaded. Source files (.py .pyw .pth and scripts .sh .bash .zsh .cmd .bat .ps1, up to 400 files, \
 1 MiB each, 16 MiB in all) are scanned for download-and-execute, exec of decoded payloads, credential and wallet \
 access, exfiltration endpoints, miners, reverse shells and obfuscation, with file and line \
 evidence; setup.py is checked for install-time behaviour. Vulnerability data is a SMALL OFFLINE \
@@ -472,6 +472,19 @@ fn fingerprint(path: &Path) -> Result<String, String> {
             hasher.update(entry.path().to_string_lossy().as_bytes());
             hasher.update(metadata.len().to_le_bytes());
             hasher.update(modified.to_le_bytes());
+            // The inode change time moves with every write and cannot be set back,
+            // so for a source file it stands in for reading the content.
+            #[cfg(unix)]
+            let changed_at = {
+                use std::os::unix::fs::MetadataExt as _;
+                Some((metadata.ctime(), metadata.ctime_nsec()))
+            };
+            #[cfg(not(unix))]
+            let changed_at: Option<(i64, i64)> = None;
+            if let Some((secs, nanos)) = changed_at {
+                hasher.update(secs.to_le_bytes());
+                hasher.update(nanos.to_le_bytes());
+            }
             // Size and time are not enough: an edit that keeps both would be served
             // from the cache.
             if metadata.len() > HASH_FILE_LIMIT {
@@ -492,7 +505,7 @@ fn fingerprint(path: &Path) -> Result<String, String> {
             ) || (name.starts_with("requirements") && name.ends_with(".txt"));
             if is_manifest {
                 manifests.push(entry.path().to_path_buf());
-            } else if crate::package_scan::language_of(&name).is_some() {
+            } else if changed_at.is_none() && crate::package_scan::language_of(&name).is_some() {
                 let relative = entry.path().strip_prefix(path).unwrap_or(entry.path());
                 let depth = relative.to_string_lossy().matches('/').count();
                 sources.push((depth, entry.path().to_path_buf()));

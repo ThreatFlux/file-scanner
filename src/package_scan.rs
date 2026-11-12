@@ -18,7 +18,6 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use flate2::read::MultiGzDecoder;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -121,6 +120,44 @@ pub struct InputInfo {
 
 /// The score a package gets at least when part of it was not read.
 pub const INCOMPLETE_FLOOR: f32 = 20.0;
+
+/// The score a dependency list gets at least when one of its dependencies has a
+/// known advisory: the list was not read as code and it names a vulnerable release.
+pub const UNREAD_ADVISORY_FLOOR: f32 = 40.0;
+
+/// The lowest score an input may get, with the reason, or `None` when the
+/// computed score stands. An input that was not read in full (a dependency list,
+/// a cut listing, skipped files) is never Safe, and a dependency list that names
+/// a release with a known advisory is at least Medium.
+pub fn input_floor(input: &InputInfo, has_advisory: bool) -> Option<(f32, String)> {
+    if !input.content_scanned {
+        let reason = if has_advisory {
+            "only the dependency list was read and it names a release with a known advisory"
+        } else {
+            "only the dependency list was read; no source was scanned"
+        };
+        let floor = if has_advisory {
+            UNREAD_ADVISORY_FLOOR
+        } else {
+            INCOMPLETE_FLOOR
+        };
+        return Some((floor, reason.to_string()));
+    }
+    input
+        .incomplete_reason()
+        .map(|reason| (INCOMPLETE_FLOOR, reason))
+}
+
+/// The risk level name for a score.
+pub fn level_for_score(score: f32) -> &'static str {
+    match score {
+        x if x >= 80.0 => "Critical",
+        x if x >= 60.0 => "High",
+        x if x >= 40.0 => "Medium",
+        x if x >= 20.0 => "Low",
+        _ => "Safe",
+    }
+}
 
 impl InputInfo {
     /// Why the package was not read in full (listing cut, files skipped or only
@@ -376,7 +413,7 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
     let mut notes = Vec::new();
     let (listed, listing_truncated, ignored) = match container {
         ContainerKind::Directory => list_dir(path, &mut notes)?,
-        ContainerKind::TarGz | ContainerKind::Tar => list_tar(path, container)?,
+        ContainerKind::TarGz | ContainerKind::Tar => list_tar(path, container, &mut notes)?,
         ContainerKind::Zip => list_zip(path)?,
     };
     if ignored > 0 {
@@ -566,32 +603,50 @@ fn read_dir_files(
     listed: &[Listed],
     want: &HashSet<usize>,
 ) -> Result<HashMap<usize, Vec<u8>>> {
+    let wanted: Vec<&Listed> = listed
+        .iter()
+        .filter(|entry| want.contains(&entry.ordinal))
+        .collect();
+    // Opening a file can wait on the file system or on a security agent that
+    // inspects every open, with the CPU idle: read the files from a few threads.
+    const READERS: usize = 8;
+    let chunk = wanted.len().div_ceil(READERS).max(1);
     let mut out = HashMap::new();
-    for entry in listed {
-        if !want.contains(&entry.ordinal) {
-            continue;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = wanted
+            .chunks(chunk)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .filter_map(|entry| {
+                            read_dir_file(&dir.join(&entry.path)).map(|buf| (entry.ordinal, buf))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for handle in handles {
+            if let Ok(rows) = handle.join() {
+                out.extend(rows);
+            }
         }
-        let full = dir.join(&entry.path);
-        // The listing did not follow links; do not follow one that appeared since.
-        let Ok(metadata) = std::fs::symlink_metadata(&full) else {
-            continue;
-        };
-        if !metadata.is_file() {
-            continue;
-        }
-        let Ok(file) = File::open(&full) else {
-            continue;
-        };
-        let mut buf = Vec::new();
-        if file
-            .take(MAX_MANIFEST_BYTES.max(MAX_FILE_BYTES) as u64)
-            .read_to_end(&mut buf)
-            .is_ok()
-        {
-            out.insert(entry.ordinal, buf);
-        }
-    }
+    });
     Ok(out)
+}
+
+/// The leading bytes of one regular file of a directory, or `None`.
+fn read_dir_file(full: &Path) -> Option<Vec<u8>> {
+    // The listing did not follow links; do not follow one that appeared since.
+    let metadata = std::fs::symlink_metadata(full).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let file = File::open(full).ok()?;
+    let mut buf = Vec::new();
+    file.take(MAX_MANIFEST_BYTES.max(MAX_FILE_BYTES) as u64)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(buf)
 }
 
 /// Most bytes of the (decompressed) stream one tar walk reads: the declared
@@ -620,16 +675,76 @@ impl Read for BudgetReader {
     }
 }
 
+/// Reads every gzip member of a file, and stops without error at bytes that do
+/// not start another member, as gzip(1) does after a warning; `trailing` says so.
+struct GzMembers {
+    /// Between members: the input, positioned after the last member read.
+    input: Option<std::io::BufReader<File>>,
+    /// Inside a member.
+    current: Option<flate2::bufread::GzDecoder<std::io::BufReader<File>>>,
+    trailing: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Read for GzMembers {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::BufRead as _;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if let Some(decoder) = self.current.as_mut() {
+                let n = decoder.read(buf)?;
+                if n > 0 {
+                    return Ok(n);
+                }
+                // The member ended: take the input back for the next one.
+                self.input = self
+                    .current
+                    .take()
+                    .map(flate2::bufread::GzDecoder::into_inner);
+            }
+            let Some(mut input) = self.input.take() else {
+                return Ok(0);
+            };
+            // Zero padding between members is skipped, as Python's gzip does. A
+            // buffer can hold a single byte, so only the first byte decides.
+            let first = loop {
+                let head = input.fill_buf()?;
+                let Some(&b) = head.first() else {
+                    return Ok(0);
+                };
+                if b != 0 {
+                    break b;
+                }
+                let zeros = head.iter().take_while(|&&z| z == 0).count();
+                input.consume(zeros);
+            };
+            if first != 0x1f {
+                self.trailing
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                return Ok(0);
+            }
+            self.current = Some(flate2::bufread::GzDecoder::new(input));
+        }
+    }
+}
+
 type BudgetedTar = (
     tar::Archive<Box<dyn Read + Send>>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
 );
 
 fn tar_archive_budget(path: &Path, container: ContainerKind, budget: u64) -> Result<BudgetedTar> {
     let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
+    let trailing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader: Box<dyn Read + Send> = if container == ContainerKind::TarGz {
         // npm and pip read every gzip member (`cat a.tgz b.tgz`), not only the first.
-        Box::new(MultiGzDecoder::new(file))
+        Box::new(GzMembers {
+            input: Some(std::io::BufReader::new(file)),
+            current: None,
+            trailing: trailing.clone(),
+        })
     } else {
         Box::new(file)
     };
@@ -643,7 +758,7 @@ fn tar_archive_budget(path: &Path, container: ContainerKind, budget: u64) -> Res
     // npm's tar needs two zero blocks to end an archive and Python and bsdtar read
     // on past one; read on to the end of the stream so no entry stays hidden.
     archive.set_ignore_zeros(true);
-    Ok((archive, exhausted))
+    Ok((archive, exhausted, trailing))
 }
 
 /// What a tar walk sees of one logical entry (extension headers are folded in).
@@ -733,7 +848,19 @@ fn walk_tar_budget(
     budget: u64,
     visit: &mut dyn FnMut(TarItem<'_>) -> Result<bool>,
 ) -> Result<(usize, bool)> {
-    let (mut archive, exhausted) = tar_archive_budget(path, container, budget)?;
+    walk_tar_noted(path, container, budget, visit).map(|(pax, cut, _)| (pax, cut))
+}
+
+/// Like [`walk_tar_budget`], and says whether the gzip stream ended in bytes that
+/// are not a gzip member (the third value).
+fn walk_tar_noted(
+    path: &Path,
+    container: ContainerKind,
+    budget: u64,
+    visit: &mut dyn FnMut(TarItem<'_>) -> Result<bool>,
+) -> Result<(usize, bool, bool)> {
+    let (mut archive, exhausted, trailing) = tar_archive_budget(path, container, budget)?;
+    let trailing_bytes = || trailing.load(std::sync::atomic::Ordering::Relaxed);
     let was_cut = || exhausted.load(std::sync::atomic::Ordering::Relaxed);
     let entries = archive
         .entries()
@@ -749,7 +876,7 @@ fn walk_tar_budget(
     for entry in entries {
         let mut entry = match entry {
             Ok(entry) => entry,
-            Err(_) if was_cut() => return Ok((pax_headers, true)),
+            Err(_) if was_cut() => return Ok((pax_headers, true, trailing_bytes())),
             Err(_) => anyhow::bail!(TAR_DAMAGED),
         };
         let kind = entry.header().entry_type();
@@ -774,7 +901,7 @@ fn walk_tar_budget(
             }
             extension_bytes = extension_bytes.saturating_add(size);
             if extension_bytes > MAX_TAR_EXTENSION_TOTAL {
-                return Ok((pax_headers, true));
+                return Ok((pax_headers, true, trailing_bytes()));
             }
             let mut data = Vec::new();
             (&mut entry)
@@ -873,51 +1000,55 @@ fn walk_tar_budget(
             break;
         }
     }
-    Ok((pax_headers, was_cut()))
+    Ok((pax_headers, was_cut(), trailing_bytes()))
 }
 
-fn list_tar(path: &Path, container: ContainerKind) -> Result<Listing> {
+fn list_tar(path: &Path, container: ContainerKind, notes: &mut Vec<String>) -> Result<Listing> {
     let mut listed = Vec::new();
     let mut truncated = false;
     let mut ignored = 0usize;
     let mut declared = 0u64;
     let mut visited = 0usize;
-    let (pax_ignored, stopped) = walk_tar(path, container, &mut |item| {
-        visited += 1;
-        if visited > MAX_VISITED_ENTRIES {
-            truncated = true;
-            return Ok(false);
-        }
-        // Every entry's data is skipped through (and decompressed), so every
-        // declared size counts toward the work limit, not only regular files.
-        declared = declared.saturating_add(item.size);
-        if declared > MAX_DECLARED_BYTES {
-            truncated = true;
-            return Ok(false);
-        }
-        if !item.kind.is_file() {
-            // Directories, links and devices carry no package content.
-            return Ok(true);
-        }
-        let normalised = normalise_entry_path(&item.path);
-        if is_metadata_entry(&normalised) {
-            let head = read_head(item.reader);
-            if is_appledouble(&normalised, &head) {
-                ignored += 1;
+    let (pax_ignored, stopped, trailing) =
+        walk_tar_noted(path, container, MAX_TAR_STREAM_BYTES, &mut |item| {
+            visited += 1;
+            if visited > MAX_VISITED_ENTRIES {
+                truncated = true;
+                return Ok(false);
+            }
+            // Every entry's data is skipped through (and decompressed), so every
+            // declared size counts toward the work limit, not only regular files.
+            declared = declared.saturating_add(item.size);
+            if declared > MAX_DECLARED_BYTES {
+                truncated = true;
+                return Ok(false);
+            }
+            if !item.kind.is_file() {
+                // Directories, links and devices carry no package content.
                 return Ok(true);
             }
-        }
-        if listed.len() >= MAX_LISTED_ENTRIES {
-            truncated = true;
-            return Ok(false);
-        }
-        listed.push(Listed {
-            path: normalised,
-            size: item.size,
-            ordinal: item.ordinal,
-        });
-        Ok(true)
-    })?;
+            let normalised = normalise_entry_path(&item.path);
+            if is_metadata_entry(&normalised) {
+                let head = read_head(item.reader);
+                if is_appledouble(&normalised, &head) {
+                    ignored += 1;
+                    return Ok(true);
+                }
+            }
+            if listed.len() >= MAX_LISTED_ENTRIES {
+                truncated = true;
+                return Ok(false);
+            }
+            listed.push(Listed {
+                path: normalised,
+                size: item.size,
+                ordinal: item.ordinal,
+            });
+            Ok(true)
+        })?;
+    if trailing {
+        notes.push("the file has bytes after its last gzip member that are not gzip data; they were ignored, as gzip does".to_string());
+    }
     ignored += pax_ignored;
     // The long-name and PAX header budget ran out: the rest was not listed.
     truncated |= stopped;
@@ -2317,6 +2448,8 @@ mod tar_budget_tests {
         h.set_cksum();
         bytes.extend_from_slice(h.as_bytes());
         bytes.extend_from_slice(b"hi");
+        bytes.extend(vec![0u8; 510]);
+        bytes.extend(vec![0u8; 1024]);
         std::fs::File::create(&path)
             .unwrap()
             .write_all(&bytes)
