@@ -14,8 +14,9 @@ finding.
   smoke test and a Docker build.
 - `security.yml` (push and pull request to `main`, daily): cargo-audit, cargo-deny,
   CodeQL, dependency review, SBOM, TruffleHog and Semgrep.
-- `docker.yml` (source changes, `v*` tags, weekly): builds the distroless image,
-  smoke-tests it, scans it with Trivy, and signs and pushes it to GHCR.
+- `docker.yml` (source changes, `v*` tags, weekly): builds the minimal glibc image,
+  smoke-tests it, scans it with Trivy, verifies its embedded SBOMs, and signs it
+  before promoting its GHCR aliases.
 - `performance.yml` (push and pull request to `main`, weekly): Criterion
   benchmarks; results from `main` are published to GitHub Pages.
 - `validate.yml` (workflow changes): yamllint, actionlint and zizmor.
@@ -66,6 +67,15 @@ Each archive has a `.sha256` checksum beside it. Asset names follow the
 URLs stay the same across releases. Container images are published
 to `ghcr.io/threatflux/file-scanner` by `docker.yml` with semver, `latest` and
 commit tags, and are signed with cosign (keyless).
+
+The build initially pushes the full version and commit tags. The serialized
+promotion job updates `main`, `latest`, major/minor and Rust-base aliases only
+after the exact image digest passes both-platform scans, signing and embedded
+SBOM verification. It re-reads accepted main and all stable tags while holding
+the promotion lock. `main` and `latest` continue tracking current main; a stale
+main build or historical tag retry cannot rewind them. A release tag must match
+the package version compiled from Cargo and belong to accepted main history.
+Publication-policy regressions run in the existing hosted container review suite.
 
 ### crates.io
 

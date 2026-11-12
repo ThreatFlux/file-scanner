@@ -205,7 +205,7 @@ workflow-check:
 
 native-zlib-check:
 	python3 scripts/check-native-zlib.py
-	vendor/libz-sys-1.1.31/tests/check-gzwrite-backport.sh
+	vendor/libz-sys-1.1.33/tests/check-gzwrite-backport.sh
 
 container-review-check:
 	python3 -m unittest discover -s scripts -p 'test_container_*.py'
@@ -233,8 +233,8 @@ install: release
 # Setup optimization tools
 setup-optimization:
 	@echo "Setting up CI/CD optimization tools..."
-	@command -v cargo-llvm-cov >/dev/null 2>&1 || $(CARGO) install cargo-llvm-cov --version 0.9.1 --locked
-	@command -v sccache >/dev/null 2>&1 || $(CARGO) install sccache --version 0.18.0 --locked
+	@$(CARGO) install cargo-llvm-cov --version 0.9.1 --locked
+	@$(CARGO) install sccache --version 0.19.0 --locked
 	@echo "Optimization tools installed!"
 
 # Generate code coverage with llvm-cov (faster than tarpaulin)
@@ -336,7 +336,7 @@ security-audit:
 	@echo "Running security audit..."
 	python3 scripts/check-rsa-exception.py
 	$(MAKE) native-zlib-check
-	@command -v cargo-audit >/dev/null 2>&1 || $(CARGO) install cargo-audit --version 0.22.2 --locked
+	@$(CARGO) install cargo-audit --version 0.23.0 --locked
 	$(CARGO) audit
 	cd threatflux-package-security && $(CARGO) audit
 

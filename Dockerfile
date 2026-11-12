@@ -46,7 +46,7 @@ ENV PATH="/home/builder/.cargo/bin:/usr/local/cargo/bin:${PATH}"
 WORKDIR /build
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
-# Compile the patched zlib 1.3.2 bundled by locked libz-sys 1.1.31, rather than
+# Compile the fixed zlib 1.4 bundled by locked libz-sys 1.1.33, rather than
 # accidentally linking the builder distribution's older system libz.
 ENV LIBZ_SYS_STATIC=1
 
@@ -59,7 +59,7 @@ RUN rustc --version --verbose && cargo --version && \
       cargo build --release --bin "${BINARY_NAME}" --all-features --locked; \
     fi
 
-RUN cargo install cargo-cyclonedx --locked --version 0.5.9 && \
+RUN cargo install cargo-cyclonedx --locked --version 0.5.10 && \
     cargo cyclonedx \
       --manifest-path "${SBOM_MANIFEST_PATH}" \
       --all-features \
@@ -77,7 +77,7 @@ RUN mkdir -p /home/builder/out/bin /home/builder/out/doc /home/builder/runtime-s
     cp "/build/${BINARY_NAME}-sbom.json" /home/builder/out/doc/sbom.cdx.json
 
 # Wolfi glibc 2.44, nonroot uid/gid 65532; amd64/arm64 multi-arch index digest
-FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:041dfc2e4c197c610880f3f39643f76bf881698a51f329aa38c9d0657ba5741c AS runtime
+FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:cb7aa4681bef604e99ad3fb6fb365330a3ca24fcee56df0b60b27ac4983409eb AS runtime
 
 ARG VERSION=0.3.9
 ARG BUILD_DATE=unknown

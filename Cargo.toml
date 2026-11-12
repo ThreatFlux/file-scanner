@@ -25,7 +25,7 @@ thiserror = "2.0.21"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # Retain the source API alias while replacing unmaintained serde_yaml/libyaml.
-serde_yaml = { package = "serde-saphyr", version = "2.0.0" }
+serde_yaml = { package = "serde-saphyr", version = "2.1.1" }
 
 # CLI and configuration
 clap = { version = "4.6.7", features = ["derive", "env"] }
@@ -33,7 +33,7 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 # File and system utilities
 filetime = "0.2.29"
 chrono = { version = "0.4.45", features = ["serde"] }
-memmap2 = "0.9.11"
+memmap2 = "0.9.12"
 walkdir = "2.5.0"
 
 # Hashing algorithms
@@ -43,11 +43,11 @@ blake3 = "1.8.7"
 
 # String processing
 regex = "1.13.1"
-encoding_rs = "0.8.42"
+encoding_rs = "0.8.44"
 
 # Binary parsing
 goblin = "0.10.7"
-object = "0.40.0"
+object = "0.41.0"
 
 # Cryptography and signatures
 ring = "0.17.14"
@@ -63,7 +63,7 @@ axum = { version = "0.8.9", features = ["ws"] }
 tower-http = { version = "0.7.1", features = ["cors"] }
 tower = "0.5.3"
 hyper = "1.12.0"
-uuid = { version = "1.28.0", features = ["v4"] }
+uuid = { version = "1.29.2", features = ["v4"] }
 
 # OpenAPI documentation
 utoipa = { version = "6.0.0", features = ["axum_extras", "chrono", "uuid"] }
@@ -74,7 +74,9 @@ capstone = "0.14.0"
 petgraph = "0.8.3"
 
 # Threat detection
-yara-x = "1.22.0"
+# Keep the source-reviewed stable runtime/crypto patch selected. A caret
+# update could silently bypass the reviewed Wasmtime and RSA requirements.
+yara-x = "=1.23.0"
 
 # Not used by src/ since the repository-integrity module was removed. Kept because it
 # is what links the reviewed, patched libz-sys (scripts/check-native-zlib.py); remove
@@ -85,8 +87,8 @@ reqwest = { version = "0.13.5", features = ["json", "blocking"] }
 
 # Archive handling
 cfb = "0.16.0"
-zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
-flate2 = "1.1.10"
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+flate2 = "1.1.11"
 tar = "0.4.46"
 
 # XML and data processing
@@ -100,7 +102,7 @@ proptest = "1.12.0"
 rstest = "0.28.0"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 pretty_assertions = "1.4.1"
-test-case = "3.4.0"
+test-case = "3.4.1"
 serial_test = "4.0.1"
 predicates = "3.1.4"
 assert_fs = "1.1.4"
@@ -132,7 +134,7 @@ pre-release-replacements = [
 # the library stays `file_scanner`.
 [package]
 name = "threatflux-file-scanner"
-version = "0.3.9"
+version = "0.3.10"
 edition = "2021"
 rust-version = "1.97.1"
 authors = ["File Scanner Project <dev@threatflux.com>"]
@@ -166,10 +168,10 @@ path = "src/main.rs"
 
 [dependencies]
 # ThreatFlux libraries - migrated to crates.io
-threatflux-string-analysis = { version = "0.2.3" }
-threatflux-binary-analysis = { version = "0.3.1", features = ["serde-support"] }
+threatflux-string-analysis = { version = "0.2.4" }
+threatflux-binary-analysis = { version = "0.3.2", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis
-threatflux-threat-detection = { version = "0.2.3", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
+threatflux-threat-detection = { version = "0.2.4", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
 # threatflux-package-security = { version = "0.1.0" } # Not used in actual source code
 
 # Core dependencies (using workspace versions)
@@ -297,6 +299,5 @@ debug = 2
 # Temporary stable YARA-X patch: use the security-fixed stable Wasmtime runtime.
 # Remove when published YARA-X resolves a patched Wasmtime release.
 [patch.crates-io]
-yara-x = { path = "vendor/yara-x-1.22.0" }
-threatflux-binary-analysis = { path = "vendor/threatflux-binary-analysis-0.3.1" }
-libz-sys = { path = "vendor/libz-sys-1.1.31" }
+yara-x = { path = "vendor/yara-x-1.23.0" }
+libz-sys = { path = "vendor/libz-sys-1.1.33" }
