@@ -723,7 +723,13 @@ mod tests {
             .any(|r| r.indicator_type == "Setuid"));
         assert!(analysis.metadata.has_encryption);
         assert!(analysis.suspicious_indicators.has_path_traversal);
-        assert!(analysis.notes.is_empty(), "{:?}", analysis.notes);
+        // The encrypted entry is called out; nothing else is noted.
+        assert_eq!(analysis.notes.len(), 1, "{:?}", analysis.notes);
+        assert!(
+            analysis.notes[0].contains("1 entry is password-protected"),
+            "{:?}",
+            analysis.notes
+        );
     }
 
     #[test]

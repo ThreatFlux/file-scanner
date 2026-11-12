@@ -34,6 +34,15 @@ pub const LISTING_PARTIAL: &str = "Entry listing is incomplete";
 /// Prefix of the note an analyzer adds when a name was cut before the risk
 /// checks ran, so a "low" risk cannot be claimed for the archive.
 pub const NAMES_UNCHECKED: &str = "Some names were cut before the risk checks";
+/// Text of the note an analyzer adds when entries are password-protected; the
+/// note reads "N entries are password-protected; their content was not inspected".
+pub const ENCRYPTED_NOTE: &str = "password-protected; their content was not inspected";
+/// Sentence appended to that note when no entry could be read at all.
+pub const ALL_ENCRYPTED: &str = "Every entry is encrypted";
+/// Prefix of the note naming nested archives that were counted but not opened.
+pub const NESTED_NOT_OPENED: &str = "Nested archives are counted but not opened";
+/// Most nested archive names a note spells out.
+const NESTED_NAMES_IN_NOTE: usize = 5;
 /// "1 entry" or "N entries".
 pub(crate) fn count_entries(n: usize) -> String {
     if n == 1 {
@@ -1200,11 +1209,11 @@ pub(crate) fn build_entry(
 pub(crate) fn finish_analysis(
     archive_type: ArchiveType,
     metadata: ArchiveMetadata,
-    entries: Vec<ArchiveEntry>,
+    mut entries: Vec<ArchiveEntry>,
     mut suspicious_indicators: SuspiciousArchiveIndicators,
     notes: Vec<String>,
 ) -> Result<ArchiveAnalysis> {
-    let nested_archives = entries
+    let nested_archives: Vec<NestedArchiveInfo> = entries
         .iter()
         .filter(|e| matches!(e.file_type, FileType::Archive))
         .map(|e| NestedArchiveInfo {
@@ -1216,6 +1225,40 @@ pub(crate) fn finish_analysis(
         .collect();
 
     let mut notes = notes;
+    let encrypted_entries = entries.iter().filter(|e| e.is_encrypted).count();
+    if encrypted_entries > 0 {
+        let mut note = format!(
+            "{} {} {ENCRYPTED_NOTE}.",
+            count_entries(encrypted_entries),
+            if encrypted_entries == 1 { "is" } else { "are" }
+        );
+        if encrypted_entries == entries.len() {
+            note.push_str(&format!(
+                " {ALL_ENCRYPTED}, so no entry content could be rated."
+            ));
+        }
+        notes.push(note);
+    }
+    if !nested_archives.is_empty() {
+        let names: Vec<String> = nested_archives
+            .iter()
+            .take(NESTED_NAMES_IN_NOTE)
+            .map(|n| capped_text(&n.path, MAX_RISK_PATH_CHARS))
+            .collect();
+        let more = nested_archives.len().saturating_sub(names.len());
+        notes.push(format!(
+            "{NESTED_NOT_OPENED}: {} nested archive(s) ({}{}); their content was not \
+             inspected, so the risk level says nothing about it. Extract them and inspect \
+             each one.",
+            nested_archives.len(),
+            names.join(", "),
+            if more > 0 {
+                format!(", and {more} more")
+            } else {
+                String::new()
+            }
+        ));
+    }
     if suspicious_indicators.names_cut > 0 {
         notes.push(format!(
             "The names and link targets of this archive are very long: after the first {} MiB, \
@@ -1235,7 +1278,20 @@ pub(crate) fn finish_analysis(
         ));
     }
     let compressed = !matches!(archive_type, ArchiveType::Tar);
-    let security_analysis = perform_security_analysis(&entries, &metadata, compressed)?;
+    let mut security_analysis = perform_security_analysis(&entries, &metadata, compressed)?;
+    if security_analysis.zip_bomb_indicators.is_potential_bomb {
+        mark_bomb_entries(&mut entries, compressed);
+    }
+    // Content that cannot be read is not "low": the archive's own entries
+    // were listed, but what is inside the encrypted ones is unknown.
+    // When every entry is encrypted nothing was rated, which callers report as
+    // "unknown" rather than a level.
+    if encrypted_entries > 0
+        && encrypted_entries < entries.len()
+        && matches!(security_analysis.overall_risk, RiskLevel::Low)
+    {
+        security_analysis.overall_risk = RiskLevel::Medium;
+    }
     suspicious_indicators.risk_score =
         calculate_risk_score(&suspicious_indicators, &security_analysis);
 
@@ -1657,6 +1713,44 @@ const BOMB_MIN_BYTES: u64 = 10 * 1024 * 1024;
 /// Uncompressed total that is a bomb risk when it also compresses 10:1 (4 GiB).
 const BOMB_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Whether one entry alone expands far out of proportion to its packed size.
+fn entry_looks_like_bomb(entry: &ArchiveEntry, compressed: bool) -> bool {
+    let extreme_ratio = compressed
+        && entry.size_compressed > 0
+        && entry.size_uncompressed / entry.size_compressed >= 1000
+        && entry.size_uncompressed >= BOMB_MIN_BYTES;
+    (compressed && entry.size_compressed < 1000 && entry.size_uncompressed > 1_000_000_000)
+        || extreme_ratio
+}
+
+/// Give the entries behind a possible bomb a risk indicator, so a listing
+/// narrowed to risky entries shows them. When the archive as a whole trips the
+/// rule and no single entry does, the largest entry carries the mark.
+fn mark_bomb_entries(entries: &mut [ArchiveEntry], compressed: bool) {
+    let indicator = |entry: &ArchiveEntry| RiskIndicator {
+        indicator_type: "CompressionBomb".to_string(),
+        description: format!(
+            "Possible compression bomb: {} bytes unpack from {} bytes",
+            entry.size_uncompressed, entry.size_compressed
+        ),
+        severity: RiskLevel::High,
+    };
+    let mut marked = false;
+    for entry in entries.iter_mut() {
+        if entry_looks_like_bomb(entry, compressed) {
+            let risk = indicator(entry);
+            entry.risk_indicators.push(risk);
+            marked = true;
+        }
+    }
+    if !marked {
+        if let Some(entry) = entries.iter_mut().max_by_key(|e| e.size_uncompressed) {
+            let risk = indicator(entry);
+            entry.risk_indicators.push(risk);
+        }
+    }
+}
+
 /// Bomb rules compare compressed and uncompressed sizes, so they apply only
 /// to compressed formats; a plain tar of any size is not a bomb.
 fn check_zip_bomb(
@@ -1690,13 +1784,7 @@ fn check_zip_bomb(
 
     // Check for suspicious file sizes
     for entry in entries {
-        let extreme_ratio = compressed
-            && entry.size_compressed > 0
-            && entry.size_uncompressed / entry.size_compressed >= 1000
-            && entry.size_uncompressed >= BOMB_MIN_BYTES;
-        if (compressed && entry.size_compressed < 1000 && entry.size_uncompressed > 1_000_000_000)
-            || extreme_ratio
-        {
+        if entry_looks_like_bomb(entry, compressed) {
             indicators.is_potential_bomb = true;
             if indicators.recursive_entries.len() < MAX_SECURITY_ROWS {
                 indicators.recursive_entries.push(entry.path.clone());

@@ -29,7 +29,7 @@ use crate::{
 };
 
 use super::{
-    output::{input_schema_with_budget, parse_request, respond, tool_error},
+    output::{input_schema_with_budget, parse_request, tool_error},
     paths::Expect,
     FileScannerMcp,
 };
@@ -792,6 +792,12 @@ struct ListingGaps {
     capped: bool,
     /// Some names were cut before the risk checks; counts and sizes are exact.
     unchecked: bool,
+    /// Some entries are password-protected: their content was not inspected.
+    encrypted: bool,
+    /// Every entry is password-protected, so nothing was rated.
+    all_encrypted: bool,
+    /// Nested archives were counted but not opened.
+    nested: bool,
 }
 
 impl ListingGaps {
@@ -806,6 +812,11 @@ impl ListingGaps {
                 gaps.capped = true;
             } else if note.starts_with(crate::archive_analysis::NAMES_UNCHECKED) {
                 gaps.unchecked = true;
+            } else if note.contains(crate::archive_analysis::ENCRYPTED_NOTE) {
+                gaps.encrypted = true;
+                gaps.all_encrypted = note.contains(crate::archive_analysis::ALL_ENCRYPTED);
+            } else if note.starts_with(crate::archive_analysis::NESTED_NOT_OPENED) {
+                gaps.nested = true;
             }
         }
         gaps
@@ -829,12 +840,22 @@ impl ListingGaps {
         }
     }
 
-    /// A risk label, "unknown" instead of "low" when part of the archive was not read.
+    /// A risk label, "unknown" instead of "low" when part of the archive was
+    /// not read: entries that could not be listed, names that were cut, nested
+    /// archives that were not opened, or entries that are all encrypted. Some
+    /// encrypted entries make it at least "medium".
     fn risk(self, risk: &str) -> String {
-        if (self.counts_unknown || self.capped || self.unchecked)
-            && risk.eq_ignore_ascii_case("low")
+        let low = risk.eq_ignore_ascii_case("low");
+        if low
+            && (self.counts_unknown
+                || self.capped
+                || self.unchecked
+                || self.nested
+                || self.all_encrypted)
         {
             "unknown".to_string()
+        } else if low && self.encrypted {
+            "medium".to_string()
         } else {
             risk.to_lowercase()
         }
@@ -846,7 +867,7 @@ fn archive_overview(path: &Path, kind: &FileKind) -> Value {
     let mut next_steps = vec![json!({
         "tool": "inspect_archive",
         "arguments": {"file_path": file_path},
-        "why": "page through every entry, filter by name or risk",
+        "gives": "page through every entry, filter by name or risk",
     })];
     if matches!(kind.kind.as_str(), "jar" | "apk") {
         next_steps.push(json!({
@@ -913,8 +934,8 @@ Returns a summary (format, entry count, sizes, risk level and flags, notes about
 could not be read) and one page of entries (path, kind, sizes, mode, link target, risk \
 indicators). Page with `offset` and `limit`; narrow with `filter` (case-insensitive text in the \
 path) or `risky_only` (entries with a medium or higher risk indicator: path traversal, links \
-leaving the extraction root, device nodes, setuid bits, executables, double extensions). \
-Encrypted or compressed RAR/7z headers cannot be listed and are reported in `notes`; .tar.bz2 \
+leaving the extraction root, device nodes, setuid bits, executables, double extensions, possible compression bombs). \
+Password-protected entries and nested archives are not opened: the notes say so and the risk is never low for them. When counts could not be measured, `entries`, `uncompressed_bytes` and `compression_ratio` are null. Encrypted or compressed RAR/7z headers cannot be listed and are reported in `notes`; .tar.bz2 \
 and .tar.xz are recognized but not listed. The complete listing is cached by the file's SHA-256, \
 so paging and filtering do not parse the archive again. Call analyze_file first for an overview. Times are UTC and end in Z for tar, 7z and RAR 5 \
 archives; ZIP and RAR 4 store DOS times with no zone, shown without a Z (local time of the \
@@ -940,7 +961,7 @@ pub struct InspectArchiveRequest {
 }
 
 /// Section-cache key for the complete listing; the file's SHA-256 is the other half.
-const ARCHIVE_CACHE_KEY: &str = "archive:listing:v4";
+const ARCHIVE_CACHE_KEY: &str = "archive:listing:v5";
 
 #[tool_router(router = formats_router, vis = "pub(crate)")]
 impl FileScannerMcp {
@@ -1026,10 +1047,48 @@ impl FileScannerMcp {
             })
             .await;
         match built {
-            Ok(Ok(value)) => Ok(respond(value, budget)),
+            Ok(Ok(value)) => Ok(respond_with_summary_nulls(value, budget)),
             Ok(Err(message)) | Err(message) => Ok(tool_error(message)),
         }
     }
+}
+
+/// Summary members that are null when a count could not be measured. The
+/// shared renderer drops null members, so they are put back after it ran and
+/// every summary has the same keys.
+const SUMMARY_COUNT_KEYS: [&str; 3] = ["entries", "uncompressed_bytes", "compression_ratio"];
+
+/// The standard response for an `inspect_archive` answer, keeping the unmeasured counts
+/// of the summary as explicit nulls.
+fn respond_with_summary_nulls(value: Value, budget: usize) -> CallToolResult {
+    super::output::respond_text(text_with_summary_nulls(value, budget))
+}
+
+fn text_with_summary_nulls(value: Value, budget: usize) -> String {
+    // The nulls put back cost a few bytes, which the render leaves room for
+    // unless the summary already has all of them.
+    let complete = value.get("summary").is_some_and(|s| {
+        SUMMARY_COUNT_KEYS
+            .iter()
+            .all(|k| s.get(*k).is_some_and(|v| !v.is_null()))
+    });
+    let text = super::output::render(
+        value,
+        if complete {
+            budget
+        } else {
+            budget.saturating_sub(80)
+        },
+    );
+    let Ok(mut parsed) = serde_json::from_str::<Value>(&text) else {
+        return text;
+    };
+    if let Some(summary) = parsed.get_mut("summary").and_then(Value::as_object_mut) {
+        for key in SUMMARY_COUNT_KEYS {
+            summary.entry(key).or_insert(Value::Null);
+        }
+    }
+    parsed.to_string()
 }
 
 /// The value kept in the section cache: the analysis with its entries replaced
@@ -1224,20 +1283,7 @@ fn build_listing(
         summary["comment"] = comment.into();
     }
 
-    let rest_size = serde_json::to_vec(&summary).map_or(0, |b| b.len());
-    super::output::fit_rows(
-        &mut entries,
-        "items",
-        budget.saturating_sub(rest_size + 1000),
-        offset,
-        total_selected,
-    );
-    let mut next_steps = Vec::new();
-    if let Some(next) = entries["next_offset"].as_u64() {
-        next_steps.push(format!(
-            "More entries: call inspect_archive again with offset={next}."
-        ));
-    }
+    let mut next_steps: Vec<String> = Vec::new();
     if needle.is_none()
         && !risky_only
         && security["path_traversal_risks"]
@@ -1249,9 +1295,44 @@ fn build_listing(
                 .to_string(),
         );
     }
+    if gaps.nested {
+        next_steps.push(
+            "Nested archives were not opened: extract each one and call inspect_archive on it."
+                .to_string(),
+        );
+    }
+    if gaps.encrypted {
+        next_steps.push(
+            "Password-protected entries were not read: get the password and extract them to \
+             inspect their content."
+                .to_string(),
+        );
+    }
     if matches!(detected["label"].as_str(), Some(l) if l.starts_with("Java")) {
         next_steps
             .push("Java archive: analyze_java_file inspects classes and the manifest.".to_string());
+    }
+
+    // The envelope around the rows: summary, echoed file_path and filter, and the
+    // next steps (plus the "More entries" step added below), all measured.
+    let json_len = |v: &Value| serde_json::to_vec(v).map_or(0, |b| b.len());
+    let envelope = json_len(&summary)
+        + json_len(&json!(request.file_path))
+        + json_len(&json!(request.filter))
+        + json_len(&json!(next_steps))
+        + 96;
+    super::output::fit_rows(
+        &mut entries,
+        "items",
+        budget.saturating_sub(envelope + 1000),
+        offset,
+        total_selected,
+    );
+    if let Some(next) = entries["next_offset"].as_u64() {
+        next_steps.insert(
+            0,
+            format!("More entries: call inspect_archive again with offset={next}."),
+        );
     }
 
     let mut out = json!({
@@ -1946,5 +2027,179 @@ mod tests {
         // Zeros compress so well that the bomb rule may rate it; never "low".
         assert_ne!(archive["risk"], "low", "{archive}");
         assert!(archive["notes"].to_string().contains("incomplete"));
+    }
+
+    /// The answer of `inspect_archive` for a file, as the tool builds it.
+    fn listing_of(dir: &Path, name: &str, bytes: &[u8], risky_only: bool) -> Value {
+        let path = write(dir, name, bytes);
+        let kind = detect_file_kind(&path).unwrap();
+        let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+        let stored = stored_listing(analysis, &kind).unwrap();
+        let request = InspectArchiveRequest {
+            file_path: "x".into(),
+            filter: None,
+            risky_only: Some(risky_only),
+            offset: None,
+            limit: None,
+        };
+        let page = build_listing(
+            &stored["listing"],
+            &stored["detected"],
+            &request,
+            "sha",
+            "miss",
+            80_000,
+        );
+        serde_json::from_str(&super::super::output::render(page, 80_000)).unwrap()
+    }
+
+    /// Set the "encrypted" bit of every local and central header of a zip.
+    fn mark_encrypted(bytes: &mut [u8]) {
+        for at in 0..bytes.len().saturating_sub(10) {
+            if &bytes[at..at + 4] == b"PK\x03\x04" {
+                bytes[at + 6] |= 1;
+            } else if &bytes[at..at + 4] == b"PK\x01\x02" {
+                bytes[at + 8] |= 1;
+            }
+        }
+    }
+
+    #[test]
+    fn an_encrypted_zip_is_noted_and_not_rated_low() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = zip_with(&["a.txt", "b.txt"]);
+        mark_encrypted(&mut bytes);
+        let page = listing_of(dir.path(), "enc.zip", &bytes, false);
+        let summary = &page["summary"];
+        assert_eq!(summary["encrypted"], true, "{summary}");
+        // Every entry is encrypted, so nothing was rated.
+        assert_eq!(summary["risk"], "unknown", "{summary}");
+        let notes = summary["notes"].to_string();
+        assert!(
+            notes.contains("2 entries are password-protected; their content was not inspected"),
+            "{notes}"
+        );
+        // Only some entries encrypted: at least medium.
+        let mut mixed = zip_with(&["a.txt", "b.txt"]);
+        let second = mixed.windows(4).rposition(|w| w == b"PK\x03\x04").unwrap();
+        mixed[second + 6] |= 1;
+        let central = mixed.windows(4).rposition(|w| w == b"PK\x01\x02").unwrap();
+        mixed[central + 8] |= 1;
+        let page = listing_of(dir.path(), "mixed.zip", &mixed, false);
+        assert_eq!(page["summary"]["risk"], "medium", "{}", page["summary"]);
+        assert!(page["summary"]["notes"]
+            .to_string()
+            .contains("1 entry is password-protected"));
+        // An ordinary zip stays low and has no note.
+        let page = listing_of(dir.path(), "ok.zip", &zip_with(&["a.txt"]), false);
+        assert_eq!(page["summary"]["risk"], "low");
+        assert_eq!(page["summary"]["notes"], json!([]));
+    }
+
+    #[test]
+    fn nested_archives_are_named_in_a_note_and_a_next_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = listing_of(
+            dir.path(),
+            "nested.zip",
+            &zip_with(&["docs/a.txt", "inner/one.zip", "two.tar.gz"]),
+            false,
+        );
+        let summary = &page["summary"];
+        assert_eq!(summary["risk"], "unknown", "{summary}");
+        let notes = summary["notes"].to_string();
+        assert!(notes.contains("counted but not opened"), "{notes}");
+        assert!(notes.contains("inner/one.zip") && notes.contains("two.tar.gz"));
+        assert!(page["next_steps"].to_string().contains("extract each one"));
+    }
+
+    #[test]
+    fn a_possible_bomb_marks_its_entry_and_shows_under_risky_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("zeros.bin", options).unwrap();
+        let chunk = vec![0u8; 1 << 20];
+        for _ in 0..64 {
+            zip.write_all(&chunk).unwrap();
+        }
+        zip.start_file("small.txt", options).unwrap();
+        zip.write_all(b"hi").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let page = listing_of(dir.path(), "bomb.zip", &bytes, true);
+        assert_eq!(page["summary"]["possible_bomb"], true, "{page}");
+        let items = page["entries"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{page}");
+        assert_eq!(items[0]["path"], "zeros.bin");
+        assert!(items[0]["risks"].to_string().contains("CompressionBomb"));
+    }
+
+    #[test]
+    fn unmeasured_counts_are_explicit_nulls_in_the_tool_answer() {
+        let value = json!({
+            "summary": {"format": "x", "risk": "unknown"},
+            "entries": {"items": []},
+        });
+        let text = text_with_summary_nulls(value, 80_000);
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        for key in SUMMARY_COUNT_KEYS {
+            assert_eq!(parsed["summary"][key], Value::Null, "{text}");
+            assert!(parsed["summary"].get(key).is_some(), "{key}: {text}");
+        }
+    }
+
+    #[test]
+    fn a_size_cut_page_sends_every_row_it_reports_with_a_long_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut names: Vec<String> = (0..120).map(|i| format!("dir/file{i:03}.txt")).collect();
+        names.push("../evil.txt".into());
+        names.push("inner/one.zip".into());
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut bytes = zip_with(&refs);
+        mark_encrypted(&mut bytes);
+        let path = write(dir.path(), "long.zip", &bytes);
+        let kind = detect_file_kind(&path).unwrap();
+        let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
+        let stored = stored_listing(analysis, &kind).unwrap();
+        let long_path = format!("/{}", "d".repeat(900));
+        let mut offset = 0usize;
+        let mut seen = 0usize;
+        let mut total;
+        loop {
+            let request = InspectArchiveRequest {
+                file_path: long_path.clone(),
+                filter: None,
+                risky_only: None,
+                offset: Some(offset),
+                limit: Some(1000),
+            };
+            let budget = 4000;
+            let page = build_listing(
+                &stored["listing"],
+                &stored["detected"],
+                &request,
+                "sha",
+                "miss",
+                budget,
+            );
+            let text = text_with_summary_nulls(page, budget);
+            let parsed: Value = serde_json::from_str(&text).unwrap();
+            assert!(parsed.get("truncated").is_none(), "{text}");
+            let entries = &parsed["entries"];
+            let items = entries["items"].as_array().unwrap().len();
+            assert_eq!(entries["returned"], items, "{text}");
+            assert!(items > 0, "{text}");
+            total = entries["total"].as_u64().unwrap() as usize;
+            seen += items;
+            match entries["next_offset"].as_u64() {
+                Some(next) => {
+                    assert_eq!(next as usize, offset + items, "{text}");
+                    offset = next as usize;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(seen, total);
     }
 }
