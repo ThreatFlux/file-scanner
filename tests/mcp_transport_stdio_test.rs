@@ -74,11 +74,13 @@ type Client = RunningService<RoleClient, TestClient>;
 
 /// The exact inventory lives in this one list (checked by the annotations test);
 /// every other test only checks that these names are present.
-const TOOLS: [&str; 14] = [
+const TOOLS: [&str; 16] = [
+    "analyze_document",
     "analyze_file",
     "analyze_java_file",
     "analyze_npm_package",
     "analyze_python_package",
+    "analyze_script",
     "cache_clear",
     "cache_status",
     "compare_files",
