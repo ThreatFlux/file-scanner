@@ -1,28 +1,28 @@
 # Reviewed stable YARA-X runtime/crypto patch
 
-Repository-built binaries and containers select the official YARA-X1.23.0
-source with Wasmtime50.0.1 and stable RSA0.10.0. The upstream manifest still
-requires Wasmtime48.0.8 and a prerelease RSA requirement. This explicit patch
+Repository-built binaries and containers select the official YARA-X 1.23.0
+source with Wasmtime 50.0.1 and stable RSA 0.10.0. The upstream manifest still
+requires Wasmtime 48.0.8 and a prerelease RSA requirement. This explicit patch
 changes the actual parent requirements instead of forcing lockfile transitives.
 
 - Official archive SHA256: `e8a5ff1e1bb43734cc68f3ddc94646c9740c8c559d38fae559f0c79076f801db`.
-- Verified against [the official sparse index](https://index.crates.io/ya/ra/yara-x) on2026-11-12.
+- Verified against [the official sparse index](https://index.crates.io/ya/ra/yara-x) on 2026-11-12.
 - Upstream commit: [`afe4585b12f56c698794dc80b3d28ddb87b56c0a`](https://github.com/VirusTotal/yara-x/tree/afe4585b12f56c698794dc80b3d28ddb87b56c0a/lib).
-- BSD-3-Clause license and upstream source/build assets are preserved.
-- [Exact local diff](yara-x-1.23.0.patch): stable RSA0.10 with its newly required
-  `pkcs1v15` feature, Wasmtime50.0.1, current `rsa::PublicKey` aliases, and the
+- The BSD-3-Clause license is retained from that exact upstream commit (the crate archive omits it); SHA256 df05444c9178e662fa28810d94a1fa6ec32d7be798241c98094213317265880. Upstream source/build assets are preserved.
+- [Exact local diff](yara-x-1.23.0.patch): stable RSA 0.10 with its newly required
+  `pkcs1v15` feature, Wasmtime 50.0.1, current `rsa::PublicKey` aliases, and the
   independent OpenSSL signature regression retained from the previous patch.
   Original workspace/lock/VCS metadata and benchmark declarations are omitted.
 
-YARA-X1.23's global-linker implementation compiles against Wasmtime50 without a
-runtime source bridge. RSA0.10 shares the current digest/PKCS8 generation, so
-the old RSA0.9-specific digest aliases are no longer needed. Only public-key
+YARA-X 1.23's global-linker implementation compiles against Wasmtime 50 without a
+runtime source bridge. RSA 0.10 shares the current digest/PKCS8 generation, so
+the old RSA 0.9-specific digest aliases are no longer needed. Only public-key
 signature verification is present. The obsolete RUSTSEC-2023-0071 waiver is
-removed; the source guard now requires stable0.10, one YARA caller and no waiver.
+removed; the source guard now requires stable 0.10, one YARA caller and no waiver.
 
-The historical1.22 patch remains at [yara-x-1.22.0.patch](yara-x-1.22.0.patch),
+The historical 1.22 patch remains at [yara-x-1.22.0.patch](yara-x-1.22.0.patch),
 and its complete source is preserved in Git history. The fixed public-key,
-prefixed/unprefixed signatures and negative controls move unchanged to1.23.
+prefixed/unprefixed signatures and negative controls move unchanged to 1.23.
 The isolated `ci/yara-crypto-compat` harness imports the actual reviewed ASN.1
 and crypto modules and runs these independent vectors on hosted runners.
 
