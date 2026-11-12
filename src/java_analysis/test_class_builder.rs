@@ -160,6 +160,75 @@ impl ClassBuilder {
         self
     }
 
+    /// Adds one `InnerClasses` attribute listing `names` (slash-separated) as inner classes.
+    pub fn inner_classes(mut self, names: &[&str]) -> Self {
+        let attr = self.utf8("InnerClasses");
+        let indexes: Vec<u16> = names.iter().map(|n| self.class(n)).collect();
+        self.attributes.extend(attr.to_be_bytes());
+        self.attributes
+            .extend((2 + 8 * indexes.len() as u32).to_be_bytes());
+        self.attributes.extend((indexes.len() as u16).to_be_bytes());
+        for i in indexes {
+            self.attributes.extend(i.to_be_bytes());
+            self.attributes.extend([0u8; 6]);
+        }
+        self.attribute_count += 1;
+        self
+    }
+
+    /// Adds `n` separate `Class` constants (not shared) that all name `name`.
+    pub fn repeated_classes(mut self, name: &str, n: usize) -> Self {
+        let u = self.utf8(name);
+        for _ in 0..n {
+            if self.slots >= 65_000 {
+                break;
+            }
+            self.slots += 1;
+            self.pool.extend([7, (u >> 8) as u8, u as u8]);
+        }
+        self
+    }
+
+    /// Adds up to `n` `Methodref`s, each with its own `Class` constant naming `owner`.
+    pub fn repeated_method_refs(
+        mut self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        n: usize,
+    ) -> Self {
+        let o = self.utf8(owner);
+        let (nn, d) = (self.utf8(name), self.utf8(descriptor));
+        let nat = self.add(vec![12, (nn >> 8) as u8, nn as u8, (d >> 8) as u8, d as u8]);
+        for _ in 0..n {
+            if self.slots >= 64_990 {
+                break;
+            }
+            self.slots += 1;
+            let class = self.slots;
+            self.pool.extend([7, (o >> 8) as u8, o as u8]);
+            self.slots += 1;
+            self.pool.extend([
+                10,
+                (class >> 8) as u8,
+                class as u8,
+                (nat >> 8) as u8,
+                nat as u8,
+            ]);
+        }
+        self
+    }
+
+    /// Adds a class attribute named `name` with `len` zero bytes.
+    pub fn padding_attribute(mut self, name: &str, len: usize) -> Self {
+        let attr = self.utf8(name);
+        self.attributes.extend(attr.to_be_bytes());
+        self.attributes.extend((len as u32).to_be_bytes());
+        self.attributes.resize(self.attributes.len() + len, 0);
+        self.attribute_count += 1;
+        self
+    }
+
     pub fn build(&self) -> Vec<u8> {
         let mut out = vec![0xCA, 0xFE, 0xBA, 0xBE];
         out.extend(self.minor.to_be_bytes());
@@ -269,6 +338,8 @@ pub fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
 /// written as `android:` attributes except `package`.
 pub enum Av {
     Str(&'static str),
+    /// An owned string value (for long or generated text).
+    Text(String),
     Int(u32),
     Bool(bool),
 }
@@ -327,6 +398,13 @@ pub fn axml(events: &[AxmlEvent]) -> Vec<u8> {
                     p.extend(name_index.to_le_bytes());
                     match value {
                         Av::Str(s) => {
+                            let v = intern(s, &mut strings);
+                            p.extend(v.to_le_bytes());
+                            p.extend(8u16.to_le_bytes());
+                            p.extend([0, 0x03]);
+                            p.extend(v.to_le_bytes());
+                        }
+                        Av::Text(s) => {
                             let v = intern(s, &mut strings);
                             p.extend(v.to_le_bytes());
                             p.extend(8u16.to_le_bytes());

@@ -88,7 +88,7 @@ use disassembly::disassemble_binary;
 use entropy_analysis::analyze_entropy;
 use function_analysis::analyze_symbols;
 use hexdump::{extract_footer_hex, extract_header_hex, generate_hex_dump, HexDumpOptions};
-use java_analysis::{analyze_class_file, analyze_java_archive};
+use java_analysis::{analyze_java_path, LEGACY_LIST_CAP};
 use mcp_server::{
     analyze_file_llm, yara_scan_files, LlmFileAnalysisRequest, YaraIndicators, YaraScanRequest,
 };
@@ -695,24 +695,8 @@ async fn handle_python_analysis(package_path: PathBuf) -> Result<()> {
 }
 
 async fn handle_java_analysis(file_path: PathBuf) -> Result<()> {
-    // Check if it's a JAR/WAR/EAR or a class file
-    let extension = file_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_lowercase);
-
-    let result = match extension.as_deref() {
-        Some("jar" | "war" | "ear" | "apk" | "aar") => analyze_java_archive(&file_path)?,
-        Some("class") => analyze_class_file(&file_path)?,
-        _ => {
-            // Try to detect based on content
-            if let Ok(result) = analyze_java_archive(&file_path) {
-                result
-            } else {
-                analyze_class_file(&file_path)?
-            }
-        }
-    };
+    // The kind is decided by content (class file or ZIP archive), never by extension.
+    let result = analyze_java_path(&file_path)?.bounded(LEGACY_LIST_CAP);
 
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())

@@ -48,7 +48,9 @@ mod java_class_builder;
 
 use anyhow::Result;
 use file_scanner::java_analysis::*;
-use java_class_builder::{axml, minimal_class, runtime_exec_class, zip_bytes, Av, ClassBuilder};
+use java_class_builder::{
+    axml, minimal_class, runtime_exec_class, zip_bytes, Av, AxmlEvent, ClassBuilder,
+};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -497,12 +499,17 @@ fn test_dangerous_permissions_in_apk() -> Result<()> {
 
     let result = analyze_java_archive(&apk_path)?;
 
-    // The basic implementation will not have permissions extracted from binary XML
-    // but we can check the security analysis structure
+    // The manifest is a bare header: it cannot be understood, so the APK is not rated
+    // Low on "nothing found".
     assert_eq!(
         result.security_analysis.threat_level,
-        SecurityThreatLevel::Low
+        SecurityThreatLevel::Medium
     );
+    assert!(result
+        .security_analysis
+        .threat_basis
+        .iter()
+        .any(|b| b.contains("AndroidManifest.xml was not read or not understood")));
     assert_eq!(
         result.security_analysis.code_signing_status,
         CodeSigningStatus::Unsigned
@@ -1051,5 +1058,665 @@ fn cf07_content_sniffing_ignores_extensions() -> Result<()> {
     let fat = dir.path().join("fat");
     std::fs::write(&fat, [0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 2, 0, 0, 0, 0])?;
     assert_eq!(sniff_java_input(&fat)?, JavaInputKind::Other);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Round 3: memory and work stay bounded for tiny hostile inputs
+// ---------------------------------------------------------------------------
+
+/// Largest serialized result a hostile file may produce in these tests.
+const RESULT_BOUND: usize = 20 * 1024 * 1024;
+
+fn serialized_size(path: &Path) -> Result<(usize, JavaAnalysisResult)> {
+    let result = analyze_java_path(path)?;
+    Ok((serde_json::to_vec(&result)?.len(), result))
+}
+
+/// Generator h2 "methods": 65,535 methods and fields whose name and descriptor are one
+/// 65,535-byte constant, in a class of a few hundred KB.
+#[test]
+fn hostile_member_lists_keep_a_bounded_result() -> Result<()> {
+    let dir = TempDir::new()?;
+    let big = "m".repeat(65_535);
+    let mut builder = ClassBuilder::new("p/M");
+    for _ in 0..65_535 {
+        builder = builder.method(&big, &big, 1);
+    }
+    let class = builder.build();
+    assert!(class.len() < 1_000_000, "{}", class.len());
+    let path = write_zip(dir.path(), "methods.jar", &[("p/M.class", &class)]);
+    let (size, result) = serialized_size(&path)?;
+    assert!(size < RESULT_BOUND, "{size} bytes");
+    let c = &result.classes[0];
+    assert_eq!(c.method_count(), 65_535, "the real count is kept");
+    assert!(c.methods.len() < 5_000, "{}", c.methods.len());
+    assert!(c.methods.iter().all(|m| m.name.len() <= 256));
+    assert!(c
+        .parse_warning
+        .as_deref()
+        .is_some_and(|w| w.contains("member lists cut")));
+    assert!(result.warnings.iter().any(|w| w.contains("partly read")));
+
+    // Fields are cut the same way.
+    let mut builder = ClassBuilder::new("p/F");
+    for _ in 0..65_535 {
+        builder = builder.field(&big, &big, 1);
+    }
+    let class = builder.build();
+    let path = write_zip(dir.path(), "fields.jar", &[("p/F.class", &class)]);
+    let (size, result) = serialized_size(&path)?;
+    assert!(size < RESULT_BOUND, "{size} bytes");
+    assert_eq!(result.classes[0].field_count(), 65_535);
+    Ok(())
+}
+
+/// Generator h2 "ifaces": thousands of interface entries naming one 64 KB class.
+#[test]
+fn hostile_interface_lists_keep_a_bounded_result() -> Result<()> {
+    let dir = TempDir::new()?;
+    let big = "i".repeat(65_535);
+    let mut builder = ClassBuilder::new("p/I");
+    for _ in 0..65_535 {
+        builder = builder.interface(&big);
+    }
+    let class = builder.build();
+    let path = write_zip(dir.path(), "ifaces.jar", &[("p/I.class", &class)]);
+    let (size, result) = serialized_size(&path)?;
+    assert!(size < RESULT_BOUND, "{size} bytes");
+    let c = &result.classes[0];
+    assert_eq!(c.interface_count(), 65_535);
+    assert!(c.interfaces.len() < 4_000, "{}", c.interfaces.len());
+    assert!(c.interfaces.iter().all(|i| i.len() <= 512));
+    Ok(())
+}
+
+/// Generator h3 "throws": one Exceptions attribute with a huge entry count.
+#[test]
+fn hostile_throws_lists_keep_a_bounded_result() -> Result<()> {
+    let dir = TempDir::new()?;
+    let big = "t".repeat(65_535);
+    let throws: Vec<&str> = (0..30_000).map(|_| big.as_str()).collect();
+    let class = ClassBuilder::new("p/T")
+        .method_with_code("m", "()V", 1, 1, &throws)
+        .build();
+    let path = write_zip(dir.path(), "throws.jar", &[("p/T.class", &class)]);
+    let (size, result) = serialized_size(&path)?;
+    assert!(size < RESULT_BOUND, "{size} bytes");
+    let m = &result.classes[0].methods[0];
+    assert!(m.exception_table.len() <= 64, "{}", m.exception_table.len());
+    Ok(())
+}
+
+/// Generators h3 "perms" and "attrs": thousands of elements sharing 32 K-unit strings.
+#[test]
+fn hostile_android_manifests_keep_a_bounded_result() -> Result<()> {
+    let dir = TempDir::new()?;
+    let big_permission = format!("android.permission.{}", "P".repeat(32_000));
+    let mut events: Vec<AxmlEvent> = vec![Some(("manifest", vec![("package", Av::Str("com.x"))]))];
+    for _ in 0..2_000 {
+        events.push(Some((
+            "uses-permission",
+            vec![("name", Av::Text(big_permission.clone()))],
+        )));
+        events.push(None);
+    }
+    events.push(None);
+    let manifest = axml(&events);
+    let path = write_zip(
+        dir.path(),
+        "perms.apk",
+        &[
+            ("AndroidManifest.xml", &manifest),
+            ("classes.dex", b"dex\n035\0"),
+        ],
+    );
+    let (size, result) = serialized_size(&path)?;
+    assert!(size < RESULT_BOUND, "{size} bytes");
+    let android = result.android_manifest.as_ref().unwrap();
+    assert!(android.permissions.len() <= 2_000);
+    assert!(android.permissions.iter().all(|p| p.len() <= 512));
+    assert!(!android.notes.is_empty(), "the cut is noted");
+
+    // Distinct long permissions: the element budget stops the parse and says so.
+    let mut events: Vec<AxmlEvent> = vec![Some(("manifest", vec![("package", Av::Str("com.x"))]))];
+    for i in 0..100 {
+        events.push(Some((
+            "meta-data",
+            vec![
+                ("name", Av::Text(format!("{i}{}", "Q".repeat(32_000)))),
+                ("scheme", Av::Text("S".repeat(32_000))),
+                ("mimeType", Av::Text("M".repeat(32_000))),
+                ("label", Av::Text("L".repeat(32_000))),
+            ],
+        )));
+        events.push(None);
+    }
+    events.push(None);
+    let manifest = axml(&events);
+    let path = write_zip(
+        dir.path(),
+        "attrs.apk",
+        &[
+            ("AndroidManifest.xml", &manifest),
+            ("classes.dex", b"dex\n035\0"),
+        ],
+    );
+    let (size, result) = serialized_size(&path)?;
+    assert!(size < RESULT_BOUND, "{size} bytes");
+    assert!(result.android_manifest.is_some());
+    Ok(())
+}
+
+/// The archive-wide budget: many hostile classes in one JAR still stay bounded and say so.
+#[test]
+fn many_hostile_classes_hit_the_archive_budget() -> Result<()> {
+    let dir = TempDir::new()?;
+    let big = "m".repeat(65_535);
+    let mut owned: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..200 {
+        let mut b = ClassBuilder::new(&format!("p/H{i}"));
+        for k in 0..1_500 {
+            // Distinct names so nothing deduplicates; the 64 KB constant is shared.
+            b = b.method(&format!("{}{k}", &big[..250]), &big, 1);
+        }
+        owned.push((format!("p/H{i}.class"), b.build()));
+    }
+    let entries: Vec<(&str, &[u8])> = owned
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let path = write_zip(dir.path(), "many.jar", &entries);
+    let (size, result) = serialized_size(&path)?;
+    assert!(size < 100 * 1024 * 1024, "{size} bytes");
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.contains("archive-wide") || w.contains("passed")),
+        "{:?}",
+        result.warnings
+    );
+    assert!(result.classes.iter().all(|c| c.method_count() == 1_500));
+    Ok(())
+}
+
+/// A class file followed by a JAR is opened as the JAR; trailing bytes are never silent.
+#[test]
+fn class_followed_by_jar_is_not_reported_as_a_clean_class() -> Result<()> {
+    let dir = TempDir::new()?;
+    let jar = zip_bytes(&[("com/acme/Evil.class", &runtime_exec_class("com/acme/Evil"))]);
+    let mut combined = minimal_class("p/Benign");
+    combined.extend(&jar);
+    let path = dir.path().join("combined.bin");
+    std::fs::write(&path, &combined)?;
+    let result = analyze_java_path(&path)?;
+    assert_eq!(result.archive_type, JavaArchiveType::Jar);
+    assert!(result.classes.iter().any(|c| c.name == "com.acme.Evil"));
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| w.contains("bytes into the file")));
+
+    // Plain trailing bytes after a class are warned about.
+    let mut padded = minimal_class("p/Benign");
+    padded.extend([0u8; 40]);
+    let path = dir.path().join("padded.class");
+    std::fs::write(&path, &padded)?;
+    let result = analyze_java_path(&path)?;
+    assert_eq!(result.archive_type, JavaArchiveType::ClassFile);
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| w.contains("40 bytes follow the end of the class file")));
+    Ok(())
+}
+
+/// A prefixed JAR inside a WAR is opened and flagged; a damaged ZIP gets a next step.
+#[test]
+fn nested_prefixed_jar_and_damaged_zip() -> Result<()> {
+    let dir = TempDir::new()?;
+    let jar = zip_bytes(&[("com/acme/Evil.class", &runtime_exec_class("com/acme/Evil"))]);
+    let mut prefixed = b"X".to_vec();
+    prefixed.extend(&jar);
+    let war = zip_bytes(&[
+        ("WEB-INF/web.xml", b"<web-app/>"),
+        ("WEB-INF/lib/evil.jar", &prefixed),
+    ]);
+    let path = dir.path().join("p.war");
+    std::fs::write(&path, &war)?;
+    let result = analyze_java_path(&path)?;
+    assert!(result.classes.iter().any(|c| c.name == "com.acme.Evil"));
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| w.contains("starts 1 bytes into the nested archive")));
+
+    let cut = dir.path().join("cut.jar");
+    std::fs::write(&cut, &jar[..jar.len() / 2])?;
+    let error = analyze_java_path(&cut).unwrap_err().to_string();
+    assert!(error.contains("damaged or cut short"), "{error}");
+    Ok(())
+}
+
+/// Nested-archive rows have a cap and a note, whatever the entry count.
+#[test]
+fn nested_archive_rows_are_capped_with_a_note() -> Result<()> {
+    let dir = TempDir::new()?;
+    let names: Vec<String> = (0..MAX_NESTED_ROWS + 200)
+        .map(|i| format!("lib/m{i}.jar"))
+        .collect();
+    let entries: Vec<(&str, &[u8])> = names.iter().map(|n| (n.as_str(), &b"x"[..])).collect();
+    let path = write_zip(dir.path(), "many.war", &entries);
+    let result = analyze_java_path(&path)?;
+    assert_eq!(result.nested_archives.len(), MAX_NESTED_ROWS);
+    assert_eq!(
+        result.nested_total,
+        MAX_NESTED_ROWS + 200,
+        "totals count every entry"
+    );
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| w.contains("nested-archive entries")));
+    Ok(())
+}
+
+/// Per-entry work must not grow with the length of a name: 40 classes of 65,535
+/// interfaces, fields and inner classes, all naming one long constant.
+#[test]
+fn hostile_member_lists_cost_little_cpu() -> Result<()> {
+    let dir = TempDir::new()?;
+    let big = "x".repeat(8_000);
+    let inner: Vec<&str> = (0..65_535).map(|_| big.as_str()).collect();
+    let mut b = ClassBuilder::new("p/C");
+    for _ in 0..65_535 {
+        b = b.interface(&big).field(&big, &big, 1);
+    }
+    let class = b.inner_classes(&inner).build();
+    let names: Vec<String> = (0..40).map(|i| format!("p/C{i}.class")).collect();
+    let entries: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|n| (n.as_str(), class.as_slice()))
+        .collect();
+    let path = write_zip(dir.path(), "cpu.jar", &entries);
+    let started = std::time::Instant::now();
+    let result = analyze_java_path(&path)?;
+    let took = started.elapsed();
+    assert!(took.as_secs() < 5, "took {took:?}");
+    assert_eq!(result.classes[0].interface_count(), 65_535);
+    assert!(result.classes[0].interfaces.len() < 4_000);
+    assert!(result.classes[0]
+        .parse_warning
+        .as_deref()
+        .is_some_and(|w| w.contains("member lists cut")));
+    Ok(())
+}
+
+/// Short names cost real memory too: 140 classes of 3,000 one-character methods must not
+/// build a result of hundreds of MB.
+#[test]
+fn short_member_names_are_charged_their_real_cost() -> Result<()> {
+    let dir = TempDir::new()?;
+    let mut owned: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..140 {
+        let mut b = ClassBuilder::new(&format!("p/S{i}"));
+        for k in 0..3_000 {
+            b = b.method(&format!("m{k}"), "()V", 1);
+        }
+        owned.push((format!("p/S{i}.class"), b.build()));
+    }
+    let entries: Vec<(&str, &[u8])> = owned
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect();
+    let path = write_zip(dir.path(), "short.jar", &entries);
+    let (size, result) = serialized_size(&path)?;
+    assert!(size < 40 * 1024 * 1024, "{size} bytes");
+    let kept: usize = result.classes.iter().map(|c| c.methods.len()).sum();
+    assert!(kept < 70_000, "{kept}");
+    assert!(result.classes.iter().all(|c| c.method_count() == 3_000));
+    assert!(result.warnings.iter().any(|w| w.contains("passed")));
+    Ok(())
+}
+
+/// A throws list cut at the per-method cap is worded as that, not as a byte-budget cut.
+#[test]
+fn throws_cut_is_described_correctly() -> Result<()> {
+    let dir = TempDir::new()?;
+    let names: Vec<String> = (0..200).map(|i| format!("p/E{i}")).collect();
+    let throws: Vec<&str> = names.iter().map(String::as_str).collect();
+    let class = ClassBuilder::new("p/T")
+        .method_with_code("m", "()V", 1, 1, &throws)
+        .build();
+    let path = write_zip(dir.path(), "t.jar", &[("p/T.class", &class)]);
+    let result = analyze_java_path(&path)?;
+    let warning = result.classes[0].parse_warning.as_deref().unwrap_or("");
+    assert!(
+        warning.contains("throws lists cut at 64 entries"),
+        "{warning}"
+    );
+    assert!(!warning.contains("393216"), "{warning}");
+    Ok(())
+}
+
+fn apk_with(dir: &Path, name: &str, events: &[AxmlEvent]) -> std::path::PathBuf {
+    let manifest = axml(events);
+    write_zip(
+        dir,
+        name,
+        &[
+            ("AndroidManifest.xml", &manifest),
+            ("classes.dex", b"dex\n035\0"),
+        ],
+    )
+}
+
+/// Filler cannot hide a sensitive permission: after 2,000 other permissions, and after the
+/// text budget is used up, READ_SMS and SEND_SMS are still reported and the level is not Low.
+#[test]
+fn sensitive_permissions_survive_the_manifest_caps() -> Result<()> {
+    let dir = TempDir::new()?;
+    let mut events: Vec<AxmlEvent> = vec![Some(("manifest", vec![("package", Av::Str("com.x"))]))];
+    for i in 0..2_100 {
+        events.push(Some((
+            "uses-permission",
+            vec![("name", Av::Text(format!("com.filler.P{i}")))],
+        )));
+        events.push(None);
+    }
+    for p in ["READ_SMS", "SEND_SMS"] {
+        events.push(Some((
+            "uses-permission",
+            vec![("name", Av::Text(format!("android.permission.{p}")))],
+        )));
+        events.push(None);
+    }
+    events.push(None);
+    let result = analyze_java_path(&apk_with(dir.path(), "perms.apk", &events))?;
+    let suspicious = &result.security_analysis.suspicious_permissions;
+    assert!(
+        suspicious.iter().any(|p| p.ends_with("READ_SMS")),
+        "{suspicious:?}"
+    );
+    assert!(suspicious.iter().any(|p| p.ends_with("SEND_SMS")));
+    assert!(result.security_analysis.threat_level >= SecurityThreatLevel::Medium);
+
+    // 60,000 filler elements use up the 4 MiB text budget before the permissions.
+    let mut events: Vec<AxmlEvent> = vec![Some(("manifest", vec![("package", Av::Str("com.x"))]))];
+    for i in 0..60_000 {
+        events.push(Some((
+            "meta-data",
+            vec![("name", Av::Text(format!("k{i}")))],
+        )));
+        events.push(None);
+    }
+    for p in ["READ_SMS", "SEND_SMS"] {
+        events.push(Some((
+            "uses-permission",
+            vec![("name", Av::Text(format!("android.permission.{p}")))],
+        )));
+        events.push(None);
+    }
+    events.push(None);
+    let result = analyze_java_path(&apk_with(dir.path(), "budget.apk", &events))?;
+    let android = result.android_manifest.as_ref().unwrap();
+    assert!(android.partial, "{:?}", android.notes);
+    let suspicious = &result.security_analysis.suspicious_permissions;
+    assert!(
+        suspicious.iter().any(|p| p.ends_with("READ_SMS")),
+        "{suspicious:?}"
+    );
+    assert!(result.security_analysis.threat_level >= SecurityThreatLevel::Medium);
+
+    // A partly read manifest is never rated "nothing found", whatever it holds.
+    let mut events: Vec<AxmlEvent> = vec![Some(("manifest", vec![("package", Av::Str("com.x"))]))];
+    for i in 0..60_000 {
+        events.push(Some((
+            "meta-data",
+            vec![("name", Av::Text(format!("k{i}")))],
+        )));
+        events.push(None);
+    }
+    events.push(None);
+    let result = analyze_java_path(&apk_with(dir.path(), "partial.apk", &events))?;
+    assert!(result.security_analysis.threat_level >= SecurityThreatLevel::Medium);
+    assert!(result
+        .security_analysis
+        .threat_basis
+        .iter()
+        .all(|b| !b.contains("no dangerous API references")));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Round 3 repair: constant work per pool entry, bounded API lists, permissions that
+// cannot be pushed out, and content that was not read is never rated Low.
+// ---------------------------------------------------------------------------
+
+/// A name of 65,535 `[` named by tens of thousands of constants, in 20 classes, must not
+/// cost a scan per constant (it cost 85 s of CPU in 9 KB of JAR before).
+#[test]
+fn long_array_names_cost_constant_work() -> Result<()> {
+    let dir = TempDir::new()?;
+    let brackets = "[".repeat(65_535);
+    let classes = ClassBuilder::new("p/B")
+        .repeated_classes(&brackets, 60_000)
+        .build();
+    let refs = ClassBuilder::new("p/R")
+        .repeated_method_refs(&brackets, "m", "()V", 30_000)
+        .build();
+    let names: Vec<String> = (0..20).map(|i| format!("p/B{i}.class")).collect();
+    let rnames: Vec<String> = (0..20).map(|i| format!("p/R{i}.class")).collect();
+    let mut entries: Vec<(&str, &[u8])> = Vec::new();
+    for n in &names {
+        entries.push((n.as_str(), classes.as_slice()));
+    }
+    for n in &rnames {
+        entries.push((n.as_str(), refs.as_slice()));
+    }
+    let path = write_zip(dir.path(), "brackets.jar", &entries);
+    let started = std::time::Instant::now();
+    let result = analyze_java_path(&path)?;
+    let took = started.elapsed();
+    assert!(took.as_secs() < 8, "took {took:?}");
+    assert_eq!(result.classes.len(), 40);
+    assert!(result
+        .classes
+        .iter()
+        .all(|c| c.referenced_classes.iter().all(|r| r == "java.lang.Object")));
+    Ok(())
+}
+
+/// InnerClasses entries that name the class itself add nothing and cost nothing.
+#[test]
+fn self_naming_inner_classes_cost_constant_work() -> Result<()> {
+    let dir = TempDir::new()?;
+    let me: Vec<&str> = (0..65_000).map(|_| "p/Me").collect();
+    let class = ClassBuilder::new("p/Me").inner_classes(&me).build();
+    let names: Vec<String> = (0..480).map(|i| format!("p/Me{i}.class")).collect();
+    let entries: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|n| (n.as_str(), class.as_slice()))
+        .collect();
+    let path = write_zip(dir.path(), "self.jar", &entries);
+    let started = std::time::Instant::now();
+    let result = analyze_java_path(&path)?;
+    assert!(started.elapsed().as_secs() < 8, "{:?}", started.elapsed());
+    assert!(result.classes.iter().all(|c| c.inner_classes.is_empty()));
+    Ok(())
+}
+
+/// Per-class dangerous-API lists are charged to a budget; later classes only feed the
+/// aggregated findings, which stay exact.
+#[test]
+fn dangerous_api_lists_are_budgeted_and_findings_stay_exact() -> Result<()> {
+    let dir = TempDir::new()?;
+    let mut b = ClassBuilder::new("p/S");
+    for i in 0..100 {
+        b = b.calls(
+            "sun/misc/Unsafe",
+            &format!("{i:03}{}", "n".repeat(500)),
+            "()V",
+        );
+    }
+    let class = b.build();
+    let names: Vec<String> = (0..1_200).map(|i| format!("p/S{i}.class")).collect();
+    let entries: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|n| (n.as_str(), class.as_slice()))
+        .collect();
+    let path = write_zip(dir.path(), "apis.jar", &entries);
+    let (size, result) = serialized_size(&path)?;
+    assert!(size < 40 * 1024 * 1024, "{size} bytes");
+    let kept: usize = result.classes.iter().map(|c| c.dangerous_apis.len()).sum();
+    assert!(kept < 40_000, "{kept} rows kept");
+    assert!(result.classes.iter().any(|c| c.dangerous_apis.is_empty()
+        && c.parse_warning
+            .as_deref()
+            .is_some_and(|w| w.contains("dangerous-API list dropped"))));
+    assert!(result.warnings.iter().any(|w| w.contains("dangerous-API")));
+    let findings = &result.security_analysis.api_findings;
+    assert_eq!(findings.len(), 100);
+    assert!(findings.iter().all(|f| f.class_count == 1_200));
+    assert!(findings.iter().all(|f| f.api.len() < 300));
+    Ok(())
+}
+
+fn permission_events(fillers: usize, fakes: usize, tail: &[&str]) -> Vec<AxmlEvent> {
+    let mut events: Vec<AxmlEvent> = vec![Some(("manifest", vec![("package", Av::Str("com.x"))]))];
+    let mut add = |name: String| {
+        events.push(Some(("uses-permission", vec![("name", Av::Text(name))])));
+        events.push(None);
+    };
+    for i in 0..fillers {
+        add(format!("com.filler.P{i}"));
+    }
+    for i in 0..fakes {
+        add(format!("com.f{i}.CAMERA"));
+    }
+    for p in tail {
+        add(format!("android.permission.{p}"));
+    }
+    events.push(None);
+    events
+}
+
+/// Fake sensitive-looking names use up the heuristic slots; the exact dangerous names are
+/// always kept, and a cut list is never reported as "nothing found".
+#[test]
+fn fake_sensitive_permissions_cannot_hide_real_ones() -> Result<()> {
+    let dir = TempDir::new()?;
+    let events = permission_events(
+        2_000,
+        500,
+        &["READ_SMS", "SEND_SMS", "BIND_ACCESSIBILITY_SERVICE"],
+    );
+    let result = analyze_java_path(&apk_with(dir.path(), "fake.apk", &events))?;
+    let suspicious = &result.security_analysis.suspicious_permissions;
+    for p in ["READ_SMS", "SEND_SMS", "BIND_ACCESSIBILITY_SERVICE"] {
+        assert!(
+            suspicious.iter().any(|s| s.ends_with(p)),
+            "{p}: {suspicious:?}"
+        );
+    }
+    assert!(result.security_analysis.threat_level >= SecurityThreatLevel::Medium);
+
+    // Past the heuristic slots the list is cut: that alone lifts the rating and says so.
+    let events = permission_events(2_000, 700, &[]);
+    let result = analyze_java_path(&apk_with(dir.path(), "cut.apk", &events))?;
+    let android = result.android_manifest.as_ref().unwrap();
+    assert!(android.permissions_dropped > 0);
+    assert!(result.security_analysis.threat_level >= SecurityThreatLevel::Medium);
+    assert!(!result
+        .security_analysis
+        .threat_basis
+        .iter()
+        .any(|b| b.contains("no dangerous API references")));
+    Ok(())
+}
+
+/// A class whose attribute is bigger than the read cap keeps what its constant pool says.
+#[test]
+fn padded_class_keeps_its_findings() -> Result<()> {
+    let dir = TempDir::new()?;
+    let class = ClassBuilder::new("p/Evil")
+        .calls("java/lang/Runtime", "getRuntime", "()Ljava/lang/Runtime;")
+        .calls(
+            "java/lang/Runtime",
+            "exec",
+            "(Ljava/lang/String;)Ljava/lang/Process;",
+        )
+        .padding_attribute("Pad", 9 * 1024 * 1024)
+        .build();
+    let path = write_zip(dir.path(), "padded.jar", &[("p/Evil.class", &class)]);
+    let result = analyze_java_path(&path)?;
+    assert_eq!(result.classes.len(), 1);
+    assert!(result
+        .security_analysis
+        .api_findings
+        .iter()
+        .any(|f| f.category == "process_exec"));
+    assert!(result.security_analysis.threat_level >= SecurityThreatLevel::Medium);
+    assert!(result.classes[0]
+        .parse_warning
+        .as_deref()
+        .is_some_and(|w| w.contains("only the first")));
+    Ok(())
+}
+
+/// Content that was not read is never rated Low with "nothing found".
+#[test]
+fn unread_content_is_never_rated_low() -> Result<()> {
+    let dir = TempDir::new()?;
+    let not_low = |result: &JavaAnalysisResult| {
+        assert!(
+            result.security_analysis.threat_level >= SecurityThreatLevel::Medium,
+            "{:?}",
+            result.security_analysis.threat_basis
+        );
+        assert!(!result
+            .security_analysis
+            .threat_basis
+            .iter()
+            .any(|b| b.contains("no dangerous API references")));
+    };
+
+    // A class file that cannot be parsed.
+    let path = write_zip(
+        dir.path(),
+        "bad.jar",
+        &[("p/Bad.class", b"\xCA\xFE\xBA\xBE\0\0\0\x34\0")],
+    );
+    not_low(&analyze_java_path(&path)?);
+
+    // A manifest over the read cap.
+    let mut manifest =
+        b"<manifest package=\"x\"><uses-permission name=\"android.permission.SEND_SMS\"/><!--"
+            .to_vec();
+    manifest.resize(9 * 1024 * 1024, b'a');
+    manifest.extend(b"--></manifest>");
+    let path = write_zip(dir.path(), "big.apk", &[("AndroidManifest.xml", &manifest)]);
+    not_low(&analyze_java_path(&path)?);
+
+    // A manifest that does not parse.
+    let path = write_zip(
+        dir.path(),
+        "garbage.apk",
+        &[("AndroidManifest.xml", b"garbage")],
+    );
+    not_low(&analyze_java_path(&path)?);
+
+    // The 501st nested archive is not opened.
+    let inner = zip_bytes(&[("p/A.class", &minimal_class("p/A"))]);
+    let names: Vec<String> = (0..501).map(|i| format!("lib/n{i}.jar")).collect();
+    let entries: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|n| (n.as_str(), inner.as_slice()))
+        .collect();
+    let path = write_zip(dir.path(), "many.war", &entries);
+    let result = analyze_java_path(&path)?;
+    assert_eq!(result.nested_opened_total, 500);
+    not_low(&result);
     Ok(())
 }

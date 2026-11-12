@@ -20,8 +20,8 @@ use crate::java_analysis::{
 
 use super::{
     output::{
-        input_schema_with_budget, parse_request, respond_result, tool_error, DEFAULT_LIMIT,
-        MAX_LIMIT,
+        fit_rows, input_schema_with_budget, page, parse_request, respond_result, tool_error,
+        DEFAULT_LIMIT,
     },
     paths::Expect,
     FileScannerMcp,
@@ -34,7 +34,10 @@ components, signature-file presence, threat level with its basis, and the top da
 findings, plus next_steps. Then dig in with `view`: classes (paged, `filter` matches class name \
 or API), findings (every dangerous API with class counts), resources (paged, `filter` on path), \
 class (one class by `class` name: methods, fields, referenced classes and method calls, paged), \
-manifest (every MANIFEST.MF attribute with its full value; `filter` matches the name). \
+manifest (every MANIFEST.MF attribute; values are returned whole up to a third of `max_output_bytes`, \
+longer ones are marked `value_cut` with their `value_length`; `filter` matches the name), \
+android (paged permissions, features and components with exported flag and intent actions; \
+`filter` matches kind or name), nested (paged nested archives with their status). \
 Class files are parsed for real; dangerous APIs (Runtime.exec, ProcessBuilder, reflection, class \
 and native loading, network, crypto, deserialization, JNDI, scripting, Unsafe) come from the \
 constant pool, and the threat level follows from them. Nested archives (AAR classes.jar, WAR \
@@ -45,7 +48,7 @@ compact JSON capped at `max_output_bytes` (default 80000, ceiling 400000); cut l
 reported under `truncated`.";
 
 /// Cache section for the full parse of one file (keyed by the file's SHA-256).
-const CACHE_KEY: &str = "java_analysis:v1";
+const CACHE_KEY: &str = "java_analysis:v3";
 
 #[tool_router(router = java_router, vis = "pub(crate)")]
 impl FileScannerMcp {
@@ -93,16 +96,18 @@ impl FileScannerMcp {
             .state
             .run_blocking("analyze_java_file", move || {
                 let cache = state.section_cache();
-                let (result, hit) = match cache.get(&sha256, CACHE_KEY) {
-                    Some(value) => match JavaAnalysisResult::deserialize(&*value) {
-                        Ok(result) => (result, true),
-                        Err(_) => (parse(&path)?, false),
-                    },
+                // Text in, text out: no intermediate `Value` tree, which costs several times
+                // the size of the result.
+                let cached = cache
+                    .get_text(&sha256, CACHE_KEY)
+                    .and_then(|text| serde_json::from_str::<JavaAnalysisResult>(&text).ok());
+                let (result, hit) = match cached {
+                    Some(result) => (result, true),
                     None => (parse(&path)?, false),
                 };
                 if !hit {
-                    if let Ok(value) = serde_json::to_value(&result) {
-                        cache.put(&sha256, CACHE_KEY, &value);
+                    if let Ok(text) = serde_json::to_string(&result) {
+                        cache.put_text(&sha256, CACHE_KEY, text);
                     }
                 }
                 respond_view(&result, view, &request, &path, &sha256, hit, budget)
@@ -129,8 +134,13 @@ pub enum JavaView {
     Resources,
     /// One class by name (`class`): methods, fields, referenced classes, method calls.
     Class,
-    /// Every `MANIFEST.MF` main-section attribute with its full value, and Class-Path entries.
+    /// Every `MANIFEST.MF` main-section attribute (long values cut at a third of the byte
+    /// budget, marked), and Class-Path entries.
     Manifest,
+    /// Paged Android permissions, features and components; `filter` matches kind or name.
+    Android,
+    /// Paged nested archives (WEB-INF/lib jars, AAR classes.jar) with their status.
+    Nested,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -141,8 +151,8 @@ pub struct JavaAnalysisRequest {
     )]
     pub file_path: String,
     #[schemars(
-        description = "What to return: summary (default), classes, findings, resources, class or manifest. \
-                       Defaults to class when `class` is given."
+        description = "What to return: summary (default), classes, findings, resources, class, manifest, \
+                       android or nested. Defaults to class when `class` is given."
     )]
     pub view: Option<JavaView>,
     #[schemars(
@@ -151,7 +161,8 @@ pub struct JavaAnalysisRequest {
     pub class: Option<String>,
     #[schemars(
         description = "Case-insensitive substring filter: class name, container or API \
-                       (classes, findings, class), or entry path (resources)"
+                       (classes, findings, class), entry path (resources), attribute name \
+                       (manifest), kind or name (android), or archive path (nested)"
     )]
     pub filter: Option<String>,
     #[schemars(description = "Number of items to skip (default 0)")]
@@ -232,9 +243,20 @@ fn respond_view(
             let rows: Vec<Value> = finding_rows(result)
                 .into_iter()
                 .filter(|row| {
-                    filter
-                        .as_deref()
-                        .is_none_or(|f| row.to_string().to_lowercase().contains(f))
+                    filter.as_deref().is_none_or(|f| {
+                        let text = |key: &str| {
+                            row[key]
+                                .as_str()
+                                .is_some_and(|t| t.to_lowercase().contains(f))
+                        };
+                        text("category")
+                            || text("api")
+                            || row["example_classes"].as_array().is_some_and(|names| {
+                                names.iter().any(|n| {
+                                    n.as_str().is_some_and(|t| t.to_lowercase().contains(f))
+                                })
+                            })
+                    })
                 })
                 .collect();
             json!({
@@ -272,6 +294,38 @@ fn respond_view(
             manifest_view(result, request, filter.as_deref(), offset, limit, budget)?
         }
         JavaView::Class => class_view(result, request, filter.as_deref(), offset, limit, budget)?,
+        JavaView::Android => {
+            android_view(result, request, filter.as_deref(), offset, limit, budget)?
+        }
+        JavaView::Nested => {
+            let rows: Vec<Value> = result
+                .nested_archives
+                .iter()
+                .filter(|n| {
+                    filter
+                        .as_deref()
+                        .is_none_or(|f| n.path.to_lowercase().contains(f))
+                })
+                .map(nested_row)
+                .collect();
+            let listed = result.nested_archives.len();
+            let counted = result.nested_total.max(listed);
+            let hint = if counted > listed {
+                format!(
+                    "filter matches the archive path. The archive holds {counted} nested \
+                     archives; rows stop at {listed} (the cap), so the rest cannot be listed."
+                )
+            } else {
+                "filter matches the archive path.".to_string()
+            };
+            json!({
+                "view": "nested",
+                "filter": request.filter,
+                "nested_archives": fit_page(&rows, offset, limit, budget / 2),
+                "nested_archives_counted": counted,
+                "hint": hint,
+            })
+        }
     };
     if let Value::Object(map) = &mut out {
         map.insert("file_path".into(), path_text.into());
@@ -325,8 +379,8 @@ fn class_row(class: &ClassInfo) -> Value {
         "java": class.java_version.split(" (").next().unwrap_or(""),
         "kind": kind_of(class),
         "super": class.super_class,
-        "methods": class.methods.len(),
-        "fields": class.fields.len(),
+        "methods": class.method_count(),
+        "fields": class.field_count(),
         "apis": if apis.is_empty() { Value::Null } else { json!(apis) },
     })
 }
@@ -457,9 +511,12 @@ fn class_view(
         .filter(|c| keep(c))
         .collect();
     let calls: Vec<&String> = class.method_refs.iter().filter(|m| keep(m)).collect();
+    let interfaces: Vec<&String> = class.interfaces.iter().filter(|c| keep(c)).collect();
+    let inner: Vec<&String> = class.inner_classes.iter().filter(|c| keep(c)).collect();
     let apis: Vec<Value> = class
         .dangerous_apis
         .iter()
+        .filter(|a| keep(&a.api) || keep(&a.category))
         .map(|a| json!({"category": a.category, "api": a.api}))
         .collect();
     let also_in: Vec<String> = matching
@@ -482,54 +539,41 @@ fn class_view(
             "java_version": class.java_version,
             "access": modifiers(class.access_flags, &[(0x0001, "public"), (0x0010, "final"), (0x0400, "abstract")]),
             "super": class.super_class,
-            "interfaces": class.interfaces,
+            "interface_count": class.interface_count(),
+            "method_count": class.method_count(),
+            "field_count": class.field_count(),
             "source_file": class.source_file,
-            "inner_classes": class.inner_classes.iter().take(50).collect::<Vec<_>>(),
-            "dangerous_apis": apis,
+            "dangerous_api_count": class.dangerous_apis.len(),
+            "also_in_count": also_in.len(),
             "parse_warning": class.parse_warning,
         },
-        "also_in": if also_in.is_empty() { Value::Null } else { json!(also_in) },
-        "methods": fit_page(&methods, offset, limit, budget / 5),
-        "fields": fit_page(&fields, offset, limit, budget / 5),
-        "referenced_classes": fit_page(&referenced, offset, limit, budget / 5),
-        "method_refs": fit_page(&calls, offset, limit, budget / 5),
-        "hint": "offset and limit apply to each of the four lists; filter narrows all of them.",
+        "dangerous_apis": fit_page(&apis, offset, limit, budget / 8),
+        "also_in": fit_page(&also_in, offset, limit, budget / 8),
+        "interfaces": fit_page(&interfaces, offset, limit, budget / 8),
+        "inner_classes": fit_page(&inner, offset, limit, budget / 8),
+        "methods": fit_page(&methods, offset, limit, budget / 6),
+        "fields": fit_page(&fields, offset, limit, budget / 6),
+        "referenced_classes": fit_page(&referenced, offset, limit, budget / 6),
+        "method_refs": fit_page(&calls, offset, limit, budget / 6),
+        "hint": "offset and limit apply to each of the eight lists (interfaces, inner_classes, \
+                 methods, fields, referenced_classes, method_refs, dangerous_apis, also_in); \
+                 filter narrows them. When class.parse_warning says member lists were cut or \
+                 dropped, method_count and field_count are the real totals; the names \
+                 themselves are not kept for that class. Extract the entry and analyze the \
+                 .class file alone to see its members.",
     }))
 }
 
-/// One page of a list like [`super::output::page`], but it stops adding rows once the
-/// serialized rows reach `budget` bytes (at least one row is always returned), so
-/// `returned` and `next_offset` describe what was really sent.
+/// One page of a list, cut by [`fit_rows`] to `budget` bytes (at least one row is always
+/// returned), so `returned`, `next_offset` and the hint describe what was really sent.
 fn fit_page<T: Serialize>(items: &[T], offset: usize, limit: usize, budget: usize) -> Value {
-    let total = items.len();
-    let limit = limit.clamp(1, MAX_LIMIT);
-    let start = offset.min(total);
-    let mut end = start;
-    let mut used = 0usize;
-    while end < total && end - start < limit {
-        let size = serde_json::to_string(&items[end]).map_or(0, |text| text.len() + 1);
-        if end > start && used + size > budget {
-            break;
-        }
-        used += size;
-        end += 1;
-    }
-    let mut out = serde_json::Map::new();
-    out.insert(
-        "items".into(),
-        serde_json::to_value(&items[start..end]).unwrap_or(Value::Null),
-    );
-    out.insert("total".into(), total.into());
-    out.insert("returned".into(), (end - start).into());
-    out.insert("offset".into(), offset.into());
-    if end < total {
-        out.insert("next_offset".into(), end.into());
-    }
-    Value::Object(out)
+    let mut page_value = page(items, offset, limit);
+    fit_rows(&mut page_value, "items", budget, offset, items.len());
+    page_value
 }
 
-/// Longest manifest value returned by view=manifest.
-const MAX_MANIFEST_VALUE_CHARS: usize = 20_000;
+/// Smallest cap on a manifest value returned by view=manifest.
+const MIN_MANIFEST_VALUE_CHARS: usize = 1_000;
 
 fn manifest_view(
     result: &JavaAnalysisResult,
@@ -565,15 +609,17 @@ fn manifest_view(
     for (name, value) in &m.custom_attributes {
         pairs.push((name.clone(), value.clone()));
     }
+    // A value may take up to its list's share of the byte budget.
+    let value_cap = (budget / 3).max(MIN_MANIFEST_VALUE_CHARS);
     let rows: Vec<Value> = pairs
         .iter()
         .filter(|(name, _)| filter.is_none_or(|f| name.to_lowercase().contains(f)))
         .map(|(name, value)| {
             let length = value.chars().count();
-            if length > MAX_MANIFEST_VALUE_CHARS {
+            if length > value_cap {
                 json!({
                     "name": name,
-                    "value": clip(value, MAX_MANIFEST_VALUE_CHARS),
+                    "value": clip(value, value_cap),
                     "value_length": length,
                     "value_cut": true,
                 })
@@ -593,8 +639,94 @@ fn manifest_view(
         "attributes": fit_page(&rows, offset, limit, budget / 3),
         "class_path": fit_page(&class_path, offset, limit, budget / 3),
         "entry_sections": m.entry_sections,
-        "hint": "filter matches the attribute name (and Class-Path entries); offset and limit \
-                 apply to both lists.",
+        "hint": if pairs.iter().any(|(_, v)| v.chars().count() > value_cap) {
+            "filter matches the attribute name (and Class-Path entries); offset and limit \
+             apply to both lists. A value marked value_cut is cut at a third of max_output_bytes: \
+             raise max_output_bytes (and filter to that attribute) to read more of it."
+        } else {
+            "filter matches the attribute name (and Class-Path entries); offset and limit \
+             apply to both lists."
+        },
+    }))
+}
+
+fn nested_row(n: &crate::java_analysis::NestedArchive) -> Value {
+    json!({
+        "path": n.path,
+        "size": n.size,
+        "opened": n.opened,
+        "entries": n.entries,
+        "classes": n.classes,
+        "note": n.note,
+    })
+}
+
+/// Paged Android permissions, features and components.
+fn android_view(
+    result: &JavaAnalysisResult,
+    request: &JavaAnalysisRequest,
+    filter: Option<&str>,
+    offset: usize,
+    limit: usize,
+    budget: usize,
+) -> Result<Value, String> {
+    let Some(a) = &result.android_manifest else {
+        return Err(
+            "This file has no readable AndroidManifest.xml (only APKs and AARs carry one). \
+             Use view=resources to see what the archive holds."
+                .to_string(),
+        );
+    };
+    let mut rows: Vec<Value> = Vec::new();
+    for name in &a.permissions {
+        rows.push(json!({"kind": "permission", "name": name}));
+    }
+    for name in &a.uses_features {
+        rows.push(json!({"kind": "feature", "name": name}));
+    }
+    for (kind, list) in [
+        ("activity", &a.activities),
+        ("service", &a.services),
+        ("receiver", &a.receivers),
+        ("provider", &a.providers),
+    ] {
+        for c in list {
+            let actions: Vec<&String> = c
+                .intent_filters
+                .iter()
+                .flat_map(|f| f.actions.iter())
+                .collect();
+            rows.push(json!({
+                "kind": kind,
+                "name": c.name,
+                "exported": c.exported,
+                "enabled": c.enabled,
+                "action_count": actions.len(),
+                "actions": if actions.is_empty() { Value::Null } else { short_list(&actions, 10) },
+            }));
+        }
+    }
+    let rows: Vec<Value> = rows
+        .into_iter()
+        .filter(|row| {
+            filter.is_none_or(|f| {
+                ["kind", "name"].iter().any(|k| {
+                    row[*k]
+                        .as_str()
+                        .is_some_and(|t| t.to_lowercase().contains(f))
+                })
+            })
+        })
+        .collect();
+    Ok(json!({
+        "view": "android",
+        "filter": request.filter,
+        "package": a.package_name,
+        "notes": if a.notes.is_empty() { Value::Null } else { json!(a.notes) },
+        "entries": fit_page(&rows, offset, limit, budget / 2),
+        "hint": "filter matches the kind (permission, feature, activity, service, receiver, \
+                 provider) or the name. A component shows its first 10 intent actions (see \
+                 action_count); categories and data schemes are not listed.",
     }))
 }
 
@@ -699,6 +831,7 @@ fn summary(result: &JavaAnalysisResult, path: &str, sha256: &str) -> Value {
                 "receivers": components(&a.receivers),
                 "providers": components(&a.providers),
                 "uses_features": short_list(&a.uses_features, 20),
+                "notes": if a.notes.is_empty() { Value::Null } else { json!(a.notes) },
             }))
         }
         (None, JavaArchiveType::Apk | JavaArchiveType::Aar) => Some(json!({
@@ -713,20 +846,21 @@ fn summary(result: &JavaAnalysisResult, path: &str, sha256: &str) -> Value {
     let finding_total = security.api_findings.len()
         + security.suspicious_permissions.len()
         + security.security_vulnerabilities.len();
-    let nested_opened = result.nested_archives.iter().filter(|n| n.opened).count();
+    let nested_opened = result
+        .nested_opened_total
+        .max(result.nested_archives.iter().filter(|n| n.opened).count());
+    let nested_total = result.nested_total.max(result.nested_archives.len());
     let nested_rows: Vec<Value> = result
         .nested_archives
         .iter()
         .take(15)
-        .map(|n| {
-            json!({
-                "path": n.path,
-                "opened": n.opened,
-                "classes": n.classes,
-                "note": n.note,
-            })
-        })
+        .map(nested_row)
         .collect();
+    let nested_list = if nested_total > 15 {
+        json!({"items": nested_rows, "total": nested_total, "truncated": true})
+    } else {
+        json!(nested_rows)
+    };
     let largest: Vec<Value> = result
         .metadata
         .largest_entries
@@ -763,6 +897,17 @@ fn summary(result: &JavaAnalysisResult, path: &str, sha256: &str) -> Value {
     if manifest_cut {
         next_steps.push(step(json!({"view": "manifest"})));
     }
+    if let Some(a) = &result.android_manifest {
+        let component_cut = [&a.activities, &a.services, &a.receivers, &a.providers]
+            .iter()
+            .any(|l| l.iter().filter(|c| c.exported).count() > 10);
+        if a.permissions.len() > 40 || a.uses_features.len() > 20 || component_cut {
+            next_steps.push(step(json!({"view": "android"})));
+        }
+    }
+    if nested_total > 15 {
+        next_steps.push(step(json!({"view": "nested"})));
+    }
 
     json!({
         "view": "summary",
@@ -773,7 +918,7 @@ fn summary(result: &JavaAnalysisResult, path: &str, sha256: &str) -> Value {
             "classes": result.classes_total,
             "unparsed_classes": result.unparsed_classes,
             "resources": result.resources_total,
-            "nested_archives": result.nested_archives.len(),
+            "nested_archives": nested_total,
             "nested_archives_opened": nested_opened,
             "dex_files": result.dex_files.len(),
             "signature_files": result.signature_files.len(),
@@ -799,7 +944,7 @@ fn summary(result: &JavaAnalysisResult, path: &str, sha256: &str) -> Value {
             "findings_total": finding_total,
             "top_findings": top,
         },
-        "nested_archives": short_list(&nested_rows, 15),
+        "nested_archives": nested_list,
         "entry_types": top_counts(&result.metadata.entry_count_by_type, 12),
         "largest_entries": largest,
         "warnings": short_list(&result.warnings, 10),
@@ -959,7 +1104,7 @@ mod tests {
         assert_eq!(class["class"]["name"], "com.example.Hello");
         assert_eq!(class["method_refs"]["total"], 1);
         assert_eq!(
-            class["class"]["dangerous_apis"][0]["category"],
+            class["dangerous_apis"]["items"][0]["category"],
             "process_exec"
         );
 
@@ -1270,5 +1415,184 @@ mod tests {
         assert_eq!(json["classes"]["returned"], items);
         assert_eq!(json["classes"]["next_offset"], items);
         assert!(json.get("truncated").is_none(), "{json}");
+    }
+
+    /// A class with thousands of interface entries answers with a paged, bounded list.
+    #[tokio::test]
+    async fn hostile_interface_list_is_paged_and_bounded() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let big = "i".repeat(60_000);
+        let mut b = ClassBuilder::new("p/I");
+        for _ in 0..3000 {
+            b = b.interface(&big);
+        }
+        let jar = zip_bytes(&[("p/I.class", &b.build())]);
+        let path = write(&dir, "ifaces.jar", &jar);
+        let (is_error, json, text) = call(
+            &mcp,
+            json!({"file_path": path, "class": "p.I", "max_output_bytes": 4000}),
+        )
+        .await;
+        assert!(!is_error, "{text}");
+        assert!(text.len() < 8_000, "{}", text.len());
+        assert_eq!(json["class"]["interface_count"], 3000);
+        let items = json["interfaces"]["items"].as_array().unwrap().len();
+        assert_eq!(json["interfaces"]["returned"], items);
+        assert_eq!(json["interfaces"]["next_offset"], items);
+        assert!(!text.contains("cut 65"), "no cutter marker needed: {text}");
+        let (_, summary, _) = call(&mcp, json!({"file_path": path, "view": "classes"})).await;
+        assert_eq!(summary["classes"]["items"][0]["methods"], 0);
+    }
+
+    /// view=android pages every permission and component; the summary points to it.
+    #[tokio::test]
+    async fn android_view_pages_what_the_summary_cuts() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let names: Vec<&'static str> = (0..60)
+            .map(|i| &*Box::leak(format!("android.permission.P{i}").into_boxed_str()))
+            .collect();
+        let acts: Vec<&'static str> = (0..25)
+            .map(|i| &*Box::leak(format!("com.x.Act{i}").into_boxed_str()))
+            .collect();
+        let mut events = vec![Some(("manifest", vec![("package", Av::Str("com.x"))]))];
+        for n in &names {
+            events.push(Some(("uses-permission", vec![("name", Av::Str(n))])));
+            events.push(None);
+        }
+        events.push(Some(("application", vec![])));
+        for a in &acts {
+            events.push(Some((
+                "activity",
+                vec![("name", Av::Str(a)), ("exported", Av::Bool(true))],
+            )));
+            events.push(None);
+        }
+        events.push(None);
+        events.push(None);
+        let apk = zip_bytes(&[
+            ("AndroidManifest.xml", &axml(&events)),
+            ("classes.dex", b"dex\n035\0"),
+        ]);
+        let path = write(&dir, "big.apk", &apk);
+        let (_, summary, _) = call(&mcp, json!({"file_path": path})).await;
+        assert_eq!(summary["android"]["permissions"]["truncated"], true);
+        assert!(summary["next_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["arguments"]["view"] == "android"));
+        let (is_error, page, text) = call(
+            &mcp,
+            json!({"file_path": path, "view": "android", "filter": "P59"}),
+        )
+        .await;
+        assert!(!is_error, "{text}");
+        assert_eq!(
+            page["entries"]["items"][0]["name"],
+            "android.permission.P59"
+        );
+        let (_, page, _) = call(
+            &mcp,
+            json!({"file_path": path, "view": "android", "filter": "act24"}),
+        )
+        .await;
+        assert_eq!(page["entries"]["items"][0]["kind"], "activity");
+        assert_eq!(page["entries"]["items"][0]["exported"], true);
+        let (is_error, _, text) = call(
+            &mcp,
+            json!({"file_path": write(&dir, "q.class", &minimal_class("a/Q")), "view": "android"}),
+        )
+        .await;
+        assert!(is_error);
+        assert!(text.contains("no readable AndroidManifest.xml"), "{text}");
+    }
+
+    /// The findings filter matches category, API and example classes, not JSON keys.
+    #[tokio::test]
+    async fn findings_filter_ignores_key_names() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let jar = zip_bytes(&[(
+            "com/example/Hello.class",
+            &runtime_exec_class("com/example/Hello"),
+        )]);
+        let path = write(&dir, "app.jar", &jar);
+        let (_, json, _) = call(
+            &mcp,
+            json!({"file_path": path, "view": "findings", "filter": "classes"}),
+        )
+        .await;
+        assert_eq!(json["findings"]["total"], 0, "{json}");
+        let (_, json, _) = call(
+            &mcp,
+            json!({"file_path": path, "view": "findings", "filter": "hello"}),
+        )
+        .await;
+        assert!(json["findings"]["total"].as_u64().unwrap() >= 1);
+    }
+
+    /// view=nested lists every nested archive; the summary marks its own cut.
+    #[tokio::test]
+    async fn nested_view_pages_all_nested_archives() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let inner = zip_bytes(&[("a/Q.class", &minimal_class("a/Q"))]);
+        let names: Vec<String> = (0..30).map(|i| format!("lib/m{i}.jar")).collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), inner.as_slice()))
+            .collect();
+        let path = write(&dir, "many.war", &zip_bytes(&entries));
+        let (_, summary, _) = call(&mcp, json!({"file_path": path})).await;
+        assert_eq!(summary["nested_archives"]["total"], 30);
+        assert_eq!(summary["nested_archives"]["truncated"], true);
+        let (_, page, _) = call(
+            &mcp,
+            json!({"file_path": path, "view": "nested", "offset": 25}),
+        )
+        .await;
+        assert_eq!(page["nested_archives"]["returned"], 5);
+    }
+
+    /// The class view pages its dangerous-API list instead of leaving it to the cutter.
+    #[tokio::test]
+    async fn class_view_pages_dangerous_apis() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let mut b = ClassBuilder::new("p/S");
+        for i in 0..100 {
+            b = b.calls("sun/misc/Unsafe", &format!("m{i:03}"), "()V");
+        }
+        let path = write(&dir, "apis.jar", &zip_bytes(&[("p/S.class", &b.build())]));
+        let (is_error, page, text) = call(
+            &mcp,
+            json!({"file_path": path, "class": "p.S", "limit": 10, "offset": 90}),
+        )
+        .await;
+        assert!(!is_error, "{text}");
+        assert_eq!(page["class"]["dangerous_api_count"], 100);
+        assert_eq!(page["dangerous_apis"]["total"], 100);
+        assert_eq!(page["dangerous_apis"]["returned"], 10);
+        assert!(page["also_in"]["total"].as_u64() == Some(0));
+        assert!(!text.contains("...[cut"), "{text}");
+    }
+
+    /// view=nested says when the rows stop short of the real count.
+    #[tokio::test]
+    async fn nested_view_states_the_count_when_rows_stop() {
+        let dir = TempDir::new().unwrap();
+        let mcp = FileScannerMcp::new();
+        let inner = zip_bytes(&[("a/Q.class", &minimal_class("a/Q"))]);
+        let names: Vec<String> = (0..5).map(|i| format!("lib/m{i}.jar")).collect();
+        let entries: Vec<(&str, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), inner.as_slice()))
+            .collect();
+        let path = write(&dir, "five.war", &zip_bytes(&entries));
+        let (_, page, _) = call(&mcp, json!({"file_path": path, "view": "nested"})).await;
+        assert_eq!(page["nested_archives_counted"], 5);
+        assert!(!page["hint"].as_str().unwrap().contains("rows stop"));
     }
 }

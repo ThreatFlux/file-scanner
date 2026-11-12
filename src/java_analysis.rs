@@ -12,7 +12,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 use zip::ZipArchive;
@@ -39,6 +39,8 @@ pub const MAX_CLASSES: usize = 100_000;
 pub const MAX_RESOURCES: usize = 50_000;
 /// Most nested archives opened in one analysis.
 pub const MAX_NESTED_ARCHIVES: usize = 500;
+/// Nested-archive rows kept in a result (rows for archives left unopened count too).
+pub const MAX_NESTED_ROWS: usize = 5_000;
 /// Most per-class references (classes, methods) kept.
 pub const MAX_REFS_PER_CLASS: usize = 4_000;
 /// Most warnings kept; the rest are counted.
@@ -80,6 +82,12 @@ pub struct JavaAnalysisResult {
     pub dex_files: Vec<NamedSize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nested_archives: Vec<NestedArchive>,
+    /// Nested-archive entries found (`nested_archives` holds at most [`MAX_NESTED_ROWS`]).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub nested_total: usize,
+    /// Nested archives actually opened (counted apart from the capped row list).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub nested_opened_total: usize,
     pub permissions: Vec<String>,
     pub security_analysis: JavaSecurityAnalysis,
     pub metadata: JavaArchiveMetadata,
@@ -174,6 +182,17 @@ pub struct AndroidManifest {
     pub uses_features: Vec<String>,
     /// Not filled: each component carries its own filters.
     pub intent_filters: Vec<IntentFilter>,
+    /// What the parser left out (budget cuts, shortened values); empty when nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The manifest text budget ran out, so later elements were not read in full (only
+    /// sensitive permissions are still picked up).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial: bool,
+    /// Permissions declared but not kept because a list cap was reached (never one of the
+    /// exact dangerous permissions, which are always kept).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub permissions_dropped: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +286,59 @@ pub struct ClassInfo {
     /// Set when the class parsed only in part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parse_warning: Option<String>,
+    /// Declared methods in the file, set only when `methods` was cut by the detail budget.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub methods_total: usize,
+    /// Declared fields in the file, set only when `fields` was cut.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fields_total: usize,
+    /// Declared interfaces in the file, set only when `interfaces` was cut.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub interfaces_total: usize,
+    /// InnerClasses entries in the file, set only when `inner_classes` was cut.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inner_classes_total: usize,
+}
+
+impl ClassInfo {
+    /// Methods the class declares (the real count, also when the list was cut).
+    pub fn method_count(&self) -> usize {
+        self.methods_total.max(self.methods.len())
+    }
+    /// Fields the class declares (the real count, also when the list was cut).
+    pub fn field_count(&self) -> usize {
+        self.fields_total.max(self.fields.len())
+    }
+    /// Interfaces the class names (the real count, also when the list was cut).
+    pub fn interface_count(&self) -> usize {
+        self.interfaces_total.max(self.interfaces.len())
+    }
+    /// Bytes this class's member lists are charged against the archive-wide budget.
+    fn detail_bytes(&self) -> usize {
+        let strings = |v: &[String]| v.iter().map(|s| s.len() + STRING_OVERHEAD).sum::<usize>();
+        strings(&self.interfaces)
+            + strings(&self.inner_classes)
+            + self
+                .methods
+                .iter()
+                .map(|m| {
+                    MEMBER_OVERHEAD
+                        + m.name.len()
+                        + m.descriptor.len()
+                        + strings(&m.exception_table)
+                })
+                .sum::<usize>()
+            + self
+                .fields
+                .iter()
+                .map(|f| {
+                    MEMBER_OVERHEAD
+                        + f.name.len()
+                        + f.descriptor.len()
+                        + f.constant_value.as_ref().map_or(0, String::len)
+                })
+                .sum::<usize>()
+    }
 }
 
 /// One dangerous API a class references.
@@ -365,7 +437,7 @@ pub struct JavaSecurityAnalysis {
     pub code_signing_status: CodeSigningStatus,
     pub privacy_concerns: Vec<String>,
     pub malware_indicators: Vec<String>,
-    /// Zip-bomb style anomalies (oversized or extreme-ratio entries).
+    /// Archive anomalies: oversized or extreme-ratio entries, data before the ZIP, unreadable parts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archive_anomalies: Vec<String>,
 }
@@ -482,6 +554,14 @@ pub fn sniff_java_input(path: &Path) -> Result<JavaInputKind> {
 pub fn analyze_java_path(path: &Path) -> Result<JavaAnalysisResult> {
     match sniff_java_input(path)? {
         JavaInputKind::Archive => analyze_java_archive_full(path),
+        // A class file followed by a JAR opens as a JAR through the central directory.
+        JavaInputKind::Class
+            if std::fs::File::open(path)
+                .ok()
+                .is_some_and(|f| ZipArchive::new(f).is_ok()) =>
+        {
+            analyze_java_archive_full(path)
+        }
         JavaInputKind::Class => analyze_class_file_full(path),
         JavaInputKind::Dex => Err(anyhow!(
             "This is a Dalvik DEX file; DEX is not supported by analyze_java_file. Analyze the \
@@ -508,7 +588,12 @@ pub fn analyze_class_file(file_path: &Path) -> Result<JavaAnalysisResult> {
 /// Analyze a Java archive; every class and resource is in the result.
 pub fn analyze_java_archive_full(file_path: &Path) -> Result<JavaAnalysisResult> {
     let file = std::fs::File::open(file_path)?;
-    let mut archive = ZipArchive::new(file)?;
+    let mut archive = ZipArchive::new(file).map_err(|error| {
+        anyhow!(
+            "ZIP archive is damaged or cut short ({error}); analyze_file can still give its \
+             hashes and strings."
+        )
+    })?;
     let names = entry_names(&mut archive);
     let archive_type = detect_archive_type_from_names(&names);
 
@@ -536,7 +621,7 @@ pub fn analyze_class_file_full(file_path: &Path) -> Result<JavaAnalysisResult> {
         ));
     }
     let class_data = std::fs::read(file_path)?;
-    let class_info = parse_class_file(&class_data).map_err(|error| {
+    let (class_info, class_end) = parse_class_file_ending(&class_data, false).map_err(|error| {
         anyhow!(
             "Class file is damaged or cut short ({error}); analyze_file can still give its \
              hashes and strings."
@@ -544,6 +629,13 @@ pub fn analyze_class_file_full(file_path: &Path) -> Result<JavaAnalysisResult> {
     })?;
 
     let mut scanner = Scanner::new(JavaArchiveType::ClassFile, 1);
+    if let Some(end) = class_end.filter(|end| *end < class_data.len()) {
+        let trailing = class_data.len() - end;
+        scanner.warn(format!(
+            "{trailing} bytes follow the end of the class file and were not analyzed"
+        ));
+        scanner.anomaly(format!("{trailing} bytes after the end of the class file"));
+    }
     scanner.result.metadata.total_size = class_data.len() as u64;
     scanner.result.metadata.compressed_size = class_data.len() as u64;
     scanner.result.metadata.compression_ratio = 1.0;
@@ -557,6 +649,7 @@ pub fn analyze_class_file_full(file_path: &Path) -> Result<JavaAnalysisResult> {
     scanner.result.metadata.largest_entries = vec![(entry.clone(), class_data.len() as u64)];
     let mut class_info = class_info;
     class_info.entry = entry;
+    scanner.fold_apis(&class_info);
     scanner.result.classes.push(class_info);
     scanner.class_count = 1;
     Ok(scanner.finish())
@@ -624,7 +717,35 @@ struct Scanner {
     class_cap_warned: bool,
     resource_cap_warned: bool,
     ref_bytes: usize,
+    ref_count: usize,
     ref_budget_warned: bool,
+    detail_bytes: usize,
+    detail_budget_warned: bool,
+    nested_rows_warned: bool,
+    /// Pool entries and declared members visited so far (see [`MAX_WORK_UNITS`]).
+    work: u64,
+    work_warned: bool,
+    api_bytes: usize,
+    api_warned: bool,
+    fixed_bytes: usize,
+    fixed_warned: bool,
+    facts: ScanFacts,
+}
+
+/// What the scan saw that the final security analysis needs, kept compact and independent
+/// of which per-class lists were shed to stay within the memory budgets.
+struct ScanFacts {
+    /// Every dangerous API with its class count and up to five example classes.
+    api_groups: BTreeMap<(String, String), (usize, Vec<String>)>,
+    /// Distinct APIs that did not fit [`MAX_API_GROUPS`], and the worst severity among them.
+    groups_dropped: usize,
+    dropped_severity: SecurityThreatLevel,
+    /// First class with the downloader / dropper shape.
+    dropper: Option<String>,
+    /// Nested archives not opened because of a cap, the read budget or damage.
+    nested_unread: usize,
+    /// `AndroidManifest.xml` was present but not read or not understood.
+    manifest_unread: bool,
 }
 
 impl Scanner {
@@ -644,6 +765,8 @@ impl Scanner {
                 java_versions: BTreeMap::new(),
                 dex_files: Vec::new(),
                 nested_archives: Vec::new(),
+                nested_total: 0,
+                nested_opened_total: 0,
                 permissions: Vec::new(),
                 security_analysis: JavaSecurityAnalysis {
                     threat_level: SecurityThreatLevel::Low,
@@ -683,7 +806,58 @@ impl Scanner {
             class_cap_warned: false,
             resource_cap_warned: false,
             ref_bytes: 0,
+            ref_count: 0,
             ref_budget_warned: false,
+            detail_bytes: 0,
+            detail_budget_warned: false,
+            nested_rows_warned: false,
+            work: 0,
+            work_warned: false,
+            api_bytes: 0,
+            api_warned: false,
+            fixed_bytes: 0,
+            fixed_warned: false,
+            facts: ScanFacts {
+                api_groups: BTreeMap::new(),
+                groups_dropped: 0,
+                dropped_severity: SecurityThreatLevel::Low,
+                dropper: None,
+                nested_unread: 0,
+                manifest_unread: false,
+            },
+        }
+    }
+
+    /// Adds a class's dangerous APIs to the aggregated findings (every class, whether or
+    /// not its own list is kept) and checks the dropper shape.
+    fn fold_apis(&mut self, class: &ClassInfo) {
+        for api in &class.dangerous_apis {
+            let key = (api.category.clone(), api.api.clone());
+            if let Some(entry) = self.facts.api_groups.get_mut(&key) {
+                entry.0 += 1;
+                if entry.1.len() < 5 {
+                    entry.1.push(class.name.clone());
+                }
+            } else if self.facts.api_groups.len() < MAX_API_GROUPS {
+                self.facts
+                    .api_groups
+                    .insert(key, (1, vec![class.name.clone()]));
+            } else {
+                self.facts.groups_dropped += 1;
+                self.facts.dropped_severity = self
+                    .facts
+                    .dropped_severity
+                    .max(category_severity(&api.category));
+            }
+        }
+        if self.facts.dropper.is_none() {
+            let has = |category: &str| class.dangerous_apis.iter().any(|a| a.category == category);
+            if has("network")
+                && (has("process_exec") || has("native_loading"))
+                && has("class_loading")
+            {
+                self.facts.dropper = Some(class.name.clone());
+            }
         }
     }
 
@@ -712,12 +886,19 @@ impl Scanner {
         declared: u64,
         cap: u64,
         what: &str,
+        truncate: bool,
     ) -> Option<Vec<u8>> {
         if declared > cap {
+            if !truncate {
+                self.warn(format!(
+                    "{what}: declares {declared} bytes, over the {cap}-byte read cap; not read"
+                ));
+                return None;
+            }
             self.warn(format!(
-                "{what}: declares {declared} bytes, over the {cap}-byte read cap; not read"
+                "{what}: declares {declared} bytes, over the {cap}-byte read cap; only the \
+                 first {cap} bytes were read"
             ));
-            return None;
         }
         if self.remaining == 0 {
             if !self.budget_warned {
@@ -818,7 +999,9 @@ impl Scanner {
 
             let lower = name.to_ascii_lowercase();
             if depth == 0 && name == "META-INF/MANIFEST.MF" {
-                if let Some(bytes) = self.read_entry(&mut file, size, MAX_MANIFEST_BYTES, &label) {
+                if let Some(bytes) =
+                    self.read_entry(&mut file, size, MAX_MANIFEST_BYTES, &label, false)
+                {
                     if std::str::from_utf8(&bytes).is_err() {
                         self.warn(
                             "META-INF/MANIFEST.MF is not valid UTF-8; undecodable bytes were \
@@ -831,15 +1014,31 @@ impl Scanner {
                 continue;
             }
             if depth == 0 && name == "AndroidManifest.xml" {
-                if let Some(bytes) =
-                    self.read_entry(&mut file, size, MAX_ANDROID_MANIFEST_BYTES, &label)
-                {
+                let read =
+                    self.read_entry(&mut file, size, MAX_ANDROID_MANIFEST_BYTES, &label, false);
+                if read.is_none() {
+                    self.facts.manifest_unread = true;
+                    self.result.limitations.push(
+                        "AndroidManifest.xml was not read (over the size cap, budget used up \
+                         or unreadable); package, permissions and components are unknown"
+                            .to_string(),
+                    );
+                }
+                if let Some(bytes) = read {
                     match parse_android_manifest(&bytes) {
-                        Ok(manifest) => self.result.android_manifest = Some(manifest),
-                        Err(error) => self.result.limitations.push(format!(
-                            "AndroidManifest.xml was not parsed ({error}); package, permissions \
-                             and components are unknown"
-                        )),
+                        Ok(manifest) => {
+                            for note in manifest.notes.clone() {
+                                self.warn(format!("AndroidManifest.xml: {note}"));
+                            }
+                            self.result.android_manifest = Some(manifest);
+                        }
+                        Err(error) => {
+                            self.facts.manifest_unread = true;
+                            self.result.limitations.push(format!(
+                                "AndroidManifest.xml was not parsed ({error}); package, \
+                                 permissions and components are unknown"
+                            ));
+                        }
                     }
                 }
                 continue;
@@ -882,39 +1081,42 @@ impl Scanner {
                     "More than {MAX_CLASSES} classes; the rest were not parsed"
                 ));
             }
+            self.result.unparsed_classes += 1;
             return;
         }
-        let Some(bytes) = self.read_entry(file, size, MAX_CLASS_BYTES, label) else {
+        let Some(bytes) = self.read_entry(file, size, MAX_CLASS_BYTES, label, true) else {
             self.result.unparsed_classes += 1;
             return;
         };
-        match parse_class_file(&bytes) {
+        let light = self.work >= MAX_WORK_UNITS;
+        match parse_class_file_ending(&bytes, light).map(|(class, _)| class) {
             Ok(mut class) => {
                 class.entry = name.to_string();
                 class.container = container.map(str::to_string);
-                let ref_len: usize = class
-                    .referenced_classes
-                    .iter()
-                    .chain(class.method_refs.iter())
-                    .map(String::len)
-                    .sum();
-                if self.ref_bytes + ref_len > MAX_REF_BYTES_TOTAL {
-                    class.referenced_classes.clear();
-                    class.method_refs.clear();
-                    if class.parse_warning.is_none() {
-                        class.parse_warning =
-                            Some("reference lists dropped: archive-wide budget used up".into());
-                    }
-                    if !self.ref_budget_warned {
-                        self.ref_budget_warned = true;
-                        self.warn(format!(
-                            "Class and method reference lists passed {MAX_REF_BYTES_TOTAL} \
-                             bytes in total; later classes keep only their dangerous-API list"
-                        ));
-                    }
-                } else {
-                    self.ref_bytes += ref_len;
+                if size > MAX_CLASS_BYTES {
+                    let note = format!(
+                        "class is {size} bytes; only the first {MAX_CLASS_BYTES} were read \
+                         (its constant pool was read in full)"
+                    );
+                    class.parse_warning = Some(match class.parse_warning.take() {
+                        Some(w) => format!("{w}; {note}"),
+                        None => note,
+                    });
                 }
+                if light && !self.work_warned {
+                    self.work_warned = true;
+                    self.warn(format!(
+                        "More than {MAX_WORK_UNITS} constant-pool entries and members were \
+                         visited; later classes keep only counts and dangerous-API references"
+                    ));
+                }
+                self.work += (class.method_count()
+                    + class.field_count()
+                    + class.interface_count()
+                    + class.inner_classes_total.max(class.inner_classes.len()))
+                    as u64
+                    + class_pool_entries(&bytes);
+                self.charge_class(&mut class);
                 self.class_count += 1;
                 self.result.classes.push(class);
             }
@@ -923,6 +1125,136 @@ impl Scanner {
                 self.warn(format!("{label}: not a readable class file ({error})"));
             }
         }
+    }
+
+    /// Folds a class into the aggregated findings, then charges what it keeps against the
+    /// archive-wide budgets, shedding lists once a budget is used up.
+    fn charge_class(&mut self, class: &mut ClassInfo) {
+        self.fold_apis(class);
+        let note_for = |class: &mut ClassInfo, note: &str| {
+            class.parse_warning = Some(match class.parse_warning.take() {
+                Some(w) => format!("{w}; {note}"),
+                None => note.to_string(),
+            });
+        };
+
+        let api_len: usize = class
+            .dangerous_apis
+            .iter()
+            .map(|a| a.category.len() + a.api.len() + 2 * STRING_OVERHEAD)
+            .sum();
+        if self.api_bytes + api_len > MAX_API_BYTES_TOTAL {
+            class.dangerous_apis.clear();
+            note_for(
+                class,
+                "dangerous-API list dropped: archive-wide budget used up (view=findings still \
+                 counts this class)",
+            );
+            if !self.api_warned {
+                self.api_warned = true;
+                self.warn(format!(
+                    "Per-class dangerous-API lists passed {MAX_API_BYTES_TOTAL} bytes in total; \
+                     later classes feed the findings but keep no list of their own"
+                ));
+            }
+        } else {
+            self.api_bytes += api_len;
+        }
+
+        let fixed_len = class.name.len()
+            + class.package.len()
+            + class.super_class.as_ref().map_or(0, String::len)
+            + class.source_file.as_ref().map_or(0, String::len)
+            + class.entry.len()
+            + class.container.as_ref().map_or(0, String::len)
+            + class.java_version.len()
+            + 4 * STRING_OVERHEAD;
+        if self.fixed_bytes + fixed_len > MAX_FIXED_BYTES_TOTAL {
+            class.package.clear();
+            class.super_class = None;
+            class.source_file = None;
+            if !self.fixed_warned {
+                self.fixed_warned = true;
+                self.warn(format!(
+                    "Class names and entry paths passed {MAX_FIXED_BYTES_TOTAL} bytes in \
+                     total; later classes omit package, super class and source file"
+                ));
+            }
+        } else {
+            self.fixed_bytes += fixed_len;
+        }
+
+        let ref_len: usize = class
+            .referenced_classes
+            .iter()
+            .chain(class.method_refs.iter())
+            .map(|s| s.len() + STRING_OVERHEAD)
+            .sum();
+        let ref_count = class.referenced_classes.len() + class.method_refs.len();
+        if self.ref_bytes + ref_len > MAX_REF_BYTES_TOTAL
+            || self.ref_count + ref_count > MAX_REF_COUNT_TOTAL
+        {
+            class.referenced_classes.clear();
+            class.method_refs.clear();
+            note_for(
+                class,
+                "reference lists dropped: archive-wide budget used up",
+            );
+            if !self.ref_budget_warned {
+                self.ref_budget_warned = true;
+                self.warn(format!(
+                    "Class and method reference lists passed {MAX_REF_BYTES_TOTAL} \
+                     bytes in total; later classes keep only their dangerous-API list"
+                ));
+            }
+        } else {
+            self.ref_bytes += ref_len;
+            self.ref_count += ref_count;
+        }
+
+        let detail_len = class.detail_bytes();
+        if self.detail_bytes + detail_len > MAX_DETAIL_BYTES_TOTAL {
+            class.methods_total = class.method_count();
+            class.fields_total = class.field_count();
+            class.interfaces_total = class.interface_count();
+            class.inner_classes_total = class.inner_classes_total.max(class.inner_classes.len());
+            class.methods.clear();
+            class.fields.clear();
+            class.interfaces.clear();
+            class.inner_classes.clear();
+            note_for(class, "member lists dropped: archive-wide budget used up");
+            if !self.detail_budget_warned {
+                self.detail_budget_warned = true;
+                self.warn(format!(
+                    "Member lists (methods, fields, interfaces) passed \
+                     {MAX_DETAIL_BYTES_TOTAL} bytes in total; later classes keep only \
+                     their counts"
+                ));
+            }
+        } else {
+            self.detail_bytes += detail_len;
+        }
+    }
+
+    /// Adds a nested-archive row, up to [`MAX_NESTED_ROWS`] (then it only warns, once).
+    /// Returns the row's index when it was kept. The totals count every row.
+    fn push_nested(&mut self, row: NestedArchive) -> Option<usize> {
+        self.result.nested_total += 1;
+        if row.opened {
+            self.result.nested_opened_total += 1;
+        }
+        if self.result.nested_archives.len() < MAX_NESTED_ROWS {
+            self.result.nested_archives.push(row);
+            return Some(self.result.nested_archives.len() - 1);
+        }
+        if !self.nested_rows_warned {
+            self.nested_rows_warned = true;
+            self.warn(format!(
+                "More than {MAX_NESTED_ROWS} nested-archive entries; the list stops there \
+                 (counts.nested_archives and nested_archives_opened still count them all)"
+            ));
+        }
+        None
     }
 
     fn open_nested<R: Read>(
@@ -934,7 +1266,7 @@ impl Scanner {
         depth: u8,
     ) {
         if depth >= 1 {
-            self.result.nested_archives.push(NestedArchive {
+            self.push_nested(NestedArchive {
                 path: label.to_string(),
                 size,
                 opened: false,
@@ -951,7 +1283,8 @@ impl Scanner {
                     "More than {MAX_NESTED_ARCHIVES} nested archives; the rest were not opened"
                 ));
             }
-            self.result.nested_archives.push(NestedArchive {
+            self.facts.nested_unread += 1;
+            self.push_nested(NestedArchive {
                 path: label.to_string(),
                 size,
                 opened: false,
@@ -969,30 +1302,52 @@ impl Scanner {
             classes: 0,
             note: None,
         };
-        let Some(bytes) = self.read_entry(file, size, MAX_NESTED_ARCHIVE_BYTES, label) else {
+        let Some(bytes) = self.read_entry(file, size, MAX_NESTED_ARCHIVE_BYTES, label, false)
+        else {
             nested.note = Some(format!(
                 "not opened: larger than {MAX_NESTED_ARCHIVE_BYTES} bytes or unreadable"
             ));
-            self.result.nested_archives.push(nested);
+            self.facts.nested_unread += 1;
+            self.push_nested(nested);
             return;
         };
         self.nested_opened += 1;
-        if bytes.len() < 4 || &bytes[..2] != b"PK" {
-            nested.note = Some("not opened: not a ZIP archive".to_string());
-            self.result.nested_archives.push(nested);
-            return;
-        }
+        let starts_with_pk = bytes.starts_with(b"PK");
         match ZipArchive::new(Cursor::new(bytes)) {
             Ok(mut inner) => {
+                if inner.offset() > 0 {
+                    self.warn(format!(
+                        "{label}: ZIP data starts {} bytes into the nested archive",
+                        inner.offset()
+                    ));
+                    self.anomaly(format!(
+                        "{label}: ZIP data starts {} bytes into the nested archive",
+                        inner.offset()
+                    ));
+                }
                 nested.opened = true;
                 nested.entries = inner.len();
                 let before = self.class_count;
+                // The row goes in first so it precedes the rows of archives inside it.
+                let row = self.push_nested(nested.clone());
                 self.scan_archive(&mut inner, Some(name), 1);
-                nested.classes = self.class_count - before;
+                if let Some(at) = row {
+                    self.result.nested_archives[at].classes = self.class_count - before;
+                }
+                return;
             }
-            Err(error) => nested.note = Some(format!("not opened: {error}")),
+            Err(error) => {
+                if starts_with_pk {
+                    self.facts.nested_unread += 1;
+                }
+                nested.note = Some(if starts_with_pk {
+                    format!("not opened: {error}")
+                } else {
+                    "not opened: not a ZIP archive".to_string()
+                });
+            }
         }
-        self.result.nested_archives.push(nested);
+        self.push_nested(nested);
     }
 
     fn finish(mut self) -> JavaAnalysisResult {
@@ -1053,7 +1408,7 @@ impl Scanner {
             result.security_analysis.archive_anomalies.push(note);
         }
         add_limitations(result);
-        perform_security_analysis(result);
+        perform_security_analysis(result, &self.facts);
         self.result
     }
 }
@@ -1277,13 +1632,33 @@ fn dotted(internal: &str) -> String {
     internal.replace('/', ".")
 }
 
-/// Class name for a `Class` constant: array classes name their element class.
+/// Constant-pool slot count a class file declares (0 when too short): the cost the work
+/// counter charges for reading its pool.
+fn class_pool_entries(bytes: &[u8]) -> u64 {
+    bytes
+        .get(8..10)
+        .map_or(0, |b| u64::from(u16::from_be_bytes([b[0], b[1]])))
+}
+
+/// Class name for a `Class` constant: array classes name their element class. Constant
+/// time: the JVM allows 255 array dimensions, so no more than 256 leading bytes are
+/// looked at (a name of 65,000 `[` costs the same as `[[Lx;`). Deeper names give `None`.
 fn element_class(name: &str) -> Option<&str> {
-    let stripped = name.trim_start_matches('[');
-    if stripped.len() == name.len() {
+    let dims = name
+        .as_bytes()
+        .iter()
+        .take(256)
+        .take_while(|b| **b == b'[')
+        .count();
+    if dims == 0 {
         return Some(name);
     }
-    stripped.strip_prefix('L').and_then(|s| s.strip_suffix(';'))
+    if dims > 255 {
+        return None;
+    }
+    name[dims..]
+        .strip_prefix('L')
+        .and_then(|s| s.strip_suffix(';'))
 }
 
 fn count_parameters(descriptor: &str) -> u16 {
@@ -1311,6 +1686,11 @@ fn count_parameters(descriptor: &str) -> u16 {
 }
 
 fn parse_class_file(class_data: &[u8]) -> Result<ClassInfo> {
+    parse_class_file_ending(class_data, false).map(|(info, _)| info)
+}
+
+/// Parses a class file; also returns where the class ended when its tail was read in full.
+fn parse_class_file_ending(class_data: &[u8], light: bool) -> Result<(ClassInfo, Option<usize>)> {
     if class_data.len() < 10 {
         return Err(anyhow!("Invalid class file: too short"));
     }
@@ -1415,34 +1795,43 @@ fn parse_class_file(class_data: &[u8]) -> Result<ClassInfo> {
         referenced_classes: Vec::new(),
         method_refs: Vec::new(),
         parse_warning: None,
+        methods_total: 0,
+        fields_total: 0,
+        interfaces_total: 0,
+        inner_classes_total: 0,
     };
 
     // Everything from the pool is available even if the rest is damaged.
-    let (referenced, method_refs, apis, refs_cut) = collect_references(&pool);
+    let (referenced, method_refs, apis, refs_cut) = collect_references(&pool, light);
     info.referenced_classes = referenced;
     info.method_refs = method_refs;
     info.dangerous_apis = apis;
 
-    let tail = parse_class_tail(&mut r, &pool, &mut info);
+    let tail = parse_class_tail(&mut r, &pool, &mut info, light);
+    let end = tail.is_ok().then_some(r.pos);
     if info.name.is_empty() {
         return Err(tail
             .err()
             .unwrap_or_else(|| anyhow!("Invalid class file: this_class does not name a class")));
     }
+    let mut notes: Vec<String> = info.parse_warning.take().into_iter().collect();
     if let Err(error) = tail {
-        info.parse_warning = Some(format!("members not fully read: {error}"));
-    } else if refs_cut {
-        info.parse_warning = Some(format!(
+        notes.push(format!("members not fully read: {error}"));
+    } else if refs_cut && !light {
+        notes.push(format!(
             "reference lists cut: more than {MAX_REF_BYTES_PER_CLASS} bytes of class or method \
              references, or more than {MAX_REFS_PER_CLASS} of them"
         ));
+    }
+    if !notes.is_empty() {
+        info.parse_warning = Some(notes.join("; "));
     }
     let own = info.name.clone();
     info.referenced_classes.retain(|c| *c != own);
     if let Some((package, _)) = info.name.rsplit_once('.') {
         info.package = package.to_string();
     }
-    Ok(info)
+    Ok((info, end))
 }
 
 /// Longest owner, method name or descriptor kept in a reference string.
@@ -1450,35 +1839,118 @@ const MAX_REF_PART_CHARS: usize = 512;
 /// Bytes of reference strings kept per class (classes and methods each).
 const MAX_REF_BYTES_PER_CLASS: usize = 64 * 1024;
 /// Most dangerous-API rows kept per class.
-const MAX_API_REFS_PER_CLASS: usize = 200;
+const MAX_API_REFS_PER_CLASS: usize = 100;
+/// Longest owner or method name kept in a dangerous-API row.
+const MAX_API_PART_CHARS: usize = 128;
+/// Bytes of per-class dangerous-API rows kept across one analysis (later classes only
+/// feed the aggregated findings).
+const MAX_API_BYTES_TOTAL: usize = 4 * 1024 * 1024;
+/// Distinct dangerous APIs kept in the aggregated findings.
+const MAX_API_GROUPS: usize = 20_000;
+/// Bytes of the fixed per-class strings (names, package, super, source file, warning)
+/// kept across one analysis.
+const MAX_FIXED_BYTES_TOTAL: usize = 24 * 1024 * 1024;
+/// Constant-pool entries plus declared members visited across one analysis, after which
+/// later classes are read in a light mode (dangerous APIs only).
+const MAX_WORK_UNITS: u64 = 60_000_000;
 /// Reference-string bytes kept across one whole analysis.
 const MAX_REF_BYTES_TOTAL: usize = 16 * 1024 * 1024;
 
-/// `s` cut to at most `max` characters, on a character boundary.
-fn clip_chars(s: &str, max: usize) -> &str {
-    match s.char_indices().nth(max) {
-        Some((at, _)) => &s[..at],
-        None => s,
+/// Longest member name or descriptor kept (longer ones are cut; the list says so).
+const MAX_MEMBER_PART_CHARS: usize = 256;
+/// Longest class name kept for `this`, super, interface, throws and inner-class names.
+const MAX_CLASS_NAME_CHARS: usize = 512;
+/// Bytes of member lists (interfaces, fields, methods, throws, inner classes) kept per class.
+const MAX_CLASS_DETAIL_BYTES: usize = 2 * 1024 * 1024;
+/// Member-list bytes kept across one whole analysis.
+const MAX_DETAIL_BYTES_TOTAL: usize = 32 * 1024 * 1024;
+/// Throws entries kept per method.
+const MAX_THROWS_PER_METHOD: usize = 64;
+/// Bytes charged for one field or method on top of its strings.
+const MEMBER_OVERHEAD: usize = 512;
+/// Bytes charged for one string in a list on top of its text.
+const STRING_OVERHEAD: usize = 64;
+/// InnerClasses entries visited per class, over all its attributes.
+const MAX_INNER_VISITS: usize = 65_535;
+/// Most class and method reference strings kept across one analysis.
+const MAX_REF_COUNT_TOTAL: usize = 500_000;
+
+/// Charges the member lists of one class against its byte budget.
+struct DetailBudget {
+    used: usize,
+    /// The archive's work budget is used up: members are counted, not kept.
+    light: bool,
+    cut: bool,
+    clipped: bool,
+    /// Throws lists were cut at [`MAX_THROWS_PER_METHOD`] entries.
+    throws_cut: bool,
+    /// InnerClasses entries beyond [`MAX_INNER_VISITS`] were not read.
+    inner_capped: bool,
+}
+
+impl DetailBudget {
+    fn take(&mut self, bytes: usize) -> bool {
+        if self.used + bytes > MAX_CLASS_DETAIL_BYTES {
+            self.cut = true;
+            false
+        } else {
+            self.used += bytes;
+            true
+        }
+    }
+    /// A name cut to `max` characters, noting when something was cut.
+    fn name(&mut self, s: &str, max: usize) -> String {
+        let clipped = clip_chars(s, max);
+        if clipped.len() < s.len() {
+            self.clipped = true;
+        }
+        clipped.to_string()
     }
 }
 
+/// `s` cut to at most `max` bytes, on a character boundary. Constant time: the cost
+/// must not grow with the length of a name taken from the file.
+fn clip_chars(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut at = max;
+    while !s.is_char_boundary(at) {
+        at -= 1;
+    }
+    &s[..at]
+}
+
 /// Returns the class, method and dangerous-API references of a constant pool, plus
-/// whether any were left out because of the byte budgets.
-fn collect_references(pool: &Pool) -> (Vec<String>, Vec<String>, Vec<ApiRef>, bool) {
+/// whether any were left out because of the byte budgets. In `light` mode (the archive's
+/// work budget is used up) only the dangerous APIs are collected.
+///
+/// Work per pool entry is constant: every name is looked at through [`clip_chars`], and an
+/// entry that repeats a class or method already seen costs one set lookup.
+fn collect_references(pool: &Pool, light: bool) -> (Vec<String>, Vec<String>, Vec<ApiRef>, bool) {
     let mut classes = BTreeSet::new();
     let mut methods = BTreeSet::new();
     let mut apis = BTreeSet::new();
+    let mut seen_classes: HashSet<u16> = HashSet::new();
+    let mut seen_refs: HashSet<(u16, u16)> = HashSet::new();
     let mut class_bytes = 0usize;
     let mut method_bytes = 0usize;
     let mut cut = false;
     for entry in &pool.0 {
         match entry {
+            Cp::Class(_) if light => {}
             Cp::Class(name_index) => {
+                if classes.len() >= MAX_REFS_PER_CLASS || class_bytes >= MAX_REF_BYTES_PER_CLASS {
+                    // Past the budget: no lookup, no copy, no allocation.
+                    cut = true;
+                    continue;
+                }
+                if !seen_classes.insert(*name_index) {
+                    continue;
+                }
                 if let Some(name) = pool.utf8(*name_index).and_then(element_class) {
                     let dotted_name = dotted(clip_chars(name, MAX_REF_PART_CHARS));
-                    if classes.len() < MAX_REFS_PER_CLASS
-                        && class_bytes + dotted_name.len() <= MAX_REF_BYTES_PER_CLASS
-                    {
+                    if class_bytes + dotted_name.len() <= MAX_REF_BYTES_PER_CLASS {
                         if classes.insert(dotted_name.clone()) {
                             class_bytes += dotted_name.len();
                         }
@@ -1488,6 +1960,9 @@ fn collect_references(pool: &Pool) -> (Vec<String>, Vec<String>, Vec<ApiRef>, bo
                 }
             }
             Cp::Ref(class, nat, true) => {
+                if !seen_refs.insert((*class, *nat)) {
+                    continue;
+                }
                 let Some(owner) = pool.class_name(*class).and_then(element_class) else {
                     continue;
                 };
@@ -1498,26 +1973,40 @@ fn collect_references(pool: &Pool) -> (Vec<String>, Vec<String>, Vec<ApiRef>, bo
                 else {
                     continue;
                 };
-                let owner_dotted = dotted(clip_chars(owner, MAX_REF_PART_CHARS));
-                let short_name = clip_chars(name, MAX_REF_PART_CHARS);
-                let text = format!(
-                    "{owner_dotted}.{short_name}{}",
-                    clip_chars(descriptor, MAX_REF_PART_CHARS)
-                );
-                if methods.len() < MAX_REFS_PER_CLASS
-                    && method_bytes + text.len() <= MAX_REF_BYTES_PER_CLASS
+                let owner = clip_chars(owner, MAX_REF_PART_CHARS);
+                let name = clip_chars(name, MAX_REF_PART_CHARS);
+                let api_category = classify_api(owner, name);
+                if (light || methods.len() >= MAX_REFS_PER_CLASS)
+                    && api_category.is_none_or(|_| apis.len() >= MAX_API_REFS_PER_CLASS)
                 {
-                    if methods.insert(text.clone()) {
-                        method_bytes += text.len();
-                    }
-                } else {
                     cut = true;
+                    continue;
                 }
-                if let Some(category) = classify_api(owner, name) {
+                let owner_dotted = dotted(owner);
+                if !light {
+                    let text = format!(
+                        "{owner_dotted}.{name}{}",
+                        clip_chars(descriptor, MAX_REF_PART_CHARS)
+                    );
+                    if methods.len() < MAX_REFS_PER_CLASS
+                        && method_bytes + text.len() <= MAX_REF_BYTES_PER_CLASS
+                    {
+                        if methods.insert(text.clone()) {
+                            method_bytes += text.len();
+                        }
+                    } else {
+                        cut = true;
+                    }
+                }
+                if let Some(category) = api_category {
                     if apis.len() < MAX_API_REFS_PER_CLASS {
                         apis.insert(ApiRef {
                             category: category.to_string(),
-                            api: format!("{owner_dotted}.{short_name}"),
+                            api: format!(
+                                "{}.{}",
+                                clip_chars(&owner_dotted, MAX_API_PART_CHARS),
+                                clip_chars(name, MAX_API_PART_CHARS)
+                            ),
                         });
                     } else {
                         cut = true;
@@ -1535,7 +2024,80 @@ fn collect_references(pool: &Pool) -> (Vec<String>, Vec<String>, Vec<ApiRef>, bo
     )
 }
 
-fn parse_class_tail(r: &mut Reader<'_>, pool: &Pool, info: &mut ClassInfo) -> Result<()> {
+fn parse_class_tail(
+    r: &mut Reader<'_>,
+    pool: &Pool,
+    info: &mut ClassInfo,
+    light: bool,
+) -> Result<()> {
+    let mut budget = DetailBudget {
+        // Light mode: nothing fits, so members are only counted.
+        used: if light { MAX_CLASS_DETAIL_BYTES } else { 0 },
+        light,
+        cut: false,
+        clipped: false,
+        throws_cut: false,
+        inner_capped: false,
+    };
+    let result = parse_class_tail_inner(r, pool, info, &mut budget);
+    let mut notes = Vec::new();
+    if budget.light {
+        notes.push("member and reference lists skipped: archive work budget used up".to_string());
+    } else if budget.cut {
+        let mut cut: Vec<String> = Vec::new();
+        for (label, kept, real) in [
+            ("interfaces", info.interfaces.len(), info.interface_count()),
+            ("fields", info.fields.len(), info.field_count()),
+            ("methods", info.methods.len(), info.method_count()),
+            (
+                "inner classes",
+                info.inner_classes.len(),
+                info.inner_classes_total.max(info.inner_classes.len()),
+            ),
+        ] {
+            if kept < real {
+                cut.push(format!("{kept} of {real} {label}"));
+            }
+        }
+        if !cut.is_empty() {
+            notes.push(format!(
+                "member lists cut at {MAX_CLASS_DETAIL_BYTES} bytes ({} kept)",
+                cut.join(", ")
+            ));
+        } else {
+            notes.push(format!(
+                "throws lists cut at the byte budget of {MAX_CLASS_DETAIL_BYTES} bytes"
+            ));
+        }
+    }
+    if budget.throws_cut {
+        notes.push(format!(
+            "throws lists cut at {MAX_THROWS_PER_METHOD} entries per method"
+        ));
+    }
+    if budget.inner_capped {
+        notes.push(format!(
+            "InnerClasses read only up to {MAX_INNER_VISITS} entries"
+        ));
+    }
+    if budget.clipped {
+        notes.push(format!(
+            "names longer than {MAX_MEMBER_PART_CHARS} bytes (members) or \
+             {MAX_CLASS_NAME_CHARS} (classes) were cut"
+        ));
+    }
+    if !notes.is_empty() {
+        info.parse_warning = Some(notes.join("; "));
+    }
+    result
+}
+
+fn parse_class_tail_inner(
+    r: &mut Reader<'_>,
+    pool: &Pool,
+    info: &mut ClassInfo,
+    budget: &mut DetailBudget,
+) -> Result<()> {
     let access = r.u16()?;
     let this_class = r.u16()?;
     let super_class = r.u16()?;
@@ -1547,41 +2109,63 @@ fn parse_class_tail(r: &mut Reader<'_>, pool: &Pool, info: &mut ClassInfo) -> Re
     info.is_annotation = access & 0x2000 != 0;
     info.is_enum = access & 0x4000 != 0;
     if let Some(name) = pool.class_name(this_class) {
-        info.name = dotted(name);
+        info.name = dotted(&budget.name(name, MAX_CLASS_NAME_CHARS));
     }
-    info.super_class = pool.class_name(super_class).map(dotted);
+    info.super_class = pool
+        .class_name(super_class)
+        .map(|n| dotted(&budget.name(n, MAX_CLASS_NAME_CHARS)));
 
     let interface_count = r.u16()?;
+    let mut interface_named = 0usize;
     for _ in 0..interface_count {
         let index = r.u16()?;
         if let Some(name) = pool.class_name(index) {
-            info.interfaces.push(dotted(name));
+            interface_named += 1;
+            let name = clip_chars(name, MAX_CLASS_NAME_CHARS);
+            if budget.take(name.len() + STRING_OVERHEAD) {
+                info.interfaces.push(dotted(name));
+            }
         }
+    }
+    if info.interfaces.len() < interface_named {
+        info.interfaces_total = interface_named;
     }
 
     let field_count = r.u16()?;
+    let mut fields_seen = 0usize;
     for _ in 0..field_count {
         let access = r.u16()?;
-        let name = pool.utf8(r.u16()?).unwrap_or("?").to_string();
-        let descriptor = pool.utf8(r.u16()?).unwrap_or("?").to_string();
+        let name = clip_chars(pool.utf8(r.u16()?).unwrap_or("?"), MAX_MEMBER_PART_CHARS);
+        let descriptor = clip_chars(pool.utf8(r.u16()?).unwrap_or("?"), MAX_MEMBER_PART_CHARS);
+        fields_seen += 1;
+        let keep = budget.take(MEMBER_OVERHEAD + name.len() + descriptor.len());
         let mut constant_value = None;
         for _ in 0..r.u16()? {
             let attr_name = pool.utf8(r.u16()?).unwrap_or("");
             let len = r.u32()? as usize;
             let body = r.take(len)?;
-            if attr_name == "ConstantValue" && body.len() == 2 {
+            if keep && attr_name == "ConstantValue" && body.len() == 2 {
                 let index = usize::from(u16::from_be_bytes([body[0], body[1]]));
                 constant_value = match pool.0.get(index) {
-                    Some(Cp::Str(s)) => pool.utf8(*s).map(|s| s.chars().take(200).collect()),
+                    Some(Cp::Str(s)) => pool.utf8(*s).map(|s| clip_chars(s, 200).to_string()),
                     Some(Cp::Integer(n)) => Some(n.to_string()),
                     Some(Cp::Long(n)) => Some(n.to_string()),
                     _ => None,
                 };
+                if let Some(v) = &constant_value {
+                    // Charged by its real length; a value that does not fit is dropped.
+                    if !budget.take(v.len() + STRING_OVERHEAD) {
+                        constant_value = None;
+                    }
+                }
             }
         }
+        if !keep {
+            continue;
+        }
         info.fields.push(FieldInfo {
-            name,
-            descriptor,
+            name: name.to_string(),
+            descriptor: descriptor.to_string(),
             access_flags: access,
             is_public: access & 0x0001 != 0,
             is_private: access & 0x0002 != 0,
@@ -1593,37 +2177,58 @@ fn parse_class_tail(r: &mut Reader<'_>, pool: &Pool, info: &mut ClassInfo) -> Re
             constant_value,
         });
     }
+    if info.fields.len() < fields_seen {
+        info.fields_total = fields_seen;
+    }
 
     let method_count = r.u16()?;
+    let mut methods_seen = 0usize;
     for _ in 0..method_count {
         let access = r.u16()?;
-        let name = pool.utf8(r.u16()?).unwrap_or("?").to_string();
-        let descriptor = pool.utf8(r.u16()?).unwrap_or("?").to_string();
+        let name = clip_chars(pool.utf8(r.u16()?).unwrap_or("?"), MAX_MEMBER_PART_CHARS);
+        let descriptor = clip_chars(pool.utf8(r.u16()?).unwrap_or("?"), MAX_MEMBER_PART_CHARS);
+        methods_seen += 1;
+        let keep = budget.take(MEMBER_OVERHEAD + name.len() + descriptor.len());
         let mut locals = 0u16;
         let mut throws = Vec::new();
         for _ in 0..r.u16()? {
             let attr_name = pool.utf8(r.u16()?).unwrap_or("");
             let len = r.u32()? as usize;
             let body = r.take(len)?;
+            if !keep {
+                continue;
+            }
             if attr_name == "Code" && body.len() >= 4 {
                 locals = u16::from_be_bytes([body[2], body[3]]);
             } else if attr_name == "Exceptions" && body.len() >= 2 {
                 let n = usize::from(u16::from_be_bytes([body[0], body[1]]));
-                for k in 0..n {
+                for k in 0..n.min(body.len() / 2) {
                     let at = 2 + 2 * k;
-                    if at + 2 <= body.len() {
-                        let index = u16::from_be_bytes([body[at], body[at + 1]]);
-                        if let Some(name) = pool.class_name(index) {
-                            throws.push(dotted(name));
+                    if at + 2 > body.len() {
+                        break;
+                    }
+                    let index = u16::from_be_bytes([body[at], body[at + 1]]);
+                    if let Some(name) = pool.class_name(index) {
+                        let name = clip_chars(name, MAX_CLASS_NAME_CHARS);
+                        if throws.len() >= MAX_THROWS_PER_METHOD {
+                            budget.throws_cut = true;
+                            break;
                         }
+                        if !budget.take(name.len() + STRING_OVERHEAD) {
+                            break;
+                        }
+                        throws.push(dotted(name));
                     }
                 }
             }
         }
+        if !keep {
+            continue;
+        }
         info.methods.push(MethodInfo {
-            parameter_count: count_parameters(&descriptor),
-            name,
-            descriptor,
+            parameter_count: count_parameters(descriptor),
+            name: name.to_string(),
+            descriptor: descriptor.to_string(),
             access_flags: access,
             is_public: access & 0x0001 != 0,
             is_private: access & 0x0002 != 0,
@@ -1637,7 +2242,17 @@ fn parse_class_tail(r: &mut Reader<'_>, pool: &Pool, info: &mut ClassInfo) -> Re
             exception_table: throws,
         });
     }
+    if info.methods.len() < methods_seen {
+        info.methods_total = methods_seen;
+    }
 
+    let mut inner_named = 0usize;
+    let mut inner_visited = 0usize;
+    let mut inner_seen: HashSet<u16> = HashSet::new();
+    let this_name_index = match pool.0.get(usize::from(this_class)) {
+        Some(Cp::Class(n)) => Some(*n),
+        _ => None,
+    };
     for _ in 0..r.u16()? {
         let attr_name = pool.utf8(r.u16()?).unwrap_or("");
         let len = r.u32()? as usize;
@@ -1645,25 +2260,50 @@ fn parse_class_tail(r: &mut Reader<'_>, pool: &Pool, info: &mut ClassInfo) -> Re
         match attr_name {
             "SourceFile" if body.len() == 2 => {
                 let index = u16::from_be_bytes([body[0], body[1]]);
-                info.source_file = pool.utf8(index).map(str::to_string);
+                info.source_file = pool
+                    .utf8(index)
+                    .map(|s| budget.name(s, MAX_MEMBER_PART_CHARS));
             }
             "InnerClasses" if body.len() >= 2 => {
                 let n = usize::from(u16::from_be_bytes([body[0], body[1]]));
                 for k in 0..n {
                     let at = 2 + 8 * k;
-                    if at + 2 <= body.len() {
-                        let index = u16::from_be_bytes([body[at], body[at + 1]]);
-                        if let Some(name) = pool.class_name(index) {
-                            let name = dotted(name);
-                            if name != info.name {
-                                info.inner_classes.push(name);
-                            }
+                    if at + 2 > body.len() {
+                        break;
+                    }
+                    if inner_visited >= MAX_INNER_VISITS {
+                        budget.inner_capped = true;
+                        break;
+                    }
+                    inner_visited += 1;
+                    let index = u16::from_be_bytes([body[at], body[at + 1]]);
+                    // Compared by pool index, never by text: an entry naming the class
+                    // itself, or one already seen, costs one lookup.
+                    let Some(Cp::Class(name_index)) = pool.0.get(usize::from(index)) else {
+                        continue;
+                    };
+                    if Some(*name_index) == this_name_index || !inner_seen.insert(*name_index) {
+                        continue;
+                    }
+                    if let Some(name) = pool.utf8(*name_index) {
+                        if budget.cut {
+                            // Past the budget entries are only counted: no copy, no scan.
+                            inner_named += 1;
+                            continue;
+                        }
+                        let name = dotted(clip_chars(name, MAX_CLASS_NAME_CHARS));
+                        inner_named += 1;
+                        if budget.take(name.len() + STRING_OVERHEAD) {
+                            info.inner_classes.push(name);
                         }
                     }
                 }
             }
             _ => {}
         }
+    }
+    if info.inner_classes.len() < inner_named {
+        info.inner_classes_total = inner_named;
     }
     Ok(())
 }
@@ -1774,6 +2414,118 @@ enum XmlEvent {
     End,
 }
 
+/// Longest attribute value or element name kept from a manifest.
+const MAX_XML_VALUE_CHARS: usize = 512;
+/// Longest element name kept from a manifest.
+const MAX_XML_TAG_CHARS: usize = 64;
+/// Text bytes (plus overhead per event and attribute) kept from one manifest.
+const MAX_XML_EVENT_BYTES: usize = 4 * 1024 * 1024;
+/// Bytes charged per element and per kept attribute on top of their text.
+const XML_ITEM_OVERHEAD: usize = 48;
+/// Most entries kept in each manifest list (permissions, features, components, ...).
+const MAX_MANIFEST_LIST: usize = 2_000;
+/// Sensitive permissions kept on top of [`MAX_MANIFEST_LIST`], so filler cannot hide them.
+const MAX_SENSITIVE_PERMISSIONS: usize = 500;
+/// Intent filters kept per component, and entries kept per filter list.
+const MAX_FILTERS_PER_COMPONENT: usize = 20;
+const MAX_FILTER_ENTRIES: usize = 20;
+/// Manifest attributes the analysis reads; every other attribute is dropped at parse time.
+const KEPT_ATTRIBUTES: &[&str] = &[
+    "package",
+    "versionCode",
+    "versionName",
+    "compileSdkVersion",
+    "minSdkVersion",
+    "targetSdkVersion",
+    "debuggable",
+    "exported",
+    "enabled",
+    "name",
+    "scheme",
+    "mimeType",
+];
+
+/// The elements read from a manifest, with what the byte budget left out.
+struct XmlEvents {
+    events: Vec<XmlEvent>,
+    used: usize,
+    /// Parsing stopped early because the text budget was used up.
+    cut: bool,
+    /// Some name or value was longer than the limit and was shortened.
+    clipped: bool,
+    /// Sensitive permissions declared after the budget ran out (kept, up to a cap).
+    late_sensitive: Vec<String>,
+    /// How many of those are heuristic matches (capped), and how many were not kept.
+    late_heuristic: usize,
+    late_dropped: usize,
+}
+
+impl XmlEvents {
+    fn new() -> Self {
+        Self {
+            events: Vec::new(),
+            used: 0,
+            cut: false,
+            clipped: false,
+            late_sensitive: Vec::new(),
+            late_heuristic: 0,
+            late_dropped: 0,
+        }
+    }
+    fn clip(&mut self, s: &str, max: usize) -> String {
+        let clipped = clip_chars(s, max);
+        if clipped.len() < s.len() {
+            self.clipped = true;
+        }
+        clipped.to_string()
+    }
+    /// Adds an element when its text fits the budget; false once the budget is used up.
+    fn start(&mut self, tag: &str, attrs: Vec<(String, String)>) -> bool {
+        let cost = XML_ITEM_OVERHEAD
+            + tag.len()
+            + attrs
+                .iter()
+                .map(|(k, v)| XML_ITEM_OVERHEAD + k.len() + v.len())
+                .sum::<usize>();
+        if self.cut || self.used + cost > MAX_XML_EVENT_BYTES {
+            self.cut = true;
+            // The rest of the manifest is only scanned for sensitive permissions, so
+            // filler elements cannot push them out of view.
+            if matches!(tag, "uses-permission" | "uses-permission-sdk-23") {
+                if let Some((_, name)) = attrs.iter().find(|(k, _)| k == "name") {
+                    if is_exact_dangerous_permission(name) {
+                        if !self.late_sensitive.contains(name) {
+                            self.late_sensitive.push(name.clone());
+                        }
+                    } else if is_sensitive_permission(name) {
+                        if self.late_heuristic < MAX_SENSITIVE_PERMISSIONS {
+                            if !self.late_sensitive.contains(name) {
+                                self.late_sensitive.push(name.clone());
+                                self.late_heuristic += 1;
+                            }
+                        } else {
+                            self.late_dropped += 1;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+        self.used += cost;
+        self.events.push(XmlEvent::Start(tag.to_string(), attrs));
+        true
+    }
+    fn end(&mut self) -> bool {
+        if self.cut || self.used + XML_ITEM_OVERHEAD > MAX_XML_EVENT_BYTES {
+            self.cut = true;
+            return false;
+        }
+        self.used += XML_ITEM_OVERHEAD;
+        self.events.push(XmlEvent::End);
+        true
+    }
+}
+
 fn parse_android_manifest(contents: &[u8]) -> Result<AndroidManifest> {
     let events = if contents.len() >= 8 && contents[0] == 0x03 && contents[1] == 0x00 {
         parse_axml(contents)?
@@ -1787,7 +2539,28 @@ fn parse_android_manifest(contents: &[u8]) -> Result<AndroidManifest> {
             return Err(anyhow!("neither binary Android XML nor text XML"));
         }
     };
-    build_manifest(&events)
+    let mut manifest = build_manifest(&events.events)?;
+    if events.cut {
+        manifest.partial = true;
+        manifest.permissions_dropped += events.late_dropped;
+        for name in &events.late_sensitive {
+            if !manifest.permissions.contains(name) {
+                manifest.permissions.push(name.clone());
+            }
+        }
+        manifest.notes.push(format!(
+            "the manifest holds more than {MAX_XML_EVENT_BYTES} bytes of element and attribute \
+             text; elements after that point were not read except for sensitive permissions \
+             ({} found there), so other late permissions and components are missing",
+            events.late_sensitive.len()
+        ));
+    }
+    if events.clipped {
+        manifest.notes.push(format!(
+            "names and values longer than {MAX_XML_VALUE_CHARS} bytes were cut"
+        ));
+    }
+    Ok(manifest)
 }
 
 fn u16_at(data: &[u8], at: usize) -> Result<u16> {
@@ -1896,17 +2669,17 @@ fn attribute_for_resource_id(id: u32) -> Option<&'static str> {
     })
 }
 
-fn parse_axml(data: &[u8]) -> Result<Vec<XmlEvent>> {
+fn parse_axml(data: &[u8]) -> Result<XmlEvents> {
     let total = (u32_at(data, 4)? as usize).min(data.len());
     let mut pos = usize::from(u16_at(data, 2)?).max(8);
     let mut strings: Vec<String> = Vec::new();
     let mut resource_ids: Vec<u32> = Vec::new();
-    let mut events = Vec::new();
-    let string_at = |strings: &[String], index: u32| -> Option<String> {
-        if index == u32::MAX {
+    let mut out = XmlEvents::new();
+    let string_at = |strings: &[String], index: u32| -> Option<usize> {
+        if index == u32::MAX || index as usize >= strings.len() {
             None
         } else {
-            strings.get(index as usize).cloned()
+            Some(index as usize)
         }
     };
 
@@ -1915,7 +2688,7 @@ fn parse_axml(data: &[u8]) -> Result<Vec<XmlEvent>> {
         let header = usize::from(u16_at(data, pos + 2)?);
         let size = u32_at(data, pos + 4)? as usize;
         if size < 8 || pos + size > total {
-            if events.is_empty() {
+            if out.events.is_empty() {
                 return Err(anyhow!("binary XML chunk at byte {pos} overruns the file"));
             }
             break;
@@ -1932,15 +2705,14 @@ fn parse_axml(data: &[u8]) -> Result<Vec<XmlEvent>> {
                     .collect();
             }
             0x0102 => {
-                if events.len() > 500_000 {
-                    return Err(anyhow!("binary XML has too many elements"));
-                }
                 let ext = header;
                 let name_index = u32_at(chunk, ext + 4)?;
                 let attr_start = usize::from(u16_at(chunk, ext + 8)?);
                 let attr_size = usize::from(u16_at(chunk, ext + 10)?).max(20);
                 let attr_count = usize::from(u16_at(chunk, ext + 12)?);
-                let name = string_at(&strings, name_index).unwrap_or_default();
+                let name = string_at(&strings, name_index)
+                    .map(|i| out.clip(&strings[i], MAX_XML_TAG_CHARS))
+                    .unwrap_or_default();
                 let mut attrs = Vec::new();
                 for k in 0..attr_count {
                     let at = ext + attr_start + k * attr_size;
@@ -1948,82 +2720,103 @@ fn parse_axml(data: &[u8]) -> Result<Vec<XmlEvent>> {
                         break;
                     }
                     let attr_name_index = u32_at(chunk, at + 4)?;
-                    let mut attr_name = string_at(&strings, attr_name_index).unwrap_or_default();
+                    let mut attr_name = string_at(&strings, attr_name_index)
+                        .map(|i| strings[i].as_str())
+                        .unwrap_or_default();
                     if attr_name.is_empty() {
                         if let Some(n) = resource_ids
                             .get(attr_name_index as usize)
                             .and_then(|id| attribute_for_resource_id(*id))
                         {
-                            attr_name = n.to_string();
+                            attr_name = n;
                         }
                     }
+                    // Only the attributes the analysis reads are copied out of the pool.
+                    if !KEPT_ATTRIBUTES.contains(&attr_name) {
+                        continue;
+                    }
+                    let attr_name = attr_name.to_string();
                     let raw = u32_at(chunk, at + 8)?;
                     let data_type = chunk[at + 15];
                     let value = u32_at(chunk, at + 16)?;
+                    let pooled =
+                        |index: u32| string_at(&strings, index).map(|i| strings[i].as_str());
                     let text = match data_type {
-                        0x03 => string_at(&strings, value)
-                            .or_else(|| string_at(&strings, raw))
+                        0x03 => pooled(value)
+                            .or_else(|| pooled(raw))
+                            .map(|t| out.clip(t, MAX_XML_VALUE_CHARS))
                             .unwrap_or_default(),
                         0x10 => (value as i32).to_string(),
                         0x11 => format!("0x{value:x}"),
                         0x12 => (value != 0).to_string(),
                         0x01 => format!("@0x{value:x}"),
-                        _ => string_at(&strings, raw).unwrap_or_else(|| value.to_string()),
+                        _ => pooled(raw)
+                            .map(|t| out.clip(t, MAX_XML_VALUE_CHARS))
+                            .unwrap_or_else(|| value.to_string()),
                     };
                     attrs.push((attr_name, text));
                 }
-                events.push(XmlEvent::Start(name, attrs));
+                out.start(&name, attrs);
             }
-            0x0103 => events.push(XmlEvent::End),
+            0x0103 => {
+                out.end();
+            }
             _ => {}
         }
         pos += size;
     }
-    if events.is_empty() {
+    if out.events.is_empty() {
         return Err(anyhow!("binary XML holds no elements"));
     }
-    Ok(events)
+    Ok(out)
 }
 
-fn parse_text_xml(data: &[u8]) -> Result<Vec<XmlEvent>> {
+fn parse_text_xml(data: &[u8]) -> Result<XmlEvents> {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_reader(data);
-    let mut events = Vec::new();
-    let attrs_of = |e: &quick_xml::events::BytesStart<'_>| -> Vec<(String, String)> {
-        e.attributes()
-            .flatten()
-            .map(|a| {
+    let mut out = XmlEvents::new();
+    let attrs_of =
+        |e: &quick_xml::events::BytesStart<'_>, out: &mut XmlEvents| -> Vec<(String, String)> {
+            let mut kept = Vec::new();
+            for a in e.attributes().flatten() {
                 let key = a.key.as_ref().to_string();
-                let key = key.rsplit(':').next().unwrap_or(&key).to_string();
+                let key = key.rsplit(':').next().unwrap_or(&key);
+                if !KEPT_ATTRIBUTES.contains(&key) {
+                    continue;
+                }
                 let value = a
                     .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                    .map_or_else(|_| String::new(), |v| v.into_owned());
-                (key, value)
-            })
-            .collect()
-    };
+                    .map_or_else(|_| String::new(), |v| out.clip(&v, MAX_XML_VALUE_CHARS));
+                kept.push((key.to_string(), value));
+            }
+            kept
+        };
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
-                if events.len() > 500_000 {
-                    return Err(anyhow!("XML has too many elements"));
-                }
-                events.push(XmlEvent::Start(e.name().as_ref().to_string(), attrs_of(&e)));
+                let tag = out.clip(e.name().as_ref(), MAX_XML_TAG_CHARS);
+                let attrs = attrs_of(&e, &mut out);
+                out.start(&tag, attrs);
             }
             Ok(Event::Empty(e)) => {
-                events.push(XmlEvent::Start(e.name().as_ref().to_string(), attrs_of(&e)));
-                events.push(XmlEvent::End);
+                let tag = out.clip(e.name().as_ref(), MAX_XML_TAG_CHARS);
+                let attrs = attrs_of(&e, &mut out);
+                if out.start(&tag, attrs) {
+                    out.end();
+                }
             }
-            Ok(Event::End(_)) => events.push(XmlEvent::End),
+            Ok(Event::End(_)) => {
+                out.end();
+            }
             Ok(Event::Eof) => break,
             Ok(_) => {}
             Err(error) => return Err(anyhow!("XML error: {error}")),
         }
     }
-    if events.is_empty() {
+    if out.events.is_empty() {
         return Err(anyhow!("XML holds no elements"));
     }
-    Ok(events)
+    Ok(out)
 }
 
 fn attr<'a>(attrs: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -2059,7 +2852,13 @@ fn build_manifest(events: &[XmlEvent]) -> Result<AndroidManifest> {
         providers: Vec::new(),
         uses_features: Vec::new(),
         intent_filters: Vec::new(),
+        notes: Vec::new(),
+        partial: false,
+        permissions_dropped: 0,
     };
+    let mut cut_lists: BTreeSet<&'static str> = BTreeSet::new();
+    let mut seen_permissions: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_features: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut stack: Vec<String> = Vec::new();
     let mut component: Option<(String, AndroidComponent, bool)> = None;
     let mut filter: Option<IntentFilter> = None;
@@ -2087,12 +2886,34 @@ fn build_manifest(events: &[XmlEvent]) -> Result<AndroidManifest> {
                     }
                     "uses-permission" | "uses-permission-sdk-23" => {
                         if let Some(name) = attr(attrs, "name") {
-                            manifest.permissions.push(name.to_string());
+                            if seen_permissions.contains(name) {
+                                // a repeated declaration adds nothing
+                            } else if is_exact_dangerous_permission(name)
+                                || manifest.permissions.len() < MAX_MANIFEST_LIST
+                                || (is_sensitive_permission(name)
+                                    && manifest.permissions.len()
+                                        < MAX_MANIFEST_LIST + MAX_SENSITIVE_PERMISSIONS)
+                            {
+                                // The exact dangerous names are a short fixed set, so
+                                // they need no cap and filler cannot push them out.
+                                seen_permissions.insert(name.to_string());
+                                manifest.permissions.push(name.to_string());
+                            } else {
+                                manifest.permissions_dropped += 1;
+                                cut_lists.insert("permissions");
+                            }
                         }
                     }
                     "uses-feature" => {
                         if let Some(name) = attr(attrs, "name") {
-                            manifest.uses_features.push(name.to_string());
+                            if seen_features.contains(name) {
+                                // a repeated declaration adds nothing
+                            } else if manifest.uses_features.len() < MAX_MANIFEST_LIST {
+                                seen_features.insert(name.to_string());
+                                manifest.uses_features.push(name.to_string());
+                            } else {
+                                cut_lists.insert("uses-feature");
+                            }
                         }
                     }
                     "application" => {
@@ -2125,21 +2946,37 @@ fn build_manifest(events: &[XmlEvent]) -> Result<AndroidManifest> {
                     }
                     "action" => {
                         if let (Some(f), Some(n)) = (filter.as_mut(), attr(attrs, "name")) {
-                            f.actions.push(n.to_string());
+                            if f.actions.len() < MAX_FILTER_ENTRIES {
+                                f.actions.push(n.to_string());
+                            } else {
+                                cut_lists.insert("intent-filter entries");
+                            }
                         }
                     }
                     "category" => {
                         if let (Some(f), Some(n)) = (filter.as_mut(), attr(attrs, "name")) {
-                            f.categories.push(n.to_string());
+                            if f.categories.len() < MAX_FILTER_ENTRIES {
+                                f.categories.push(n.to_string());
+                            } else {
+                                cut_lists.insert("intent-filter entries");
+                            }
                         }
                     }
                     "data" => {
                         if let Some(f) = filter.as_mut() {
                             if let Some(s) = attr(attrs, "scheme") {
-                                f.data_schemes.push(s.to_string());
+                                if f.data_schemes.len() < MAX_FILTER_ENTRIES {
+                                    f.data_schemes.push(s.to_string());
+                                } else {
+                                    cut_lists.insert("intent-filter entries");
+                                }
                             }
                             if let Some(t) = attr(attrs, "mimeType") {
-                                f.data_types.push(t.to_string());
+                                if f.data_types.len() < MAX_FILTER_ENTRIES {
+                                    f.data_types.push(t.to_string());
+                                } else {
+                                    cut_lists.insert("intent-filter entries");
+                                }
                             }
                         }
                     }
@@ -2152,7 +2989,11 @@ fn build_manifest(events: &[XmlEvent]) -> Result<AndroidManifest> {
                 match tag.as_str() {
                     "intent-filter" => {
                         if let (Some(f), Some((_, c, _))) = (filter.take(), component.as_mut()) {
-                            c.intent_filters.push(f);
+                            if c.intent_filters.len() < MAX_FILTERS_PER_COMPONENT {
+                                c.intent_filters.push(f);
+                            } else {
+                                cut_lists.insert("intent filters per component");
+                            }
                         }
                     }
                     "activity" | "activity-alias" | "service" | "receiver" | "provider"
@@ -2162,11 +3003,16 @@ fn build_manifest(events: &[XmlEvent]) -> Result<AndroidManifest> {
                             if !explicit {
                                 c.exported = kind != "provider" && !c.intent_filters.is_empty();
                             }
-                            match kind.as_str() {
-                                "service" => manifest.services.push(c),
-                                "receiver" => manifest.receivers.push(c),
-                                "provider" => manifest.providers.push(c),
-                                _ => manifest.activities.push(c),
+                            let list = match kind.as_str() {
+                                "service" => &mut manifest.services,
+                                "receiver" => &mut manifest.receivers,
+                                "provider" => &mut manifest.providers,
+                                _ => &mut manifest.activities,
+                            };
+                            if list.len() < MAX_MANIFEST_LIST {
+                                list.push(c);
+                            } else {
+                                cut_lists.insert("components");
                             }
                         }
                     }
@@ -2177,6 +3023,14 @@ fn build_manifest(events: &[XmlEvent]) -> Result<AndroidManifest> {
     }
     if !saw_manifest {
         return Err(anyhow!("no <manifest> element"));
+    }
+    if !cut_lists.is_empty() {
+        manifest.notes.push(format!(
+            "lists cut at their limits ({}): {MAX_MANIFEST_LIST} per list, \
+             {MAX_FILTERS_PER_COMPONENT} filters per component, {MAX_FILTER_ENTRIES} entries per \
+             filter",
+            cut_lists.into_iter().collect::<Vec<_>>().join(", ")
+        ));
     }
     Ok(manifest)
 }
@@ -2218,7 +3072,7 @@ const PRIVACY_PERMISSIONS: &[&str] = &[
     "CAMERA",
 ];
 
-fn perform_security_analysis(result: &mut JavaAnalysisResult) {
+fn perform_security_analysis(result: &mut JavaAnalysisResult, facts: &ScanFacts) {
     let mut level = SecurityThreatLevel::Low;
     let mut basis: Vec<String> = Vec::new();
 
@@ -2265,27 +3119,16 @@ fn perform_security_analysis(result: &mut JavaAnalysisResult) {
     }
 
     // Dangerous APIs, from constant-pool references
-    let mut grouped: BTreeMap<(String, String), (usize, Vec<String>)> = BTreeMap::new();
-    for class in &result.classes {
-        for api in &class.dangerous_apis {
-            let entry = grouped
-                .entry((api.category.clone(), api.api.clone()))
-                .or_default();
-            entry.0 += 1;
-            if entry.1.len() < 5 {
-                entry.1.push(class.name.clone());
-            }
-        }
-    }
-    let mut findings: Vec<ApiFinding> = grouped
-        .into_iter()
+    let mut findings: Vec<ApiFinding> = facts
+        .api_groups
+        .iter()
         .map(
             |((category, api), (class_count, example_classes))| ApiFinding {
-                severity: category_severity(&category),
-                category,
-                api,
-                class_count,
-                example_classes,
+                severity: category_severity(category),
+                category: category.clone(),
+                api: api.clone(),
+                class_count: *class_count,
+                example_classes: example_classes.clone(),
             },
         )
         .collect();
@@ -2319,16 +3162,11 @@ fn perform_security_analysis(result: &mut JavaAnalysisResult) {
     }
     // The dropper shape must meet in one class; spread over a large archive it is just
     // what libraries look like.
-    let dropper = result.classes.iter().find(|class| {
-        let has = |category: &str| class.dangerous_apis.iter().any(|a| a.category == category);
-        has("network") && (has("process_exec") || has("native_loading")) && has("class_loading")
-    });
-    if let Some(class) = dropper {
+    if let Some(class) = &facts.dropper {
         level = SecurityThreatLevel::Critical;
         let note = format!(
-            "Class {} uses network access, process execution or native loading, and dynamic \
-             class loading together: the shape of a downloader or dropper",
-            class.name
+            "Class {class} uses network access, process execution or native loading, and dynamic \
+             class loading together: the shape of a downloader or dropper"
         );
         basis.push(note.clone());
         result.security_analysis.malware_indicators.push(note);
@@ -2391,7 +3229,62 @@ fn perform_security_analysis(result: &mut JavaAnalysisResult) {
     }
 
     if !result.security_analysis.archive_anomalies.is_empty() {
-        basis.push("archive has oversized or extreme-ratio entries".to_string());
+        basis.push("archive anomalies found (see archive_anomalies)".to_string());
+    }
+    if result.android_manifest.as_ref().is_some_and(|m| m.partial) {
+        // Something was not read: never report "nothing found" on it.
+        level = level.max(SecurityThreatLevel::Medium);
+        basis.push(
+            "AndroidManifest.xml was only partly read (text budget used up); permissions after \
+             that point were not all examined (see android_manifest.notes)"
+                .to_string(),
+        );
+    }
+    if facts.groups_dropped > 0 {
+        level = level
+            .max(facts.dropped_severity)
+            .max(SecurityThreatLevel::Medium);
+        basis.push(format!(
+            "{} further dangerous API reference(s) beyond the {MAX_API_GROUPS} listed in \
+             findings were counted, not listed (worst severity {:?})",
+            facts.groups_dropped, facts.dropped_severity
+        ));
+    }
+    // Anything that was not read is not "clean": say what, and never report "nothing found".
+    let not_read = |n: usize, what: &str| format!("{n} {what}");
+    let mut unexamined: Vec<String> = Vec::new();
+    if result.unparsed_classes > 0 {
+        unexamined.push(not_read(
+            result.unparsed_classes,
+            "class file(s) were not analyzed (over the read cap, past the read budget, or \
+             damaged)",
+        ));
+    }
+    if facts.nested_unread > 0 {
+        unexamined.push(not_read(
+            facts.nested_unread,
+            "nested archive(s) were not opened (size cap, count cap, read budget or damage)",
+        ));
+    }
+    if facts.manifest_unread {
+        unexamined.push(
+            "AndroidManifest.xml was not read or not understood; its permissions are unknown"
+                .to_string(),
+        );
+    }
+    if let Some(m) = &result.android_manifest {
+        if m.permissions_dropped > 0 {
+            unexamined.push(not_read(
+                m.permissions_dropped,
+                "permission(s) beyond the list caps were not examined",
+            ));
+        }
+    }
+    if !unexamined.is_empty() {
+        level = level.max(SecurityThreatLevel::Medium);
+        for item in unexamined {
+            basis.push(format!("{item} (see warnings)"));
+        }
     }
     if basis.is_empty() && level == SecurityThreatLevel::Low {
         basis.push(if result.security_analysis.api_findings.is_empty() {
@@ -2404,27 +3297,42 @@ fn perform_security_analysis(result: &mut JavaAnalysisResult) {
     result.security_analysis.threat_basis = basis;
 }
 
+/// A permission the analysis reports on: dangerous or privacy-related.
+fn is_sensitive_permission(permission: &str) -> bool {
+    is_dangerous_permission(permission)
+        || PRIVACY_PERMISSIONS
+            .iter()
+            .any(|p| permission.strip_suffix(p).is_some_and(|r| r.ends_with('.')))
+}
+
 fn is_dangerous_permission(permission: &str) -> bool {
-    match permission {
+    is_exact_dangerous_permission(permission)
+        || permission.contains("ADMIN")
+        || permission.contains("ROOT")
+}
+
+/// The fixed set of dangerous permission names (a short list, so it is never capped).
+fn is_exact_dangerous_permission(permission: &str) -> bool {
+    matches!(
+        permission,
         "android.permission.SEND_SMS"
-        | "android.permission.READ_SMS"
-        | "android.permission.RECEIVE_SMS"
-        | "android.permission.READ_CALL_LOG"
-        | "android.permission.CALL_PHONE"
-        | "android.permission.READ_CONTACTS"
-        | "android.permission.ACCESS_FINE_LOCATION"
-        | "android.permission.CAMERA"
-        | "android.permission.RECORD_AUDIO"
-        | "android.permission.READ_EXTERNAL_STORAGE"
-        | "android.permission.WRITE_EXTERNAL_STORAGE"
-        | "android.permission.INSTALL_PACKAGES"
-        | "android.permission.REQUEST_INSTALL_PACKAGES"
-        | "android.permission.DELETE_PACKAGES"
-        | "android.permission.SYSTEM_ALERT_WINDOW"
-        | "android.permission.BIND_ACCESSIBILITY_SERVICE"
-        | "android.permission.DEVICE_ADMIN" => true,
-        _ => permission.contains("ADMIN") || permission.contains("ROOT"),
-    }
+            | "android.permission.READ_SMS"
+            | "android.permission.RECEIVE_SMS"
+            | "android.permission.READ_CALL_LOG"
+            | "android.permission.CALL_PHONE"
+            | "android.permission.READ_CONTACTS"
+            | "android.permission.ACCESS_FINE_LOCATION"
+            | "android.permission.CAMERA"
+            | "android.permission.RECORD_AUDIO"
+            | "android.permission.READ_EXTERNAL_STORAGE"
+            | "android.permission.WRITE_EXTERNAL_STORAGE"
+            | "android.permission.INSTALL_PACKAGES"
+            | "android.permission.REQUEST_INSTALL_PACKAGES"
+            | "android.permission.DELETE_PACKAGES"
+            | "android.permission.SYSTEM_ALERT_WINDOW"
+            | "android.permission.BIND_ACCESSIBILITY_SERVICE"
+            | "android.permission.DEVICE_ADMIN"
+    )
 }
 
 /// Legacy name-only check, kept for callers that have a bare method name.
