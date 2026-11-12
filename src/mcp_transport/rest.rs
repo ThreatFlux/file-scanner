@@ -91,7 +91,7 @@ pub const ROUTES: &[RouteInfo] = &[
     RouteInfo {
         method: "POST",
         path: "/cache/clear",
-        summary: "Clear the analysis cache",
+        summary: "Clear the analysis history, cached sections and tracked strings (optional ?scope=all|analysis|strings)",
     },
     RouteInfo {
         method: "GET",
@@ -453,20 +453,45 @@ async fn get_cache_stats(State(state): State<RestState>) -> AxumJson<Value> {
     }))
 }
 
-#[utoipa::path(post, path = "/cache/clear", responses((status = 200, description = "`{status, message}`")))]
-async fn clear_cache(State(state): State<RestState>) -> AxumJson<Value> {
-    // The section cache answers analyze_file sections; leaving it would serve
-    // results the caller just asked to forget.
-    state.handler.state().section_cache().clear();
-    match state.cache.clear().await {
-        Ok(()) => AxumJson(json!({
-            "status": "success",
-            "message": "Cache cleared successfully"
-        })),
-        Err(e) => AxumJson(json!({
-            "status": "error",
-            "message": format!("Failed to clear cache: {}", e)
-        })),
+#[utoipa::path(post, path = "/cache/clear", responses((status = 200, description = "`{status, message, cleared}`")))]
+async fn clear_cache(
+    State(state): State<RestState>,
+    axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>,
+) -> (StatusCode, AxumJson<Value>) {
+    use crate::mcp_server::tools_services::{clear_scope, ClearScope};
+    // The same optional scope as the cache_clear tool: all (default),
+    // analysis or strings.
+    let scope = match query
+        .get("scope")
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        None | Some("" | "all") => ClearScope::All,
+        Some("analysis") => ClearScope::Analysis,
+        Some("strings") => ClearScope::Strings,
+        Some(other) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                AxumJson(json!({
+                    "status": "error",
+                    "message": format!("Unknown scope '{other}': use all (default), analysis or strings")
+                })),
+            )
+        }
+    };
+    match clear_scope(state.handler.state(), scope).await {
+        Ok(cleared) => (
+            StatusCode::OK,
+            AxumJson(json!({
+                "status": "success",
+                "message": "Cache cleared successfully",
+                "cleared": cleared
+            })),
+        ),
+        Err(message) => (
+            StatusCode::OK,
+            AxumJson(json!({"status": "error", "message": message})),
+        ),
     }
 }
 

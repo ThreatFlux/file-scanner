@@ -266,3 +266,45 @@ fn the_cache_directory_can_come_from_the_environment() {
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert!(cache.join("metadata.json").exists());
 }
+
+/// A call that is still running when stdin closes (the `printf | file-scanner`
+/// pattern) is answered, not dropped: the server drains for several seconds.
+#[test]
+fn a_slow_call_is_still_answered_after_stdin_closes() {
+    let work = tempfile::tempdir().unwrap();
+    let cache = work.path().join("cache");
+    let big = work.path().join("big.txt");
+    let mut text = String::with_capacity(24 << 20);
+    let mut n = 0u64;
+    while text.len() < (20 << 20) {
+        text.push_str(&format!(
+            "line {n} value-{} marker\n",
+            n.wrapping_mul(2654435761)
+        ));
+        n += 1;
+    }
+    std::fs::write(&big, text).unwrap();
+    let cache_arg = cache.to_string_lossy().into_owned();
+    let run = session(
+        &["--cache-dir", &cache_arg],
+        &[],
+        &[
+            (
+                "analyze_file",
+                json!({"file_path": big.to_string_lossy(), "strings": true, "hashes": true}),
+            ),
+            (
+                "search_strings",
+                json!({"file_path": big.to_string_lossy(), "query": "marker"}),
+            ),
+        ],
+    );
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(run.tool_json(2).is_object(), "{:?}", run.replies);
+    assert!(
+        run.reply(3)["result"].is_object(),
+        "{:?}\n{}",
+        run.replies,
+        run.stderr
+    );
+}

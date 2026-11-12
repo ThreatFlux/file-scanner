@@ -460,6 +460,83 @@ fn read_full(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize>
     Ok(filled)
 }
 
+/// Offsets kept per value when `analyze_file` feeds the tracker (the
+/// `string_details` answer shows at most ten per file).
+const MAX_OFFSETS_TRACKED: usize = 10;
+
+/// Feed the strings `analyze_file` found to the tracker with their offsets.
+///
+/// The file's string index (the one `search_strings` builds, at the default
+/// minimum length, cached under the same key) supplies the offsets. A string
+/// the index does not hold (shorter than the minimum, or beyond the index's
+/// scan and count limits) is tracked without an offset, and `string_details`
+/// says so for that file. Returns the tracker's error for values outside its
+/// bounds, as `track_strings_from_results` does.
+pub(crate) fn track_analyzed_strings(
+    cache: &super::state::SectionCache,
+    tracker: &StringTracker,
+    resolved: Option<&Path>,
+    raw_path: &str,
+    sha256: &str,
+    strings: &[String],
+) -> anyhow::Result<()> {
+    let display = resolved.map_or_else(
+        || raw_path.to_string(),
+        |p| p.to_string_lossy().into_owned(),
+    );
+    let mut leftover: Option<Vec<String>> = None;
+    if let Some(path) = resolved {
+        let key = format!("strings_index:min={DEFAULT_MIN_LEN}");
+        tracker.track_strings_at(
+            || {
+                let index = if let Some(hit) = cache.get(sha256, &key) {
+                    hit
+                } else if let Ok(built) = build_string_index(path, DEFAULT_MIN_LEN) {
+                    let built = Arc::new(built);
+                    cache.put(sha256, &key, &built);
+                    built
+                } else {
+                    return Vec::new();
+                };
+                let wanted: std::collections::HashSet<&str> =
+                    strings.iter().map(String::as_str).collect();
+                let mut count: HashMap<&str, usize> = HashMap::new();
+                let mut items = Vec::new();
+                for item in index["strings"].as_array().map_or(&[][..], Vec::as_slice) {
+                    let (Some(offset), Some(value)) = (item[0].as_u64(), item[2].as_str()) else {
+                        continue;
+                    };
+                    if !wanted.contains(value) {
+                        continue;
+                    }
+                    let n = count.entry(value).or_insert(0);
+                    if *n < MAX_OFFSETS_TRACKED {
+                        *n += 1;
+                        items.push((value.to_string(), offset as usize));
+                    }
+                }
+                leftover = Some(
+                    strings
+                        .iter()
+                        .filter(|value| !count.contains_key(value.as_str()))
+                        .cloned()
+                        .collect(),
+                );
+                items
+            },
+            &display,
+            sha256,
+            "analyze_file",
+            &key,
+        );
+    }
+    let rest = leftover.unwrap_or_else(|| strings.to_vec());
+    if rest.is_empty() {
+        return Ok(());
+    }
+    tracker.track_strings_from_results(&rest, &display, sha256, "analyze_file")
+}
+
 /// One distinct string of a file's index.
 struct Group {
     value: String,
@@ -1035,7 +1112,15 @@ fn string_details_value(
         let rows: Vec<Value> = files
             .iter()
             .map(|(path, hash, count, offsets)| {
-                json!({"file_path": path, "file_hash": hash, "occurrences": count, "offsets": offsets})
+                let mut row = json!({"file_path": path, "file_hash": hash, "occurrences": count, "offsets": offsets});
+                if offsets.is_empty() {
+                    row["offsets_note"] = "No offset was recorded for this file: the string was \
+                        indexed without one (it is shorter than 4 characters or lies beyond the \
+                        string index's scan or count limits). search_strings with file_path and \
+                        query gives its offsets."
+                        .into();
+                }
+                row
             })
             .collect();
         let related = tracker
@@ -1167,7 +1252,7 @@ fn cache_stats_value(state: &ServerState) -> Value {
     let strings = state.string_tracker().get_statistics(None);
     let mut categories: Vec<(&String, &usize)> = strings.category_distribution.iter().collect();
     categories.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-    json!({
+    let mut out = json!({
         "enabled": state.cache_enabled(),
         "persistent": cache.is_persistent(),
         "directory": cache.directory().map(|d| d.display().to_string()),
@@ -1190,7 +1275,48 @@ fn cache_stats_value(state: &ServerState) -> Value {
             "search_strings {query} searches the indexed strings",
             "cache_clear forgets cached results (destructive)"
         ],
-    })
+    });
+    if !state.cache_enabled() {
+        out["note"] = "Caching is off (--no-cache): no analysis history or cached sections are \
+            kept and nothing is written to disk. The in-memory string index still fills, so \
+            search_strings and string_details work; the `strings` counts below describe it, and \
+            cache_clear with scope \"strings\" empties it."
+            .into();
+    }
+    out
+}
+
+/// Forget what `scope` names, as the `cache_clear` tool and `POST /cache/clear`
+/// both do; returns what was cleared, worded for the mode the server runs in.
+pub(crate) async fn clear_scope(
+    state: &ServerState,
+    scope: ClearScope,
+) -> Result<Vec<&'static str>, String> {
+    let mut cleared = Vec::new();
+    if matches!(scope, ClearScope::All | ClearScope::Analysis) {
+        state.clear_analysis_caches().await.map_err(|error| {
+            format!(
+                "Could not clear the analysis cache: {error}. Check that the cache directory \
+                 is writable (cache_status shows where it is)."
+            )
+        })?;
+        // LEAD: call super::tools_java::forget_recent() here (the Java tool's in-memory store)
+        cleared.push(if state.cache_enabled() {
+            "analysis history, cached sections and files on disk"
+        } else {
+            "analysis history and cached sections (in memory; --no-cache keeps no files on disk, \
+             so none were touched)"
+        });
+    }
+    if matches!(scope, ClearScope::All | ClearScope::Strings) {
+        state.string_tracker().clear();
+        cleared.push(if state.cache_enabled() {
+            "tracked strings"
+        } else {
+            "tracked strings (the in-memory string index, which --no-cache still fills)"
+        });
+    }
+    Ok(cleared)
 }
 
 impl FileScannerMcp {
@@ -1233,20 +1359,10 @@ impl FileScannerMcp {
             Err(message) => return tool_error(message),
         };
         let scope = request.scope.unwrap_or_default();
-        let mut cleared = Vec::new();
-        if matches!(scope, ClearScope::All | ClearScope::Analysis) {
-            if let Err(error) = self.state.clear_analysis_caches().await {
-                return tool_error(format!(
-                    "Could not clear the analysis cache: {error}. Check that the cache directory \
-                     is writable (cache_status shows where it is)."
-                ));
-            }
-            cleared.push("analysis history, cached sections and files on disk");
-        }
-        if matches!(scope, ClearScope::All | ClearScope::Strings) {
-            self.state.string_tracker().clear();
-            cleared.push("tracked strings");
-        }
+        let cleared = match clear_scope(&self.state, scope).await {
+            Ok(cleared) => cleared,
+            Err(message) => return tool_error(message),
+        };
         respond(json!({"cleared": cleared}), budget)
     }
 }
@@ -1979,6 +2095,93 @@ mod tests {
         // The session index knows it too.
         let (_, session) = call(&client, "search_strings", json!({"query": "number 02999"})).await;
         assert_eq!(session["total"], 1, "{session}");
+    }
+
+    #[tokio::test]
+    async fn string_details_has_offsets_after_analyze_file_alone() {
+        let cache = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let path = sample_file(files.path(), "s.bin", &payload());
+        let (_state, client) = connect(cache.path()).await;
+        let (error, analyzed) = call(&client, "analyze_file", json!({"file_path": path})).await;
+        assert!(!error, "{analyzed}");
+        let (error, details) = call(
+            &client,
+            "string_details",
+            json!({"value": "http://evil.example.com/beacon"}),
+        )
+        .await;
+        assert!(!error, "{details}");
+        assert_eq!(details["files"][0]["offsets"], json!([16]), "{details}");
+        assert!(details["files"][0].get("offsets_note").is_none());
+        // The repeated string keeps both offsets and one record per offset.
+        let (_, twice) = call(
+            &client,
+            "string_details",
+            json!({"value": "hello world, plain text"}),
+        )
+        .await;
+        assert_eq!(twice["files"][0]["offsets"].as_array().unwrap().len(), 2);
+        assert_eq!(twice["total_occurrences"], 2, "{twice}");
+    }
+
+    #[tokio::test]
+    async fn a_string_without_an_offset_says_so_in_string_details() {
+        let cache = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let path = sample_file(files.path(), "s.bin", &payload());
+        let (state, client) = connect(cache.path()).await;
+        state
+            .string_tracker()
+            .track_strings_from_results(&["bare".to_string()], &path, "hash", "analyze_file")
+            .unwrap();
+        let (_, details) = call(&client, "string_details", json!({"value": "bare"})).await;
+        assert_eq!(details["files"][0]["offsets"], json!([]), "{details}");
+        assert!(
+            details["files"][0]["offsets_note"]
+                .as_str()
+                .unwrap()
+                .contains("search_strings"),
+            "{details}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_cache_answers_say_what_exists_and_what_was_cleared() {
+        let cache = tempfile::tempdir().unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let path = sample_file(files.path(), "s.bin", &payload());
+        let state = Arc::new(ServerState::new(StateConfig {
+            cache_dir: cache.path().join("c"),
+            cache_enabled: false,
+            ..StateConfig::default()
+        }));
+        let server = FileScannerMcp::with_state(Arc::clone(&state));
+        let (server_io, client_io) = tokio::io::duplex(1 << 20);
+        tokio::spawn(async move {
+            if let Ok(service) = server.serve(server_io).await {
+                let _ = service.waiting().await;
+            }
+        });
+        let client = ().serve(client_io).await.unwrap();
+        call(&client, "analyze_file", json!({"file_path": path})).await;
+        let (_, stats) = call(&client, "cache_status", json!({})).await;
+        assert!(
+            stats["note"].as_str().unwrap().contains("string index"),
+            "{stats}"
+        );
+        assert!(stats["strings"]["unique"].as_u64().unwrap() > 0, "{stats}");
+        let (_, cleared) = call(&client, "cache_clear", json!({})).await;
+        let text = cleared.to_string();
+        assert!(!text.contains("files on disk\""), "{text}");
+        assert!(text.contains("--no-cache"), "{text}");
+        assert_eq!(
+            state
+                .string_tracker()
+                .get_statistics(None)
+                .total_unique_strings,
+            0
+        );
     }
 
     #[test]

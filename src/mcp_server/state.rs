@@ -842,7 +842,7 @@ pub struct ServerState {
     cache_dir: Arc<CacheDir>,
     analysis_cache: OnceLock<Arc<AnalysisCache>>,
     string_tracker: OnceLock<Arc<StringTracker>>,
-    section_cache: SectionCache,
+    section_cache: Arc<SectionCache>,
     /// Hashes already computed, keyed by path (see [`Self::file_sha256`]).
     file_identities: Mutex<HashMap<PathBuf, FileIdentity>>,
     /// Permits for [`Self::run_blocking`]: one per analysis allowed to run.
@@ -872,7 +872,7 @@ impl ServerState {
         let policy = PathPolicy::new(config.allow_roots.clone());
         let config_slots = config.max_concurrent_analyses.max(1);
         let cache_dir = Arc::new(CacheDir::new(config.cache_dir.clone()));
-        let section_cache = if config.cache_enabled {
+        let section_cache = Arc::new(if config.cache_enabled {
             SectionCache::new(
                 config.section_cache_max_bytes,
                 config.section_cache_max_entries,
@@ -881,7 +881,7 @@ impl ServerState {
         } else {
             // Caching is off: nothing is kept, every call recomputes.
             SectionCache::new(0, 0)
-        };
+        });
         Self {
             config,
             policy,
@@ -987,8 +987,14 @@ impl ServerState {
     }
 
     /// The bounded in-memory cache of complete section results.
-    pub const fn section_cache(&self) -> &SectionCache {
+    pub fn section_cache(&self) -> &SectionCache {
         &self.section_cache
+    }
+
+    /// A shared handle on the section cache, for work that moves to a
+    /// blocking thread.
+    pub fn section_cache_handle(&self) -> Arc<SectionCache> {
+        Arc::clone(&self.section_cache)
     }
 
     /// The allowed roots as the path policy uses them: `~` expanded and
@@ -1061,11 +1067,24 @@ impl ServerState {
     ) {
         if let Some(strings) = strings {
             let tracker = self.string_tracker();
+            let cache = self.section_cache_handle();
             let path = raw_path.to_string();
+            let resolved = self
+                .resolve_path(raw_path, "File", super::paths::Expect::File)
+                .ok();
             let hash = sha256.to_string();
             match self
                 .run_blocking("string tracking", move || {
-                    tracker.track_strings_from_results(&strings, &path, &hash, "analyze_file")
+                    // With the file's string index the occurrences carry
+                    // their offsets; without it they are tracked plain.
+                    super::tools_services::track_analyzed_strings(
+                        &cache,
+                        &tracker,
+                        resolved.as_deref(),
+                        &path,
+                        &hash,
+                        &strings,
+                    )
                 })
                 .await
             {

@@ -7,12 +7,37 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use rmcp::{
-    service::ServerInitializeError,
-    transport::{stdio, IntoTransport},
-    RoleServer, ServiceExt,
-};
+use rmcp::{service::ServerInitializeError, transport::IntoTransport, RoleServer, ServiceExt};
 use tokio_util::sync::CancellationToken;
+
+/// How long the stdio server keeps running after its input reached end of
+/// file, so a call that is about to finish can still be answered. Matches the
+/// SDK's own drain; an ordinary session still exits as soon as its calls are
+/// answered.
+const STDIN_EOF_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A reader that tells `closed` when the input ends.
+struct EofSignal<R> {
+    inner: R,
+    closed: Arc<tokio::sync::Notify>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for EofSignal<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let polled = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(())) = &polled {
+            if buf.filled().len() == before && buf.remaining() > 0 {
+                self.closed.notify_one();
+            }
+        }
+        polled
+    }
+}
 
 use crate::mcp_server::{state::StateConfig, FileScannerMcp, ServerState};
 
@@ -60,7 +85,9 @@ impl McpTransportServer {
     /// Serve MCP over stdin and stdout.
     ///
     /// Stdout carries JSON-RPC and nothing else; diagnostics go to stderr. A
-    /// closed stdin, before or after a session, ends the server cleanly.
+    /// closed stdin, before or after a session, ends the server cleanly: a call
+    /// still running gets five seconds to answer; if it is still unanswered then,
+    /// one line on stderr says so and the process exits.
     pub async fn run_stdio(&self) -> Result<()> {
         self.handler.state().warm_up();
         eprintln!(
@@ -84,7 +111,36 @@ impl McpTransportServer {
                 );
             }
         }
-        self.serve_transport(stdio(), true).await
+        // The SDK keeps draining in-flight work for 5 s after its input
+        // closes, and a scan on a blocking thread can run far longer. Once
+        // stdin has reached end of file, answers still being written get a
+        // grace period and then the process ends.
+        let closed = Arc::new(tokio::sync::Notify::new());
+        let input = EofSignal {
+            inner: tokio::io::stdin(),
+            closed: Arc::clone(&closed),
+        };
+        let serving = self.serve_transport((input, tokio::io::stdout()), true);
+        tokio::pin!(serving);
+        tokio::select! {
+            outcome = &mut serving => outcome?,
+            () = async {
+                closed.notified().await;
+                tokio::time::sleep(STDIN_EOF_GRACE).await;
+            } => {
+                eprintln!(
+                    "file-scanner: input closed and a call was still running after {} s; \
+                     exiting without its answer",
+                    STDIN_EOF_GRACE.as_secs()
+                );
+            }
+        }
+        {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
+        }
+        std::process::exit(0)
     }
 
     /// Serve one connection over `transport` until it closes.

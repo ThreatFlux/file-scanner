@@ -385,6 +385,66 @@ async fn cache_string_and_documentation_routes_answer() {
 }
 
 #[tokio::test]
+async fn rest_cache_clear_forgets_the_tracked_strings_like_the_tool_and_takes_a_scope() {
+    let server = start().await;
+    let http = client();
+    let track = || {
+        server
+            .state
+            .string_tracker()
+            .track_strings_from_results(
+                &["a tracked string".to_string()],
+                "/tmp/x",
+                "hash",
+                "analyze_file",
+            )
+            .unwrap();
+    };
+    let unique = || {
+        server
+            .state
+            .string_tracker()
+            .get_statistics(None)
+            .total_unique_strings
+    };
+    track();
+    assert_eq!(unique(), 1);
+    // Only the analysis side: the strings stay.
+    let reply: Value = http
+        .post(format!("{}/cache/clear?scope=analysis", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reply["status"], "success", "{reply}");
+    assert_eq!(unique(), 1);
+    // The default is the tool's default: both.
+    let reply: Value = http
+        .post(format!("{}/cache/clear", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        reply["cleared"].to_string().contains("tracked strings"),
+        "{reply}"
+    );
+    assert_eq!(unique(), 0);
+    track();
+    let bad = http
+        .post(format!("{}/cache/clear?scope=nope", server.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+    assert_eq!(unique(), 1, "a refused scope clears nothing");
+}
+
+#[tokio::test]
 async fn invalid_requests_to_mcp_are_rejected_not_served() {
     let server = start().await;
     let http = client();
