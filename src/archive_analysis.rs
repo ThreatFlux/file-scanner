@@ -14,6 +14,42 @@ pub struct ArchiveAnalysis {
     pub security_analysis: ArchiveSecurityAnalysis,
     pub suspicious_indicators: SuspiciousArchiveIndicators,
     pub nested_archives: Vec<NestedArchiveInfo>,
+    /// Limits that were hit or parts that could not be read (for example an
+    /// encrypted header or a compressed 7z header). Empty when everything was read.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// Most entries any analyzer records; the rest are counted but not listed.
+pub const MAX_ENTRIES: usize = 100_000;
+/// Most decompressed bytes a compressed archive is read through (1 GiB).
+pub const MAX_STREAM_BYTES: u64 = 1 << 30;
+/// Prefix of the note an analyzer adds when the entries could not be read at
+/// all, so callers can tell "nothing readable" from "an empty archive".
+pub const LISTING_UNAVAILABLE: &str = "Entry listing is unavailable";
+/// Longest archive or entry comment kept in a result (bytes).
+pub(crate) const MAX_COMMENT_BYTES: usize = 512;
+
+/// Space saved by compression, from 0.0 (none, or the container is larger
+/// than its content) to 1.0.
+pub(crate) fn saved_ratio(compressed: u64, uncompressed: u64) -> f64 {
+    if uncompressed == 0 {
+        return 0.0;
+    }
+    (1.0 - compressed as f64 / uncompressed as f64).clamp(0.0, 1.0)
+}
+
+/// A comment cut to [`MAX_COMMENT_BYTES`], with its full length when cut.
+pub(crate) fn capped_comment(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    if text.len() <= MAX_COMMENT_BYTES {
+        return text.into_owned();
+    }
+    let mut end = MAX_COMMENT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... ({} bytes in all)", &text[..end], text.len())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +96,27 @@ pub struct ArchiveEntry {
     pub comment: Option<String>,
     pub file_type: FileType,
     pub risk_indicators: Vec<RiskIndicator>,
+    /// What the entry is (file, directory, link, device node, ...).
+    #[serde(default)]
+    pub entry_kind: EntryKind,
+    /// Where a symbolic or hard link points.
+    #[serde(default)]
+    pub link_target: Option<String>,
+}
+
+/// The kind of an archive entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    #[default]
+    File,
+    Directory,
+    Symlink,
+    Hardlink,
+    CharDevice,
+    BlockDevice,
+    Fifo,
+    Other,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,74 +224,479 @@ pub fn analyze_zip<P: AsRef<Path>>(path: P) -> Result<ArchiveAnalysis> {
 
     let mut archive = ZipArchive::new(file).context("Failed to read ZIP archive")?;
 
-    let metadata = extract_zip_metadata(&mut archive)?;
+    let mut metadata = extract_zip_metadata(&mut archive)?;
     let mut entries = Vec::new();
     let mut suspicious_indicators = SuspiciousArchiveIndicators::default();
-    let mut nested_archives = Vec::new();
+    let mut notes = Vec::new();
 
-    // Analyze each entry
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        let entry_info = analyze_zip_entry(&mut entry, &mut suspicious_indicators)?;
-
-        // Check for nested archives
-        if matches!(entry_info.file_type, FileType::Archive) {
-            nested_archives.push(NestedArchiveInfo {
-                path: entry_info.path.clone(),
-                archive_type: detect_archive_type(&entry_info.file_name),
-                size: entry_info.size_uncompressed,
-                depth: 1,
-            });
-        }
-
-        entries.push(entry_info);
+    let listed = archive.len().min(MAX_ENTRIES);
+    if archive.len() > listed {
+        notes.push(format!(
+            "Only the first {listed} of {} entries were analyzed.",
+            archive.len()
+        ));
     }
 
-    // Perform security analysis
-    let security_analysis = perform_security_analysis(&entries, &metadata)?;
+    // Analyze each entry from its central-directory record; nothing is
+    // decompressed, so encrypted entries and unsupported methods still list.
+    for i in 0..listed {
+        let link_target = zip_symlink_target(&mut archive, i);
+        let mut entry = archive.by_index_raw(i)?;
+        let entry_info = analyze_zip_entry(&mut entry, link_target, &mut suspicious_indicators)?;
+        entries.push(entry_info);
+    }
+    metadata.has_encryption = entries.iter().any(|e| e.is_encrypted);
 
-    // Calculate risk score
+    finish_analysis(
+        ArchiveType::Zip,
+        metadata,
+        entries,
+        suspicious_indicators,
+        notes,
+    )
+}
+
+/// A bounds-checked little-endian reader over a header buffer. Every read
+/// returns `None` past the end, so a damaged header ends parsing instead of
+/// panicking.
+pub(crate) struct ByteReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteReader<'a> {
+    pub(crate) const fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    pub(crate) const fn position(&self) -> usize {
+        self.pos
+    }
+
+    pub(crate) const fn remaining(&self) -> usize {
+        self.data.len() - self.pos
+    }
+
+    pub(crate) fn bytes(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        let slice = self.data.get(self.pos..end)?;
+        self.pos = end;
+        Some(slice)
+    }
+
+    pub(crate) fn skip(&mut self, n: usize) -> Option<()> {
+        self.bytes(n).map(|_| ())
+    }
+
+    pub(crate) fn u8(&mut self) -> Option<u8> {
+        self.bytes(1).map(|b| b[0])
+    }
+
+    pub(crate) fn u16le(&mut self) -> Option<u16> {
+        self.bytes(2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+    }
+
+    pub(crate) fn u32le(&mut self) -> Option<u32> {
+        self.bytes(4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    pub(crate) fn u64le(&mut self) -> Option<u64> {
+        self.bytes(8).map(|b| {
+            let mut a = [0u8; 8];
+            a.copy_from_slice(b);
+            u64::from_le_bytes(a)
+        })
+    }
+
+    /// RAR 5 variable-length integer: 7 bits per byte, low group first.
+    pub(crate) fn rar_vint(&mut self) -> Option<u64> {
+        let mut value = 0u64;
+        for i in 0..10 {
+            let byte = self.u8()?;
+            value |= u64::from(byte & 0x7f) << (7 * i);
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// 7z `NUMBER`: the count of leading one bits in the first byte says how
+    /// many extra bytes follow.
+    pub(crate) fn sevenz_number(&mut self) -> Option<u64> {
+        let first = self.u8()?;
+        let mut mask = 0x80u8;
+        let mut value = 0u64;
+        for i in 0..8 {
+            if first & mask == 0 {
+                value |= u64::from(first & (mask - 1)) << (8 * i);
+                return Some(value);
+            }
+            value |= u64::from(self.u8()?) << (8 * i);
+            mask >>= 1;
+        }
+        Some(value)
+    }
+}
+
+/// Entry kind from the file-type bits of a unix mode.
+pub(crate) fn unix_kind(mode: u32) -> EntryKind {
+    match mode & 0o170_000 {
+        0o040_000 => EntryKind::Directory,
+        0o120_000 => EntryKind::Symlink,
+        0o020_000 => EntryKind::CharDevice,
+        0o060_000 => EntryKind::BlockDevice,
+        0o010_000 => EntryKind::Fifo,
+        _ => EntryKind::File,
+    }
+}
+
+/// Everything the shared per-entry checks need to know about one entry.
+#[derive(Default)]
+pub(crate) struct EntrySpec {
+    pub path: String,
+    pub kind: EntryKind,
+    pub size_compressed: u64,
+    pub size_uncompressed: u64,
+    pub method: String,
+    pub last_modified: Option<String>,
+    pub crc32: Option<u32>,
+    pub is_encrypted: bool,
+    pub permissions: Option<u32>,
+    pub comment: Option<String>,
+    pub link_target: Option<String>,
+}
+
+/// Why `path` would write outside the extraction directory, if it would.
+pub(crate) fn path_risk(path: &str) -> Option<&'static str> {
+    let normalized = path.replace('\\', "/");
+    let bytes = normalized.as_bytes();
+    if normalized.starts_with('/') {
+        return Some("absolute path");
+    }
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Some("drive-letter path");
+    }
+    if normalized.split('/').any(|part| part == "..") {
+        return Some("parent-directory (..) component");
+    }
+    None
+}
+
+/// `path` with `.` and `..` components resolved lexically; leading `..`
+/// components that climb out of the root are kept.
+fn lexical_resolve(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let mut parts: Vec<&str> = Vec::new();
+    for part in normalized.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|p| *p != "..") => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    let joined = parts.join("/");
+    if normalized.starts_with('/') {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
+
+/// Whether a link at `entry_path` that points at `target` leaves the
+/// extraction root. `relative_to_entry` is true for symbolic links (resolved
+/// from the link's own directory) and false for hard links (from the root).
+pub(crate) fn link_escapes(entry_path: &str, target: &str, relative_to_entry: bool) -> bool {
+    let target = target.replace('\\', "/");
+    if target.starts_with('/') || path_risk(&target) == Some("drive-letter path") {
+        return true;
+    }
+    let mut depth: i64 = 0;
+    if relative_to_entry {
+        let entry = entry_path.replace('\\', "/");
+        let parts: Vec<&str> = entry
+            .split('/')
+            .filter(|p| !p.is_empty() && *p != ".")
+            .collect();
+        depth = parts.len().saturating_sub(1) as i64;
+    }
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            _ => depth += 1,
+        }
+    }
+    false
+}
+
+/// Build an [`ArchiveEntry`] from raw facts and run the checks every format
+/// shares (type by extension, double extension, traversal, link escape,
+/// device nodes, setuid bits, hidden and suspicious names).
+pub(crate) fn build_entry(
+    spec: EntrySpec,
+    indicators: &mut SuspiciousArchiveIndicators,
+) -> ArchiveEntry {
+    let path = spec.path;
+    let normalized = path.replace('\\', "/");
+    let file_name = normalized
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let is_directory = spec.kind == EntryKind::Directory;
+    let compression_ratio = saved_ratio(spec.size_compressed, spec.size_uncompressed);
+
+    let file_type = if is_directory {
+        FileType::Unknown
+    } else {
+        determine_file_type(&file_name, &path)
+    };
+    let mut risk_indicators = Vec::new();
+    let mut flag = |indicator_type: &str, description: String, severity: RiskLevel| {
+        risk_indicators.push(RiskIndicator {
+            indicator_type: indicator_type.to_string(),
+            description,
+            severity,
+        });
+    };
+
+    if matches!(file_type, FileType::Executable) {
+        indicators.has_executable = true;
+        indicators.executable_count += 1;
+        flag(
+            "Executable",
+            "Archive contains executable file".to_string(),
+            RiskLevel::Medium,
+        );
+    }
+
+    if matches!(file_type, FileType::Script) {
+        indicators.has_script = true;
+        indicators.script_count += 1;
+        flag(
+            "Script",
+            "Archive contains script file".to_string(),
+            RiskLevel::Medium,
+        );
+    }
+
+    if has_double_extension(&file_name) {
+        indicators.has_double_extension = true;
+        flag(
+            "DoubleExtension",
+            "File has double extension (possible masquerading)".to_string(),
+            RiskLevel::High,
+        );
+    }
+
+    if let Some(why) = path_risk(&path) {
+        indicators.has_path_traversal = true;
+        flag(
+            "PathTraversal",
+            format!("Entry path escapes the extraction directory: {why}"),
+            RiskLevel::Critical,
+        );
+    }
+
+    match (spec.kind, spec.link_target.as_deref()) {
+        (EntryKind::Symlink | EntryKind::Hardlink, Some(target)) => {
+            let relative = spec.kind == EntryKind::Symlink;
+            if link_escapes(&path, target, relative) {
+                indicators.has_path_traversal = true;
+                flag(
+                    "LinkEscape",
+                    format!("Link points outside the extraction directory: {target}"),
+                    RiskLevel::Critical,
+                );
+            } else {
+                flag("Link", format!("Link to {target}"), RiskLevel::Low);
+            }
+        }
+        (EntryKind::Symlink | EntryKind::Hardlink, None) => {
+            flag("Link", "Link entry".to_string(), RiskLevel::Low);
+        }
+        (EntryKind::CharDevice | EntryKind::BlockDevice, _) => {
+            indicators
+                .suspicious_patterns
+                .push(format!("device node: {path}"));
+            flag(
+                "DeviceNode",
+                "Device node entry (extracting as root would create it)".to_string(),
+                RiskLevel::High,
+            );
+        }
+        (EntryKind::Fifo, _) => {
+            flag("Fifo", "Named pipe entry".to_string(), RiskLevel::Medium);
+        }
+        _ => {}
+    }
+
+    if let Some(mode) = spec.permissions {
+        if mode & 0o4000 != 0 {
+            indicators
+                .suspicious_patterns
+                .push(format!("setuid: {path}"));
+            flag(
+                "Setuid",
+                format!("Setuid bit set (mode {:o})", mode & 0o7777),
+                RiskLevel::High,
+            );
+        }
+        if mode & 0o2000 != 0 && !is_directory {
+            indicators
+                .suspicious_patterns
+                .push(format!("setgid: {path}"));
+            flag(
+                "Setgid",
+                format!("Setgid bit set (mode {:o})", mode & 0o7777),
+                RiskLevel::High,
+            );
+        }
+    }
+
+    let hidden = normalized
+        .split('/')
+        .any(|part| part.starts_with('.') && part != "." && part != "..");
+    if hidden {
+        indicators.has_hidden_files = true;
+        flag(
+            "HiddenFile",
+            "Hidden file detected".to_string(),
+            RiskLevel::Low,
+        );
+    }
+
+    if is_suspicious_filename(&file_name) {
+        indicators.has_suspicious_names = true;
+        indicators.suspicious_patterns.push(file_name.clone());
+    }
+
+    ArchiveEntry {
+        path,
+        file_name,
+        is_directory,
+        size_compressed: spec.size_compressed,
+        size_uncompressed: spec.size_uncompressed,
+        compression_method: spec.method,
+        compression_ratio,
+        last_modified: spec.last_modified,
+        crc32: spec.crc32,
+        is_encrypted: spec.is_encrypted,
+        is_text: false, // Would need content analysis
+        permissions: spec.permissions,
+        comment: spec.comment,
+        file_type,
+        risk_indicators,
+        entry_kind: spec.kind,
+        link_target: spec.link_target,
+    }
+}
+
+/// Turn a list of entries into the final analysis: nested archives, the
+/// security analysis and the risk score.
+pub(crate) fn finish_analysis(
+    archive_type: ArchiveType,
+    metadata: ArchiveMetadata,
+    entries: Vec<ArchiveEntry>,
+    mut suspicious_indicators: SuspiciousArchiveIndicators,
+    notes: Vec<String>,
+) -> Result<ArchiveAnalysis> {
+    let nested_archives = entries
+        .iter()
+        .filter(|e| matches!(e.file_type, FileType::Archive))
+        .map(|e| NestedArchiveInfo {
+            path: e.path.clone(),
+            archive_type: detect_archive_type(&e.file_name),
+            size: e.size_uncompressed,
+            depth: 1,
+        })
+        .collect();
+
+    let compressed = !matches!(archive_type, ArchiveType::Tar);
+    let security_analysis = perform_security_analysis(&entries, &metadata, compressed)?;
     suspicious_indicators.risk_score =
         calculate_risk_score(&suspicious_indicators, &security_analysis);
 
     Ok(ArchiveAnalysis {
-        archive_type: ArchiveType::Zip,
+        archive_type,
         metadata,
         entries,
         security_analysis,
         suspicious_indicators,
         nested_archives,
+        notes,
     })
+}
+
+/// Unix mode of a ZIP entry including the setuid/setgid/sticky bits, which
+/// `ZipFile::unix_mode` clears.
+fn zip_mode<R: Read>(entry: &zip::read::ZipFile<'_, R>) -> Option<u32> {
+    if entry.system() == zip::System::Unix {
+        let mode = entry.external_attributes() >> 16;
+        if mode != 0 {
+            return Some(mode);
+        }
+    }
+    entry.unix_mode()
+}
+
+/// Largest symlink target read from an archive (bytes).
+const MAX_LINK_TARGET: u64 = 4096;
+
+/// The target of a symlink entry (its data), when it is small enough to read.
+fn zip_symlink_target<R: Read + Seek>(archive: &mut ZipArchive<R>, index: usize) -> Option<String> {
+    let (is_link, size, encrypted) = {
+        let entry = archive.by_index_raw(index).ok()?;
+        let mode = zip_mode(&entry)?;
+        (
+            mode & 0o170_000 == 0o120_000,
+            entry.size(),
+            entry.encrypted(),
+        )
+    };
+    if !is_link || encrypted || size == 0 || size > MAX_LINK_TARGET {
+        return None;
+    }
+    let entry = archive.by_index(index).ok()?;
+    let mut data = Vec::new();
+    entry.take(MAX_LINK_TARGET).read_to_end(&mut data).ok()?;
+    Some(String::from_utf8_lossy(&data).into_owned())
 }
 
 fn extract_zip_metadata<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<ArchiveMetadata> {
     let mut total_compressed = 0u64;
     let mut total_uncompressed = 0u64;
 
-    for i in 0..archive.len() {
+    for i in 0..archive.len().min(MAX_ENTRIES) {
         if let Ok(entry) = archive.by_index_raw(i) {
-            total_compressed += entry.compressed_size();
-            total_uncompressed += entry.size();
+            total_compressed = total_compressed.saturating_add(entry.compressed_size());
+            total_uncompressed = total_uncompressed.saturating_add(entry.size());
         }
     }
 
-    let compression_ratio = if total_uncompressed > 0 {
-        1.0 - (total_compressed as f64 / total_uncompressed as f64)
-    } else {
-        0.0
-    };
+    let compression_ratio = saved_ratio(total_compressed, total_uncompressed);
 
     Ok(ArchiveMetadata {
         total_entries: archive.len(),
         total_size_compressed: total_compressed,
         total_size_uncompressed: total_uncompressed,
         compression_ratio,
-        has_encryption: false, // Check entries for encryption
+        has_encryption: false, // set from the entries by the caller
         has_password: false,
         comment: if archive.comment().is_empty() {
             None
         } else {
-            Some(String::from_utf8_lossy(archive.comment()).to_string())
+            Some(capped_comment(archive.comment()))
         },
         created_by: None, // Would need to parse ZIP extra fields
         creation_date: None,
@@ -243,24 +705,23 @@ fn extract_zip_metadata<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<A
 
 fn analyze_zip_entry<R: std::io::Read>(
     entry: &mut zip::read::ZipFile<'_, R>,
+    link_target: Option<String>,
     indicators: &mut SuspiciousArchiveIndicators,
 ) -> Result<ArchiveEntry> {
     let path = entry.name()?.into_owned();
-    let file_name = Path::new(&path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    let is_directory = entry.is_dir();
-    let size_compressed = entry.compressed_size();
-    let size_uncompressed = entry.size();
-    let compression_ratio = if size_uncompressed > 0 {
-        1.0 - (size_compressed as f64 / size_uncompressed as f64)
+    let mode = zip_mode(entry);
+    let permissions = mode.map(|m| m & 0o7777);
+    let kind = if entry.is_dir() {
+        EntryKind::Directory
     } else {
-        0.0
+        match mode.map(|m| m & 0o170_000) {
+            Some(0o120_000) => EntryKind::Symlink,
+            Some(0o020_000) => EntryKind::CharDevice,
+            Some(0o060_000) => EntryKind::BlockDevice,
+            Some(0o010_000) => EntryKind::Fifo,
+            _ => EntryKind::File,
+        }
     };
-
-    let compression_method = format!("{:?}", entry.compression());
     let last_modified = entry.last_modified().map(|dt| {
         format!(
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
@@ -272,94 +733,28 @@ fn analyze_zip_entry<R: std::io::Read>(
             dt.second()
         )
     });
-
-    let crc32 = Some(entry.crc32());
-    let is_encrypted = entry.encrypted();
-    let permissions = entry.unix_mode();
     let comment = if entry.comment().is_empty() {
         None
     } else {
-        Some(entry.comment().to_string())
+        Some(capped_comment(entry.comment().as_bytes()))
     };
 
-    // Determine file type and check for suspicious patterns
-    let file_type = determine_file_type(&file_name, &path);
-    let mut risk_indicators = Vec::new();
-
-    // Check for suspicious patterns
-    if matches!(file_type, FileType::Executable) {
-        indicators.has_executable = true;
-        indicators.executable_count += 1;
-        risk_indicators.push(RiskIndicator {
-            indicator_type: "Executable".to_string(),
-            description: "Archive contains executable file".to_string(),
-            severity: RiskLevel::Medium,
-        });
-    }
-
-    if matches!(file_type, FileType::Script) {
-        indicators.has_script = true;
-        indicators.script_count += 1;
-        risk_indicators.push(RiskIndicator {
-            indicator_type: "Script".to_string(),
-            description: "Archive contains script file".to_string(),
-            severity: RiskLevel::Medium,
-        });
-    }
-
-    // Check for double extensions
-    if has_double_extension(&file_name) {
-        indicators.has_double_extension = true;
-        risk_indicators.push(RiskIndicator {
-            indicator_type: "DoubleExtension".to_string(),
-            description: "File has double extension (possible masquerading)".to_string(),
-            severity: RiskLevel::High,
-        });
-    }
-
-    // Check for path traversal
-    if path.contains("..") || path.starts_with('/') || path.contains("\\..") {
-        indicators.has_path_traversal = true;
-        risk_indicators.push(RiskIndicator {
-            indicator_type: "PathTraversal".to_string(),
-            description: "Path contains directory traversal sequences".to_string(),
-            severity: RiskLevel::Critical,
-        });
-    }
-
-    // Check for hidden files
-    if file_name.starts_with('.') || path.contains("/.") {
-        indicators.has_hidden_files = true;
-        risk_indicators.push(RiskIndicator {
-            indicator_type: "HiddenFile".to_string(),
-            description: "Hidden file detected".to_string(),
-            severity: RiskLevel::Low,
-        });
-    }
-
-    // Check for suspicious names
-    if is_suspicious_filename(&file_name) {
-        indicators.has_suspicious_names = true;
-        indicators.suspicious_patterns.push(file_name.clone());
-    }
-
-    Ok(ArchiveEntry {
-        path,
-        file_name,
-        is_directory,
-        size_compressed,
-        size_uncompressed,
-        compression_method,
-        compression_ratio,
-        last_modified,
-        crc32,
-        is_encrypted,
-        is_text: false, // Would need content analysis
-        permissions,
-        comment,
-        file_type,
-        risk_indicators,
-    })
+    Ok(build_entry(
+        EntrySpec {
+            path,
+            kind,
+            size_compressed: entry.compressed_size(),
+            size_uncompressed: entry.size(),
+            method: format!("{:?}", entry.compression()),
+            last_modified,
+            crc32: Some(entry.crc32()),
+            is_encrypted: entry.encrypted(),
+            permissions,
+            comment,
+            link_target,
+        },
+        indicators,
+    ))
 }
 
 fn determine_file_type(file_name: &str, _path: &str) -> FileType {
@@ -464,9 +859,17 @@ fn is_suspicious_filename(file_name: &str) -> bool {
         "rootkit",
     ];
 
-    suspicious_keywords
-        .iter()
-        .any(|keyword| lower_name.contains(keyword))
+    // Short keywords ("bot", "rat") match whole words only, so "operation" and
+    // "elaborate" are not flagged.
+    suspicious_keywords.iter().any(|keyword| {
+        if keyword.len() <= 3 {
+            lower_name
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|token| token == *keyword)
+        } else {
+            lower_name.contains(keyword)
+        }
+    })
 }
 
 fn detect_archive_type(file_name: &str) -> ArchiveType {
@@ -494,6 +897,7 @@ fn detect_archive_type(file_name: &str) -> ArchiveType {
 fn perform_security_analysis(
     entries: &[ArchiveEntry],
     metadata: &ArchiveMetadata,
+    compressed: bool,
 ) -> Result<ArchiveSecurityAnalysis> {
     let malicious_patterns = Vec::new();
     let mut suspicious_files = Vec::new();
@@ -502,17 +906,34 @@ fn perform_security_analysis(
 
     // Check for malicious patterns
     for entry in entries {
-        // Check for path traversal
-        if entry.path.contains("..") || entry.path.starts_with('/') {
-            path_traversal_risks.push(PathTraversalRisk {
-                entry_path: entry.path.clone(),
-                resolved_path: "Outside archive root".to_string(),
-                risk_type: "Directory Traversal".to_string(),
-            });
+        // Path traversal and links that leave the extraction root
+        for indicator in &entry.risk_indicators {
+            if indicator.indicator_type == "PathTraversal"
+                || indicator.indicator_type == "LinkEscape"
+            {
+                path_traversal_risks.push(PathTraversalRisk {
+                    entry_path: entry.path.clone(),
+                    resolved_path: if indicator.indicator_type == "LinkEscape" {
+                        entry.link_target.clone().unwrap_or_default()
+                    } else {
+                        lexical_resolve(&entry.path)
+                    },
+                    risk_type: if indicator.indicator_type == "LinkEscape" {
+                        "Link Escape".to_string()
+                    } else {
+                        "Directory Traversal".to_string()
+                    },
+                });
+            }
         }
 
-        // Check for suspicious files
-        if !entry.risk_indicators.is_empty() {
+        // Suspicious files: a hidden file or an ordinary link alone (Low) is
+        // not worth raising the archive's risk level.
+        if entry
+            .risk_indicators
+            .iter()
+            .any(|r| !matches!(r.severity, RiskLevel::Low))
+        {
             let max_risk = entry
                 .risk_indicators
                 .iter()
@@ -538,7 +959,7 @@ fn perform_security_analysis(
         }
 
         // Check for hidden content
-        if entry.file_name.starts_with('.') {
+        if entry.file_name.starts_with('.') && entry.file_name != "." && entry.file_name != ".." {
             hidden_content.push(HiddenContent {
                 content_type: "Hidden File".to_string(),
                 location: entry.path.clone(),
@@ -548,7 +969,7 @@ fn perform_security_analysis(
     }
 
     // Check for zip bomb indicators
-    let zip_bomb_indicators = check_zip_bomb(entries, metadata);
+    let zip_bomb_indicators = check_zip_bomb(entries, metadata, compressed);
 
     // Determine overall risk
     let overall_risk = determine_overall_risk(
@@ -567,7 +988,18 @@ fn perform_security_analysis(
     })
 }
 
-fn check_zip_bomb(entries: &[ArchiveEntry], metadata: &ArchiveMetadata) -> ZipBombIndicators {
+/// Uncompressed size below which a high ratio is not worth a bomb flag (10 MiB).
+const BOMB_MIN_BYTES: u64 = 10 * 1024 * 1024;
+/// Uncompressed total that is a bomb risk by itself (4 GiB).
+const BOMB_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Bomb rules compare compressed and uncompressed sizes, so they apply only
+/// to compressed formats; a plain tar of any size is not a bomb.
+fn check_zip_bomb(
+    entries: &[ArchiveEntry],
+    metadata: &ArchiveMetadata,
+    compressed: bool,
+) -> ZipBombIndicators {
     let mut indicators = ZipBombIndicators {
         is_potential_bomb: false,
         compression_ratio: metadata.compression_ratio,
@@ -576,14 +1008,27 @@ fn check_zip_bomb(entries: &[ArchiveEntry], metadata: &ArchiveMetadata) -> ZipBo
         quine_detection: false,
     };
 
-    // Check for extreme compression ratio
-    if metadata.compression_ratio > 0.99 {
+    // 100:1 or better over the whole archive, and big enough to matter
+    // (a few KiB of zeros always compresses that well).
+    if compressed
+        && metadata.compression_ratio > 0.99
+        && metadata.total_size_uncompressed >= BOMB_MIN_BYTES
+    {
+        indicators.is_potential_bomb = true;
+    }
+    if compressed && metadata.total_size_uncompressed >= BOMB_TOTAL_BYTES {
         indicators.is_potential_bomb = true;
     }
 
     // Check for suspicious file sizes
     for entry in entries {
-        if entry.size_compressed < 1000 && entry.size_uncompressed > 1_000_000_000 {
+        let extreme_ratio = compressed
+            && entry.size_compressed > 0
+            && entry.size_uncompressed / entry.size_compressed >= 1000
+            && entry.size_uncompressed >= BOMB_MIN_BYTES;
+        if (compressed && entry.size_compressed < 1000 && entry.size_uncompressed > 1_000_000_000)
+            || extreme_ratio
+        {
             indicators.is_potential_bomb = true;
             indicators.recursive_entries.push(entry.path.clone());
         }
@@ -591,16 +1036,6 @@ fn check_zip_bomb(entries: &[ArchiveEntry], metadata: &ArchiveMetadata) -> ZipBo
         // Check for nested archives
         if matches!(entry.file_type, FileType::Archive) {
             indicators.nesting_level += 1;
-        }
-    }
-
-    // Check for quine patterns (archive containing itself)
-    for entry in entries {
-        if entry.file_name.ends_with(".zip")
-            && entry.size_uncompressed == metadata.total_size_uncompressed
-        {
-            indicators.quine_detection = true;
-            indicators.is_potential_bomb = true;
         }
     }
 

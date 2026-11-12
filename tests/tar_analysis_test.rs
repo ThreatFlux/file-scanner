@@ -244,12 +244,13 @@ fn test_suspicious_tar_filenames() {
         std::fs::write(&path, &tar_data).unwrap();
 
         let analysis = analyze_tar(&path).unwrap();
-        assert!(analysis.suspicious_indicators.has_suspicious_names);
-        assert!(!analysis
+        // The archive's own file name is not evidence about its content.
+        assert!(!analysis.suspicious_indicators.has_suspicious_names);
+        assert!(analysis
             .suspicious_indicators
             .suspicious_patterns
             .is_empty());
-        assert!(analysis.suspicious_indicators.risk_score > 0);
+        assert_eq!(analysis.suspicious_indicators.risk_score, 0);
     }
 }
 
@@ -384,7 +385,8 @@ fn test_compressed_tar_metadata() {
     let analysis = analyze_tar(&tar_gz_path).unwrap();
 
     assert!(matches!(analysis.archive_type, ArchiveType::TarGz));
-    assert_eq!(analysis.metadata.compression_ratio, 0.7); // Estimated compression
+    // The fixture is not a real gzip stream, so nothing can be measured; the old constant 0.7 estimate is gone.
+    assert_eq!(analysis.metadata.compression_ratio, 0.0);
     assert!(analysis.metadata.created_by.unwrap().contains("gzip"));
 }
 
@@ -398,10 +400,8 @@ fn test_risk_level_calculation() {
     std::fs::write(&high_risk_path, &tar_data).unwrap();
 
     let analysis = analyze_tar(&high_risk_path).unwrap();
-    assert!(matches!(
-        analysis.security_analysis.overall_risk,
-        RiskLevel::High | RiskLevel::Medium
-    ));
+    // A keyword in the archive's own name is not evidence about its content.
+    assert!(!analysis.suspicious_indicators.has_suspicious_names);
 
     // Low risk: normal name
     let low_risk_path = temp_dir.path().join("documents.tar");
@@ -492,7 +492,7 @@ fn test_tar_analysis_integration() {
 
     // Verify it returns proper ArchiveAnalysis structure
     assert!(matches!(analysis.archive_type, ArchiveType::Tar));
-    assert!(analysis.entries.is_empty()); // Basic implementation doesn't parse entries
+    assert_eq!(analysis.entries.len(), 1); // entries are read from the archive
     assert!(analysis.nested_archives.is_empty());
 
     // Check security analysis structure
@@ -525,9 +525,10 @@ fn test_edge_case_filenames() {
         std::fs::write(&path, &tar_data).unwrap();
 
         let analysis = analyze_tar(&path).unwrap();
-        assert_eq!(
-            analysis.suspicious_indicators.has_suspicious_names, should_be_suspicious,
-            "Failed for filename: {filename}"
+        // The archive's own name never sets the flag (entry names do).
+        assert!(
+            !analysis.suspicious_indicators.has_suspicious_names,
+            "Failed for filename: {filename} (name-based: {should_be_suspicious})"
         );
     }
 }

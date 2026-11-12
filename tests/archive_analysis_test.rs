@@ -80,6 +80,8 @@ fn test_archive_analysis_serialization() {
             comment: None,
             file_type: FileType::Text,
             risk_indicators: vec![],
+            entry_kind: EntryKind::File,
+            link_target: None,
         }],
         security_analysis: ArchiveSecurityAnalysis {
             overall_risk: RiskLevel::Low,
@@ -97,6 +99,7 @@ fn test_archive_analysis_serialization() {
         },
         suspicious_indicators: SuspiciousArchiveIndicators::default(),
         nested_archives: vec![],
+        notes: vec![],
     };
 
     let json = serde_json::to_string(&analysis).unwrap();
