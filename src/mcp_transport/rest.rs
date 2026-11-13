@@ -493,6 +493,29 @@ fn parse_scope(
     }
 }
 
+/// The scope named in a non-empty `/cache/clear` body. Only a JSON object counts:
+/// serde's struct deserializer would also take an array as the fields in order.
+fn parse_clear_body(
+    body: &[u8],
+) -> Result<Option<crate::mcp_server::tools_services::ClearScope>, String> {
+    let refuse = |detail: String| {
+        format!(
+            "The body must be a JSON object with at most one field, \"scope\" ({SCOPE_VALUES}), \
+             for example {{\"scope\": \"analysis\"}}: {detail}. Nothing was cleared."
+        )
+    };
+    let first = body.iter().find(|b| !b.is_ascii_whitespace());
+    if first != Some(&b'{') {
+        return Err(refuse("it is not a JSON object".to_string()));
+    }
+    let parsed: CacheClearBody = serde_json::from_slice(body).map_err(|e| refuse(e.to_string()))?;
+    parsed
+        .scope
+        .filter(|s| !s.is_empty())
+        .map(|s| parse_scope(&s, "body"))
+        .transpose()
+}
+
 /// The scope a `POST /cache/clear` asks for, from the query string and the
 /// optional JSON body. Any refusal clears nothing.
 fn requested_clear_scope(
@@ -508,17 +531,7 @@ fn requested_clear_scope(
     let from_body = if body.iter().all(u8::is_ascii_whitespace) {
         None
     } else {
-        let parsed: CacheClearBody = serde_json::from_slice(body).map_err(|e| {
-            format!(
-                "The body must be a JSON object with at most one field, \"scope\" ({SCOPE_VALUES}), \
-                 for example {{\"scope\": \"analysis\"}}: {e}. Nothing was cleared."
-            )
-        })?;
-        parsed
-            .scope
-            .filter(|s| !s.is_empty())
-            .map(|s| parse_scope(&s, "body"))
-            .transpose()?
+        parse_clear_body(body)?
     };
     match (from_query, from_body) {
         (Some(q), Some(b)) if std::mem::discriminant(&q) != std::mem::discriminant(&b) => {

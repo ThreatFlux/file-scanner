@@ -403,39 +403,72 @@ pub fn unsafe_entry_findings(loaded: &LoadedPackage) -> Vec<SourceFinding> {
         .collect()
 }
 
+/// How many archive entries have an unsafe finding, and how many findings that is
+/// (one entry can have an unsafe path and an unsafe link target).
+#[derive(Debug, Default, Clone, Copy)]
+struct UnsafeCounts {
+    entries: usize,
+    findings: usize,
+}
+
+/// Count the findings of one entry, and keep as many as still fit under the cap.
+fn record_unsafe(found: Vec<UnsafeEntry>, kept: &mut Vec<UnsafeEntry>, counts: &mut UnsafeCounts) {
+    if found.is_empty() {
+        return;
+    }
+    counts.entries += 1;
+    counts.findings += found.len();
+    let room = MAX_UNSAFE_ENTRIES.saturating_sub(kept.len());
+    kept.extend(found.into_iter().take(room));
+}
+
+/// The sentence that says findings were cut, empty when none were.
+fn unsafe_cap_sentence(findings: usize, kept: usize) -> String {
+    let unlisted = findings.saturating_sub(kept);
+    if unlisted == 0 {
+        return String::new();
+    }
+    let verb = if unlisted == 1 { "is" } else { "are" };
+    format!(" Only the first {kept} are listed as findings; {unlisted} more {verb} not listed.")
+}
+
 /// One note for a package archive's unsafe entries, `None` when there are none.
-/// The count is the true number in the archive, which can be more than the
-/// `MAX_UNSAFE_ENTRIES` that are kept and listed as findings.
+/// The counts are the true numbers in the archive, which can be more than the
+/// `MAX_UNSAFE_ENTRIES` findings that are kept and listed. When every unsafe entry
+/// has one finding the two numbers are the same and the note names only entries.
 pub fn unsafe_entry_note(loaded: &LoadedPackage) -> Option<String> {
-    let total = loaded.unsafe_entries_total.max(loaded.unsafe_entries.len());
-    if total == 0 {
+    let kept = loaded.unsafe_entries.len();
+    let findings = loaded.unsafe_findings_total.max(kept);
+    if findings == 0 {
         return None;
     }
+    let entries = match loaded.unsafe_entries_total {
+        0 => findings,
+        n => n.min(findings),
+    };
     let shown: Vec<String> = loaded
         .unsafe_entries
         .iter()
         .take(5)
         .map(UnsafeEntry::describe)
         .collect();
-    let more = total.saturating_sub(shown.len());
+    let more = findings.saturating_sub(shown.len());
     let tail = if more > 0 {
         format!(" and {more} more")
     } else {
         String::new()
     };
-    let unlisted = total.saturating_sub(loaded.unsafe_entries.len());
-    let cap = if unlisted > 0 {
-        let verb = if unlisted == 1 { "is" } else { "are" };
-        format!(
-            " Only the first {} are listed as findings; {unlisted} more {verb} not listed.",
-            loaded.unsafe_entries.len()
-        )
+    let counted = if entries == findings {
+        format!("{entries} entries leave the package directory or link outside it")
     } else {
-        String::new()
+        format!(
+            "{entries} entries leave the package directory or link outside it ({findings} findings, because an entry can have an unsafe path and an unsafe link target)"
+        )
     };
     Some(format!(
-        "UNSAFE ARCHIVE ENTRIES: {total} entries leave the package directory or link outside it: {}{tail}. A tarball made by npm pack or an sdist never has such entries; extracting it could write outside the target directory.{cap}",
-        shown.join("; ")
+        "UNSAFE ARCHIVE ENTRIES: {counted}: {}{tail}. A tarball made by npm pack or an sdist never has such entries; extracting it could write outside the target directory.{}",
+        shown.join("; "),
+        unsafe_cap_sentence(findings, kept)
     ))
 }
 
@@ -461,8 +494,12 @@ pub struct LoadedPackage {
     /// Archive entries with `..` or absolute paths, and links (tar and zip only).
     /// At most `MAX_UNSAFE_ENTRIES` are kept; see `unsafe_entries_total`.
     pub unsafe_entries: Vec<UnsafeEntry>,
-    /// How many unsafe entries the archive holds, counting those past the cap.
+    /// How many archive entries have at least one unsafe finding, counting those past
+    /// the cap.
     pub unsafe_entries_total: usize,
+    /// How many unsafe findings the archive holds, counting those past the cap. An
+    /// entry with an unsafe path and an unsafe link target has two.
+    pub unsafe_findings_total: usize,
 }
 
 impl LoadedFile {
@@ -560,7 +597,7 @@ struct Listed {
 pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<LoadedPackage> {
     let mut notes = Vec::new();
     let mut unsafe_entries: Vec<UnsafeEntry> = Vec::new();
-    let mut unsafe_total = 0usize;
+    let mut unsafe_counts = UnsafeCounts::default();
     let (listed, listing_truncated, ignored) = match container {
         ContainerKind::Directory => list_dir(path, &mut notes)?,
         ContainerKind::TarGz | ContainerKind::Tar => list_tar(
@@ -568,9 +605,9 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
             container,
             &mut notes,
             &mut unsafe_entries,
-            &mut unsafe_total,
+            &mut unsafe_counts,
         )?,
-        ContainerKind::Zip => list_zip(path, &mut unsafe_entries, &mut unsafe_total)?,
+        ContainerKind::Zip => list_zip(path, &mut unsafe_entries, &mut unsafe_counts)?,
     };
     if ignored > 0 {
         notes.push(format!(
@@ -744,7 +781,8 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
         files_partial,
         files_skipped,
         unsafe_entries,
-        unsafe_entries_total: unsafe_total,
+        unsafe_entries_total: unsafe_counts.entries,
+        unsafe_findings_total: unsafe_counts.findings,
     })
 }
 
@@ -1234,7 +1272,7 @@ fn list_tar(
     container: ContainerKind,
     notes: &mut Vec<String>,
     unsafe_entries: &mut Vec<UnsafeEntry>,
-    unsafe_total: &mut usize,
+    unsafe_counts: &mut UnsafeCounts,
 ) -> Result<Listing> {
     let mut listed = Vec::new();
     let mut truncated = false;
@@ -1255,12 +1293,9 @@ fn list_tar(
                 truncated = true;
                 return Ok(false);
             }
-            // Every unsafe entry is counted; only the first ones are kept.
+            // Every unsafe entry is counted; only the first findings are kept.
             let found = classify_unsafe(&item.path, item.kind, item.link.clone());
-            *unsafe_total += found.len();
-            if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
-                unsafe_entries.extend(found);
-            }
+            record_unsafe(found, unsafe_entries, unsafe_counts);
             if !item.kind.is_file() {
                 // Directories, links and devices carry no package content.
                 return Ok(true);
@@ -1330,22 +1365,21 @@ fn open_zip_for_listing(path: &Path) -> Result<zip::ZipArchive<File>> {
 }
 
 /// Record an entry name that is an unsafe path, keeping at most
-/// `MAX_UNSAFE_ENTRIES` of them.
+/// `MAX_UNSAFE_ENTRIES` findings.
 fn note_unsafe_zip_name(
     raw: &str,
     unsafe_entries: &mut Vec<UnsafeEntry>,
-    unsafe_total: &mut usize,
+    unsafe_counts: &mut UnsafeCounts,
 ) {
-    if let Some(kind) = unsafe_path_kind(raw) {
-        *unsafe_total += 1;
-        if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
-            unsafe_entries.push(UnsafeEntry {
-                path: raw.to_string(),
-                kind,
-                target: None,
-            });
-        }
-    }
+    let found: Vec<UnsafeEntry> = unsafe_path_kind(raw)
+        .map(|kind| UnsafeEntry {
+            path: raw.to_string(),
+            kind,
+            target: None,
+        })
+        .into_iter()
+        .collect();
+    record_unsafe(found, unsafe_entries, unsafe_counts);
 }
 
 /// What the zip listing has gathered so far.
@@ -1377,7 +1411,7 @@ impl ZipListing {
 fn list_zip(
     path: &Path,
     unsafe_entries: &mut Vec<UnsafeEntry>,
-    unsafe_total: &mut usize,
+    unsafe_counts: &mut UnsafeCounts,
 ) -> Result<Listing> {
     let mut zip = open_zip_for_listing(path)?;
     let mut state = ZipListing::default();
@@ -1387,7 +1421,7 @@ fn list_zip(
             continue;
         }
         let raw = entry.name()?.to_string();
-        note_unsafe_zip_name(&raw, unsafe_entries, unsafe_total);
+        note_unsafe_zip_name(&raw, unsafe_entries, unsafe_counts);
         let name = normalise_entry_path(&raw);
         if is_metadata_entry(&name) && is_appledouble(&name, &read_head(&mut entry)) {
             state.ignored += 1;

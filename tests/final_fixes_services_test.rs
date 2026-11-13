@@ -192,6 +192,40 @@ async fn cache_clear_reads_the_scope_from_the_query_or_the_body() {
     }
 }
 
+#[tokio::test]
+async fn cache_clear_refuses_every_body_that_is_not_a_json_object() {
+    let bodies = [
+        "[null]",
+        r#"["all"]"#,
+        r#"["strings"]"#,
+        r#"["analysis"]"#,
+        "[]",
+        r#"[{"scope":"strings"}]"#,
+        r#""all""#,
+        "5",
+        "true",
+        "null",
+        r#" [null]"#,
+        r#"{"scope":"all","scope":"strings"}"#,
+    ];
+    for body in bodies {
+        let f = fixture(false);
+        fill(&f).await;
+        let before = held(&f).await;
+        let (status, reply) = send(&f.app, Method::POST, "/cache/clear", Some(body)).await;
+        let label = format!("{body}: {status} {reply}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}");
+        assert!(
+            reply["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Nothing was cleared."),
+            "{label}"
+        );
+        assert_eq!(held(&f).await, before, "a 400 cleared something: {label}");
+    }
+}
+
 /// Track `value` in `path` with a hash, as `search_strings` does.
 fn track(f: &Fixture, path: &str, hash: &str, value: &str, offsets: &[usize]) {
     let items: Vec<(String, usize)> = offsets.iter().map(|o| (value.to_string(), *o)).collect();

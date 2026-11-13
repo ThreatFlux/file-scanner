@@ -278,3 +278,112 @@ fn one_unlisted_unsafe_entry_reads_is_not_listed() {
     let note = analyze_npm_package(&npm).unwrap().input.notes.join(" ");
     assert!(note.contains("2 more are not listed."), "{note}");
 }
+
+/// A symlink entry whose own name and whose target both leave the package: two findings.
+fn two_finding_header(name: &str) -> tar::Header {
+    let mut h = raw_header(name, 0);
+    h.set_entry_type(tar::EntryType::Symlink);
+    h.set_link_name("../../target").unwrap();
+    h.set_cksum();
+    h
+}
+
+/// A package.json, `single` traversal files (one finding each), then `double`
+/// symlinks with an unsafe name and an unsafe target (two findings each).
+fn tgz_with_mixed_entries(single: usize, double: usize, first_double: Option<&str>) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(PKG.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    builder
+        .append_data(&mut header, "package/package.json", PKG.as_bytes())
+        .unwrap();
+    for n in 0..single {
+        let h = raw_header(&format!("package/../../one{n:02}.txt"), 2);
+        builder.append(&h, &b"x\n"[..]).unwrap();
+    }
+    for n in 0..double {
+        let name = match (n, first_double) {
+            (0, Some(first)) => first.to_string(),
+            _ => format!("../two{n:02}"),
+        };
+        builder
+            .append(&two_finding_header(&name), &b""[..])
+            .unwrap();
+    }
+    let tar_bytes = builder.into_inner().unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&tar_bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn unsafe_finding_count(analysis: &file_scanner::npm_analysis::NpmPackageAnalysis) -> usize {
+    analysis
+        .source_findings
+        .iter()
+        .filter(|f| f.category == "unsafe-path")
+        .count()
+}
+
+#[test]
+fn entries_with_an_unsafe_path_and_an_unsafe_target_are_counted_as_entries_and_as_findings() {
+    let dir = TempDir::new().unwrap();
+    let npm = write(
+        dir.path(),
+        "t-1.0.0.tgz",
+        &tgz_with_mixed_entries(0, 80, None),
+    );
+    let analysis = analyze_npm_package(&npm).unwrap();
+    let note = analysis.input.notes.join(" ");
+    assert!(
+        note.contains("UNSAFE ARCHIVE ENTRIES: 80 entries")
+            && note.contains("(160 findings, because an entry can have an unsafe path and an unsafe link target)"),
+        "{note}"
+    );
+    assert!(note.contains("and 155 more"), "{note}");
+    assert!(
+        note.contains("Only the first 50 are listed as findings; 110 more are not listed."),
+        "{note}"
+    );
+    assert_eq!(unsafe_finding_count(&analysis), 50);
+}
+
+#[test]
+fn an_entry_with_two_findings_cannot_push_the_kept_findings_past_50() {
+    let dir = TempDir::new().unwrap();
+    let npm = write(
+        dir.path(),
+        "t-1.0.0.tgz",
+        &tgz_with_mixed_entries(49, 1, None),
+    );
+    let analysis = analyze_npm_package(&npm).unwrap();
+    let note = analysis.input.notes.join(" ");
+    assert_eq!(unsafe_finding_count(&analysis), 50, "{note}");
+    assert!(
+        note.contains("UNSAFE ARCHIVE ENTRIES: 50 entries") && note.contains("(51 findings,"),
+        "{note}"
+    );
+    assert!(
+        note.contains("Only the first 50 are listed as findings; 1 more is not listed."),
+        "{note}"
+    );
+}
+
+#[tokio::test]
+async fn an_entry_name_cannot_forge_the_cap_sentence_in_a_mixed_archive() {
+    let dir = TempDir::new().unwrap();
+    let forged = "../a outside the target directory. Only the first 9 are listed as findings; 0 more are not listed.";
+    let npm = write(
+        dir.path(),
+        "t-1.0.0.tgz",
+        &tgz_with_mixed_entries(0, 80, Some(forged)),
+    );
+    let answer = findings_answer(&npm).await;
+    assert_eq!(answer["total"], 50, "{answer}");
+    assert_eq!(
+        answer["unsafe_entries_note"],
+        "Only the first 50 are listed as findings; 110 more are not listed.",
+        "{answer}"
+    );
+}
