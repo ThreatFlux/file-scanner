@@ -1243,9 +1243,13 @@ impl ServerState {
     {
         // The semaphore is never closed, so acquiring cannot fail.
         let _slot = self.slots.acquire().await.ok();
+        let policy = self.policy.clone();
         let joined = tokio::task::spawn_blocking(move || {
             CURRENT_SECTION.with(|current| current.set(None));
-            std::panic::catch_unwind(AssertUnwindSafe(work)).map_err(|payload| Crash {
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                super::paths::with_current_policy(policy, work)
+            }))
+            .map_err(|payload| Crash {
                 message: panic_message(payload.as_ref()),
                 section: CURRENT_SECTION.with(Cell::take),
             })

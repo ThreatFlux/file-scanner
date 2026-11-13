@@ -66,7 +66,60 @@ pub struct CertificateInfo {
     pub not_after: String,
 }
 
+/// What a caller's policy says about one candidate detached-signature file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SideFile {
+    /// Nothing usable is there.
+    Absent,
+    /// Read this path (already resolved by the caller; hand it to gpg as is).
+    Use(std::path::PathBuf),
+    /// A side file exists but may not be read (it leads outside the roots a
+    /// server is confined to). It is not opened, hashed or passed to a tool.
+    Refused,
+}
+
+/// The command-line scanner's rule: any candidate that exists is used, links
+/// followed.
+fn follow_links(candidate: &Path) -> SideFile {
+    if candidate.exists() {
+        SideFile::Use(candidate.to_path_buf())
+    } else {
+        SideFile::Absent
+    }
+}
+
+/// The first detached signature file `resolve` allows, and whether a candidate
+/// was refused on the way.
+fn pick_side_file(
+    path: &Path,
+    resolve: &dyn Fn(&Path) -> SideFile,
+) -> (Option<std::path::PathBuf>, bool) {
+    let mut refused = false;
+    for candidate in detached_signature_candidates(path) {
+        match resolve(&candidate) {
+            SideFile::Use(resolved) => return (Some(resolved), refused),
+            SideFile::Refused => refused = true,
+            SideFile::Absent => {}
+        }
+    }
+    (None, refused)
+}
+
+/// The sentence for a side file that was left unread.
+const SIDE_FILE_REFUSED: &str = "a detached signature file (.sig or .asc) exists beside the file but was not read because it is a link that leads to <outside the allowed roots>; copy it under an allowed root, or start the server with --allow-root for the directory it is in";
+
 pub fn verify_signature(path: &Path) -> Result<SignatureInfo> {
+    verify_signature_with(path, &follow_links)
+}
+
+/// [`verify_signature`] with the caller deciding which detached signature
+/// files may be read (a server confined to roots refuses a link that leaves
+/// them). `resolve` is asked once per candidate and the path it returns is the
+/// one handed to gpg.
+pub fn verify_signature_with(
+    path: &Path,
+    resolve: &dyn Fn(&Path) -> SideFile,
+) -> Result<SignatureInfo> {
     // Try different signature verification methods based on the platform and file type
     // Checks that could not run (missing external tool) are remembered so the
     // final answer can say "not checked" instead of "no signature found".
@@ -78,15 +131,18 @@ pub fn verify_signature(path: &Path) -> Result<SignatureInfo> {
     }
 
     // Check for GPG signatures
-    if let Ok(gpg_info) = check_gpg_signature(path) {
-        return Ok(gpg_info);
+    let (side_file, refused) = pick_side_file(path, resolve);
+    if let Some(side_file) = &side_file {
+        if let Ok(gpg_info) = run_gpg_verify(path, "gpg", side_file) {
+            return Ok(gpg_info);
+        }
+        if !tool_available("gpg") {
+            not_checked
+                .push("a detached .sig/.asc file exists but gpg is not installed".to_string());
+        }
     }
-    if detached_signature_candidates(path)
-        .iter()
-        .any(|p| p.exists())
-        && !tool_available("gpg")
-    {
-        not_checked.push("a detached .sig/.asc file exists but gpg is not installed".to_string());
+    if refused {
+        not_checked.push(SIDE_FILE_REFUSED.to_string());
     }
 
     // Check for macOS code signatures (only for Mach-O binaries)
@@ -411,17 +467,22 @@ pub(crate) fn detached_signature_candidates(path: &Path) -> Vec<std::path::PathB
         .collect()
 }
 
+#[cfg(test)]
 fn check_gpg_signature(path: &Path) -> Result<SignatureInfo> {
     check_gpg_signature_with(path, "gpg")
 }
 
+#[cfg(test)]
 fn check_gpg_signature_with(path: &Path, program: &str) -> Result<SignatureInfo> {
-    // Check for detached GPG signature
-    let sig_file = detached_signature_candidates(path)
-        .into_iter()
-        .find(|p| p.exists());
+    match pick_side_file(path, &follow_links).0 {
+        Some(sig_file) => run_gpg_verify(path, program, &sig_file),
+        None => anyhow::bail!("No GPG signature found"),
+    }
+}
 
-    if let Some(sig_file) = sig_file {
+/// Verify `path` against the detached signature `sig_file` with `program`.
+fn run_gpg_verify(path: &Path, program: &str, sig_file: &Path) -> Result<SignatureInfo> {
+    {
         if let Ok(output) = Command::new(program)
             .arg("--verify")
             .arg(sig_file)
@@ -751,6 +812,57 @@ mod tests {
         .unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
         stub
+    }
+
+    #[test]
+    fn pick_side_file_skips_a_refused_candidate_and_reports_it() {
+        let path = Path::new("/srv/x/p.bin");
+        let refuse_sig = |candidate: &Path| {
+            if candidate.extension().is_some_and(|e| e == "sig") {
+                SideFile::Refused
+            } else if candidate.extension().is_some_and(|e| e == "asc") {
+                SideFile::Use(std::path::PathBuf::from("/srv/x/resolved.asc"))
+            } else {
+                SideFile::Absent
+            }
+        };
+        let (picked, refused) = pick_side_file(path, &refuse_sig);
+        assert_eq!(
+            picked,
+            Some(std::path::PathBuf::from("/srv/x/resolved.asc"))
+        );
+        assert!(refused);
+        let (picked, refused) = pick_side_file(path, &|_| SideFile::Refused);
+        assert_eq!((picked, refused), (None, true));
+        let (picked, refused) = pick_side_file(path, &|_| SideFile::Absent);
+        assert_eq!((picked, refused), (None, false));
+    }
+
+    #[test]
+    fn a_refused_side_file_is_said_so_and_never_handed_to_gpg() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("p.bin");
+        fs::write(&file, b"payload").unwrap();
+        let opened = std::cell::Cell::new(false);
+        let info = verify_signature_with(&file, &|candidate| {
+            if candidate.ends_with("p.bin.sig") {
+                opened.set(true);
+                SideFile::Refused
+            } else {
+                SideFile::Absent
+            }
+        })
+        .unwrap();
+        assert!(opened.get());
+        assert!(!info.is_signed);
+        assert!(
+            info.verification_status.contains("was not read")
+                && info
+                    .verification_status
+                    .contains("outside the allowed roots"),
+            "{}",
+            info.verification_status
+        );
     }
 
     #[test]

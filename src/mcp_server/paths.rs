@@ -5,6 +5,34 @@
 
 use std::path::{Path, PathBuf};
 
+pub use crate::signature::SideFile;
+
+thread_local! {
+    /// The policy of the server call running on this thread, set by
+    /// `ServerState::run_blocking` so analysis code that derives paths from the
+    /// named one (a detached signature) can apply it. `None` off the server.
+    static CURRENT_POLICY: std::cell::RefCell<Option<PathPolicy>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `work` with `policy` as this thread's current policy.
+pub(super) fn with_current_policy<T>(policy: PathPolicy, work: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CURRENT_POLICY.with(|current| *current.borrow_mut() = None);
+        }
+    }
+    CURRENT_POLICY.with(|current| *current.borrow_mut() = Some(policy));
+    let _reset = Reset;
+    work()
+}
+
+/// The policy of the server call running on this thread, if any.
+pub(super) fn current_policy() -> Option<PathPolicy> {
+    CURRENT_POLICY.with(|current| current.borrow().clone())
+}
+
 /// What a tool needs the path to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expect {
@@ -172,6 +200,31 @@ impl PathPolicy {
             return Err(special_in_tree(dir, shown, kind));
         }
         Ok(())
+    }
+
+    /// Decide whether the server may read `candidate`, a file it derived from a
+    /// path the client named (a detached signature beside it), not one the
+    /// client named itself.
+    ///
+    /// Without roots every candidate that exists is used as written (links
+    /// followed, as the command-line scanner does). With roots the candidate is
+    /// resolved once, following every link, and used only when the result is
+    /// inside a root; the caller must open that resolved path, not the link.
+    /// A candidate that does not exist, or whose link cannot be resolved, is
+    /// [`SideFile::Absent`].
+    pub fn side_file(&self, candidate: &Path) -> SideFile {
+        if self.allow_roots.is_empty() {
+            return if candidate.exists() {
+                SideFile::Use(candidate.to_path_buf())
+            } else {
+                SideFile::Absent
+            };
+        }
+        match std::fs::canonicalize(candidate) {
+            Ok(resolved) if self.is_inside_a_root(&resolved) => SideFile::Use(resolved),
+            Ok(_) => SideFile::Refused,
+            Err(_) => SideFile::Absent,
+        }
     }
 
     fn is_inside_a_root(&self, canonical: &Path) -> bool {
@@ -568,5 +621,37 @@ mod tests {
             assert_eq!(expanded, PathBuf::from(home).join("x/y"));
         }
         assert_eq!(expand_tilde("~other/x").unwrap(), PathBuf::from("~other/x"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn side_file_follows_links_only_to_places_inside_the_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let dir = root.path().canonicalize().unwrap();
+        std::fs::write(outside.path().join("s"), b"x").unwrap();
+        std::fs::write(dir.join("own"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("s"), dir.join("out.sig")).unwrap();
+        std::os::unix::fs::symlink(dir.join("own"), dir.join("in.sig")).unwrap();
+        std::os::unix::fs::symlink(dir.join("nowhere"), dir.join("dangling.sig")).unwrap();
+
+        let rooted = PathPolicy::new(vec![dir.clone()]);
+        assert_eq!(rooted.side_file(&dir.join("out.sig")), SideFile::Refused);
+        assert_eq!(
+            rooted.side_file(&dir.join("in.sig")),
+            SideFile::Use(dir.join("own"))
+        );
+        assert_eq!(
+            rooted.side_file(&dir.join("dangling.sig")),
+            SideFile::Absent
+        );
+        assert_eq!(rooted.side_file(&dir.join("none.sig")), SideFile::Absent);
+
+        let open = PathPolicy::new(Vec::new());
+        assert_eq!(
+            open.side_file(&dir.join("out.sig")),
+            SideFile::Use(dir.join("out.sig"))
+        );
+        assert_eq!(open.side_file(&dir.join("none.sig")), SideFile::Absent);
     }
 }

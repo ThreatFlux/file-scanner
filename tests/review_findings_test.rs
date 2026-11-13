@@ -251,3 +251,127 @@ async fn the_signature_answer_follows_the_detached_signature_files_of_the_path()
     assert_eq!(status(&third), "No signature found", "{third}");
     client.cancel().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// 4. A detached signature file is read only from inside the allowed roots
+// ---------------------------------------------------------------------------
+
+const SECRET_LINE: &str = "TOPSECRET_LINE_42";
+const REFUSED_WORDS: &str = "was not read because it is a link that leads to";
+
+async fn rooted_client(root: &Path) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    use file_scanner::mcp_server::{ServerState, StateConfig};
+    let cache = TempDir::new().unwrap();
+    let state = std::sync::Arc::new(ServerState::new(StateConfig {
+        cache_dir: cache.path().to_path_buf(),
+        allow_roots: vec![root.to_path_buf()],
+        ..StateConfig::default()
+    }));
+    let (server_io, client_io) = tokio::io::duplex(1 << 20);
+    tokio::spawn(async move {
+        let _keep = cache;
+        if let Ok(service) = FileScannerMcp::with_state(state).serve(server_io).await {
+            let _ = service.waiting().await;
+        }
+    });
+    ().serve(client_io).await.expect("handshake")
+}
+
+fn armor_with(line: &str) -> Vec<u8> {
+    format!("-----BEGIN PGP SIGNATURE-----\n{line}\n\nxx\n-----END PGP SIGNATURE-----\n")
+        .into_bytes()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_signature_link_leading_outside_the_roots_is_not_read() {
+    for suffix in ["sig", "asc"] {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let secret = write(outside.path(), "secret.txt", &armor_with(SECRET_LINE));
+        let file = write(&root_path, "a.bin", b"payload bytes\n");
+        std::os::unix::fs::symlink(&secret, root_path.join(format!("a.bin.{suffix}"))).unwrap();
+        let client = rooted_client(&root_path).await;
+        let outside_dir = outside.path().canonicalize().unwrap();
+
+        // The cache is on: the answer must be computed again every call.
+        for args in [
+            json!({"file_path": file, "signatures": true}),
+            json!({"file_path": file, "all": true}),
+            json!({"file_path": file}),
+            json!({"file_path": file, "signatures": true}),
+            json!({"file_path": file, "sections": ["signatures"]}),
+        ] {
+            let answer = call(&client, "analyze_file", args).await.to_string();
+            assert!(!answer.contains(SECRET_LINE), "{suffix}: {answer}");
+            assert!(
+                !answer.contains(outside_dir.to_str().unwrap()) && !answer.contains("secret.txt"),
+                "{suffix}: {answer}"
+            );
+            if answer.contains("verification_status") {
+                assert!(answer.contains(REFUSED_WORDS), "{suffix}: {answer}");
+                assert!(answer.contains("<outside the allowed roots>"), "{suffix}");
+            }
+        }
+        // Removing the link gives the plain answer again (nothing stale).
+        std::fs::remove_file(root_path.join(format!("a.bin.{suffix}"))).unwrap();
+        let after = call(
+            &client,
+            "analyze_file",
+            json!({"file_path": file, "signatures": true}),
+        )
+        .await;
+        assert_eq!(
+            after["signatures"]["verification_status"], "No signature found",
+            "{after}"
+        );
+        client.cancel().await.unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_signature_link_to_another_file_inside_the_roots_is_still_used() {
+    let root = TempDir::new().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let real = write(&root_path, "store/real.dat", &armor_with("INSIDE_LINE_7"));
+    let file = write(&root_path, "a.bin", b"payload bytes\n");
+    std::os::unix::fs::symlink(&real, root_path.join("a.bin.sig")).unwrap();
+    let client = rooted_client(&root_path).await;
+    let answer = call(
+        &client,
+        "analyze_file",
+        json!({"file_path": file, "signatures": true}),
+    )
+    .await;
+    let status = answer["signatures"]["verification_status"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(!status.contains(REFUSED_WORDS), "{answer}");
+    assert_ne!(status, "No signature found", "{answer}");
+    client.cancel().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn without_roots_a_signature_link_is_followed_as_before() {
+    let dir = TempDir::new().unwrap();
+    let other = TempDir::new().unwrap();
+    let secret = write(other.path(), "s.txt", &armor_with(SECRET_LINE));
+    let file = write(dir.path(), "a.bin", b"payload bytes\n");
+    std::os::unix::fs::symlink(&secret, dir.path().join("a.bin.sig")).unwrap();
+    let client = client().await;
+    let answer = call(
+        &client,
+        "analyze_file",
+        json!({"file_path": file, "signatures": true}),
+    )
+    .await;
+    let status = answer["signatures"]["verification_status"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(!status.contains(REFUSED_WORDS), "{answer}");
+    assert_ne!(status, "No signature found", "{answer}");
+    client.cancel().await.unwrap();
+}

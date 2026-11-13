@@ -29,7 +29,7 @@ use crate::{
         tools_formats::{detect_file_kind, format_overview},
     },
     metadata::FileMetadata,
-    signature::verify_signature,
+    signature::{verify_signature, verify_signature_with},
     strings::{scan_strings, StringScan},
     taint_tracking::taint_report_for_path,
     threat_detection::{analyze_threats, analyze_threats_enhanced},
@@ -322,6 +322,9 @@ pub(super) struct Ctx<'a> {
     entropy: Option<Result<Arc<EntropyAnalysis>, String>>,
     binary_info: Option<Result<Arc<BinaryInfo>, String>>,
     hashes: Option<Arc<Hashes>>,
+    /// The roots policy of the call this context was built in (none: the
+    /// command line or a test), for paths derived from `path`.
+    policy: Option<crate::mcp_server::paths::PathPolicy>,
 }
 
 impl<'a> Ctx<'a> {
@@ -342,6 +345,7 @@ impl<'a> Ctx<'a> {
             entropy: None,
             binary_info: None,
             hashes: None,
+            policy: crate::mcp_server::paths::current_policy(),
         }
     }
 
@@ -439,6 +443,17 @@ impl<'a> Ctx<'a> {
         Ok(hashes)
     }
 
+    /// The signatures section: a detached signature file beside the path is
+    /// read only when the roots policy of the call allows where it resolves.
+    fn verify_signature(&self) -> anyhow::Result<crate::signature::SignatureInfo> {
+        match &self.policy {
+            Some(policy) => {
+                verify_signature_with(self.path, &|candidate| policy.side_file(candidate))
+            }
+            None => verify_signature(self.path),
+        }
+    }
+
     /// Compute section `name` in full.
     pub(super) fn compute(&mut self, name: &str) -> Result<Value, Failure> {
         mark_section(match name {
@@ -479,7 +494,7 @@ impl<'a> Ctx<'a> {
                 let info = self.binary_info().map_err(classify_binary)?;
                 to_value(&*info)
             }
-            "signatures" => match verify_signature(path) {
+            "signatures" => match self.verify_signature() {
                 Ok(info) => {
                     let mut value = to_value(&info)?;
                     value["status"] = "success".into();
