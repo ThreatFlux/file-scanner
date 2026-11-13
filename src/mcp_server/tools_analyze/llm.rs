@@ -380,7 +380,16 @@ fn entry_of(buffer: &[u8]) -> Result<(Arch, Mode, usize, u64), String> {
             ))
         }
         Object::PE(pe) => {
-            let mode = if pe.is_64 { Mode::Mode64 } else { Mode::Mode32 };
+            let (arch, mode) = match pe.header.coff_header.machine {
+                0x8664 => (Arch::X86, Mode::Mode64),
+                0x14c => (Arch::X86, Mode::Mode32),
+                0xAA64 => (Arch::ARM64, Mode::Arm),
+                other => {
+                    return Err(format!(
+                        "unsupported PE machine 0x{other:x}: the architecture is not supported"
+                    ))
+                }
+            };
             let rva = pe.entry as u64;
             let section = pe
                 .sections
@@ -395,7 +404,7 @@ fn entry_of(buffer: &[u8]) -> Result<(Arch, Mode, usize, u64), String> {
                 .checked_add(u64::from(section.pointer_to_raw_data))
                 .ok_or("the entry point is outside the file")?;
             Ok((
-                Arch::X86,
+                arch,
                 mode,
                 usize::try_from(offset).unwrap_or(usize::MAX),
                 pe.image_base.wrapping_add(rva),
@@ -496,20 +505,30 @@ impl FileScannerMcp {
         let hex_patterns = self.extract_hex_patterns(&path, pattern_size)?;
 
         let mut notes = Vec::new();
+        let mut slice_names: Option<Vec<String>> = None;
         let (imports, format, architecture) = match parse_binary(&path) {
             // A file that parses only as "Raw" has no executable structure.
             Ok(info) if matches!(info.format.as_str(), "Raw" | "Unknown") => {
                 notes.push("not an executable (no imports, architecture or entry point)".into());
                 (Vec::new(), None, None)
             }
-            Ok(info) => (
-                info.imports
-                    .into_iter()
-                    .take(request.max_imports.unwrap_or(30))
-                    .collect(),
-                Some(info.format),
-                Some(info.architecture),
-            ),
+            Ok(info) => {
+                // The slices as `arch` accepts them, as the overview names them.
+                slice_names = info.universal_slices.as_ref().map(|slices| {
+                    slices
+                        .iter()
+                        .map(|s| super::sections::slice_name(&s.architecture))
+                        .collect()
+                });
+                (
+                    info.imports
+                        .into_iter()
+                        .take(request.max_imports.unwrap_or(30))
+                        .collect(),
+                    Some(info.format),
+                    Some(info.architecture),
+                )
+            }
             Err(error) => {
                 notes.push(format!("imports: not an executable format ({error:#})"));
                 (Vec::new(), None, None)
@@ -535,7 +554,15 @@ impl FileScannerMcp {
         let entropy_analysis = analyze_entropy(&path).ok();
         let kind = detect_file_kind(&path).ok().filter(|k| k.kind != "unknown");
         let file_type = kind
-            .map(|k| k.label)
+            .map(|k| match &slice_names {
+                Some(names) if k.kind == "macho-fat" => format!(
+                    "Mach-O universal binary ({} slice{}: {})",
+                    names.len(),
+                    if names.len() == 1 { "" } else { "s" },
+                    names.join(", ")
+                ),
+                _ => k.label,
+            })
             .or_else(|| format.clone().map(|f| format!("{f} executable")));
 
         let mut result = LlmFileAnalysisResult {
@@ -880,5 +907,43 @@ mod tests {
         }
         let refused = entry_of(&macho).unwrap_err();
         assert!(refused.contains("outside its command"), "{refused}");
+    }
+    /// A PE entry point is decoded for the machine the COFF header names.
+    #[test]
+    fn the_pe_entry_point_follows_the_coff_machine() {
+        let pe = |machine: u16| {
+            let mut f = vec![0u8; 0x400];
+            f[0] = b'M';
+            f[1] = b'Z';
+            f[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+            f[0x40..0x44].copy_from_slice(b"PE\0\0");
+            f[0x44..0x46].copy_from_slice(&machine.to_le_bytes());
+            f[0x46..0x48].copy_from_slice(&1u16.to_le_bytes());
+            f[0x54..0x56].copy_from_slice(&240u16.to_le_bytes());
+            let opt = 0x58;
+            f[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+            f[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+            f[opt + 24..opt + 32].copy_from_slice(&0x1_4000_0000u64.to_le_bytes());
+            f[opt + 32..opt + 36].copy_from_slice(&0x1000u32.to_le_bytes());
+            f[opt + 36..opt + 40].copy_from_slice(&0x200u32.to_le_bytes());
+            f[opt + 56..opt + 60].copy_from_slice(&0x2000u32.to_le_bytes());
+            f[opt + 60..opt + 64].copy_from_slice(&0x200u32.to_le_bytes());
+            f[opt + 108..opt + 112].copy_from_slice(&16u32.to_le_bytes());
+            let sh = opt + 240;
+            f[sh..sh + 5].copy_from_slice(b".text");
+            f[sh + 8..sh + 12].copy_from_slice(&0x200u32.to_le_bytes());
+            f[sh + 12..sh + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+            f[sh + 16..sh + 20].copy_from_slice(&0x200u32.to_le_bytes());
+            f[sh + 20..sh + 24].copy_from_slice(&0x200u32.to_le_bytes());
+            f
+        };
+        let (arch, mode, ..) = entry_of(&pe(0xAA64)).unwrap();
+        assert!(matches!((arch, mode), (Arch::ARM64, Mode::Arm)));
+        let (arch, mode, ..) = entry_of(&pe(0x8664)).unwrap();
+        assert!(matches!((arch, mode), (Arch::X86, Mode::Mode64)));
+        for machine in [0x1c0u16, 0x1c4, 0x1234] {
+            let err = entry_of(&pe(machine)).unwrap_err();
+            assert!(err.contains(&format!("0x{machine:x}")), "{err}");
+        }
     }
 }

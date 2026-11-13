@@ -230,6 +230,43 @@ fn cb02_well_formed_fixtures_still_disassemble() {
     }
 }
 
+// ------------------------------------- R7-B: the PE decoder follows the COFF machine
+
+fn pe_with_machine(machine: u16, code: &[u8]) -> Vec<u8> {
+    let mut f = pe64(code, None);
+    f[0x44..0x46].copy_from_slice(&machine.to_le_bytes());
+    f
+}
+
+#[test]
+fn r7b_arm64_pe_is_decoded_as_arm64_not_x86() {
+    let dir = TempDir::new().unwrap();
+    // sub sp, sp, #16 ; ret
+    let code = [0xff, 0x43, 0x00, 0xd1, 0xc0, 0x03, 0x5f, 0xd6];
+    let path = write(&dir, "arm64.exe", &pe_with_machine(0xAA64, &code));
+    let result = disassemble_binary(&path, &symbols(vec![])).unwrap();
+    assert_eq!(result.architecture, "ARM64");
+    assert_eq!(result.instructions.len(), 2);
+    assert_eq!(result.instructions[1].mnemonic, "ret");
+}
+
+#[test]
+fn r7b_x86_pes_still_list_and_other_machines_are_refused_by_value() {
+    let dir = TempDir::new().unwrap();
+    for (machine, arch) in [(0x8664u16, "x86_64"), (0x14c, "x86")] {
+        let path = write(&dir, "x.exe", &pe_with_machine(machine, SIMPLE_FN));
+        let result = disassemble_binary(&path, &symbols(vec![])).unwrap();
+        assert_eq!(result.architecture, arch);
+    }
+    for (machine, shown) in [(0x1c0u16, "0x1c0"), (0x1c4, "0x1c4"), (0x1234, "0x1234")] {
+        let path = write(&dir, "y.exe", &pe_with_machine(machine, SIMPLE_FN));
+        let err = disassemble_binary(&path, &symbols(vec![])).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains(shown), "{text}");
+        assert!(text.contains("not supported"), "{text}");
+    }
+}
+
 // ------------------------------------- CB05: skip undecodable bytes, report
 
 #[test]

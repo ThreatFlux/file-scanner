@@ -620,10 +620,15 @@ pub(crate) fn detect_architecture_and_code_with_arch(
             ))
         }
         Object::PE(pe) => {
-            let arch = if pe.is_64 {
-                (Arch::X86, Mode::Mode64)
-            } else {
-                (Arch::X86, Mode::Mode32)
+            let arch = match pe.header.coff_header.machine {
+                0x8664 => (Arch::X86, Mode::Mode64),
+                0x14c => (Arch::X86, Mode::Mode32),
+                0xAA64 => (Arch::ARM64, Mode::Arm),
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "Unsupported PE machine 0x{other:x}; supported: x86 (0x14c), x86-64 (0x8664), ARM64 (0xaa64). The architecture is not supported"
+                    ))
+                }
             };
 
             // Find .text section
