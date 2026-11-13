@@ -287,14 +287,14 @@ pub(super) fn table(
             steps.push(json!({
                 "tool": "analyze_npm_package",
                 "arguments": {"package_path": file_path},
-                "why": "this directory is an npm package: lifecycle scripts, dependencies, findings",
+                "gives": "this directory is an npm package: lifecycle scripts, dependencies, findings",
             }));
         }
         if has("setup.py") || has("pyproject.toml") || has("requirements.txt") {
             steps.push(json!({
                 "tool": "analyze_python_package",
                 "arguments": {"package_path": file_path},
-                "why": "this directory is a Python package: install hooks, dependencies, findings",
+                "gives": "this directory is a Python package: install hooks, dependencies, findings",
             }));
         }
         // The first file of this page, as a path that works as it is.

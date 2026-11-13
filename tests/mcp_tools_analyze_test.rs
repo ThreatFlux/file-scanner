@@ -2048,3 +2048,95 @@ async fn functions_beyond_the_grouped_table_are_reachable_and_cuts_are_named() {
     let note = none["note"].as_str().unwrap();
     assert!(note.contains("URL") && !note.contains("none"), "{note}");
 }
+
+/// A zip of `entries` (name, bytes) at `path`.
+fn write_zip(path: &std::path::Path, entries: &[(&str, &[u8])]) {
+    use std::io::Write as _;
+    let mut zip = zip::write::ZipWriter::new(std::fs::File::create(path).unwrap());
+    let opts = zip::write::SimpleFileOptions::default();
+    for (name, data) in entries {
+        zip.start_file(*name, opts).unwrap();
+        zip.write_all(data).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
+/// A .war or .ear gets the overview a .jar gets, and a plain zip (even one that
+/// holds a WEB-INF directory) never gets the native pair or a disassemble step.
+#[tokio::test]
+async fn war_ear_and_zip_overviews_are_not_native() {
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    for (name, entries) in [
+        (
+            "app.war",
+            vec![("WEB-INF/web.xml", &b"<web-app/>"[..]), ("a.jsp", b"x")],
+        ),
+        (
+            "app.ear",
+            vec![("META-INF/application.xml", b"<application/>")],
+        ),
+        ("web.zip", vec![("WEB-INF/web.xml", b"<web-app/>")]),
+        ("plain.zip", vec![("a.txt", b"hello")]),
+    ] {
+        let path = dir.path().join(name);
+        write_zip(&path, &entries);
+        let (overview, _) = harness.ok("analyze_file", json!({"file_path": path})).await;
+        let tools: Vec<&str> = overview["next_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["tool"].as_str())
+            .collect();
+        assert!(!tools.contains(&"disassemble"), "{name}: {tools:?}");
+        assert!(
+            !overview["next_steps"].to_string().contains("\"symbols\""),
+            "{name}: {overview}"
+        );
+        if name == "plain.zip" {
+            assert_eq!(overview["kind"], "zip", "{overview}");
+            assert!(!tools.contains(&"analyze_java_file"), "{tools:?}");
+        } else {
+            assert_eq!(overview["kind"], "jar", "{name}: {overview}");
+            assert!(tools.contains(&"analyze_java_file"), "{name}: {tools:?}");
+        }
+        for step in overview["next_steps"].as_array().unwrap() {
+            assert!(
+                step["gives"].is_string() && step.get("why").is_none(),
+                "{step}"
+            );
+        }
+    }
+}
+
+/// The function-list step runs as written even when the first row's name is
+/// shared by several functions, and a decimal address works as `function`.
+#[tokio::test]
+async fn the_function_list_step_runs_when_names_repeat_and_decimal_addresses_work() {
+    let harness = Harness::new().await;
+    let file = sample("go_test_binary");
+    for offset in [0, 1, 2] {
+        let (table, _) = harness
+            .ok(
+                "disassemble",
+                json!({"file_path": file, "filter": "(.text)", "offset": offset, "limit": 3}),
+            )
+            .await;
+        let step = &table["next_steps"][0];
+        assert_eq!(step["tool"], "disassemble", "{table}");
+        harness.ok("disassemble", step["arguments"].clone()).await;
+    }
+    let (by_hex, _) = harness
+        .ok(
+            "disassemble",
+            json!({"file_path": file, "function": "0x401136", "max_instructions": 3}),
+        )
+        .await;
+    let (by_decimal, _) = harness
+        .ok(
+            "disassemble",
+            json!({"file_path": file, "function": "4198710", "max_instructions": 3}),
+        )
+        .await;
+    assert_eq!(by_hex["listing"], by_decimal["listing"], "{by_decimal}");
+}

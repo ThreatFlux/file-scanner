@@ -108,14 +108,28 @@ pub(super) fn string_filter(
 }
 
 /// The text a filter is matched against: a string's value, otherwise every
-/// scalar field of the row (and the strings in its first-level lists).
+/// scalar field of the row (and the strings in its first-level lists). A
+/// threat row's `metadata` values count too (`evidence_strength`, category,
+/// description), so `filter: "weak"` finds the rows marked weak.
 fn haystack(item: &Value) -> String {
     match item {
         Value::String(s) => s.clone(),
         Value::Object(map) => {
             let mut text = String::new();
-            for value in map.values() {
+            for (key, value) in map {
                 match value {
+                    Value::Object(meta) if key == "metadata" => {
+                        for inner in meta.values() {
+                            match inner {
+                                Value::String(s) => text.push_str(s),
+                                Value::Number(_) | Value::Bool(_) => {
+                                    text.push_str(&inner.to_string());
+                                }
+                                _ => continue,
+                            }
+                            text.push('\n');
+                        }
+                    }
                     Value::String(s) => {
                         text.push_str(s);
                         text.push('\n');
@@ -510,5 +524,31 @@ mod tests {
             note.contains("evasion") && note.contains("network"),
             "{note}"
         );
+    }
+
+    /// `filter` searches the metadata values of a threat row, so "weak" finds the
+    /// rows marked `evidence_strength: weak`.
+    #[test]
+    fn filter_searches_the_metadata_values_of_a_threat_row() {
+        let section = json!({"matches": [
+            {"rule_identifier": "a", "metadata": {"evidence_strength": "weak"}},
+            {"rule_identifier": "b", "metadata": {"evidence_strength": "strong"}},
+            {"rule_identifier": "c"},
+        ]});
+        let params = |filter| Params {
+            list: None,
+            filter: Some(filter),
+            regex: false,
+            category: None,
+            encoding: None,
+            offset: 0,
+            limit: 50,
+            detail: false,
+        };
+        for section_name in ["threats", "enhanced_threats"] {
+            let hit = answer(section_name, &section, &params("weak"), 80_000).unwrap();
+            assert_eq!(hit["total"], 1, "{hit}");
+            assert_eq!(hit["items"][0]["rule_identifier"], "a");
+        }
     }
 }

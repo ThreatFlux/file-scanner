@@ -126,7 +126,7 @@ pub struct DisassembleRequest {
     #[schemars(description = "Absolute path of the binary (a leading ~/ is expanded)")]
     pub file_path: String,
     #[schemars(
-        description = "Function to list: its name (exact, else a unique case-insensitive match) or its address"
+        description = "Function to list: its name (exact, else a unique case-insensitive match) or its address (\"0x401136\", or a decimal number when no function has that text in its name)"
     )]
     pub function: Option<String>,
     #[schemars(
@@ -893,20 +893,41 @@ fn function_table(
         .into();
         value["next_steps"] = json!([step]);
     } else {
-        // The first function of this page, callable as it is.
-        let first_name = rows
+        // The first function of this page, callable as it is: by name when
+        // the name is the file's only one, else by its address (a name such
+        // as "runtime/cgo(.text)" is shared by several functions).
+        let row = rows
             .get(request.offset.unwrap_or(0).min(rows.len() - 1))
-            .and_then(|row| row.get("name"))
             .cloned()
             .unwrap_or(Value::Null);
+        let first_name = row.get("name").cloned().unwrap_or(Value::Null);
+        let shared = first_name.as_str().is_none_or(|name| {
+            functions
+                .iter()
+                .chain(ungrouped.iter())
+                .filter(|f| f.get("name").and_then(Value::as_str) == Some(name))
+                .count()
+                != 1
+        });
+        let (target, gives) = if shared {
+            (
+                json!({"file_path": file_path, "address": row.get("address")}),
+                "the instruction listing of the function at that address (the first row of this \
+                 page; its name is shared by several functions). For another row pass its \
+                 `address`, or its `function` name when no other function has the same name",
+            )
+        } else {
+            (
+                json!({"file_path": file_path, "function": first_name}),
+                "the instruction listing of the first function of this page (for another row \
+                 pass its `address`, or its `function` name when no other function has the \
+                 same name)",
+            )
+        };
         value["next_steps"] = json!([{
             "tool": "disassemble",
-            "arguments": with_arch(
-                json!({"file_path": file_path, "function": first_name}),
-                request.arch.as_deref(),
-            ),
-            "gives": "the instruction listing of that function (any name from items works; or \
-                      pass `address`)",
+            "arguments": with_arch(target, request.arch.as_deref()),
+            "gives": gives,
         }]);
     }
     if !ungrouped.is_empty() {
@@ -1222,6 +1243,42 @@ impl FileScannerMcp {
                          only file_path to see what kind of file it is."
                     ),
                 })?;
+                // A `function` that is a decimal number (query_analysis symbols
+                // prints addresses that way) and names no function is an address.
+                let mut request = request;
+                if request.address.is_none() {
+                    let digits = request
+                        .function
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()))
+                        .and_then(|f| f.parse::<u64>().ok().map(|n| (f.to_string(), n)));
+                    if let Some((text, number)) = digits {
+                        let has_text = |f: &Value| {
+                            f.get("name")
+                                .and_then(Value::as_str)
+                                .is_some_and(|n| n.contains(&text))
+                        };
+                        let in_table = section
+                            .get("functions")
+                            .and_then(Value::as_array)
+                            .is_some_and(|list| list.iter().any(has_text));
+                        let in_symbols = !in_table
+                            && engine
+                                .load(&plan("symbols", &options, &file_path, mtime_ns))
+                                .ok()
+                                .is_some_and(|symbols| {
+                                    symbols
+                                        .get("functions")
+                                        .and_then(Value::as_array)
+                                        .is_some_and(|list| list.iter().any(has_text))
+                                });
+                        if !in_table && !in_symbols {
+                            request.function = None;
+                            request.address = Some(AddressArg::Number(number));
+                        }
+                    }
+                }
                 // A name the grouped function table lacks is looked up in the
                 // symbol table (the table groups the first few thousand only).
                 let function_name = request

@@ -204,6 +204,10 @@ pub(super) struct Planned {
     pub key: String,
 }
 
+/// Revision of the stored `threats` and `enhanced_threats` sections. Bump it
+/// whenever the built-in rules or the weak-evidence logic change.
+const THREATS_REVISION: u32 = 2;
+
 /// The cache key of `name` under `options`. The metadata key holds the path
 /// and mtime because the metadata contains both.
 pub(super) fn plan(name: &'static str, options: &Options, path: &str, mtime_ns: u128) -> Planned {
@@ -222,8 +226,10 @@ pub(super) fn plan(name: &'static str, options: &Options, path: &str, mtime_ns: 
         "dependencies" | "behavioral" | "yara_indicators" => {
             format!("{name}:min={}{arch}", options.min)
         }
-        "threats" => "threats:basic".to_string(),
-        "enhanced_threats" => "threats:enhanced".to_string(),
+        // Bump THREATS_REVISION whenever the built-in rules or the weak-evidence
+        // logic change, so ratings stored by an earlier build are not served.
+        "threats" => format!("threats:basic:r{THREATS_REVISION}"),
+        "enhanced_threats" => format!("threats:enhanced:r{THREATS_REVISION}"),
         // Everything built from the symbol table or the parsed binary.
         "binary_info" | "symbols" | "control_flow" | "vulnerabilities" | "code_quality"
         | "disassembly" | "call_graph" => format!("{name}{arch}"),
@@ -1884,7 +1890,7 @@ pub(super) fn drill_down(
     let mut step = json!({
         "tool": "query_analysis",
         "arguments": with_arch(arguments, arch),
-        "why": format!(
+        "gives": format!(
             "page{} the {} {} (offset, limit, filter, category)",
             if name == "strings" { " and filter" } else { "" },
             total.map_or_else(String::new, |t| t.to_string()),
@@ -2020,7 +2026,19 @@ pub(super) fn overview(
     out.insert("sha256".into(), sha256.into());
 
     // Identity: type, mime, md5.
-    let kind = detect_file_kind(path).ok();
+    let mut kind = detect_file_kind(path).ok();
+    // A .war or .ear without a manifest or class entries reads as a plain zip
+    // to the detector; the name says what it is.
+    if let Some(k) = kind.as_mut().filter(|k| k.kind == "zip") {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if matches!(ext.as_str(), "war" | "ear" | "aar") {
+            *k = java_archive_kind(&ext);
+        }
+    }
     let metadata = match load(engine, "metadata") {
         Ok(value) => Some(value),
         Err(failure) => {
@@ -2066,10 +2084,27 @@ pub(super) fn overview(
         Err(Failure::NotApplicable(m)) if m.is_empty() => {}
         Ok(info) => {
             // A file that parses only as "Raw" has no executable structure.
-            binary_ok = !matches!(
-                info.get("format").and_then(Value::as_str),
-                Some("Raw" | "Unknown") | None
-            );
+            let parsed_format = info.get("format").and_then(Value::as_str);
+            binary_ok = !matches!(parsed_format, Some("Raw" | "Unknown") | None);
+            // A zip the parser reads as a Java archive (WEB-INF/ entries, a
+            // manifest) is one for the overview too, not native code.
+            if let Some(ext) = parsed_format.and_then(|f| match f {
+                "WAR" => Some("war"),
+                "EAR" => Some("ear"),
+                "JAR" | "AAR" | "APK" | "Java Archive" => Some("jar"),
+                _ => None,
+            }) {
+                if let Some(k) = kind.as_mut().filter(|k| k.kind == "zip") {
+                    *k = java_archive_kind(ext);
+                    out.insert("type".into(), k.label.clone().into());
+                    out.insert("kind".into(), k.kind.clone().into());
+                    out.insert("mime".into(), k.mime.clone().into());
+                }
+            }
+            // An archive has no native code, whatever the parser made of it.
+            if kind.as_ref().is_some_and(|k| is_archive_kind(&k.kind)) {
+                binary_ok = false;
+            }
             let mut format = scalar_fields(
                 &info,
                 &[
@@ -2224,7 +2259,9 @@ pub(super) fn overview(
     }
     out.insert("counts".into(), Value::Object(counts));
 
-    let mut binary_ok = binary_ok || heavy;
+    // A file too big to parse may be native code; an archive is not.
+    let archive_kind = kind.as_ref().is_some_and(|k| is_archive_kind(&k.kind));
+    let mut binary_ok = (binary_ok || heavy) && !archive_kind;
     if let Some(kind) = kind.as_ref().filter(|_| kind_is_known && !heavy) {
         if let Some(mut details) = format_overview(path, kind) {
             // The tools to call are the overview's own next_steps.
@@ -2527,6 +2564,26 @@ fn is_non_x86(architecture: &str) -> bool {
         .any(|family| a.contains(family))
 }
 
+/// Whether a detected kind is a plain archive (never native code).
+fn is_archive_kind(kind: &str) -> bool {
+    matches!(kind, "zip" | "gzip" | "tar" | "rar" | "7z" | "bzip2" | "xz")
+}
+
+/// The kind of a Java archive named by its extension (`war`, `ear`, `aar`).
+fn java_archive_kind(ext: &str) -> crate::mcp_server::tools_formats::FileKind {
+    let label = match ext {
+        "war" => "Java web application archive (WAR)",
+        "ear" => "Java enterprise archive (EAR)",
+        "aar" => "Java Android library (AAR)",
+        _ => "Java archive (JAR)",
+    };
+    crate::mcp_server::tools_formats::FileKind {
+        kind: "jar".into(),
+        label: label.into(),
+        mime: "application/java-archive".into(),
+    }
+}
+
 /// The tool that specializes in this kind of file, as overview `next_steps`
 /// (first, before the generic drill-down).
 fn specialist_steps(
@@ -2534,18 +2591,18 @@ fn specialist_steps(
     path: &Path,
     file_path: &str,
 ) -> Vec<Value> {
-    let call = |tool: &str, why: &str| {
+    let call = |tool: &str, gives: &str| {
         json!({
             "tool": tool,
             "arguments": {"file_path": file_path},
-            "why": why,
+            "gives": gives,
         })
     };
-    let package = |tool: &str, why: &str| {
+    let package = |tool: &str, gives: &str| {
         json!({
             "tool": tool,
             "arguments": {"package_path": file_path},
-            "why": why,
+            "gives": gives,
         })
     };
     let name = path
@@ -2573,7 +2630,7 @@ fn specialist_steps(
             steps.push(json!({
                 "tool": "analyze_file",
                 "arguments": {"file_path": file_path, "sections": ["taint"]},
-                "why": "sources of user-controlled data reaching dangerous calls (heuristic)",
+                "gives": "sources of user-controlled data reaching dangerous calls (heuristic)",
             }));
         }
         "java-class" => steps.push(call(
@@ -2606,12 +2663,14 @@ fn specialist_steps(
             } else if name.ends_with(".tgz") || name.ends_with(".tar.gz") {
                 steps.push(package(
                     "analyze_npm_package",
-                    "if this is an npm package: lifecycle scripts, dependencies and findings",
+                    "lifecycle scripts, dependencies and findings of an npm package; errors when this \
+                         archive is not an npm package (no package.json)",
                 ));
                 if name.ends_with(".tar.gz") {
                     steps.push(package(
                         "analyze_python_package",
-                        "if this is a Python source distribution: install hooks and findings",
+                        "install hooks and findings of a Python source distribution; errors when this \
+                             archive is not a Python package (no setup.py, pyproject.toml or PKG-INFO)",
                     ));
                 }
             }
