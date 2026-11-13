@@ -47,7 +47,7 @@ jobs:
       - name: Generate cache key
         id: cache-key
         run: |
-          echo "key=${WORKFLOW_VALUE_0}-rust-1.99.1-cargo-${WORKFLOW_VALUE_1}-${WORKFLOW_VALUE_2}" >> "$GITHUB_OUTPUT"
+          echo "key=${WORKFLOW_VALUE_0}-rust-1.100.0-cargo-${WORKFLOW_VALUE_1}-${WORKFLOW_VALUE_2}" >> "$GITHUB_OUTPUT"
 
         env:
           WORKFLOW_VALUE_0: ${{ runner.os }}
@@ -63,7 +63,7 @@ jobs:
         with:
           components: rustfmt, clippy
 
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -85,7 +85,7 @@ jobs:
           path: target
           key: target-debug0-${{ steps.cache-key.outputs.key }}-build
           restore-keys: |
-            target-debug0-${{ runner.os }}-rust-1.99.1-cargo-
+            target-debug0-${{ runner.os }}-rust-1.100.0-cargo-
 
       - name: Monitor disk space during build
         run: |
@@ -127,7 +127,7 @@ jobs:
         with:
           components: rustfmt, clippy
 
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -149,7 +149,7 @@ jobs:
           path: target
           key: target-debug0-${{ needs.build-cache.outputs.cache-key }}-build
           restore-keys: |
-            target-debug0-${{ runner.os }}-rust-1.99.1-cargo-
+            target-debug0-${{ runner.os }}-rust-1.100.0-cargo-
 
       - name: Check formatting
         run: |
@@ -171,7 +171,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         rust:
-          - 1.99.1
+          - 1.100.0
           - beta
     env:
       RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
@@ -274,7 +274,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: "1.99.1"
+          toolchain: "1.100.0"
       - name: Verify actual reviewed public-key modules against OpenSSL vectors
         run: cargo test --manifest-path ci/yara-crypto-compat/Cargo.toml --locked --all-features
 
@@ -319,7 +319,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -341,7 +341,7 @@ jobs:
           path: target
           key: target-debug0-${{ needs.build-cache.outputs.cache-key }}-build
           restore-keys: |
-            target-debug0-${{ runner.os }}-rust-1.99.1-cargo-
+            target-debug0-${{ runner.os }}-rust-1.100.0-cargo-
 
       - name: Make scripts executable
         run: |
@@ -384,7 +384,7 @@ jobs:
         with:
           components: llvm-tools-preview
 
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -407,7 +407,7 @@ jobs:
           key: target-debug0-${{ needs.build-cache.outputs.cache-key }}-coverage
           restore-keys: |
             target-debug0-${{ needs.build-cache.outputs.cache-key }}-build
-            target-debug0-${{ runner.os }}-rust-1.99.1-cargo-
+            target-debug0-${{ runner.os }}-rust-1.100.0-cargo-
 
       - name: Install cargo-llvm-cov (faster than tarpaulin)
         run: |
@@ -457,7 +457,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - name: Install cargo-audit
         run: |
           cargo install cargo-audit --locked --version 0.23.0
@@ -489,7 +489,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - name: Install sccache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -512,7 +512,7 @@ jobs:
           key: target-debug0-${{ needs.build-cache.outputs.cache-key }}-bench
           restore-keys: |
             target-debug0-${{ needs.build-cache.outputs.cache-key }}-build
-            target-debug0-${{ runner.os }}-rust-1.99.1-cargo-
+            target-debug0-${{ runner.os }}-rust-1.100.0-cargo-
 
       - name: Run benchmarks
         run: |
@@ -535,14 +535,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - name: Cache cargo build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
           key: target-debug0-${{ needs.build-cache.outputs.cache-key }}-build
           restore-keys: |
-            target-debug0-${{ runner.os }}-rust-1.99.1-cargo-
+            target-debug0-${{ runner.os }}-rust-1.100.0-cargo-
 
       - name: Build release binary
         run: |

@@ -9,23 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Consolidate dependency updates on Rust 1.99.1, refresh stable crate/tool/container
+- Consolidate dependency updates on Rust 1.100.0, refresh stable crate/tool/container
   pins and migrate archive readers to ZIP 9's fallible filename API.
+- Adopt the verified shared v0.7.11 release workflow and final stable ThreatFlux
+  libraries; update the locked TLS verifier to 0.103.17.
+- Update the reviewed MCP SDK pin to 3.10.0, including its tool-schema dependency
+  property-name fix, while retaining the existing transport and server behavior.
 - Replace deprecated `serde_yaml`/unmaintained `unsafe-libyaml` with maintained
-  `serde-saphyr` 2.0.0 under the existing source alias. YAML data remains compatible;
+  `serde-saphyr` 2.1.1 under the existing source alias. YAML data remains compatible;
   emitted formatting may differ.
-- Refresh the documented stable YARA-X runtime/crypto patch and patch the latest
-  binary-analysis release to remove its vulnerable ZIP 8 dependency. Repository
-  overrides do not propagate to downstream crates.io library consumers.
+- Consume the reviewed binary-analysis release with ZIP 9 and preserve the
+  stable YARA-X runtime/crypto override. Repository overrides do not propagate
+  to downstream crates.io library consumers.
 - Add complete open security-alert assessments and per-TP remediation plans in
   `docs/security`, including deployment and evidence limits.
 
 ### Fixed
 
 - Remediate the eleven confirmed runtime findings with a pinned Wolfi glibc 2.44
-  runtime and patched static zlib 1.3.2. Backport upstream's nonblocking gzip
-  security fix into stable libz-sys; verify it with AddressSanitizer and a source
-  guard rather than relying only on package-version scans.
+  runtime and stable libz-sys 1.1.33 with pristine bundled zlib 1.4, which includes
+  the prior nonblocking gzip fix. Retain the AddressSanitizer regression and
+  exact native-source guard.
 - Dismiss sixteen verified false positives with both-platform/source evidence.
   Preserve complete all-severity container reports, verify exact image identity
   and application inventories, scan both published architectures, and fail the
