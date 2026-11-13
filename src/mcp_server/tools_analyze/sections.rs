@@ -218,7 +218,7 @@ pub(super) struct Planned {
 
 /// Revision of the stored `threats` and `enhanced_threats` sections. Bump it
 /// whenever the built-in rules or the weak-evidence logic change.
-const THREATS_REVISION: u32 = 2;
+const THREATS_REVISION: u32 = 3;
 
 /// The cache key of `name` under `options`. The metadata key holds the path
 /// and mtime because the metadata contains both.

@@ -367,6 +367,134 @@ fn looks_like_text(data: &[u8]) -> bool {
     }
 }
 
+/// A Markdown fence line: three backticks or tildes after optional blanks.
+fn is_fence_line(line: &[u8]) -> bool {
+    let t = line.trim_ascii_start();
+    t.starts_with(b"```") || t.starts_with(b"~~~")
+}
+
+/// A line that starts a declaration of a source file (`fn`, `def`, `use`,
+/// `import`, `#include`, ...). Prose and configuration files do not have one.
+fn is_code_line(line: &[u8]) -> bool {
+    static CODE: std::sync::OnceLock<regex::bytes::Regex> = std::sync::OnceLock::new();
+    CODE.get_or_init(|| {
+        regex::bytes::Regex::new(
+            r"^\s*(pub(\([a-z]+\))?\s+)?(async\s+)?(fn|def|func|function|class|struct|enum|impl|mod|use|import|package|let|const|static|var)\s|^\s*(#include|#\[|#!\[|#define)",
+        )
+        .expect("a valid pattern")
+    })
+    .is_match(line)
+}
+
+/// The longest stretch of a line looked at before a match. A line that is
+/// longer (a minified bundle) is not read back, so the cost per match is
+/// bounded and a literal is never claimed for text that could not be checked.
+const MAX_LINE_LOOKBACK: usize = 4096;
+
+/// The text before `at` on its line, or `None` when the line starts more than
+/// `MAX_LINE_LOOKBACK` bytes earlier.
+fn line_prefix(data: &[u8], at: usize) -> Option<&[u8]> {
+    let from = at.saturating_sub(MAX_LINE_LOOKBACK);
+    match data[from..at].iter().rposition(|&b| b == b'\n') {
+        Some(i) => Some(&data[from + i + 1..at]),
+        None if from == 0 => Some(&data[..at]),
+        None => None,
+    }
+}
+
+/// Whether the text before `at` on its line leaves `at` inside a double-quoted
+/// string, a backtick span or a line comment. A line too long to read back is
+/// not a literal.
+fn line_prefix_is_literal(data: &[u8], at: usize) -> bool {
+    let Some(prefix) = line_prefix(data, at) else {
+        return false;
+    };
+    let (mut quotes, mut ticks) = (0usize, 0usize);
+    let mut i = 0;
+    while i < prefix.len() {
+        match prefix[i] {
+            b'\\' => i += 1,
+            b'"' if ticks % 2 == 0 => quotes += 1,
+            b'`' if quotes % 2 == 0 => ticks += 1,
+            b'/' if quotes % 2 == 0 && ticks % 2 == 0 && prefix.get(i + 1) == Some(&b'/') => {
+                return true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    quotes % 2 == 1 || ticks % 2 == 1
+}
+
+/// Whether the file calls an anti-debug or anti-VM technique instead of only
+/// naming it: `IsDebuggerPresent(`, `CheckRemoteDebuggerPresent(`,
+/// `ptrace(PTRACE_TRACEME` or `ptrace(0`, `sysctl` with `P_TRACED`, a call
+/// that opens or reads `/proc/self/status` (the tracer's pid), or a file read
+/// next to a string naming the DMI product files. A call inside a string, a
+/// comment or a backtick span does not count, and neither does anything in a
+/// Markdown document (a file with a fence line), whose code is an example.
+fn has_anti_analysis_call(data: &[u8]) -> bool {
+    use regex::bytes::Regex;
+    static CALLS: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static DMI: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static READ: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    if data.split(|&b| b == b'\n').any(is_fence_line) {
+        return false;
+    }
+    // Prose has no declaration or include line; a call needs code around it.
+    if !data.split_inclusive(|&b| b == b'\n').any(is_code_line) {
+        return false;
+    }
+    let calls = CALLS.get_or_init(|| {
+        Regex::new(
+            r#"(?i-u:\b(?:open\w*|fopen|read\w*|exists|inquire|fileexists)\s*\([^)\n]*"/proc/self/status")|\b(?:IsDebuggerPresent|CheckRemoteDebuggerPresent)\s*\(|\bptrace\s*\(\s*(?:PTRACE_TRACEME|0)\b|(?s)\bsysctl\b.{0,300}?\bP_TRACED\b"#,
+        )
+        .expect("a valid pattern")
+    });
+    // The name has to start a call, not end an identifier or a string.
+    // A call named inside a block comment is not a call either.
+    let genuine = |at: usize| {
+        if line_prefix_is_literal(data, at) {
+            return false;
+        }
+        let window = &data[at.saturating_sub(MAX_LINE_LOOKBACK)..at];
+        let last = |pat: &[u8]| window.windows(2).rposition(|w| w == pat);
+        match (last(b"/*"), last(b"*/")) {
+            (Some(open), Some(close)) => close > open,
+            (Some(_), None) => false,
+            _ => true,
+        }
+    };
+    // A call is a statement: its own line has `;`, `{` or `=` (a wrapped prose
+    // line that starts with "use" has none of them).
+    let statement = |at: usize| {
+        let before = line_prefix(data, at).unwrap_or(&[]);
+        let rest = data[at..].split(|&b| b == b'\n').next().unwrap_or(&[]);
+        before
+            .iter()
+            .chain(rest)
+            .any(|b| matches!(b, b';' | b'{' | b'='))
+    };
+    if calls
+        .find_iter(data)
+        .take(64)
+        .any(|m| genuine(m.start()) && statement(m.start()))
+    {
+        return true;
+    }
+    let dmi = DMI.get_or_init(|| {
+        Regex::new(r#"(?-u:[^b\w]"[^"\n]*/dmi/id/[^"\n]*")"#).expect("a valid pattern")
+    });
+    let read = READ.get_or_init(|| {
+        Regex::new(
+            r"(?i-u:\b(?:readfile|read_to_string|fileexists|fopen|open\w*|exists|inquire)\s*\()",
+        )
+        .expect("a valid pattern")
+    });
+    dmi.find_iter(data).take(64).any(|m| genuine(m.start() + 1))
+        && read.find_iter(data).take(64).any(|m| genuine(m.start()))
+}
+
 /// Why a rule's match is weak evidence, or `None` when it is not: every matched
 /// string is under four bytes or a run of one repeated byte (padding), the
 /// shellcode rule fired on a padding run or on its two short patterns in a large
@@ -380,7 +508,14 @@ fn weak_evidence_reason(
     text_file: bool,
     high_severity: bool,
 ) -> Option<&'static str> {
-    if text_file && !high_severity && tags.iter().any(|t| t == "anti_vm" || t == "anti_debug") {
+    // Source code that calls the technique is not prose: a debugger-check API
+    // called, or a file read of the tracer's status or the DMI product names.
+    let anti_call = text_file && has_anti_analysis_call(data);
+    if text_file
+        && !high_severity
+        && !anti_call
+        && tags.iter().any(|t| t == "anti_vm" || t == "anti_debug")
+    {
         return Some("a text file that describes the technique in words");
     }
     let matched: Vec<&str> = rule
@@ -405,7 +540,6 @@ fn weak_evidence_reason(
     {
         return Some("a text file that describes the technique in words");
     }
-    let has = |id: &str| matched.contains(&id);
     // Only the strings that made the rule fire count: a padding run alone, or
     // the two short shellcode patterns far apart in a large file, are weak.
     if rule.identifier() == "shellcode_patterns" {
@@ -421,7 +555,8 @@ fn weak_evidence_reason(
     // Hypervisor product names alone are in every program that lists them.
     if rule.identifier() == "anti_analysis" {
         let debugger_names = matched.iter().filter(|id| id.starts_with("$dbg")).count();
-        let tracer = has("$tracer") && has("$procstatus") && (has("$ptrace") || has("$dmi"));
+        let tracer =
+            has("$tracer") && has("$procstatus") && (has("$ptrace") || has("$dmi") || anti_call);
         if debugger_names < 2 && !tracer && !has("$dmi") {
             return Some("only hypervisor product names matched");
         }
