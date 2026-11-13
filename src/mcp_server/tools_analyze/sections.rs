@@ -328,10 +328,15 @@ pub(super) struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
+    /// `policy` is the roots policy of the server call this context serves, or
+    /// `None` on purpose where there is no server (the command line, a test):
+    /// a detached signature link is then followed as the command-line scanner
+    /// does. A server path passes `Some(state.path_policy())`.
     pub(super) fn new(
         path: &'a Path,
         runtime: &'a tokio::runtime::Handle,
         options: Options,
+        policy: Option<crate::mcp_server::paths::PathPolicy>,
     ) -> Self {
         Self {
             path,
@@ -345,7 +350,7 @@ impl<'a> Ctx<'a> {
             entropy: None,
             binary_info: None,
             hashes: None,
-            policy: crate::mcp_server::paths::current_policy(),
+            policy,
         }
     }
 

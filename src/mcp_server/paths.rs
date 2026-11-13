@@ -7,32 +7,6 @@ use std::path::{Path, PathBuf};
 
 pub use crate::signature::SideFile;
 
-thread_local! {
-    /// The policy of the server call running on this thread, set by
-    /// `ServerState::run_blocking` so analysis code that derives paths from the
-    /// named one (a detached signature) can apply it. `None` off the server.
-    static CURRENT_POLICY: std::cell::RefCell<Option<PathPolicy>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Run `work` with `policy` as this thread's current policy.
-pub(super) fn with_current_policy<T>(policy: PathPolicy, work: impl FnOnce() -> T) -> T {
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            CURRENT_POLICY.with(|current| *current.borrow_mut() = None);
-        }
-    }
-    CURRENT_POLICY.with(|current| *current.borrow_mut() = Some(policy));
-    let _reset = Reset;
-    work()
-}
-
-/// The policy of the server call running on this thread, if any.
-pub(super) fn current_policy() -> Option<PathPolicy> {
-    CURRENT_POLICY.with(|current| current.borrow().clone())
-}
-
 /// What a tool needs the path to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expect {
@@ -211,17 +185,17 @@ impl PathPolicy {
     /// resolved once, following every link, and used only when the result is
     /// inside a root; the caller must open that resolved path, not the link.
     /// A candidate that does not exist, or whose link cannot be resolved, is
-    /// [`SideFile::Absent`].
+    /// [`SideFile::Absent`]; one that is not a regular file (a named pipe,
+    /// socket, device, directory) or is too large is [`SideFile::Unreadable`],
+    /// with or without roots.
     pub fn side_file(&self, candidate: &Path) -> SideFile {
         if self.allow_roots.is_empty() {
-            return if candidate.exists() {
-                SideFile::Use(candidate.to_path_buf())
-            } else {
-                SideFile::Absent
-            };
+            return crate::signature::classify_side_file(candidate);
         }
         match std::fs::canonicalize(candidate) {
-            Ok(resolved) if self.is_inside_a_root(&resolved) => SideFile::Use(resolved),
+            Ok(resolved) if self.is_inside_a_root(&resolved) => {
+                crate::signature::classify_side_file(&resolved)
+            }
             Ok(_) => SideFile::Refused,
             Err(_) => SideFile::Absent,
         }
@@ -653,5 +627,36 @@ mod tests {
             SideFile::Use(dir.join("out.sig"))
         );
         assert_eq!(open.side_file(&dir.join("none.sig")), SideFile::Absent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn side_file_that_is_not_a_regular_file_is_unreadable_with_or_without_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().canonicalize().unwrap();
+        let pipe = dir.join("p.sig");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::create_dir(dir.join("d.sig")).unwrap();
+        std::os::unix::fs::symlink(&pipe, dir.join("l.sig")).unwrap();
+        for policy in [
+            PathPolicy::new(vec![dir.clone()]),
+            PathPolicy::new(Vec::new()),
+        ] {
+            for (name, words) in [
+                ("p.sig", "is a named pipe (FIFO)"),
+                ("l.sig", "is a named pipe (FIFO)"),
+                ("d.sig", "is a directory"),
+            ] {
+                assert_eq!(
+                    policy.side_file(&dir.join(name)),
+                    SideFile::Unreadable(words.to_string()),
+                    "{name}"
+                );
+            }
+        }
     }
 }

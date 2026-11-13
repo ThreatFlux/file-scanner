@@ -380,12 +380,23 @@ impl FileScannerMcp {
         respond(result, budget)
     }
 
+    /// The roots checks of the registered package tools for a library entry
+    /// point: the path, then the tree the analysis reads. No roots: as written.
+    fn confine_package_path(&self, raw: &str, ecosystem: Ecosystem) -> Result<PathBuf, String> {
+        let path = self.confine_library_path(raw, "Package", Expect::FileOrDir)?;
+        if !self.state.allowed_roots().is_empty() {
+            self.state
+                .check_tree(&analysis_target(ecosystem, &path), true)?;
+        }
+        Ok(path)
+    }
+
     /// Library-level entry: the complete npm analysis (no paging).
     pub async fn analyze_npm_package(
         &self,
         request: NpmAnalysisRequest,
     ) -> Result<Json<NpmPackageAnalysis>, String> {
-        let path = PathBuf::from(&request.package_path);
+        let path = self.confine_package_path(&request.package_path, Ecosystem::Npm)?;
         if !path.exists() {
             return Err(format!("Path does not exist: {}", request.package_path));
         }
@@ -398,7 +409,7 @@ impl FileScannerMcp {
         &self,
         request: PythonAnalysisRequest,
     ) -> Result<Json<PythonPackageAnalysis>, String> {
-        let path = PathBuf::from(&request.package_path);
+        let path = self.confine_package_path(&request.package_path, Ecosystem::Python)?;
         if !path.exists() {
             return Err(format!("Path does not exist: {}", request.package_path));
         }

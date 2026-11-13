@@ -1231,7 +1231,7 @@ impl FileScannerMcp {
                     arch: arch.clone(),
                     ..Options::default()
                 };
-                let ctx = Ctx::new(&path, &runtime, options.clone());
+                let ctx = Ctx::new(&path, &runtime, options.clone(), Some(state.path_policy()));
                 let mut engine =
                     Engine::new(state.section_cache(), &sha256, ctx, state.cache_enabled());
                 super::sections::check_arch(&mut engine, &options, &file_path, mtime_ns)?;

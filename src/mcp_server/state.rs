@@ -1228,6 +1228,13 @@ impl ServerState {
         self.policy.resolve(raw, noun, expect)
     }
 
+    /// The roots policy of this server, for code that derives paths from the
+    /// one the client named (a detached signature beside it) and must apply
+    /// the same confinement. Analysis contexts take it explicitly.
+    pub fn path_policy(&self) -> PathPolicy {
+        self.policy.clone()
+    }
+
     /// Vet the contents of a directory argument (see [`PathPolicy::check_tree`]).
     pub fn check_tree(&self, dir: &std::path::Path, recursive: bool) -> Result<(), String> {
         self.policy.check_tree(dir, recursive)
@@ -1243,13 +1250,9 @@ impl ServerState {
     {
         // The semaphore is never closed, so acquiring cannot fail.
         let _slot = self.slots.acquire().await.ok();
-        let policy = self.policy.clone();
         let joined = tokio::task::spawn_blocking(move || {
             CURRENT_SECTION.with(|current| current.set(None));
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                super::paths::with_current_policy(policy, work)
-            }))
-            .map_err(|payload| Crash {
+            std::panic::catch_unwind(AssertUnwindSafe(work)).map_err(|payload| Crash {
                 message: panic_message(payload.as_ref()),
                 section: CURRENT_SECTION.with(Cell::take),
             })

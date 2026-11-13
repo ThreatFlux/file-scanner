@@ -53,7 +53,7 @@ use crate::{
     hash::{calculate_all_hashes, calculate_sha256_only, Hashes},
     hexdump::{format_hex_dump_text, generate_hex_dump, HexDumpOptions},
     metadata::FileMetadata,
-    signature::verify_signature,
+    signature::verify_signature_with,
     strings::extract_strings,
     threat_detection::{analyze_threats, analyze_threats_enhanced, ThreatAnalysis},
     vulnerability_detection::{analyze_vulnerabilities, VulnerabilityDetectionResult},
@@ -476,7 +476,7 @@ impl FileScannerMcp {
         let outcome = self
             .state
             .run_blocking("analyze_file", move || {
-                let ctx = Ctx::new(&path, &runtime, options.clone());
+                let ctx = Ctx::new(&path, &runtime, options.clone(), Some(state.path_policy()));
                 let mut engine =
                     Engine::new(state.section_cache(), &sha, ctx, state.cache_enabled());
                 sections::check_arch(&mut engine, &options, &file_path, mtime_ns)?;
@@ -663,7 +663,7 @@ impl FileScannerMcp {
         let outcome = self
             .state
             .run_blocking("query_analysis", move || {
-                let ctx = Ctx::new(&path, &runtime, options.clone());
+                let ctx = Ctx::new(&path, &runtime, options.clone(), Some(state.path_policy()));
                 let mut engine =
                     Engine::new(state.section_cache(), &sha256, ctx, state.cache_enabled());
                 sections::check_arch(&mut engine, &options, &file_path, mtime_ns)?;
@@ -1323,11 +1323,30 @@ pub struct LlmFileAnalysisResult {
 }
 
 impl FileScannerMcp {
+    /// The path check of the library entry points (`analyze_file`,
+    /// `analyze_npm_package`, `analyze_python_package`, `yara_scan_file`,
+    /// `analyze_java_file`): with allowed roots the path goes through the same
+    /// [`ServerState::resolve_path`](super::state::ServerState::resolve_path)
+    /// the registered tools use (same refusals, same text) before anything is
+    /// opened; without roots the path is used as written, as before.
+    pub(crate) fn confine_library_path(
+        &self,
+        raw: &str,
+        noun: &str,
+        expect: Expect,
+    ) -> Result<PathBuf, String> {
+        if self.state.allowed_roots().is_empty() {
+            Ok(PathBuf::from(raw))
+        } else {
+            self.state.resolve_path(raw, noun, expect)
+        }
+    }
+
     pub async fn analyze_file(
         &self,
         request: FileAnalysisRequest,
     ) -> Result<Json<FileAnalysisResult>, String> {
-        let path = PathBuf::from(&request.file_path);
+        let path = self.confine_library_path(&request.file_path, "File", Expect::File)?;
 
         if !path.exists() {
             return Err(format!("File does not exist: {}", request.file_path));
@@ -1451,7 +1470,9 @@ impl FileScannerMcp {
         // Signatures
         if request.signatures.unwrap_or(false) || all {
             mark_section("signatures");
-            let sig_result = verify_signature(&path);
+            // A detached signature beside the file obeys the roots policy too.
+            let policy = self.state.path_policy();
+            let sig_result = verify_signature_with(&path, &|candidate| policy.side_file(candidate));
             // Convert the result to a JSON-serializable format
             let sig_json = match sig_result {
                 Ok(info) => serde_json::json!({

@@ -375,3 +375,239 @@ async fn without_roots_a_signature_link_is_followed_as_before() {
     assert_ne!(status, "No signature found", "{answer}");
     client.cancel().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// 5. A side file that is not a regular file is never opened
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn make_fifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("mkfifo");
+    assert!(status.success());
+}
+
+/// Ask for the signature section with a client-side deadline, so a call that
+/// would block on a pipe fails the test instead of hanging it.
+async fn signature_answer(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    file: &Path,
+) -> Value {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        call(
+            client,
+            "analyze_file",
+            json!({"file_path": file, "sections": ["signatures"]}),
+        ),
+    )
+    .await
+    .expect("the signature section must answer, not block on the side file")
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_named_pipe_or_directory_as_a_side_file_is_not_opened_and_is_said_so() {
+    for rooted in [false, true] {
+        for (kind, words) in [
+            ("fifo", "is a named pipe (FIFO)"),
+            ("dir", "is a directory"),
+        ] {
+            for suffix in ["sig", "asc"] {
+                let root = TempDir::new().unwrap();
+                let root_path = root.path().canonicalize().unwrap();
+                let file = write(&root_path, "a.bin", b"payload bytes\n");
+                let side = root_path.join(format!("a.bin.{suffix}"));
+                if kind == "fifo" {
+                    make_fifo(&side);
+                } else {
+                    std::fs::create_dir(&side).unwrap();
+                }
+                let client = if rooted {
+                    rooted_client(&root_path).await
+                } else {
+                    client().await
+                };
+                let answer = signature_answer(&client, &file).await.to_string();
+                assert!(
+                    answer.contains("exists beside the file but")
+                        && answer.contains(words)
+                        && answer.contains("was not read"),
+                    "{kind} {suffix} rooted={rooted}: {answer}"
+                );
+                assert!(!answer.contains("Detached signature present"), "{answer}");
+                client.cancel().await.unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_to_a_named_pipe_inside_the_roots_is_not_opened_either() {
+    let root = TempDir::new().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let file = write(&root_path, "a.bin", b"payload bytes\n");
+    let pipe = root_path.join("pipe");
+    make_fifo(&pipe);
+    std::os::unix::fs::symlink(&pipe, root_path.join("a.bin.sig")).unwrap();
+    let client = rooted_client(&root_path).await;
+    let answer = signature_answer(&client, &file).await.to_string();
+    assert!(answer.contains("is a named pipe (FIFO)"), "{answer}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_ordinary_side_file_is_still_used() {
+    let root = TempDir::new().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let file = write(&root_path, "a.bin", b"payload bytes\n");
+    write(&root_path, "a.bin.sig", &armor_with("PLAIN_SIDE"));
+    let client = rooted_client(&root_path).await;
+    let answer = signature_answer(&client, &file).await;
+    let status = answer["signatures"]["verification_status"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(!status.contains("was not read"), "{answer}");
+    assert_ne!(status, "No signature found", "{answer}");
+    client.cancel().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 6. The library entry points obey the roots of a rooted state
+// ---------------------------------------------------------------------------
+
+async fn tool_error_text(
+    client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    tool: &str,
+    args: Value,
+) -> String {
+    let Value::Object(map) = args else {
+        panic!("object")
+    };
+    let result = client
+        .call_tool(CallToolRequestParams::new(tool.to_string()).with_arguments(map))
+        .await
+        .expect("protocol");
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    result
+        .content
+        .first()
+        .and_then(|b| b.as_text())
+        .map(|t| t.text.clone())
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_library_entry_points_refuse_what_the_registered_tools_refuse() {
+    use file_scanner::mcp_server::{
+        NpmAnalysisRequest, PythonAnalysisRequest, ServerState, StateConfig, YaraScanRequest,
+    };
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let outside_path = outside.path().canonicalize().unwrap();
+    let cache = TempDir::new().unwrap();
+    let state = std::sync::Arc::new(ServerState::new(StateConfig {
+        cache_dir: cache.path().to_path_buf(),
+        allow_roots: vec![root_path.clone()],
+        ..StateConfig::default()
+    }));
+    let server = FileScannerMcp::with_state(std::sync::Arc::clone(&state));
+    let client = rooted_client(&root_path).await;
+
+    // Targets: a file outside, and a link inside that leads outside.
+    let secret = write(&outside_path, "secret.bin", b"SECRET_BYTES\n");
+    let secret_dir = outside_path.join("pkg");
+    write(
+        &secret_dir,
+        "package.json",
+        br#"{"name":"x","version":"1.0.0"}"#,
+    );
+    write(&secret_dir, "setup.py", b"print('x')\n");
+    let inside_file = write(&root_path, "ok.bin", b"inside\n");
+    let link_file = root_path.join("link.bin");
+    std::os::unix::fs::symlink(&secret, &link_file).unwrap();
+    let link_dir = root_path.join("linkdir");
+    std::os::unix::fs::symlink(&secret_dir, &link_dir).unwrap();
+    let rules = write(&outside_path, "rules/r.yar", b"rule r { condition: true }");
+
+    for target in [&secret, &link_file] {
+        let raw = target.to_string_lossy().into_owned();
+        let request: file_scanner::mcp_server::FileAnalysisRequest =
+            serde_json::from_value(json!({"file_path": raw, "signatures": true})).unwrap();
+        let library = server.analyze_file(request).await.err().expect("refused");
+        let tool = tool_error_text(&client, "analyze_file", json!({"file_path": raw})).await;
+        assert_eq!(library, tool);
+
+        let request: YaraScanRequest =
+            serde_json::from_value(json!({"path": raw, "yara_rule": "rule a { condition: true }"}))
+                .unwrap();
+        let library = server.yara_scan_file(request).await.err().expect("refused");
+        let tool = tool_error_text(
+            &client,
+            "yara_scan_file",
+            json!({"path": raw, "yara_rule": "rule a { condition: true }"}),
+        )
+        .await;
+        assert_eq!(library, tool);
+    }
+
+    // A rule path outside, with a scan path inside.
+    for rule in [rules.clone(), {
+        let link = root_path.join("rules-link");
+        std::os::unix::fs::symlink(outside_path.join("rules"), &link).unwrap();
+        link
+    }] {
+        let raw = rule.to_string_lossy().into_owned();
+        let request: YaraScanRequest =
+            serde_json::from_value(json!({"path": inside_file, "yara_rule": "", "rule_path": raw}))
+                .unwrap();
+        let library = server.yara_scan_file(request).await.err().expect("refused");
+        let tool = tool_error_text(
+            &client,
+            "yara_scan_file",
+            json!({"path": inside_file, "rule_path": raw}),
+        )
+        .await;
+        assert_eq!(library, tool);
+    }
+
+    for target in [&secret_dir, &link_dir] {
+        let raw = target.to_string_lossy().into_owned();
+        let request: NpmAnalysisRequest =
+            serde_json::from_value(json!({"package_path": raw})).unwrap();
+        let library = server
+            .analyze_npm_package(request)
+            .await
+            .err()
+            .expect("refused");
+        let tool =
+            tool_error_text(&client, "analyze_npm_package", json!({"package_path": raw})).await;
+        assert_eq!(library, tool);
+
+        let request: PythonAnalysisRequest =
+            serde_json::from_value(json!({"package_path": raw})).unwrap();
+        let library = server
+            .analyze_python_package(request)
+            .await
+            .err()
+            .expect("refused");
+        let tool = tool_error_text(
+            &client,
+            "analyze_python_package",
+            json!({"package_path": raw}),
+        )
+        .await;
+        assert_eq!(library, tool);
+    }
+
+    // What is inside the root still works.
+    let request: file_scanner::mcp_server::FileAnalysisRequest =
+        serde_json::from_value(json!({"file_path": inside_file, "hashes": true})).unwrap();
+    assert!(server.analyze_file(request).await.is_ok());
+    client.cancel().await.unwrap();
+}

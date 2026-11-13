@@ -76,16 +76,68 @@ pub enum SideFile {
     /// A side file exists but may not be read (it leads outside the roots a
     /// server is confined to). It is not opened, hashed or passed to a tool.
     Refused,
+    /// A side file exists but is not something a signature can be: after
+    /// following links it is not a regular file (a named pipe, socket, device
+    /// or directory) or it is larger than [`MAX_SIDE_FILE_BYTES`]. It is not
+    /// opened or passed to a tool. The text completes "... exists beside the
+    /// file but ..." (for example `is a named pipe (FIFO)`).
+    Unreadable(String),
+}
+
+/// The largest detached signature file that is handed to gpg (16 MiB; real
+/// ones are a few hundred bytes to a few kilobytes).
+pub const MAX_SIDE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+#[cfg(unix)]
+fn special_file_kind(file_type: std::fs::FileType) -> Option<&'static str> {
+    use std::os::unix::fs::FileTypeExt;
+    if file_type.is_fifo() {
+        Some("a named pipe (FIFO)")
+    } else if file_type.is_socket() {
+        Some("a socket")
+    } else if file_type.is_block_device() || file_type.is_char_device() {
+        Some("a device file")
+    } else {
+        None
+    }
+}
+
+#[cfg(not(unix))]
+fn special_file_kind(_file_type: std::fs::FileType) -> Option<&'static str> {
+    None
+}
+
+/// Judge a side file that is already resolved (every link followed): it is
+/// used only when it is a regular file of a plausible size. Uses `metadata`,
+/// which follows links and never opens the file, so a pipe cannot block here.
+/// A candidate that cannot be stat-ed is [`SideFile::Absent`].
+pub fn classify_side_file(resolved: &Path) -> SideFile {
+    let Ok(metadata) = std::fs::metadata(resolved) else {
+        return SideFile::Absent;
+    };
+    if let Some(kind) = special_file_kind(metadata.file_type()) {
+        return SideFile::Unreadable(format!("is {kind}"));
+    }
+    if metadata.is_dir() {
+        return SideFile::Unreadable("is a directory".to_string());
+    }
+    if !metadata.is_file() {
+        return SideFile::Unreadable("is not a regular file".to_string());
+    }
+    if metadata.len() > MAX_SIDE_FILE_BYTES {
+        return SideFile::Unreadable(format!(
+            "is {} bytes, larger than the {} MiB a detached signature can be",
+            metadata.len(),
+            MAX_SIDE_FILE_BYTES / (1024 * 1024)
+        ));
+    }
+    SideFile::Use(resolved.to_path_buf())
 }
 
 /// The command-line scanner's rule: any candidate that exists is used, links
-/// followed.
+/// followed, provided it is a regular file of a plausible size.
 fn follow_links(candidate: &Path) -> SideFile {
-    if candidate.exists() {
-        SideFile::Use(candidate.to_path_buf())
-    } else {
-        SideFile::Absent
-    }
+    classify_side_file(candidate)
 }
 
 /// The first detached signature file `resolve` allows, and whether a candidate
@@ -94,15 +146,35 @@ fn pick_side_file(
     path: &Path,
     resolve: &dyn Fn(&Path) -> SideFile,
 ) -> (Option<std::path::PathBuf>, bool) {
+    let (picked, refused, _) = pick_side_file_full(path, resolve);
+    (picked, refused)
+}
+
+/// [`pick_side_file`] plus the sentences for candidates that exist but are not
+/// usable as a signature (not a regular file, too large).
+fn pick_side_file_full(
+    path: &Path,
+    resolve: &dyn Fn(&Path) -> SideFile,
+) -> (Option<std::path::PathBuf>, bool, Vec<String>) {
     let mut refused = false;
+    let mut unreadable = Vec::new();
     for candidate in detached_signature_candidates(path) {
         match resolve(&candidate) {
-            SideFile::Use(resolved) => return (Some(resolved), refused),
+            SideFile::Use(resolved) => return (Some(resolved), refused, unreadable),
             SideFile::Refused => refused = true,
+            SideFile::Unreadable(why) => {
+                let name = candidate
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                unreadable.push(format!(
+                    "a detached signature file ({name}) exists beside the file but {why} and was not read; only a regular file is used as a signature"
+                ));
+            }
             SideFile::Absent => {}
         }
     }
-    (None, refused)
+    (None, refused, unreadable)
 }
 
 /// The sentence for a side file that was left unread.
@@ -131,7 +203,7 @@ pub fn verify_signature_with(
     }
 
     // Check for GPG signatures
-    let (side_file, refused) = pick_side_file(path, resolve);
+    let (side_file, refused, unreadable) = pick_side_file_full(path, resolve);
     if let Some(side_file) = &side_file {
         if let Ok(gpg_info) = run_gpg_verify(path, "gpg", side_file) {
             return Ok(gpg_info);
@@ -144,6 +216,7 @@ pub fn verify_signature_with(
     if refused {
         not_checked.push(SIDE_FILE_REFUSED.to_string());
     }
+    not_checked.extend(unreadable);
 
     // Check for macOS code signatures (only for Mach-O binaries)
     if let Ok(mut reader) = FileReader::open(path) {
@@ -812,6 +885,106 @@ mod tests {
         .unwrap();
         fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
         stub
+    }
+
+    /// Run `verify_signature` on another thread with a generous deadline, so a
+    /// call that blocks on a pipe fails the test instead of hanging it.
+    #[cfg(unix)]
+    fn verify_with_deadline(file: &Path) -> SignatureInfo {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let file = file.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = sender.send(verify_signature(&file));
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("verify_signature must not block on a side file")
+            .unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_named_pipe_or_directory_as_a_side_file_is_not_opened() {
+        for suffix in ["sig", "asc"] {
+            for kind in ["fifo", "dir"] {
+                let dir = TempDir::new().unwrap();
+                let file = dir.path().join("p.bin");
+                fs::write(&file, b"payload").unwrap();
+                let side = dir.path().join(format!("p.bin.{suffix}"));
+                if kind == "fifo" {
+                    assert!(Command::new("mkfifo")
+                        .arg(&side)
+                        .status()
+                        .unwrap()
+                        .success());
+                } else {
+                    fs::create_dir(&side).unwrap();
+                }
+                let info = verify_with_deadline(&file);
+                assert!(!info.is_signed);
+                let expected = if kind == "fifo" {
+                    "is a named pipe (FIFO)"
+                } else {
+                    "is a directory"
+                };
+                assert!(
+                    info.verification_status.contains(expected)
+                        && info.verification_status.contains("was not read"),
+                    "{kind} {suffix}: {}",
+                    info.verification_status
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn classify_side_file_uses_regular_files_and_bounds_their_size() {
+        let dir = TempDir::new().unwrap();
+        let regular = dir.path().join("ok.sig");
+        fs::write(&regular, b"sig").unwrap();
+        assert_eq!(classify_side_file(&regular), SideFile::Use(regular.clone()));
+        assert_eq!(
+            classify_side_file(&dir.path().join("none.sig")),
+            SideFile::Absent
+        );
+        assert_eq!(
+            classify_side_file(dir.path()),
+            SideFile::Unreadable("is a directory".to_string())
+        );
+        let big = dir.path().join("big.sig");
+        fs::File::create(&big)
+            .unwrap()
+            .set_len(MAX_SIDE_FILE_BYTES + 1)
+            .unwrap();
+        match classify_side_file(&big) {
+            SideFile::Unreadable(why) => assert!(why.contains("larger than the 16 MiB"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        let exact = dir.path().join("exact.sig");
+        fs::File::create(&exact)
+            .unwrap()
+            .set_len(MAX_SIDE_FILE_BYTES)
+            .unwrap();
+        assert_eq!(classify_side_file(&exact), SideFile::Use(exact.clone()));
+    }
+
+    #[test]
+    fn an_oversized_side_file_is_said_so_and_not_handed_to_gpg() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("p.bin");
+        fs::write(&file, b"payload").unwrap();
+        fs::File::create(dir.path().join("p.bin.sig"))
+            .unwrap()
+            .set_len(MAX_SIDE_FILE_BYTES + 1)
+            .unwrap();
+        let info = verify_signature(&file).unwrap();
+        assert!(!info.is_signed);
+        assert!(
+            info.verification_status.contains("larger than the 16 MiB")
+                && info.verification_status.contains("was not read"),
+            "{}",
+            info.verification_status
+        );
     }
 
     #[test]

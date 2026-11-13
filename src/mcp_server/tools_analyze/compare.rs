@@ -268,7 +268,7 @@ impl FileScannerMcp {
                     (&mut a, &a_path, &a_sha, a_mtime, "file_a"),
                     (&mut b, &b_path, &b_sha, b_mtime, "file_b"),
                 ] {
-                    let ctx = Ctx::new(path, &runtime, options.clone());
+                    let ctx = Ctx::new(path, &runtime, options.clone(), Some(state.path_policy()));
                     let mut engine = Engine::new(state.section_cache(), sha, ctx, state.cache_enabled());
                     load_side(&mut engine, side, label, &options, mtime);
                     computed += engine.computed;

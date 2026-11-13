@@ -774,7 +774,7 @@ impl FileScannerMcp {
         &self,
         request: YaraScanRequest,
     ) -> Result<Json<YaraScanResult>, String> {
-        let path = PathBuf::from(&request.path);
+        let path = self.confine_library_path(&request.path, "Path", Expect::FileOrDir)?;
         if !path.exists() {
             return Err(format!("Path does not exist: {}", request.path));
         }
@@ -796,7 +796,11 @@ impl FileScannerMcp {
             sources.push(("yara_rule".to_string(), request.yara_rule));
         }
         if let Some(rule_path) = request.rule_path.as_deref() {
-            sources.extend(load_rule_sources(&PathBuf::from(rule_path))?);
+            let rule_path = self.confine_library_path(rule_path, "Rule path", Expect::FileOrDir)?;
+            if !self.state.allowed_roots().is_empty() {
+                self.state.check_tree(&rule_path, true)?;
+            }
+            sources.extend(load_rule_sources(&rule_path)?);
         }
         if sources.is_empty() {
             return Err("No rules given: pass a rule file or rule text.".to_string());
@@ -807,6 +811,7 @@ impl FileScannerMcp {
         if request.timeout_seconds == Some(0) {
             return Err("timeout_seconds must be at least 1.".to_string());
         }
+        let path_for_check = path.clone();
         let plan = ScanPlan {
             path,
             sources,
@@ -817,6 +822,9 @@ impl FileScannerMcp {
                 // Without the flags the command line scans everything.
                 max_files: request.max_files.unwrap_or(usize::MAX),
                 timeout: Duration::from_secs(request.timeout_seconds.unwrap_or(24 * 60 * 60)),
+                // Each entry is vetted as the walk meets it, as the tool does.
+                entry_check: (!self.state.allowed_roots().is_empty())
+                    .then(|| entry_check_for(self.state.config(), &path_for_check)),
                 ..YaraScanOptions::default()
             },
         };
