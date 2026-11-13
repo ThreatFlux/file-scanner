@@ -349,6 +349,9 @@ pub fn analyze_threats(path: &Path) -> Result<ThreatAnalysis> {
 const WEAK_EVIDENCE_KEY: &str = "evidence_strength";
 /// A matched string shorter than this says nothing on its own.
 const MIN_STRONG_STRING_BYTES: usize = 4;
+/// The two short shellcode patterns (get-pc and SEH) only count in a file up
+/// to this size; in a larger binary they occur by chance.
+const MAX_STRONG_SHELLCODE_PAIR_FILE_BYTES: usize = 256 * 1024;
 
 /// Whether the file is text: no NUL byte anywhere in it and valid UTF-8 in
 /// its first 64 KiB. A binary part after long leading text is not text.
@@ -365,7 +368,9 @@ fn looks_like_text(data: &[u8]) -> bool {
 }
 
 /// Why a rule's match is weak evidence, or `None` when it is not: every matched
-/// string is under four bytes or a run of one repeated byte (padding), or the
+/// string is under four bytes or a run of one repeated byte (padding), the
+/// shellcode rule fired on a padding run or on its two short patterns in a large
+/// file, the anti-analysis rule fired on hypervisor names alone, or the
 /// rule names a debugger or virtual-machine technique and the file is text
 /// (documentation that describes it). Such a match is still reported.
 fn weak_evidence_reason(
@@ -378,16 +383,48 @@ fn weak_evidence_reason(
     if text_file && !high_severity && tags.iter().any(|t| t == "anti_vm" || t == "anti_debug") {
         return Some("a text file that describes the technique in words");
     }
+    let matched: Vec<&str> = rule
+        .patterns()
+        .filter(|p| p.matches().next().is_some())
+        .map(|p| p.identifier())
+        .collect();
+    let has = |id: &str| matched.contains(&id);
     // The words "bind shell" and "reverse shell" in a text file are
-    // documentation; a command line that opens one is not.
+    // documentation; a command line that opens one is not. The strings of the
+    // Python pair count only when the whole pair is present.
+    let pair = has("$dup2") && (has("$binsh") || has("$pty")) && has("$sock") && has("$conn");
     if text_file
         && tags.iter().any(|t| t == "backdoor")
-        && rule
-            .patterns()
-            .filter(|p| p.matches().next().is_some())
-            .all(|p| matches!(p.identifier(), "$bind" | "$reverse"))
+        && !pair
+        && matched.iter().all(|id| {
+            matches!(
+                *id,
+                "$bind" | "$reverse" | "$dup2" | "$binsh" | "$pty" | "$sock" | "$conn"
+            )
+        })
     {
         return Some("a text file that describes the technique in words");
+    }
+    let has = |id: &str| matched.contains(&id);
+    // Only the strings that made the rule fire count: a padding run alone, or
+    // the two short shellcode patterns far apart in a large file, are weak.
+    if rule.identifier() == "shellcode_patterns" {
+        if has("$get_pc") && has("$seh") && data.len() <= MAX_STRONG_SHELLCODE_PAIR_FILE_BYTES {
+            return None;
+        }
+        return Some(if has("$get_pc") && has("$seh") {
+            "two short byte patterns found far apart in a large file"
+        } else {
+            "every matched string is under 4 bytes or a run of one repeated byte"
+        });
+    }
+    // Hypervisor product names alone are in every program that lists them.
+    if rule.identifier() == "anti_analysis" {
+        let debugger_names = matched.iter().filter(|id| id.starts_with("$dbg")).count();
+        let tracer = has("$tracer") && has("$procstatus") && (has("$ptrace") || has("$dmi"));
+        if debugger_names < 2 && !tracer && !has("$dmi") {
+            return Some("only hypervisor product names matched");
+        }
     }
     let mut any = false;
     for pattern in rule.patterns() {
@@ -979,8 +1016,11 @@ rule persistence_mechanisms : persistence {
         $svc1 = "CreateService" ascii
         $svc2 = "SERVICE_AUTO_START" ascii
         $task = "schtasks" ascii nocase
+        // The word alone is in help texts, completion files and git; a task
+        // is created with "schtasks /create" or beside a Run key.
+        $create = /schtasks(\.exe)?["']?[ \t]+\/create/ ascii nocase
     condition:
-        2 of ($reg*) or ($svc1 and $svc2) or $task
+        2 of ($reg*) or ($svc1 and $svc2) or $create or ($task and $reg1)
 }"#,
         // Rule 7: Shell code patterns
         r#"
@@ -1047,8 +1087,16 @@ rule backdoor_patterns : backdoor {
         $shell2 = "nc -e /bin/" ascii
         $bind = "bind shell" ascii nocase
         $reverse = "reverse shell" ascii nocase
+        // A Python reverse shell: a socket connects, is dup2'd onto fds 0 to 2,
+        // then a shell starts. Ordinary Python has os.dup2 and /bin/sh, not the
+        // socket connect with them.
+        $dup2 = "os.dup2(" ascii
+        $binsh = "/bin/sh" ascii
+        $pty = "pty.spawn(" ascii
+        $sock = "socket.socket(" ascii
+        $conn = ".connect(" ascii
     condition:
-        $cmd or any of ($shell*) or any of ($bind, $reverse)
+        $cmd or any of ($shell*) or any of ($bind, $reverse) or ($dup2 and ($binsh or $pty) and $sock and $conn)
 }"#,
         // Rule 11: A hard-coded domain that imitates a vendor's update service
         r#"
