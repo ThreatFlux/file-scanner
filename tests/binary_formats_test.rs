@@ -1830,7 +1830,7 @@ fn macho_library_names_outside_their_commands_are_not_analyzed() {
 }
 
 /// ELF64 whose dynamic section holds `names.len()` DT_NEEDED entries.
-fn elf_with_needed(names: &[Vec<u8>], shared: bool) -> Vec<u8> {
+fn elf_with_needed(names: &[impl AsRef<[u8]>], shared: bool) -> Vec<u8> {
     let mut strtab = vec![0u8];
     let mut offsets = Vec::new();
     for n in names {
@@ -1839,7 +1839,7 @@ fn elf_with_needed(names: &[Vec<u8>], shared: bool) -> Vec<u8> {
             continue;
         }
         offsets.push(strtab.len() as u64);
-        strtab.extend_from_slice(n);
+        strtab.extend_from_slice(n.as_ref());
         strtab.push(0);
     }
     let dyn_off = 64 + 2 * 56;
@@ -1906,7 +1906,10 @@ fn elf_needed_libraries_are_capped_and_cheap_to_deduplicate() {
         info.notes
     );
     // 20,000 entries naming one 1 MiB string: one name, kept cut, quickly
-    let big = vec![vec![b'n'; 1 << 20]; 20_000];
+    // Share the input bytes too: cloning the name per entry would allocate
+    // about 20 GiB before the parser even sees this small shared-name fixture.
+    let big_name = vec![b'n'; 1 << 20];
+    let big = vec![big_name.as_slice(); 20_000];
     let path = write(&dir, "needed_big", &elf_with_needed(&big, true));
     let start = std::time::Instant::now();
     let info = parse_binary(&path).unwrap();

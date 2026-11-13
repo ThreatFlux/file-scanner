@@ -13,7 +13,7 @@ import sys
 import tomllib
 
 
-POLICY_DIGEST = "fc2f2b4260484dca5ac6de482ffe6a11440e4af1987a1adc4ff45dee4a80d310"
+POLICY_DIGEST = "34c74e269aa32309d358222de5d97176b10fcacaff7c039539cafbb519bc3041"
 SOURCE_TOKENS = (
     "thumbprint", "pearson_hash", "TlshBuilder", "Certificate",
     "CertificateChain", "AuthenticodeSignature", "X509CertificateParser",

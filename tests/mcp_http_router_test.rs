@@ -944,6 +944,7 @@ async fn allow_roots_confine_tool_paths_over_http() {
     let secret = outside.path().join("secret.txt");
     std::fs::write(&ok_file, "fine").unwrap();
     std::fs::write(&secret, "secret").unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(&secret, inside.path().join("link.txt")).unwrap();
     let fx = fixture_with(
         HttpConfig::default(),
@@ -960,6 +961,7 @@ async fn allow_roots_confine_tool_paths_over_http() {
 
     for path in [
         secret.to_string_lossy().into_owned(),
+        #[cfg(unix)]
         inside
             .path()
             .join("link.txt")
