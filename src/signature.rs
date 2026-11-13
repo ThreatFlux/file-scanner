@@ -685,12 +685,13 @@ fn extract_gpg_signer(output: &str) -> Option<String> {
         .lines()
         .find(|l| l.contains("Good signature from"))
         .map(|l| {
-            l.split("Good signature from")
-                .nth(1)
-                .unwrap_or("")
-                .trim()
-                .trim_matches('"')
-                .to_string()
+            let rest = l.split("Good signature from").nth(1).unwrap_or("").trim();
+            // The name sits between the first and the last double quote; gpg
+            // appends a trust label such as `[ultimate]` after the closing one.
+            match (rest.find('"'), rest.rfind('"')) {
+                (Some(first), Some(last)) if last > first => rest[first + 1..last].to_string(),
+                _ => rest.trim_matches('"').to_string(),
+            }
         })
 }
 
@@ -1192,6 +1193,39 @@ mod tests {
         let output = "gpg: Signature made Mon 01 Jan 2024\ngpg: Good signature from \"Test User <test@example.com>\"\ngpg: checking";
         let signer = extract_gpg_signer(output);
         assert_eq!(signer, Some("Test User <test@example.com>".to_string()));
+    }
+
+    /// The signer is the text between the first and the last double quote of
+    /// the line: gpg appends the trust label after the closing quote.
+    #[test]
+    fn the_gpg_signer_stops_at_the_last_quote_of_the_line() {
+        let name = "t <t@example.invalid>";
+        for label in ["[ultimate]", "[full]", "[marginal]", "[unknown]", ""] {
+            let line = format!("gpg: Good signature from \"{name}\" {label}");
+            assert_eq!(
+                extract_gpg_signer(&line),
+                Some(name.to_string()),
+                "label {label:?}"
+            );
+        }
+        // Other lines of the output do not matter.
+        let output = "gpg: Signature made Mon 01 Jan 2024\ngpg: Good signature from \"t <t@example.invalid>\" [ultimate]\ngpg: aka \"u <u@example.invalid>\" [ultimate]";
+        assert_eq!(extract_gpg_signer(output), Some(name.to_string()));
+        // A name that holds a double quote keeps it.
+        assert_eq!(
+            extract_gpg_signer("gpg: Good signature from \"A \"B\" C <c@example.invalid>\" [full]"),
+            Some("A \"B\" C <c@example.invalid>".to_string())
+        );
+        // No quotes: the text after the phrase, as before.
+        assert_eq!(
+            extract_gpg_signer("gpg: Good signature from someone"),
+            Some("someone".to_string())
+        );
+        // One quote only: nothing to pair it with; the quote is trimmed as before.
+        assert_eq!(
+            extract_gpg_signer("gpg: Good signature from \"someone"),
+            Some("someone".to_string())
+        );
     }
 
     #[test]

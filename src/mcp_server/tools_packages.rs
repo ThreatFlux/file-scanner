@@ -185,8 +185,8 @@ impl Ecosystem {
 
     const fn cache_key(self) -> &'static str {
         match self {
-            Self::Npm => "package:npm:v3",
-            Self::Python => "package:python:v3",
+            Self::Npm => "package:npm:v4",
+            Self::Python => "package:python:v4",
         }
     }
 
@@ -338,8 +338,12 @@ impl FileScannerMcp {
         };
 
         let cache = self.state.section_cache();
-        let (full, cache_state) = if let Some(hit) = cache.get(&fingerprint, ecosystem.cache_key())
-        {
+        // No fingerprint: the digest could not cover the whole tree the analysis
+        // can read, so the answer is computed on every call and never stored.
+        let cached = fingerprint
+            .as_deref()
+            .and_then(|key| cache.get(key, ecosystem.cache_key()));
+        let (full, cache_state) = if let Some(hit) = cached {
             (hit, "hit")
         } else {
             let analysis_path = path.clone();
@@ -353,7 +357,9 @@ impl FileScannerMcp {
                 Ok(Ok(value)) => value,
                 Ok(Err(message)) | Err(message) => return tool_error(message),
             };
-            cache.put(&fingerprint, ecosystem.cache_key(), &value);
+            if let Some(key) = fingerprint.as_deref() {
+                cache.put(key, ecosystem.cache_key(), &value);
+            }
             (std::sync::Arc::new(value), "miss")
         };
 
@@ -455,101 +461,195 @@ fn run_analysis(ecosystem: Ecosystem, path: &Path) -> Result<Value, String> {
 
 /// A stable identity for the package: the SHA-256 of a file, or a digest of
 /// the names, sizes and modification times of the files of a directory.
-fn fingerprint(path: &Path) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
+/// `None` when the walk of a directory stopped at the entry limit the scan
+/// also uses: the digest does not cover the whole tree, so the answer is
+/// never cached.
+fn fingerprint(path: &Path) -> Result<Option<String>, String> {
+    fingerprint_with(path, crate::package_scan::MAX_VISITED_ENTRIES)
+}
 
-    /// Content of files up to this size is hashed, up to [`HASH_BUDGET`] bytes in all.
-    const HASH_FILE_LIMIT: u64 = 2 * 1024 * 1024;
-    const HASH_BUDGET: u64 = 128 * 1024 * 1024;
+/// [`fingerprint`] with the entry limit as a parameter.
+fn fingerprint_with(path: &Path, max_entries: usize) -> Result<Option<String>, String> {
+    use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
     if path.is_dir() {
         hasher.update(b"dir:");
-        let mut hashed = 0u64;
-        let walker = walkdir::WalkDir::new(path)
-            .follow_links(false)
-            .sort_by_file_name()
-            .into_iter()
-            // The directories the analysis does not enter are not read here either,
-            // so the content-hashed set is the one the analysis reads.
-            .filter_entry(|entry| {
-                entry.depth() == 0
-                    || !(entry.file_type().is_dir()
-                        && crate::package_scan::SKIPPED_DIRS
-                            .contains(&entry.file_name().to_string_lossy().as_ref()))
-            });
-        // Content is hashed only for what the analysis reads: manifests and the
-        // shallowest sources (the same order package_scan reads them in). The rest
-        // is covered by size and time, so a call on a big tree does not read it all.
-        let mut manifests: Vec<std::path::PathBuf> = Vec::new();
-        let mut sources: Vec<(usize, std::path::PathBuf)> = Vec::new();
-        for entry in walker.filter_map(Result::ok).take(200_000) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos());
-            hasher.update(entry.path().to_string_lossy().as_bytes());
-            hasher.update(metadata.len().to_le_bytes());
-            hasher.update(modified.to_le_bytes());
-            // The inode change time moves with every write and cannot be set back,
-            // so for a source file it stands in for reading the content.
-            #[cfg(unix)]
-            let changed_at = {
-                use std::os::unix::fs::MetadataExt as _;
-                Some((metadata.ctime(), metadata.ctime_nsec()))
-            };
-            #[cfg(not(unix))]
-            let changed_at: Option<(i64, i64)> = None;
-            if let Some((secs, nanos)) = changed_at {
-                hasher.update(secs.to_le_bytes());
-                hasher.update(nanos.to_le_bytes());
-            }
-            // Size and time are not enough: an edit that keeps both would be served
-            // from the cache.
-            if metadata.len() > HASH_FILE_LIMIT {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy();
-            let is_manifest = matches!(
-                name.as_ref(),
-                "package.json"
-                    | "package-lock.json"
-                    | "npm-shrinkwrap.json"
-                    | "setup.py"
-                    | "setup.cfg"
-                    | "pyproject.toml"
-                    | "PKG-INFO"
-                    | "METADATA"
-                    | "poetry.lock"
-            ) || (name.starts_with("requirements") && name.ends_with(".txt"));
-            if is_manifest {
-                manifests.push(entry.path().to_path_buf());
-            } else if changed_at.is_none() && crate::package_scan::language_of(&name).is_some() {
-                let relative = entry.path().strip_prefix(path).unwrap_or(entry.path());
-                let depth = relative.to_string_lossy().matches('/').count();
-                sources.push((depth, entry.path().to_path_buf()));
-            }
+        if !hash_directory(&mut hasher, path, max_entries) {
+            return Ok(None);
         }
-        sources.sort();
-        sources.truncate(crate::package_scan::MAX_SCANNED_FILES);
+    } else {
+        hash_file_content(&mut hasher, path)?;
+    }
+    Ok(Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    ))
+}
+
+/// Content of files up to this size is hashed, up to [`HASH_BUDGET`] bytes in all.
+const HASH_FILE_LIMIT: u64 = 2 * 1024 * 1024;
+const HASH_BUDGET: u64 = 128 * 1024 * 1024;
+
+/// Hash the whole content of one file, read in 64 KiB chunks.
+fn hash_file_content(hasher: &mut sha2::Sha256, path: &Path) -> Result<(), String> {
+    use sha2::Digest as _;
+    use std::io::Read;
+
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(())
+}
+
+/// Walk a package directory in name order, without following links.
+fn package_walker(path: &Path) -> impl Iterator<Item = Result<walkdir::DirEntry, walkdir::Error>> {
+    walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        // The directories the analysis does not enter are not read here either,
+        // so the content-hashed set is the one the analysis reads.
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !(entry.file_type().is_dir()
+                    && crate::package_scan::SKIPPED_DIRS
+                        .contains(&entry.file_name().to_string_lossy().as_ref()))
+        })
+}
+
+/// Hash the directory tree: path, size and times of every file, then the
+/// content of the manifests and shallow sources. `false` when the walk passed
+/// `max_entries`, in which case the digest is not complete.
+fn hash_directory(hasher: &mut sha2::Sha256, path: &Path, max_entries: usize) -> bool {
+    use sha2::Digest as _;
+
+    // Content is hashed only for what the analysis reads: manifests and the
+    // shallowest sources (the same order package_scan reads them in). The rest
+    // is covered by size and time, so a call on a big tree does not read it all.
+    let mut candidates = ContentCandidates::default();
+    let mut visited = 0usize;
+    for entry in package_walker(path).filter_map(Result::ok) {
+        visited += 1;
+        if visited > max_entries {
+            return false;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        hasher.update(entry.path().to_string_lossy().as_bytes());
+        let change_time_hashed = hash_size_and_times(hasher, &metadata);
+        // Size and time are not enough: an edit that keeps both would be served
+        // from the cache.
+        if metadata.len() > HASH_FILE_LIMIT {
+            continue;
+        }
+        candidates.add(&entry, path, change_time_hashed);
+    }
+    candidates.hash_content(hasher, path);
+    hasher.update(path.to_string_lossy().as_bytes());
+    true
+}
+
+/// Hash the size and the times of a file; `true` when the inode change time
+/// was among them (Unix), `false` when it is not available.
+fn hash_size_and_times(hasher: &mut sha2::Sha256, metadata: &std::fs::Metadata) -> bool {
+    use sha2::Digest as _;
+
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    hasher.update(metadata.len().to_le_bytes());
+    hasher.update(modified.to_le_bytes());
+    // The inode change time moves with every write and cannot be set back,
+    // so for a source file it stands in for reading the content.
+    #[cfg(unix)]
+    let changed_at = {
+        use std::os::unix::fs::MetadataExt as _;
+        Some((metadata.ctime(), metadata.ctime_nsec()))
+    };
+    #[cfg(not(unix))]
+    let changed_at: Option<(i64, i64)> = None;
+    if let Some((secs, nanos)) = changed_at {
+        hasher.update(secs.to_le_bytes());
+        hasher.update(nanos.to_le_bytes());
+    }
+    changed_at.is_some()
+}
+
+/// Whether a file name is a manifest the analysis reads.
+fn is_manifest_name(name: &str) -> bool {
+    matches!(
+        name,
+        "package.json"
+            | "package-lock.json"
+            | "npm-shrinkwrap.json"
+            | "setup.py"
+            | "setup.cfg"
+            | "pyproject.toml"
+            | "PKG-INFO"
+            | "METADATA"
+            | "poetry.lock"
+    ) || (name.starts_with("requirements") && name.ends_with(".txt"))
+}
+
+/// The files of a directory whose content goes into the digest.
+#[derive(Default)]
+struct ContentCandidates {
+    manifests: Vec<PathBuf>,
+    sources: Vec<(usize, PathBuf)>,
+}
+
+impl ContentCandidates {
+    /// Sort a file into the manifests or, when its change time was not hashed,
+    /// the sources.
+    fn add(&mut self, entry: &walkdir::DirEntry, root: &Path, change_time_hashed: bool) {
+        let name = entry.file_name().to_string_lossy();
+        if is_manifest_name(&name) {
+            self.manifests.push(entry.path().to_path_buf());
+        } else if !change_time_hashed && crate::package_scan::language_of(&name).is_some() {
+            let relative = entry.path().strip_prefix(root).unwrap_or(entry.path());
+            let depth = relative.to_string_lossy().matches('/').count();
+            self.sources.push((depth, entry.path().to_path_buf()));
+        }
+    }
+
+    /// Hash the content of the chosen files, up to [`HASH_BUDGET`] bytes.
+    fn hash_content(mut self, hasher: &mut sha2::Sha256, root: &Path) {
+        use sha2::Digest as _;
+
+        self.sources.sort();
+        self.sources
+            .truncate(crate::package_scan::MAX_SCANNED_FILES);
         // The manifest the analysis reads is the shallowest one; in walk order
         // many nested manifests can sort before it and push it past the cap.
-        manifests.sort_by_key(|file| {
-            let relative = file.strip_prefix(path).unwrap_or(file);
+        self.manifests.sort_by_key(|file| {
+            let relative = file.strip_prefix(root).unwrap_or(file);
             (relative.components().count(), file.clone())
         });
-        for file in manifests
+        let mut hashed = 0u64;
+        for file in self
+            .manifests
             .iter()
             .take(64)
-            .chain(sources.iter().map(|(_, f)| f))
+            .chain(self.sources.iter().map(|(_, f)| f))
         {
             if hashed >= HASH_BUDGET {
                 break;
@@ -559,26 +659,7 @@ fn fingerprint(path: &Path) -> Result<String, String> {
                 hasher.update(&bytes);
             }
         }
-        hasher.update(path.to_string_lossy().as_bytes());
-    } else {
-        let mut file = std::fs::File::open(path)
-            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-        let mut buffer = vec![0u8; 64 * 1024];
-        loop {
-            let n = file
-                .read(&mut buffer)
-                .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-        }
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -820,6 +901,23 @@ fn findings_page(full: &Value, view: &View) -> Value {
         })
         .unwrap_or_default();
     let mut out = page(&rows, view.offset, view.limit);
+    // The unsafe-entry findings stop at a cap; the list says how many are not there.
+    let cap_sentence = full["input"]["notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|note| note.starts_with("UNSAFE ARCHIVE ENTRIES"))
+        .find_map(|note| {
+            // The cap sentence follows the fixed last sentence of the note; entry names,
+            // which come from the archive, are all before it.
+            note.rsplit_once("outside the target directory.")
+                .map(|(_, tail)| tail.trim())
+                .filter(|tail| tail.starts_with("Only the first "))
+        });
+    if let (Some(sentence), Some(object)) = (cap_sentence, out.as_object_mut()) {
+        object.insert("unsafe_entries_note".to_string(), json!(sentence));
+    }
     let indicators = &full["malicious_indicators"];
     let mut signals = serde_json::Map::new();
     for key in [
@@ -1223,12 +1321,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "one").unwrap();
-        let first = fingerprint(&file).unwrap();
+        let first = fingerprint(&file).unwrap().unwrap();
         std::fs::write(&file, "two").unwrap();
-        assert_ne!(first, fingerprint(&file).unwrap());
-        let dir_first = fingerprint(dir.path()).unwrap();
+        assert_ne!(first, fingerprint(&file).unwrap().unwrap());
+        let dir_first = fingerprint(dir.path()).unwrap().unwrap();
         std::fs::write(dir.path().join("b.txt"), "x").unwrap();
-        assert_ne!(dir_first, fingerprint(dir.path()).unwrap());
+        assert_ne!(dir_first, fingerprint(dir.path()).unwrap().unwrap());
     }
 
     #[test]
@@ -1244,7 +1342,7 @@ mod tests {
             std::fs::write(modules.join(format!("m{n}.js")), "x\n").unwrap();
         }
         let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
-        let first = fingerprint(dir.path()).unwrap();
+        let first = fingerprint(dir.path()).unwrap().unwrap();
         // Same length, same modification time, different content.
         std::fs::write(&file, "// bbbb\n").unwrap();
         std::fs::File::options()
@@ -1253,7 +1351,7 @@ mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
-        assert_ne!(first, fingerprint(dir.path()).unwrap());
+        assert_ne!(first, fingerprint(dir.path()).unwrap().unwrap());
     }
 
     #[test]
@@ -1267,7 +1365,7 @@ mod tests {
         let root = dir.path().join("package.json");
         std::fs::write(&root, "{\"scripts\":{\"postinstall\":\"echo aaaa\"}}").unwrap();
         let modified = std::fs::metadata(&root).unwrap().modified().unwrap();
-        let first = fingerprint(dir.path()).unwrap();
+        let first = fingerprint(dir.path()).unwrap().unwrap();
         // Same length, same modification time, different content.
         std::fs::write(&root, "{\"scripts\":{\"postinstall\":\"echo bbbb\"}}").unwrap();
         std::fs::File::options()
@@ -1276,6 +1374,20 @@ mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
-        assert_ne!(first, fingerprint(dir.path()).unwrap());
+        assert_ne!(first, fingerprint(dir.path()).unwrap().unwrap());
+    }
+
+    #[test]
+    fn fingerprint_of_a_tree_past_the_entry_limit_is_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for n in 0..20 {
+            std::fs::create_dir_all(dir.path().join(format!("aaa/{n:02}"))).unwrap();
+        }
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("index.js"), "1\n").unwrap();
+        // root + aaa + 20 + package.json + index.js = 24 entries.
+        assert!(fingerprint_with(dir.path(), 24).unwrap().is_some());
+        assert!(fingerprint_with(dir.path(), 23).unwrap().is_none());
+        assert!(fingerprint_with(dir.path(), 10).unwrap().is_none());
     }
 }

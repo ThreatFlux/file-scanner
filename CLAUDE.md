@@ -258,7 +258,12 @@ Design rules every tool follows:
   `tool_args`, matched by `file_path_pattern`; counts and sizes (`cache_status` `stats`, `/cache/stats`, string
   totals) stay global.
 - The threats, enhanced_threats and package section keys carry a revision, so ratings stored by an earlier build are
-  recomputed.
+  recomputed. `binary_info` and `yara_indicators` keys carry a name class (`java-archive`, `java-class`, `content`),
+  `taint` is keyed per path, and the `signatures` section is never cached while a `.sig` or `.asc` side file exists
+  (`signatures:r2` otherwise).
+- `POST /cache/clear` takes the scope as `?scope=` or a JSON body `{"scope": ...}`; a bad body or conflicting scopes
+  is a 400 and clears nothing. With `--allow-root`, library callers of the `FileScannerMcp` methods get the same
+  path policy as the tools (`ServerState::path_policy()`).
 - Location: `--cache-dir`, else `FILE_SCANNER_CACHE_DIR`, else `$XDG_CACHE_HOME/file-scanner`, else
   `~/.cache/file-scanner` (Linux) or `~/Library/Caches/file-scanner` (macOS). Mode 0700 directory, 0600 files. An
   unusable directory degrades to memory-only with one line on stderr.
@@ -321,8 +326,9 @@ downloaded; a registry name is rejected with a message that says to run `npm pac
   `node_fs_1.default.writeFileSync`, `(0, node_child_process_1.execSync)(...)`) and Python
   `asyncio.create_subprocess_*`, `aiohttp` and `fd, path = tempfile.mkstemp()` are read like the plain ones. The
   `Exfiltration endpoint` rule matches out-of-band hosts only as whole host names. A package whose only High finding is
-  a decoded payload passed to process execution rates at least High. The section cache keys are `package:npm:v3` and
-  `package:python:v3`; bump them when a rating changes. See `docs/MCP.md`, `analyze_npm_package`, for the checked cases
+  a decoded payload passed to process execution rates at least High. The section cache keys are `package:npm:v4` and
+  `package:python:v4`; bump them when a rating changes. A package directory is cached only when its whole tree was
+  keyed (not past 500,000 entries). See `docs/MCP.md`, `analyze_npm_package`, for the checked cases
   and the known limits.
 - Install hooks (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) are judged by their command string
   (for example a download piped to a shell) and also by the file they run. A file named by a hook (`node

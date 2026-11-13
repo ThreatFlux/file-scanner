@@ -764,16 +764,40 @@ fn symbol_target(
     if found.is_empty() {
         found = named(&|n| n.to_lowercase() == lower);
     }
-    // A part of a name is looked up here only when the grouped table has no
-    // name containing it (that table answers first, as it always did).
-    if found.is_empty()
-        && !functions.iter().any(|f| {
-            f.get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|n| n.to_lowercase().contains(&lower))
-        })
-    {
-        found = named(&|n| n.to_lowercase().contains(&lower));
+    // A part of a name searches the grouped table and the symbols outside it
+    // together, the list the functions view's `filter` shows.
+    if found.is_empty() {
+        let partial = named(&|n| n.to_lowercase().contains(&lower));
+        if partial.is_empty() {
+            return Ok(None);
+        }
+        let in_table: Vec<&Value> = functions
+            .iter()
+            .filter(|f| {
+                f.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|n| n.to_lowercase().contains(&lower))
+            })
+            .collect();
+        if !in_table.is_empty() {
+            let all: Vec<&Value> = in_table.into_iter().chain(partial).collect();
+            let more = all.len().saturating_sub(CANDIDATES);
+            return Err(format!(
+                "'{query}' matches {} functions: {}{}. Pass the exact name or an `address`.",
+                all.len(),
+                all.iter()
+                    .take(CANDIDATES)
+                    .map(|f| describe(f))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                if more > 0 {
+                    format!(" (and {more} more)")
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        found = partial;
     }
     match found.as_slice() {
         [] => Ok(None),

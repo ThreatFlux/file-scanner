@@ -15,7 +15,10 @@ Two things are worth knowing:
   may start external programs such as `codesign`, `gpg` or `osslsigncode` when they are installed. They
   are given the path of the file under analysis. The `analyze_file` overview runs this check for every
   file below the large-file threshold, so these programs may start on any file you analyze, not only
-  when you ask for signatures.
+  when you ask for signatures. `gpg` is also given a detached signature file (`<file>.sig` or `<file>.asc`) beside
+  the file, but only when that is a regular file of at most 16 MiB; a named pipe, socket, device, directory or larger
+  file is never opened. On a rooted server a side file that is a link leaving the roots is not read either (the
+  `signatures` section says why).
 - It parses untrusted input: executables, archives, PDFs, Office files, Java classes and package
   archives. Parsers can have bugs. The code limits what it reads (see below), isolates panics inside MCP
   analyses, and is written in Rust, but this is not a sandbox.
@@ -87,7 +90,11 @@ unrestricted one. The rooted server shows only entries whose stored path is insi
 
 A path that a tool names directly is checked against the roots before it is read, as above. A directory scan checks
 each entry it reaches: `yara_scan_file` refuses a directory that holds a link out of the roots, and the
-`analyze_file` triage table skips links and counts them under `links_skipped`.
+`analyze_file` triage table skips links and counts them under `links_skipped`. A Rust program that embeds the
+server with allowed roots gets the same checks, with the same error text, from the `FileScannerMcp` methods that
+read a path (`analyze_file`, `analyze_npm_package`, `analyze_python_package`, `yara_scan_file`, `llm_analyze_file`,
+`analyze_java_file`) and from `ServerState::file_sha256`; `ServerState::path_policy()` returns the policy. On a rooted
+server `limit` of `/strings/search` and `/strings/related` counts visible rows only.
 
 ### HTTP
 

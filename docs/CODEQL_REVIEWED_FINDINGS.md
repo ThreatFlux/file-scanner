@@ -95,6 +95,18 @@ tests of those. Neither file imports YARA-X, and neither consumes a YARA-X
 certificate, thumbprint or TLSH value. The nine exact reviewed result tuples are
 unchanged.
 
+A second 2026-11-13 re-review covers one first-party file in the token inventory
+and no vendored source: `src/signature.rs`. The last review round changed only
+how the GPG signer name is cut out of gpg's `Good signature from` line (the text
+between the first and the last double quote, so a trust label after the closing
+quote is dropped) and added a test of that; no changed line holds a review token.
+The matching lines were read again: they are the scanner's own
+`SignatureInfo.certificate_chain` and `CertificateInfo` report types, the PE
+certificate-table lookup that decides whether to ask an external verifier, the
+chain built from `codesign` authority names, and the tests of those. The file
+does not import YARA-X and consumes no YARA-X certificate, thumbprint or TLSH
+value. The nine exact reviewed result tuples are unchanged.
+
 The historical API fixture `scripts/codeql-reviewed-findings-fixture.sarif` and
 compressed CLI evidence `scripts/codeql-reviewed-findings-raw-25c41d9.sarif.gz`
 remain byte-for-byte intact. They describe 1.21.0 and are **not** fresh 1.22.0

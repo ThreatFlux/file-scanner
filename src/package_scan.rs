@@ -61,7 +61,7 @@ const MAX_TAR_EXTENSIONS: usize = 100_000;
 /// Most entries visited while listing one archive or directory, counting the
 /// ones that are dropped (directories, metadata): a tar of empty entries
 /// costs a header each.
-const MAX_VISITED_ENTRIES: usize = 500_000;
+pub(crate) const MAX_VISITED_ENTRIES: usize = 500_000;
 /// Message for every tar read failure; the library's text can echo file bytes.
 const TAR_DAMAGED: &str =
     "The tar archive is damaged or is not a tar archive, and could not be read to the end.";
@@ -404,8 +404,11 @@ pub fn unsafe_entry_findings(loaded: &LoadedPackage) -> Vec<SourceFinding> {
 }
 
 /// One note for a package archive's unsafe entries, `None` when there are none.
+/// The count is the true number in the archive, which can be more than the
+/// `MAX_UNSAFE_ENTRIES` that are kept and listed as findings.
 pub fn unsafe_entry_note(loaded: &LoadedPackage) -> Option<String> {
-    if loaded.unsafe_entries.is_empty() {
+    let total = loaded.unsafe_entries_total.max(loaded.unsafe_entries.len());
+    if total == 0 {
         return None;
     }
     let shown: Vec<String> = loaded
@@ -414,15 +417,24 @@ pub fn unsafe_entry_note(loaded: &LoadedPackage) -> Option<String> {
         .take(5)
         .map(UnsafeEntry::describe)
         .collect();
-    let more = loaded.unsafe_entries.len().saturating_sub(5);
+    let more = total.saturating_sub(shown.len());
     let tail = if more > 0 {
         format!(" and {more} more")
     } else {
         String::new()
     };
+    let unlisted = total.saturating_sub(loaded.unsafe_entries.len());
+    let cap = if unlisted > 0 {
+        let verb = if unlisted == 1 { "is" } else { "are" };
+        format!(
+            " Only the first {} are listed as findings; {unlisted} more {verb} not listed.",
+            loaded.unsafe_entries.len()
+        )
+    } else {
+        String::new()
+    };
     Some(format!(
-        "UNSAFE ARCHIVE ENTRIES: {} entries leave the package directory or link outside it: {}{tail}. A tarball made by npm pack or an sdist never has such entries; extracting it could write outside the target directory.",
-        loaded.unsafe_entries.len(),
+        "UNSAFE ARCHIVE ENTRIES: {total} entries leave the package directory or link outside it: {}{tail}. A tarball made by npm pack or an sdist never has such entries; extracting it could write outside the target directory.{cap}",
         shown.join("; ")
     ))
 }
@@ -447,7 +459,10 @@ pub struct LoadedPackage {
     /// Source files not read because a limit was reached.
     pub files_skipped: usize,
     /// Archive entries with `..` or absolute paths, and links (tar and zip only).
+    /// At most `MAX_UNSAFE_ENTRIES` are kept; see `unsafe_entries_total`.
     pub unsafe_entries: Vec<UnsafeEntry>,
+    /// How many unsafe entries the archive holds, counting those past the cap.
+    pub unsafe_entries_total: usize,
 }
 
 impl LoadedFile {
@@ -545,12 +560,17 @@ struct Listed {
 pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<LoadedPackage> {
     let mut notes = Vec::new();
     let mut unsafe_entries: Vec<UnsafeEntry> = Vec::new();
+    let mut unsafe_total = 0usize;
     let (listed, listing_truncated, ignored) = match container {
         ContainerKind::Directory => list_dir(path, &mut notes)?,
-        ContainerKind::TarGz | ContainerKind::Tar => {
-            list_tar(path, container, &mut notes, &mut unsafe_entries)?
-        }
-        ContainerKind::Zip => list_zip(path, &mut unsafe_entries)?,
+        ContainerKind::TarGz | ContainerKind::Tar => list_tar(
+            path,
+            container,
+            &mut notes,
+            &mut unsafe_entries,
+            &mut unsafe_total,
+        )?,
+        ContainerKind::Zip => list_zip(path, &mut unsafe_entries, &mut unsafe_total)?,
     };
     if ignored > 0 {
         notes.push(format!(
@@ -724,6 +744,7 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
         files_partial,
         files_skipped,
         unsafe_entries,
+        unsafe_entries_total: unsafe_total,
     })
 }
 
@@ -1213,6 +1234,7 @@ fn list_tar(
     container: ContainerKind,
     notes: &mut Vec<String>,
     unsafe_entries: &mut Vec<UnsafeEntry>,
+    unsafe_total: &mut usize,
 ) -> Result<Listing> {
     let mut listed = Vec::new();
     let mut truncated = false;
@@ -1233,8 +1255,11 @@ fn list_tar(
                 truncated = true;
                 return Ok(false);
             }
+            // Every unsafe entry is counted; only the first ones are kept.
+            let found = classify_unsafe(&item.path, item.kind, item.link.clone());
+            *unsafe_total += found.len();
             if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
-                unsafe_entries.extend(classify_unsafe(&item.path, item.kind, item.link.clone()));
+                unsafe_entries.extend(found);
             }
             if !item.kind.is_file() {
                 // Directories, links and devices carry no package content.
@@ -1298,46 +1323,80 @@ fn read_tar_files(
     Ok(out)
 }
 
-fn list_zip(path: &Path, unsafe_entries: &mut Vec<UnsafeEntry>) -> Result<Listing> {
+/// Open a zip archive, with the messages the zip listing reports.
+fn open_zip_for_listing(path: &Path) -> Result<zip::ZipArchive<File>> {
     let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(file).context("The file is not a readable zip archive")?;
-    let mut listed = Vec::new();
-    let mut truncated = false;
-    let mut ignored = 0usize;
-    let mut declared = 0u64;
+    zip::ZipArchive::new(file).context("The file is not a readable zip archive")
+}
+
+/// Record an entry name that is an unsafe path, keeping at most
+/// `MAX_UNSAFE_ENTRIES` of them.
+fn note_unsafe_zip_name(
+    raw: &str,
+    unsafe_entries: &mut Vec<UnsafeEntry>,
+    unsafe_total: &mut usize,
+) {
+    if let Some(kind) = unsafe_path_kind(raw) {
+        *unsafe_total += 1;
+        if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
+            unsafe_entries.push(UnsafeEntry {
+                path: raw.to_string(),
+                kind,
+                target: None,
+            });
+        }
+    }
+}
+
+/// What the zip listing has gathered so far.
+#[derive(Default)]
+struct ZipListing {
+    listed: Vec<Listed>,
+    truncated: bool,
+    ignored: usize,
+    declared: u64,
+}
+
+impl ZipListing {
+    /// Whether an entry of `size` declared bytes still fits in the listing;
+    /// when it does not, the listing is marked truncated.
+    fn admit(&mut self, size: u64) -> bool {
+        if self.listed.len() >= MAX_LISTED_ENTRIES {
+            self.truncated = true;
+            return false;
+        }
+        self.declared = self.declared.saturating_add(size);
+        if self.declared > MAX_DECLARED_BYTES {
+            self.truncated = true;
+            return false;
+        }
+        true
+    }
+}
+
+fn list_zip(
+    path: &Path,
+    unsafe_entries: &mut Vec<UnsafeEntry>,
+    unsafe_total: &mut usize,
+) -> Result<Listing> {
+    let mut zip = open_zip_for_listing(path)?;
+    let mut state = ZipListing::default();
     for index in 0..zip.len().min(MAX_VISITED_ENTRIES) {
         let mut entry = zip.by_index(index)?;
         if entry.is_dir() {
             continue;
         }
-        if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
-            let raw = entry.name()?.to_string();
-            if let Some(kind) = unsafe_path_kind(&raw) {
-                unsafe_entries.push(UnsafeEntry {
-                    path: raw,
-                    kind,
-                    target: None,
-                });
-            }
+        let raw = entry.name()?.to_string();
+        note_unsafe_zip_name(&raw, unsafe_entries, unsafe_total);
+        let name = normalise_entry_path(&raw);
+        if is_metadata_entry(&name) && is_appledouble(&name, &read_head(&mut entry)) {
+            state.ignored += 1;
+            continue;
         }
-        let name = normalise_entry_path(&entry.name()?);
-        if is_metadata_entry(&name) {
-            let head = read_head(&mut entry);
-            if is_appledouble(&name, &head) {
-                ignored += 1;
-                continue;
-            }
-        }
-        if listed.len() >= MAX_LISTED_ENTRIES {
-            truncated = true;
+        if !state.admit(entry.size()) {
             break;
         }
-        declared = declared.saturating_add(entry.size());
-        if declared > MAX_DECLARED_BYTES {
-            truncated = true;
-            break;
-        }
-        listed.push(Listed {
+        state.listed.push(Listed {
             path: name,
             size: entry.size(),
             ordinal: index,
@@ -1345,9 +1404,9 @@ fn list_zip(path: &Path, unsafe_entries: &mut Vec<UnsafeEntry>) -> Result<Listin
         });
     }
     if zip.len() > MAX_VISITED_ENTRIES {
-        truncated = true;
+        state.truncated = true;
     }
-    Ok((listed, truncated, ignored))
+    Ok((state.listed, state.truncated, state.ignored))
 }
 
 fn read_zip_files(path: &Path, want: &HashSet<usize>) -> Result<HashMap<usize, Vec<u8>>> {

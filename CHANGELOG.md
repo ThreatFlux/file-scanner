@@ -41,7 +41,10 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
     symbols, imports, functions, findings, call-graph edges, taint flows, and more).
   - `disassemble` lists one function or address range (it works on an ELF, a PE, a thin Mach-O, or one slice of a
     universal Mach-O). It finds a function by any name in the symbol table, also beyond the first 5,000 grouped
-    functions, and its function list says when it holds only part of them. `function` also takes an address, as
+    functions, and its function list says when it holds only part of them. A part of a function name searches the
+    function table and the symbol-table-only functions together, as `filter` does: one match is disassembled, several
+    are an error that lists them (`'<part>' matches N functions: ...`, N equal to the `total` of that `filter`).
+    `function` also takes an address, as
     `0x...` or as a decimal string when no function name contains that text. The next step of a function list passes
     the row's `address` when its name is shared by several functions. An ARM64 PE (COFF machine `0xAA64`) is decoded
     as ARM64; a PE with any machine other than x86, x86-64 or ARM64 is an error that names the machine value. An
@@ -49,8 +52,12 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
     again and the answer carries `cache: "partial"`. `read_hex` reads raw bytes at any offset (negative counts from
     the end); `compare_files` compares two files.
   - `search_strings` and `string_details` search strings in one file or across every file indexed in the session.
-    `analyze_file` records offsets only for strings of 4 or more characters, and `string_details` says so for a
-    string that has none.
+    `analyze_file` records offsets only for strings of 4 or more characters, and only the first 10 occurrences of a
+    string per file; `string_details` says so for a string that has none, marks a file row that reached the cap with
+    `occurrences_at_least: true` and adds `total_occurrences_at_least` and a note when any row is marked.
+    `search_strings` with `file_path` gives the exact count. A file is hashed again when it was rewritten in place
+    with the same length and its modification time put back (on Unix the change time, device and inode must also
+    match to reuse the remembered hash; on Windows length, write time and creation time are compared).
   - `analyze_document` (PDF structure, JavaScript, launch actions, embedded files, up to 5,000 link targets; Office
     macros, auto-exec entry points, keywords), `analyze_script` (shell, PowerShell, JavaScript, Python, batch,
     VBScript; `line_from` and `line_to` scan a range again to reach findings beyond the 2,000 kept for a whole
@@ -66,6 +73,10 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   they accept tarballs, wheels, zips, directories and lock or requirements files, and page `findings`, `files`,
   `dependencies` and `scripts`. For a wheel that ships a `.pth` file with findings, `section: "scripts"` lists them
   under `dangerous_operations`.
+- Tool input schemas (`tools/list` over stdio and HTTP, REST `/tools/list`) give integer and number properties no
+  `format` (`uint`, `uint64`, `int64`, `double`); `minimum`, `maximum`, `type` and `default` are unchanged. The
+  section cache keys of `binary_info` and `yara_indicators` carry a name class (`java-archive`, `java-class`,
+  `content`) and `taint` is keyed per path; the first call after an upgrade reports `cache: miss`.
 - Output control on every tool: `max_output_bytes` (default 80,000, ceiling 400,000) caps each result, anything cut is
   named in the answer (`truncated`, `hint` or `note`; a `next_steps` entry is kept whole or dropped, never shortened,
   and the top-level path echo is shortened only as a last resort), and lists page with `offset`, `limit`, `total`,
@@ -94,13 +105,22 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   a path argument outside the roots (such as a `rule_path`) is shown as `<outside the allowed roots>`; counts and sizes
   (`cache_status` `stats`, `/cache/stats`, string totals) stay global and name no path. The analysis history is shared
   by every server that uses the same cache directory, and a rooted server lists only the entries inside its roots.
+  On a rooted server, `limit` of `POST /strings/search` and `/strings/related` counts visible rows only, and a
+  detached signature file that is a link leaving the roots is not opened (the `signatures` section says why). A Rust
+  program that embeds the server with allowed roots gets the same confinement and error text from the methods
+  `FileScannerMcp::analyze_file`, `analyze_npm_package`, `analyze_python_package`, `yara_scan_file`,
+  `llm_analyze_file` and `analyze_java_file` and from `ServerState::file_sha256` as from the tools;
+  `ServerState::path_policy()` returns the policy.
 - `--cache-dir <dir>` (also `FILE_SCANNER_CACHE_DIR`) and `--no-cache` on the MCP commands;
   `FILE_SCANNER_CACHE_DISK_MB` and `FILE_SCANNER_SECTION_CACHE_MB` set cache budgets. Section results are also
   cached on disk, so drill-down survives a server restart. At most `max(4, CPUs)` analyses run at once. `--no-cache`
   keeps no section cache or history, also for `analyze_java_file`; the in-memory string index still fills, and
   `cache_status` and `cache_clear` say so.
 - Analysis coverage: universal (fat) Mach-O files are analyzed on one slice and list all slices; Authenticode tables,
-  ad-hoc Mach-O signatures and detached `.sig`/`.asc` files are recognized; dependencies are grouped by library;
+  ad-hoc Mach-O signatures and detached `.sig`/`.asc` files are recognized (only a regular file of at most 16 MiB is
+  handed to `gpg`; any other kind, or a larger file, gets a `Not checked` answer that says why; while a side file
+  exists the `signatures` section is computed on every call, and `signer`
+  is the name between the quotes of gpg's `Good signature from` line); dependencies are grouped by library;
   entropy analysis measures bytes that no section covers; disassembly, control flow, vulnerability and call-graph
   analysis cover ELF, PE and Mach-O with reported coverage (an ARM64 PE is decoded as ARM64); a tail call to an unsafe
   function is reported like a call; ARM64 branch targets are decoded.
@@ -175,7 +195,9 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   `POST /strings/details` answers 404 for an unknown string. `POST /cache/search` filters on `file_path_pattern`, not
   `file_path`. `POST /cache/clear` clears the analysis
   history, the cached sections (in memory too), the tracked strings and the Java tool's in-memory results, and takes
-  `?scope=all|analysis|strings`.
+  the scope as `?scope=all|analysis|strings` or as a JSON body `{"scope": "analysis"}` (case-insensitive; the
+  `Content-Type` is not checked). A body that is not an object with at most the field `scope`, an unknown scope, or a
+  query and a body that name different scopes is an HTTP 400 `{status, message, error}` and clears nothing.
 - Package tools. Registry names (`express`, `requests==2.5.0`) are rejected with an offline message; pass a local file
   (a specifier that a shell would misread is quoted in the suggested command, `pip download 'django>=4'`). Mainstream
   packages are no longer flagged as typosquats of themselves or labelled malicious. Known-malicious names are Critical
@@ -190,8 +212,12 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   argument is a quoted literal now counts in the download-write-run check (JavaScript `spawn`, `exec`, `execFile` and
   `fork`; Python `subprocess.*`, `os.system`), as does a shell started on a variable; a shell or interpreter started
   only on fixed text beside an unrelated write does not. A package whose only High finding is a decoded payload
-  passed to process execution now rates at least High. The npm and Python results are cached under new keys, so
-  results stored by an earlier build are recomputed. Known limits are listed under `analyze_npm_package` in
+  passed to process execution now rates at least High. A selected source file that could not be read is no longer
+  counted as scanned (`files_skipped` rises, a note says so) and the package rates at least Low. The npm and Python
+  results are cached under new keys (`package:npm:v4`, `package:python:v4`), so results stored by an earlier build are
+  recomputed; a package directory whose walk passes 500,000 entries is never cached. The `UNSAFE ARCHIVE ENTRIES`
+  note gives the true number of unsafe entries, and the `findings` section has an `unsafe_entries_note` field when
+  more exist than the 50 kept as findings. Known limits are listed under `analyze_npm_package` in
   `docs/MCP.md`. A tarball, sdist or zip with a `..`, absolute-path or link entry rates at
   least High, with one finding per entry. Every result states its advisory data (a small offline table: 6 npm
   packages, 7 PyPI packages) and that an empty list is not a clean bill of health. Packages that were not read in full
@@ -208,6 +234,8 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   in bounded form (counts stay exact), archives, packages, PDFs, Office files, Java archives and YARA directory
   scans stop at documented limits and say so. Directory YARA scans share one compiled rule set across a bounded
   worker pool.
+- The command-line signature check (`-v` / `--verify-signatures`) no longer opens a `.sig` or `.asc` file that is a
+  named pipe, socket, device or directory, and does not hand a file over 16 MiB to `gpg`; the result says why.
 - `estimate_technical_debt` uses saturating arithmetic, so extreme metrics no longer overflow and panic.
 - Consolidate dependency updates on Rust 1.100.0, refresh stable crate/tool/container pins and migrate archive
   readers to ZIP 9's fallible filename API.

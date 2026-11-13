@@ -1140,6 +1140,10 @@ fn string_details_value(
         // One row per file (path and hash) with the offsets seen there.
         let mut files: Vec<(String, String, usize, Vec<usize>)> = Vec::new();
         let mut slot: HashMap<(String, String), usize> = HashMap::new();
+        // Files that hold an occurrence not recorded by analyze_file with an
+        // offset: their count is not capped by `MAX_OFFSETS_TRACKED`.
+        let mut counted_fully: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
         for occurrence in &entry.occurrences {
             let key = (occurrence.file_path.clone(), occurrence.file_hash.clone());
             let at = *slot.entry(key).or_insert_with(|| {
@@ -1152,6 +1156,13 @@ fn string_details_value(
                 files.len() - 1
             });
             files[at].2 += 1;
+            let has_offset = matches!(
+                &occurrence.context,
+                StringContext::FileString { offset: Some(_) }
+            );
+            if occurrence.tool_name != "analyze_file" || !has_offset {
+                counted_fully.insert((occurrence.file_path.clone(), occurrence.file_hash.clone()));
+            }
             if let StringContext::FileString {
                 offset: Some(offset),
             } = &occurrence.context
@@ -1162,10 +1173,19 @@ fn string_details_value(
             }
         }
         files.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+        let mut capped_files = 0usize;
         let rows: Vec<Value> = files
             .iter()
             .map(|(path, hash, count, offsets)| {
                 let mut row = json!({"file_path": path, "file_hash": hash, "occurrences": count, "offsets": offsets});
+                // analyze_file records at most MAX_OFFSETS_TRACKED offsets per
+                // string and file: a count that reached it is a lower bound.
+                if *count >= MAX_OFFSETS_TRACKED
+                    && !counted_fully.contains(&(path.clone(), hash.clone()))
+                {
+                    capped_files += 1;
+                    row["occurrences_at_least"] = true.into();
+                }
                 if offsets.is_empty() {
                     row["offsets_note"] = "No offset was recorded for this file, and `occurrences` here is 1 \
                         or the number analyze_file listed, not a count of the file: analyze_file \
@@ -1222,6 +1242,17 @@ fn string_details_value(
                 that were not kept. Use search_strings with file_path and query for the exact \
                 count in one file."
                 .into();
+        }
+        if capped_files > 0 {
+            out["total_occurrences_at_least"] = true.into();
+            out["note"] = format!(
+                "analyze_file records only the first {MAX_OFFSETS_TRACKED} occurrences of a \
+                 string per file, so for {capped_files} file(s) (rows marked \
+                 occurrences_at_least) and for total_occurrences the real number may be higher. \
+                 search_strings with file_path and query gives the exact count and offsets in \
+                 one file and records them here."
+            )
+            .into();
         }
         out["total_occurrences"] = entry.total_occurrences.into();
         out["files_total"] = entry.unique_files.len().into();

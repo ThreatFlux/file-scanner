@@ -8,9 +8,9 @@ the MCP endpoint. For the MCP tools themselves, see [MCP.md](MCP.md).
 The package is `threatflux-file-scanner`. The library is imported as `file_scanner`, and the installed
 binary is `file-scanner`. The unrelated `file-scanner` crate on crates.io is not this project.
 
-The examples below use items added after 0.3.12 (`scan_strings`, `scan_bytes`, `calculate_sha256_only`,
+The examples below use items added after 0.3.13 (`scan_strings`, `scan_bytes`, `calculate_sha256_only`,
 the `rule_path`, `max_files` and `timeout_seconds` fields of `YaraScanRequest`, `files_matched`,
-`StateConfig`, `with_config` and `HttpConfig`). The `"0.3"` requirement resolves to 0.3.12 and does not
+`StateConfig`, `with_config` and `HttpConfig`). The `"0.3"` requirement resolves to 0.3.13 and does not
 have them, so until the next release is published, depend on the repository. The git dependency resolves the
 default branch, which has these items only after the change that adds them is merged. A dependent build also
 does not apply this repository's `[patch.crates-io]` entries, which Cargo ignores outside the workspace root;
@@ -154,11 +154,18 @@ async fn serve() -> anyhow::Result<()> {
 }
 ```
 
+With `allow_roots` set, the `FileScannerMcp` methods that take a path (`analyze_file`, `analyze_npm_package`,
+`analyze_python_package`, `yara_scan_file`, `llm_analyze_file`, `analyze_java_file`) and `ServerState::file_sha256`
+refuse a path outside the roots, or a link that leaves them, with the same message as the tools;
+`ServerState::path_policy()` returns the policy. Without roots nothing changes. The detached-signature helpers are
+`file_scanner::signature::verify_signature` (unchanged), `verify_signature_with`, `SideFile` and
+`PathPolicy::side_file`.
+
 `run_stdio` writes only JSON-RPC to stdout and prints its banner on stderr. `run_http(HttpConfig { .. })`
 serves Streamable HTTP and the REST routes below; `HttpConfig::default()` binds `127.0.0.1:3000` with no
 token.
 
-The examples above were compiled and run against the library at this revision (not against 0.3.12).
+The examples above were compiled and run against the library at this revision (not against 0.3.13).
 
 ## REST helper routes
 
@@ -175,9 +182,12 @@ one is set. Only `/health` is open without the token.
 | `/tools/list` | POST | The tool list in an envelope: `{"jsonrpc", "result": {"tools": [...]}}`. |
 | `/tools/call` | POST | Call one tool; returns the bare result. Body: `{"name": "...", "arguments": {...}}`. |
 | `/cache/stats`, `/cache/list` | GET | What the analysis cache holds. |
-| `/cache/search`, `/cache/clear` | POST | Search the cache; empty it (`?scope=all\|analysis\|strings`, default all). |
+| `/cache/search`, `/cache/clear` | POST | Search the cache; empty it (the scope is described below the table). |
 | `/strings/stats` | GET | Statistics of the tracked strings. |
 | `/strings/search`, `/strings/details`, `/strings/related`, `/strings/filter` | POST | Query the string index. `/strings/details` answers 404 `{"error":"String not found"}` for an unknown string. |
+
+`/cache/clear` takes the scope `all` (default), `analysis` or `strings`, as `?scope=` or a JSON body
+`{"scope": "analysis"}`; a bad body, an unknown scope or two different scopes is a 400 and clears nothing.
 
 Example, with a token and a path scope set:
 
