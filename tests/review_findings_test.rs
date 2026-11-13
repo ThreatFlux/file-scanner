@@ -8,9 +8,10 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use file_scanner::npm_analysis::{analyze_npm_package, RiskLevel as NpmRisk};
 use file_scanner::{
     mcp_server::FileScannerMcp,
-    npm_analysis::{analyze_npm_package, RiskLevel as NpmRisk},
     python_analysis::{analyze_python_package, RiskLevel as PyRisk},
 };
 use rmcp::{model::CallToolRequestParams, ServiceExt};
@@ -94,6 +95,7 @@ async fn a_same_length_rewrite_with_the_mtime_restored_is_not_answered_from_the_
 // 2. Sources that could not be read are not counted as scanned
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 fn evil_js() -> String {
     let pool = ["stratum", "+tcp://pool.example.invalid:3333"].concat();
     format!(
@@ -256,7 +258,9 @@ async fn the_signature_answer_follows_the_detached_signature_files_of_the_path()
 // 4. A detached signature file is read only from inside the allowed roots
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 const SECRET_LINE: &str = "TOPSECRET_LINE_42";
+#[cfg(unix)]
 const REFUSED_WORDS: &str = "was not read because it is a link that leads to";
 
 async fn rooted_client(root: &Path) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
@@ -479,6 +483,7 @@ async fn an_ordinary_side_file_is_still_used() {
 // 6. The library entry points obey the roots of a rooted state
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 async fn tool_error_text(
     client: &rmcp::service::RunningService<rmcp::RoleClient, ()>,
     tool: &str,
