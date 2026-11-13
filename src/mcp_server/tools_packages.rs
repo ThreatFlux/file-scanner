@@ -185,23 +185,32 @@ impl Ecosystem {
 
     const fn cache_key(self) -> &'static str {
         match self {
-            Self::Npm => "package:npm:v1",
-            Self::Python => "package:python:v1",
+            Self::Npm => "package:npm:v2",
+            Self::Python => "package:python:v2",
         }
     }
 
     fn registry_error(self, raw: &str) -> String {
+        // A specifier such as `django>=4` or `lodash@^4` is quoted so a shell
+        // does not read `>` as a redirect or `^`, `~` or `!` as its own.
+        let spec = if raw.contains([
+            '<', '>', '!', '~', '=', '^', ' ', '*', '|', '&', ';', '$', '(', ')',
+        ]) {
+            format!("'{}'", raw.replace('\'', "'\\''"))
+        } else {
+            raw.to_string()
+        };
         match self {
             Self::Npm => format!(
                 "'{raw}' looks like an npm registry name, not a path. This tool is offline and \
-                 only analyzes local files; it never downloads packages. Run `npm pack {raw}` \
+                 only analyzes local files; it never downloads packages. Run `npm pack {spec}` \
                  (it writes a .tgz in the current directory) and pass the absolute path of that \
                  .tgz, or pass an unpacked package directory, or a package-lock.json for a \
                  dependency list."
             ),
             Self::Python => format!(
                 "'{raw}' looks like a PyPI name, not a path. This tool is offline and only \
-                 analyzes local files; it never downloads packages. Run `pip download {raw} \
+                 analyzes local files; it never downloads packages. Run `pip download {spec} \
                  --no-deps -d <dir>` and pass the absolute path of the downloaded wheel or \
                  sdist, or pass a source directory, a requirements.txt or a poetry.lock for a \
                  dependency list."
@@ -587,11 +596,11 @@ fn build_view(ecosystem: Ecosystem, path: &Path, full: &Value, view: &View) -> V
     }
 }
 
-fn next_step(ecosystem: Ecosystem, path: &Path, section: &str, why: &str) -> Value {
+fn next_step(ecosystem: Ecosystem, path: &Path, section: &str, gives: &str) -> Value {
     json!({
         "tool": ecosystem.tool(),
         "arguments": {"package_path": path.to_string_lossy(), "section": section},
-        "why": why,
+        "gives": gives,
     })
 }
 
@@ -1094,12 +1103,49 @@ fn scripts_view(ecosystem: Ecosystem, full: &Value) -> Value {
                 _ => None,
             };
             if let Some(note) = no_setup {
+                // A .pth file of a wheel is run by Python at every start: say
+                // where its findings are rather than read as clean.
+                let pth: Vec<Value> = if kind == "wheel" {
+                    full["source_findings"]
+                        .as_array()
+                        .map(|list| {
+                            list.iter()
+                                .filter(|f| {
+                                    f["file"].as_str().is_some_and(|n| n.ends_with(".pth"))
+                                        && f["in_comment"] != json!(true)
+                                })
+                                .take(40)
+                                .map(|f| {
+                                    json!({
+                                        "operation": f["rule"],
+                                        "location": format!(
+                                            "{}:{}",
+                                            f["file"].as_str().unwrap_or(""),
+                                            f["line"]
+                                        ),
+                                        "risk_reason": format!(
+                                            "a .pth file runs when Python starts: {}",
+                                            f["evidence"].as_str().unwrap_or("")
+                                        ),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let note = if pth.is_empty() {
+                    note.to_string()
+                } else {
+                    "A wheel is already built and has no setup script, but it ships a .pth file with findings (listed under dangerous_operations, file:line in location). Python runs the code in a .pth file every time it starts, so this is install-time code.".to_string()
+                };
                 return json!({
                     "section": "scripts",
                     "setup_type": Value::Null,
                     "note": note,
                     "setup_commands": [],
-                    "dangerous_operations": [],
+                    "dangerous_operations": pth,
                     "external_downloads": [],
                     "suspicious_imports": [],
                 });

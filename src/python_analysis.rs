@@ -878,11 +878,21 @@ fn is_malware_entry(vuln: &KnownVulnerability) -> bool {
 }
 
 fn tally_vulns(summary: &mut VulnerabilitySummary, name: &str, vulns: &[KnownVulnerability]) {
+    tally_vulns_as(summary, name, name, vulns);
+}
+
+/// `release` is how a malicious release is named (`name==version`).
+fn tally_vulns_as(
+    summary: &mut VulnerabilitySummary,
+    name: &str,
+    release: &str,
+    vulns: &[KnownVulnerability],
+) {
     if vulns.is_empty() {
         return;
     }
     if vulns.iter().any(is_malware_entry) {
-        summary.malicious_releases.push(name.to_string());
+        summary.malicious_releases.push(release.to_string());
     }
     summary.vulnerable_packages.push(name.to_string());
     summary.total_count += vulns.len();
@@ -898,7 +908,18 @@ fn tally_vulns(summary: &mut VulnerabilitySummary, name: &str, vulns: &[KnownVul
 }
 
 fn tally_dependency(summary: &mut VulnerabilitySummary, name: &str, details: &DependencyDetails) {
-    tally_vulns(summary, name, &details.vulnerabilities);
+    let version = details
+        .resolved_version
+        .as_deref()
+        .unwrap_or(details.version_spec.as_str())
+        .trim()
+        .trim_start_matches(['=', 'v']);
+    let release = if version.is_empty() || version.contains(['<', '>', '~', '!', ',', ' ']) {
+        name.to_string()
+    } else {
+        format!("{name}=={version}")
+    };
+    tally_vulns_as(summary, name, &release, &details.vulnerabilities);
     if !details.range_floor_advisories.is_empty() {
         summary.unresolved_range_hits.push(name.to_string());
     }
@@ -2194,6 +2215,22 @@ fn detect_malicious_indicators(
         ));
     }
 
+    // setup.py runs on install from an sdist: obfuscation there is worse
+    // there, and obfuscated code in it (an escaped blob, a decoded string
+    // handed to a call) is not what a build script looks like.
+    let mut setup_obfuscation = false;
+    if let Some(hit) = findings
+        .iter()
+        .find(|f| is_setup_py_finding(f) && !f.in_comment && f.category == "obfuscation")
+    {
+        setup_obfuscation = true;
+        overall_risk_score += 20.0;
+        reasons.push(format!(
+            "setup.py runs suspicious code at install time: {} (line {})",
+            hit.rule, hit.line
+        ));
+    }
+
     let summary = &dependencies.vulnerability_summary;
     let malicious_dependencies = !summary.malicious_releases.is_empty();
     if malicious_dependencies {
@@ -2266,6 +2303,7 @@ fn detect_malicious_indicators(
     // High and Critical need a High or Critical reason; soft signals alone
     // (a name that resembles another, Medium findings) stop at Medium.
     let strong_evidence = !known_malicious_patterns.is_empty()
+        || setup_obfuscation
         || !code_injection_patterns.is_empty()
         || !security.backdoor_indicators.is_empty()
         || findings
@@ -2282,6 +2320,9 @@ fn detect_malicious_indicators(
     }) {
         // A known-bad name or release is Critical on its own.
         overall_risk_score = overall_risk_score.max(80.0);
+    }
+    if setup_obfuscation {
+        overall_risk_score = overall_risk_score.max(60.0);
     }
     if malicious_dependencies {
         // Depending on a hijacked or trojaned release is a supply-chain compromise,

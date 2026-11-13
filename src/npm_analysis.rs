@@ -1127,7 +1127,10 @@ fn add_install_file_findings(scripts: &mut ScriptsAnalysis, scan: &SourceScan) {
             .findings
             .iter()
             .filter(|f| {
-                &f.file == file && package_scan::severity_rank(&f.severity) >= 3 && !f.in_comment
+                &f.file == file
+                    && (package_scan::severity_rank(&f.severity) >= 3
+                        || f.category == "obfuscation")
+                    && !f.in_comment
             })
             .max_by_key(|f| package_scan::severity_rank(&f.severity))
         else {
@@ -1272,13 +1275,51 @@ const SCRIPT_RUNNERS: &[&str] = &[
 /// when joined with `&&`, `||`, `;` or `|`. Paths are relative to the package root,
 /// without `./`; a path that leaves the package or is absolute is dropped.
 fn hook_files(command: &str) -> Vec<String> {
+    /// Join `path` onto the directory `base` (package-relative parts); `None`
+    /// when the result leaves the package.
+    fn resolve(base: &[String], path: &str) -> Option<Vec<String>> {
+        if path.starts_with('/') {
+            return None;
+        }
+        let mut parts: Vec<String> = base.to_vec();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                other => parts.push(other.to_string()),
+            }
+        }
+        Some(parts)
+    }
     let mut files: Vec<String> = Vec::new();
+    // The directory a `cd` moved to; `None` once it left the package.
+    let mut cwd: Option<Vec<String>> = Some(Vec::new());
     for segment in command.split(['&', '|', ';', '\n']) {
-        let tokens: Vec<&str> = segment
+        let mut tokens: Vec<&str> = segment
             .split_whitespace()
             .map(|t| t.trim_matches(['"', '\'']))
             .collect();
+        // `NAME=value node file.js`
+        while tokens.first().is_some_and(|t| {
+            t.split_once('=').is_some_and(|(name, _)| {
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+        }) {
+            tokens.remove(0);
+        }
         let Some(first) = tokens.first() else {
+            continue;
+        };
+        if *first == "cd" {
+            cwd = match (&cwd, tokens.get(1)) {
+                (Some(base), Some(dir)) => resolve(base, dir),
+                _ => None,
+            };
+            continue;
+        }
+        let Some(base) = cwd.as_ref() else {
             continue;
         };
         let runner = first.rsplit('/').next().unwrap_or(first);
@@ -1308,32 +1349,37 @@ fn hook_files(command: &str) -> Vec<String> {
         let Some(candidate) = candidate else {
             continue;
         };
-        let lower = candidate.to_ascii_lowercase();
-        if !["js", "mjs", "cjs", "ts", "sh", "py"]
-            .iter()
-            .any(|ext| lower.ends_with(&format!(".{ext}")))
-        {
+        let Some(parts) = resolve(base, candidate) else {
             continue;
-        }
-        let mut parts: Vec<&str> = Vec::new();
-        let mut escapes = candidate.starts_with('/');
-        for part in candidate.split('/') {
-            match part {
-                "" | "." => {}
-                ".." => {
-                    if parts.pop().is_none() {
-                        escapes = true;
-                    }
-                }
-                other => parts.push(other),
-            }
-        }
-        if escapes || parts.is_empty() {
+        };
+        if parts.is_empty() {
             continue;
         }
         let path = parts.join("/");
-        if !files.contains(&path) {
-            files.push(path);
+        let last = parts.last().map_or("", String::as_str);
+        let lower = last.to_ascii_lowercase();
+        let paths: Vec<String> = if lower.contains('.') {
+            if ["js", "mjs", "cjs", "ts", "sh", "py"]
+                .iter()
+                .any(|ext| lower.ends_with(&format!(".{ext}")))
+            {
+                vec![path]
+            } else {
+                continue;
+            }
+        } else {
+            // `node scripts/setup` and `node scripts`: what node would load.
+            vec![
+                format!("{path}.js"),
+                format!("{path}.cjs"),
+                format!("{path}.mjs"),
+                format!("{path}/index.js"),
+            ]
+        };
+        for path in paths {
+            if !files.contains(&path) {
+                files.push(path);
+            }
         }
     }
     files
@@ -1914,11 +1960,16 @@ fn detect_malicious_indicators(
 
     // The same behaviour is worse in a script npm runs on install: nobody has
     // to import the code for it to run.
+    // A file a hook runs that is obfuscated (obfuscator names, an escaped or
+    // char-code string blob) counts too: nobody hides ordinary code that way.
+    let mut hook_obfuscation = false;
     if let Some(hit) = findings.iter().find(|f| {
         (f.file.contains("#scripts.") || install_files.contains_key(&f.file))
-            && package_scan::severity_rank(&f.severity) >= 3
+            && (package_scan::severity_rank(&f.severity) >= 3
+                || (install_files.contains_key(&f.file) && f.category == "obfuscation"))
             && !f.in_comment
     }) {
+        hook_obfuscation = package_scan::severity_rank(&hit.severity) < 3;
         overall_risk_score += 20.0;
         let place = match install_files.get(&hit.file) {
             Some(hook) => format!("{hook} runs {}", hit.file),
@@ -2002,6 +2053,7 @@ fn detect_malicious_indicators(
     // a dependency. Soft signals alone (a name that resembles another, Medium
     // findings, install hooks) stop at Medium.
     let strong_evidence = !known_malicious_patterns.is_empty()
+        || hook_obfuscation
         || !backdoor_indicators.is_empty()
         || !code_injection_patterns.is_empty()
         || findings
@@ -2018,6 +2070,9 @@ fn detect_malicious_indicators(
     }) {
         // A known-bad name or release is Critical on its own.
         overall_risk_score = overall_risk_score.max(80.0);
+    }
+    if hook_obfuscation {
+        overall_risk_score = overall_risk_score.max(60.0);
     }
     if malicious_dependencies {
         // Depending on a hijacked or trojaned release is a supply-chain compromise,

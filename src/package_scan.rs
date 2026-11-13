@@ -1542,6 +1542,13 @@ fn rules() -> &'static Vec<Rule> {
                 r"(\beval\s*\(\s*(Buffer\.from|atob|unescape|decodeURIComponent|String\.fromCharCode)|\beval\s*\([^\n]{0,80}(base64|atob\()|new\s+Function\s*\([^\n]{0,80}(base64|atob\(|Buffer\.from)|Function\s*\(\s*atob)",
             ),
             (
+                "Decoded payload passed to process execution",
+                "obfuscation",
+                "High",
+                JS,
+                r#"\b(exec|execSync|spawn|spawnSync)\s*\(\s*(Buffer\.from\([^)]*,\s*['"](base64|hex)['"]|atob\(|String\.fromCharCode)"#,
+            ),
+            (
                 "Dynamic code evaluation",
                 "code-exec",
                 "Medium",
@@ -1590,6 +1597,13 @@ fn rules() -> &'static Vec<Rule> {
                 "High",
                 PY,
                 r"(\b(exec|eval)\s*\(\s*(base64\.|zlib\.|codecs\.|marshal\.|bytes\.fromhex|binascii\.|bz2\.|lzma\.|__import__\()|\b(exec|eval)\s*\([^\n]{0,120}(b64decode|decompress|marshal\.loads|unhexlify|fromhex))",
+            ),
+            (
+                "Decoded payload passed to process execution",
+                "obfuscation",
+                "High",
+                PY,
+                r#"\b(os\.(system|popen)|__import__\(\s*['"]os['"]\s*\)\.(system|popen)|subprocess\.\w+)\s*\([^\n]{0,80}(b64decode|bytes\.fromhex|unhexlify|codecs\.decode)"#,
             ),
             (
                 "Dynamic code execution",
@@ -2388,22 +2402,58 @@ fn access_context_regex() -> &'static Regex {
 /// Second look at a rule match. Names that only appear in a lookup table (a
 /// lexer's file-name list) or an environment read that is only `NODE_ENV` are
 /// not what the rule is about.
-fn match_is_credible(rule: &Rule, line: &str, matched: &str) -> bool {
+fn match_is_credible(rule: &Rule, line: &str, _matched: &str) -> bool {
     match rule.category {
         "persistence" => write_context_regex().is_match(line),
         "credential-theft" if rule.severity == "High" => access_context_regex().is_match(line),
         "exfiltration" if rule.name == "Environment sent over the network" => {
-            let stripped = matched
-                .replace("process.env.NODE_ENV", "")
-                .replace("process.env.NODE_DEBUG", "")
-                .replace("process.env.DEBUG", "")
-                .replace("process.env.NODE_PATH", "");
-            stripped.contains("process.env")
-                || stripped.contains("environ")
-                || stripped.contains("getenv")
+            // One named variable (a base URL, a token, a proxy) is
+            // configuration; the rule needs the whole environment.
+            if rule.langs == PY {
+                holds_whole_python_environment(line)
+            } else {
+                holds_whole_js_environment(line)
+            }
         }
         _ => true,
     }
+}
+
+/// `process.env` that is not followed by a property access or an index.
+fn holds_whole_js_environment(line: &str) -> bool {
+    line.match_indices("process.env").any(|(i, m)| {
+        let rest = line[i + m.len()..].trim_start();
+        if rest.starts_with("?.") || (rest.starts_with('.') && !rest.starts_with("...")) {
+            return false;
+        }
+        // `process.environment` and the like are other names.
+        !rest.starts_with('[')
+            && !line[i + m.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$')
+    })
+}
+
+/// `os.environ` that is not indexed or read with `.get`; `dict(os.environ)`,
+/// `.copy()` and `.items()` hold all of it.
+fn holds_whole_python_environment(line: &str) -> bool {
+    line.match_indices("os.environ").any(|(i, m)| {
+        let rest = &line[i + m.len()..];
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
+            return false;
+        }
+        let rest = rest.trim_start();
+        !(rest.starts_with('[')
+            || rest.starts_with(".get(")
+            || rest.starts_with(".get (")
+            || rest.starts_with(".pop(")
+            || rest.starts_with(".setdefault("))
+    })
 }
 
 /// Regexes for the whole-file checks of one language.
@@ -2455,7 +2505,7 @@ fn flow_regexes(lang: Lang) -> &'static FlowRegexes {
             build(
                 r"(\burlretrieve\(|\burlopen\(|\brequests\.(get|post|put|request)\(|\bhttpx\.\w+\(|\bhttp\.client\b|\burllib3\b|\bwget\.download\(|\burllib\.request\.\w+\()",
                 r#"(\burlretrieve\(\s*[^,)]+,|\bopen\([^)]*,\s*['"][wa][b+]*['"]|\.write_bytes\(|\.write_text\(|\bcopyfileobj\(|\bwget\.download\()"#,
-                r#"((subprocess\.\w+|os\.(system|popen|exec\w+|spawn\w+)|pty\.spawn)\s*\(\s*(\[\s*)?([A-Za-z_][\w.]*\s*[,)\]]|f['"]|[^)\n]*(\+|%\s|\.format\()))"#,
+                r#"((subprocess\.\w+|os\.(system|popen|exec\w+|spawn\w+)|pty\.spawn)\s*\(\s*(\[\s*)?([A-Za-z_][\w.]*\s*[,)\](]|f['"]|[^)\n]*(\+|%\s|\.format\()))"#,
                 r"((subprocess\.\w+|os\.(system|popen|exec\w+|spawn\w+)|pty\.spawn)\s*\()",
                 r"((^|[^.\w])(exec|eval)\s*\([^\n]*(\.text\b|\.content\b|\.read\(\)))",
                 r"(\brequests\.(post|put|patch)\(|\bhttpx\.(post|put|patch)\(|[(,]\s*(data|json|files)\s*=|\.sendall?\(|\bsmtplib\b|\bftplib\b|\burlopen\([^)]*,)",
@@ -2469,7 +2519,7 @@ fn flow_regexes(lang: Lang) -> &'static FlowRegexes {
             build(
                 r#"(\b(https?|http2)\s*\.\s*(get|request)\s*\(|['"]\)\s*\.\s*(get|request)\s*\(|(^|[^.\w$])fetch\s*\(|\baxios\b|\bgot\s*[.(]|\bnode-fetch\b|\bsuperagent\b|\bneedle\s*[.(])"#,
                 r"\b(writeFile(Sync)?|appendFile(Sync)?|createWriteStream|copyFile(Sync)?)\s*\(",
-                r"((^|[^.\w$])(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)|\b(child_process|childProcess|cp)\s*\.\s*(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork))\s*\(\s*([A-Za-z_$][\w$.]*\s*[,)]|[^)\n]*(\+|\$\{))",
+                r"((^|[^.\w$])(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)|\b(child_process|childProcess|cp)\s*\.\s*(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork))\s*\(\s*([A-Za-z_$][\w$.]*\s*[,)(]|[^)\n]*(\+|\$\{))",
                 r"(^|[^.\w$])(exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(",
                 r"((^|[^.\w$])(eval\s*\(|new\s+Function\s*\()\s*[A-Za-z_$]|\bvm\.run\w+\s*\(\s*[A-Za-z_$])",
                 r#"(\.(post|put|patch)\s*\(|method\s*:\s*['"](POST|PUT|PATCH)['"]|\breq(uest)?\.(write|end)\s*\(\s*[^)\s]|\.send\s*\(|\bbody\s*:|\bform\s*:)"#,
@@ -2511,8 +2561,11 @@ fn correlate_file(
     }
     // The first line matching `re` that is at or after `from` and within the window.
     let after = |re: &Regex, from: usize| {
-        code.iter()
-            .find(|(n, line)| *n >= from && near(*n, from) && re.is_match(line))
+        let start = code.partition_point(|(n, _)| *n < from);
+        code[start..]
+            .iter()
+            .take_while(|(n, _)| near(*n, from))
+            .find(|(_, line)| re.is_match(line))
             .copied()
     };
     // Every fetch is a possible start of the chain.
@@ -2547,21 +2600,31 @@ fn correlate_file(
             );
         };
 
+    let mut runs: HashMap<usize, RunContext> = HashMap::new();
+    let assigned = assignments(code);
     for &f in &fetches {
-        let exec_re_hit = |from: usize| {
-            if !uses_child_process {
-                return None;
-            }
-            after(&flow.exec, from).or_else(|| {
-                (lang == Lang::Python && is_setup)
-                    .then(|| after(&flow.exec_loose, from))
-                    .flatten()
-            })
-        };
-        let Some((write_line, _)) = after(&flow.write, f) else {
+        let Some((write_line, write_text)) = after(&flow.write, f) else {
             continue;
         };
-        if let Some((exec_line, exec_text)) = exec_re_hit(write_line) {
+        if !uses_child_process {
+            continue;
+        }
+        let path_arg = write_path_argument(lang, flow, write_text);
+        // The first run after the write that is tied to it. What a run line
+        // starts does not depend on the fetch, so it is worked out once per line.
+        let first = code.partition_point(|(n, _)| *n < write_line);
+        let hit = code[first..]
+            .iter()
+            .take_while(|(n, _)| near(*n, write_line))
+            .find(|(n, line)| {
+                (flow.exec.is_match(line)
+                    || (lang == Lang::Python && is_setup && flow.exec_loose.is_match(line)))
+                    && runs
+                        .entry(*n)
+                        .or_insert_with(|| RunContext::of(line, &assigned, *n))
+                        .is_tied_to(&path_arg)
+            });
+        if let Some(&(exec_line, exec_text)) = hit {
             add(
                 "Download written to disk and run",
                 "download-exec",
@@ -2624,6 +2687,252 @@ fn correlate_file(
             format!("request body built at line {send_line}"),
         );
     }
+}
+
+/// The part of a write call that names where the data goes: the first
+/// argument of a JavaScript write, the destination of `urlretrieve`, the
+/// first argument of `open`, or the object a `Path` write is called on.
+fn write_path_argument(lang: Lang, flow: &FlowRegexes, line: &str) -> String {
+    let Some(m) = flow.write.find(line) else {
+        return line.to_string();
+    };
+    let head = &line[..m.start()];
+    let call = m.as_str();
+    if call.contains(".write_bytes(") || call.contains(".write_text(") {
+        return head.to_string();
+    }
+    // Arguments of the call, up to the closing parenthesis at its own depth.
+    let open = line[m.start()..].find('(').map(|i| m.start() + i + 1);
+    let Some(open) = open else {
+        return line.to_string();
+    };
+    let mut args: Vec<String> = vec![String::new()];
+    let mut depth = 0i32;
+    let mut quote: Option<char> = None;
+    for c in line[open..].chars() {
+        if let Some(q) = quote {
+            args.last_mut().expect("one argument").push(c);
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => {
+                quote = Some(c);
+                args.last_mut().expect("one argument").push(c);
+            }
+            '(' | '[' | '{' => {
+                depth += 1;
+                args.last_mut().expect("one argument").push(c);
+            }
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth < 0 {
+                    break;
+                }
+                args.last_mut().expect("one argument").push(c);
+            }
+            ',' if depth == 0 => args.push(String::new()),
+            _ => args.last_mut().expect("one argument").push(c),
+        }
+    }
+    let index = if lang == Lang::Python && call.contains("urlretrieve") {
+        1
+    } else {
+        0
+    };
+    args.get(index).cloned().unwrap_or_else(|| line.to_string())
+}
+
+fn name_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"[A-Za-z_$][\w$]*").expect("name regex"))
+}
+
+fn literal_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"'([^']{4,})'|"([^"]{4,})"|`([^`]{4,})`"#).expect("literal regex")
+    })
+}
+
+fn interpreter_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(sh|bash|zsh|dash|node|nodejs|python3?|perl|ruby|chmod|powershell)\b")
+            .expect("interpreter regex")
+    })
+}
+
+/// The most text taken from earlier assignments when a run's command is followed back.
+const RUN_CONTEXT_MAX: usize = 4_000;
+/// How many earlier values of one name are taken.
+const RUN_CONTEXT_VALUES: usize = 3;
+
+/// Every `name = value` of a file by name, in line order (line number, value).
+type Assignments<'a> = HashMap<&'a str, Vec<(usize, &'a str)>>;
+
+fn assignments<'a>(code: &[(usize, &'a str)]) -> Assignments<'a> {
+    let mut map: Assignments<'a> = HashMap::new();
+    for (n, line) in code {
+        let t = line.trim_start();
+        let t = t
+            .strip_prefix("const ")
+            .or_else(|| t.strip_prefix("let "))
+            .or_else(|| t.strip_prefix("var "))
+            .unwrap_or(t);
+        let Some((left, right)) = t.split_once('=') else {
+            continue;
+        };
+        let left = left.trim();
+        // A module import is not the value of a path or a command, however
+        // it is spelled (`require`, `await import`, `__importStar`).
+        let is_import = right.contains("require(")
+            || right.contains("require (")
+            || right.contains("import(")
+            || right.contains("__import__(");
+        let is_name = name_regex().find(left).is_some_and(|m| m.as_str() == left);
+        if is_name && !right.starts_with('=') && !is_import {
+            map.entry(left).or_default().push((*n, right));
+        }
+    }
+    map
+}
+
+/// Names that say nothing about which file a path names. They never tie a run
+/// to a write, except as the whole destination (`open(path, 'wb')`).
+const PATH_NOISE: &[&str] = &[
+    "path",
+    "join",
+    "os",
+    "tmpdir",
+    "dirname",
+    "__dirname",
+    "__filename",
+    "process",
+    "env",
+    "require",
+    "fs",
+    "resolve",
+    "Path",
+    "tempfile",
+    "gettempdir",
+    "mkdtemp",
+    "str",
+    "self",
+    "this",
+    "const",
+    "let",
+    "var",
+    "new",
+    "basename",
+    "name",
+    "sync",
+    "String",
+    "format",
+];
+
+fn dotted_chain_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+$").expect("chain regex"))
+}
+
+/// What a run line starts: the line itself plus, one assignment back, the
+/// values of the names it uses. A run is of the thing that was written when
+/// it shares a name or a string literal with the path of the write, or when
+/// it starts a shell or an interpreter (or `chmod`). A generic runner that
+/// starts whatever it is given is not tied to a cache file written elsewhere.
+struct RunContext {
+    text: String,
+    names: std::collections::HashSet<String>,
+    starts_interpreter: bool,
+}
+
+impl RunContext {
+    fn of(exec_line: &str, assigned: &Assignments<'_>, exec_number: usize) -> Self {
+        let mut text = exec_line.to_string();
+        // One step back through `name = ...` for the names the run uses: the
+        // last few values given to each name before the run, and only a
+        // bounded amount of text, so the cost does not grow with the file.
+        let used: std::collections::BTreeSet<&str> = name_regex()
+            .find_iter(exec_line)
+            .map(|m| m.as_str())
+            .collect();
+        for name in used {
+            let Some(values) = assigned.get(name) else {
+                continue;
+            };
+            let before = values.partition_point(|(n, _)| *n < exec_number);
+            for (_, right) in values[..before].iter().rev().take(RUN_CONTEXT_VALUES) {
+                let room = RUN_CONTEXT_MAX.saturating_sub(text.len());
+                let mut end = right.len().min(room);
+                while !right.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text.push(' ');
+                text.push_str(&right[..end]);
+            }
+        }
+        // `node:child_process` names a module, not the interpreter.
+        let starts_interpreter = interpreter_regex().is_match(&text.replace("node:", ""));
+        let names = name_regex()
+            .find_iter(&text)
+            .map(|m| m.as_str().to_string())
+            .collect();
+        Self {
+            text,
+            names,
+            starts_interpreter,
+        }
+    }
+
+    fn is_tied_to(&self, path_arg: &str) -> bool {
+        if self.starts_interpreter {
+            return true;
+        }
+        let dest = path_arg.trim();
+        // A destination kept in a field (`self.path`, `this.path`, `opts.out`)
+        // is tied when the run names the same field.
+        if dotted_chain_regex().is_match(dest) {
+            return contains_chain(&self.text, dest);
+        }
+        // The same expression written again (`path.join(os.tmpdir(), name)`)
+        // names the same file, whatever words it is made of.
+        if dest.len() >= 8 && dest.contains(['(', '+', '/']) && self.text.contains(dest) {
+            return true;
+        }
+        let names = &self.names;
+        // A destination that is one bare variable is tied by that name, even
+        // if the name is a common one (`path`, `name`).
+        let bare = !dest.is_empty() && name_regex().find(dest).is_some_and(|m| m.as_str() == dest);
+        if name_regex()
+            .find_iter(path_arg)
+            .map(|m| m.as_str())
+            .any(|w| (bare || !PATH_NOISE.contains(&w)) && names.contains(w))
+        {
+            return true;
+        }
+        literal_regex().captures_iter(path_arg).any(|c| {
+            let lit = c
+                .get(1)
+                .or_else(|| c.get(2))
+                .or_else(|| c.get(3))
+                .map_or("", |m| m.as_str());
+            !lit.is_empty() && self.text.contains(lit)
+        })
+    }
+}
+
+/// Whether `text` holds the dotted name `chain` as a whole name (not as part
+/// of a longer one such as `myself.pathname`).
+fn contains_chain(text: &str, chain: &str) -> bool {
+    let is_name = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    text.match_indices(chain).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + chain.len()..].chars().next();
+        !before.is_some_and(|c| is_name(c) || c == '.') && !after.is_some_and(is_name)
+    })
 }
 
 fn setup_network_regex() -> &'static Regex {
@@ -2797,6 +3106,57 @@ pub fn looks_like_registry_spec(raw: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command built from the destination is followed one assignment back wherever the
+    /// assignment is, only before the run, and only a bounded amount of text is taken.
+    #[test]
+    fn a_run_is_followed_back_one_assignment_with_a_bounded_amount_of_text() {
+        let at = |gap: usize, late: bool| {
+            let mut lines: Vec<(usize, String)> = Vec::new();
+            if !late {
+                lines.push((1, "const cmd = 'sh ' + dest".to_string()));
+            }
+            lines.extend((0..gap).map(|i| (i + 2, format!("const v{i} = {i}"))));
+            let run = gap + 2;
+            lines.push((run, "cp.spawn(cmd, args)".to_string()));
+            if late {
+                lines.push((run + 1, "const cmd = 'sh ' + dest".to_string()));
+            }
+            let code: Vec<(usize, &str)> = lines.iter().map(|(n, l)| (*n, l.as_str())).collect();
+            RunContext::of("cp.spawn(cmd, args)", &assignments(&code), run)
+        };
+        // The shell in `cmd` is seen near the run and far above it, not below it.
+        assert!(at(3, false).is_tied_to("'/tmp/cache.json'"));
+        assert!(at(5_000, false).is_tied_to("'/tmp/cache.json'"));
+        assert!(!at(3, true).is_tied_to("'/tmp/cache.json'"));
+        // Long or many assignments to a name the run uses do not make the text grow.
+        let long = format!("a = [{}]", "q,".repeat(450));
+        let mut lines: Vec<(usize, String)> = (1..=500).map(|n| (n, long.clone())).collect();
+        lines.push((501, "spawn(a, b)".to_string()));
+        let code: Vec<(usize, &str)> = lines.iter().map(|(n, l)| (*n, l.as_str())).collect();
+        let context = RunContext::of("spawn(a, b)", &assignments(&code), 501);
+        assert!(
+            context.text.len() <= "spawn(a, b)".len() + RUN_CONTEXT_VALUES * 1_000,
+            "{}",
+            context.text.len()
+        );
+    }
+
+    /// A destination kept in a field ties a run that names the same field, and only that.
+    #[test]
+    fn a_field_destination_is_tied_by_the_whole_field_name() {
+        let run = |line: &str| RunContext::of(line, &Assignments::new(), 1);
+        assert!(run("subprocess.Popen([self.path])").is_tied_to("self.path"));
+        assert!(run("cp.execFile(this.path)").is_tied_to(" this.path "));
+        assert!(!run("subprocess.run(cmd, cwd=self.root)").is_tied_to("self.path"));
+        assert!(!run("subprocess.run(myself.pathname)").is_tied_to("self.path"));
+        assert!(!run("subprocess.run(other.self.path)").is_tied_to("self.path"));
+        // A module spelled `node:child_process` is not the node interpreter.
+        assert!(
+            !run("require('node:child_process').spawn(command, args)").is_tied_to("'/tmp/c.json'")
+        );
+        assert!(run("spawn('node', [script])").is_tied_to("'/tmp/c.json'"));
+    }
 
     #[test]
     fn registry_specs_are_recognised() {
