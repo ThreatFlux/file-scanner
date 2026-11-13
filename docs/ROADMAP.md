@@ -197,6 +197,9 @@ File Scanner aims to become the leading open-source file analysis platform, prov
 - **Anti-Analysis Detection**: Debugger checks, VM detection, timing attacks
 - **Cryptographic Analysis**: Key detection, algorithm identification
 - **Code Quality Metrics**: Complexity analysis, coding standards
+- **Analysis Isolation**: Run each analysis behind a memory, time and file-access boundary, with WebAssembly,
+  worker-process, container and pod backends
+  ([#316](https://github.com/ThreatFlux/file-scanner/issues/316))
 
 #### Priority: Medium
 
