@@ -147,8 +147,8 @@ docker run --rm -v /path/to/files:/data:ro ghcr.io/threatflux/file-scanner /data
 Dependabot opens weekly updates for Cargo (root workspace and
 `threatflux-package-security`), GitHub Actions and the Dockerfile. When updating
 an action by hand, pin the commit SHA that its release tag resolves to and keep
-the tag in the trailing comment. Refresh the distroless runtime digest with:
+the tag in the trailing comment. Refresh the Wolfi runtime digest with:
 
 ```bash
-docker buildx imagetools inspect gcr.io/distroless/cc-debian13:nonroot | awk '/^Digest:/{print $2; exit}'
+docker buildx imagetools inspect cgr.dev/chainguard/glibc-dynamic:latest | awk '/^Digest:/{print $2; exit}'
 ```
