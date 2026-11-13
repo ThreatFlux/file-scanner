@@ -661,6 +661,112 @@ async fn a_rooted_server_shows_no_cache_entry_or_string_of_a_file_outside_its_ro
 }
 
 #[tokio::test]
+async fn rest_cache_routes_print_the_canonical_path_and_match_on_it() {
+    use file_scanner::cache::CacheEntry;
+    let work = TempDir::new().unwrap();
+    let base = std::fs::canonicalize(work.path()).unwrap();
+    let inside = base.join("in");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::create_dir_all(base.join("outside_zone")).unwrap();
+    std::fs::write(inside.join("a.bin"), b"data").unwrap();
+    let server = start_with_roots(vec![inside.clone()]).await;
+    let canonical = inside.join("a.bin").to_string_lossy().into_owned();
+    let stored = format!("{}/outside_zone/../in/a.bin", base.display());
+    server
+        .state
+        .analysis_cache()
+        .add_entry(CacheEntry {
+            file_path: stored.clone(),
+            file_hash: "aa".into(),
+            tool_name: "analyze_file".into(),
+            tool_args: [("file_path".to_string(), json!(stored))].into(),
+            result: json!({"path": stored}),
+            timestamp: chrono::Utc::now(),
+            file_size: 4,
+            execution_time_ms: 1,
+        })
+        .await
+        .unwrap();
+    let http = client();
+    let list = http
+        .get(format!("{}/cache/list", server.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let mut answers = vec![list];
+    for body in [json!({}), json!({"file_path_pattern": "outside"})] {
+        answers.push(
+            http.post(format!("{}/cache/search", server.base))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+        );
+    }
+    for answer in &answers {
+        assert!(!answer.contains("outside_zone"), "{answer}");
+    }
+    let listed: Value = serde_json::from_str(&answers[0]).unwrap();
+    assert_eq!(listed["entries"][0]["file_path"], canonical.as_str());
+    assert_eq!(
+        listed["entries"][0]["tool_args"]["file_path"],
+        canonical.as_str()
+    );
+    let all: Value = serde_json::from_str(&answers[1]).unwrap();
+    assert_eq!(all["results"][0]["file_path"], canonical.as_str());
+    let none: Value = serde_json::from_str(&answers[2]).unwrap();
+    assert_eq!(none["count"], 0, "{none}");
+}
+
+#[tokio::test]
+async fn strings_related_is_filtered_by_root() {
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let inside_path = root.path().join("in.bin").to_string_lossy().into_owned();
+    let outside_path = outside
+        .path()
+        .join("out.bin")
+        .to_string_lossy()
+        .into_owned();
+    let mut answers = Vec::new();
+    for roots in [Vec::new(), vec![root.path().to_path_buf()]] {
+        let server = start_with_roots(roots).await;
+        let tracker = server.state.string_tracker();
+        for (path, hash, values) in [
+            (&inside_path, "aa", ["VALUE_A", "VALUE_B"]),
+            (&outside_path, "bb", ["VALUE_A", "VALUE_C"]),
+        ] {
+            tracker
+                .track_strings_from_results(&values.map(String::from), path, hash, "analyze_file")
+                .unwrap();
+        }
+        let text = client()
+            .post(format!("{}/strings/related", server.base))
+            .json(&json!({"value": "VALUE_A"}))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        answers.push(text);
+    }
+    assert!(
+        answers[0].contains("VALUE_B") && answers[0].contains("VALUE_C"),
+        "{}",
+        answers[0]
+    );
+    assert!(answers[1].contains("VALUE_B"), "{}", answers[1]);
+    assert!(!answers[1].contains("VALUE_C"), "{}", answers[1]);
+}
+
+#[tokio::test]
 async fn an_unknown_string_is_a_404_with_the_error_body() {
     let server = start().await;
     let response = client()

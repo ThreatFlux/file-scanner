@@ -1258,12 +1258,7 @@ fn cache_status_value(
                 min_file_size: None,
                 max_file_size: None,
             };
-            let rows: Vec<EntrySummary> = state
-                .analysis_cache()
-                .list_summaries(&query)
-                .into_iter()
-                .filter(|row| state.path_is_visible(&row.file_path))
-                .collect();
+            let rows: Vec<EntrySummary> = state.visible_cache_rows(&query);
             let mut out = page(
                 &rows,
                 request.offset.unwrap_or(0),

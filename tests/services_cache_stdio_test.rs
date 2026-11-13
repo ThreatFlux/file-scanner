@@ -360,3 +360,158 @@ fn sigterm_ends_the_stdio_server_with_exit_zero() {
     };
     assert_eq!(status.code(), Some(0), "{status:?}");
 }
+
+/// A file inside the root that was stored under a `..` spelling through a
+/// sibling directory shows under its canonical path, and the sibling's name
+/// can neither be read nor matched by a rooted server.
+#[test]
+fn a_rooted_listing_never_prints_a_directory_outside_the_roots() {
+    let work = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(work.path()).unwrap();
+    let inside = base.join("in");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::create_dir_all(base.join("outside_zone")).unwrap();
+    std::fs::write(
+        inside.join("a.bin"),
+        b"\0\0\0\0http://evil.example.com/beacon\0\0",
+    )
+    .unwrap();
+    let cache = base.join("cache");
+    let cache_arg = cache.to_string_lossy().into_owned();
+    let dotted = format!("{}/outside_zone/../in/a.bin", base.display());
+    let first = session(
+        &["--cache-dir", &cache_arg],
+        &[],
+        &[("analyze_file", json!({"file_path": dotted, "hashes": true}))],
+    );
+    assert_eq!(first.tool_json(2)["cache"], "miss", "{:?}", first.reply(2));
+
+    let root_arg = inside.to_string_lossy().into_owned();
+    let calls = [
+        ("cache_status", json!({"action": "list", "limit": 500})),
+        (
+            "cache_status",
+            json!({"action": "search", "file_path_pattern": "outside"}),
+        ),
+        (
+            "cache_status",
+            json!({"action": "search", "file_path_pattern": ".."}),
+        ),
+        (
+            "cache_status",
+            json!({"action": "search", "file_path_pattern": "in/a.bin"}),
+        ),
+        (
+            "cache_status",
+            json!({"action": "search", "tool_name": "analyze_file"}),
+        ),
+    ];
+    let second = session(
+        &["--cache-dir", &cache_arg, "--allow-root", &root_arg],
+        &[],
+        &calls,
+    );
+    assert_eq!(second.code, Some(0), "{}", second.stderr);
+    let canonical = inside.join("a.bin").to_string_lossy().into_owned();
+    for id in 2..=6u64 {
+        let text = second.reply(id).to_string();
+        assert!(!text.contains("outside_zone"), "id {id}: {text}");
+    }
+    for id in [2u64, 5, 6] {
+        let answer = second.tool_json(id);
+        assert_eq!(answer["total"], 1, "id {id}: {answer}");
+        assert_eq!(answer["items"][0]["file_path"], canonical.as_str());
+        assert_eq!(
+            answer["items"][0]["tool_args"]["file_path"],
+            canonical.as_str()
+        );
+    }
+    assert_eq!(
+        second.tool_json(3)["total"],
+        0,
+        "matched on the stored spelling"
+    );
+    assert_eq!(
+        second.tool_json(4)["total"],
+        0,
+        "matched on the stored spelling"
+    );
+}
+
+/// The cache cuts long arguments to 200 characters, and a second path
+/// argument (`rule_path`) is not the row's own path: a rooted server still
+/// prints neither the outside directory a stored path went through nor a
+/// path outside its roots.
+#[test]
+fn a_rooted_listing_hides_outside_names_in_cut_and_second_path_arguments() {
+    let work = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(work.path()).unwrap();
+    let inside = base.join("in");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::create_dir_all(base.join("outside_zone")).unwrap();
+    std::fs::write(inside.join("b.bin"), b"\0\0\0\0plain bytes here\0\0").unwrap();
+    let rule = "rule r { condition: true }";
+    std::fs::write(inside.join("r.yar"), rule).unwrap();
+    std::fs::write(base.join("outside_zone").join("o.yar"), rule).unwrap();
+    let cache = base.join("cache");
+    let cache_arg = cache.to_string_lossy().into_owned();
+    let long = format!(
+        "{}/{}in/b.bin",
+        base.display(),
+        "outside_zone/../".repeat(16)
+    );
+    assert!(long.chars().count() > 200);
+    let dotted_rule = format!("{}/outside_zone/../in/r.yar", base.display());
+    let outside_rule = base.join("outside_zone").join("o.yar");
+    let first = session(
+        &["--cache-dir", &cache_arg],
+        &[],
+        &[
+            ("analyze_file", json!({"file_path": long, "hashes": true})),
+            (
+                "yara_scan_file",
+                json!({"path": inside.join("b.bin"), "rule_path": dotted_rule}),
+            ),
+            (
+                "yara_scan_file",
+                json!({"path": inside.join("b.bin"), "rule_path": outside_rule}),
+            ),
+        ],
+    );
+    for id in 2..=4u64 {
+        assert!(first.reply(id)["error"].is_null(), "{:?}", first.reply(id));
+    }
+    let root_arg = inside.to_string_lossy().into_owned();
+    let second = session(
+        &["--cache-dir", &cache_arg, "--allow-root", &root_arg],
+        &[],
+        &[("cache_status", json!({"action": "list", "limit": 500}))],
+    );
+    let text = second.reply(2).to_string();
+    assert!(!text.contains("outside_zone"), "{text}");
+    let listed = second.tool_json(2);
+    let items = listed["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3, "{listed}");
+    let canonical = inside.join("b.bin").to_string_lossy().into_owned();
+    let rule_canonical = inside.join("r.yar").to_string_lossy().into_owned();
+    for item in items {
+        assert_eq!(item["file_path"], canonical.as_str(), "{item}");
+    }
+    let args_of = |key: &str, wanted: &str| {
+        items
+            .iter()
+            .any(|item| item["tool_args"][key].as_str() == Some(wanted))
+    };
+    assert!(
+        args_of("file_path", &canonical),
+        "cut argument shows the canonical path: {listed}"
+    );
+    assert!(
+        args_of("rule_path", &rule_canonical),
+        "second path argument shows its canonical spelling: {listed}"
+    );
+    assert!(
+        args_of("rule_path", "<outside the allowed roots>"),
+        "a rule path outside the roots is a placeholder: {listed}"
+    );
+}

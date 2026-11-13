@@ -1009,9 +1009,18 @@ impl ServerState {
     /// file still exists, otherwise judged by the stored path itself (a path
     /// with `..` or a relative path is never shown).
     pub fn path_is_visible(&self, stored: &str) -> bool {
+        self.display_path(stored).is_some()
+    }
+
+    /// The spelling of a stored path this server may print, or `None` when
+    /// the path must stay hidden. Unrestricted servers print the stored
+    /// spelling. With roots, the canonical path is printed (a file stored as
+    /// `<outside>/../in/a.bin` shows as `<root>/in/a.bin`, so no directory
+    /// name outside the roots is ever shown) and it must lie inside a root.
+    pub fn display_path(&self, stored: &str) -> Option<String> {
         let roots = self.policy.roots();
         if roots.is_empty() {
-            return true;
+            return Some(stored.to_string());
         }
         let path = std::path::Path::new(stored);
         let canonical = match std::fs::canonicalize(path) {
@@ -1024,7 +1033,7 @@ impl ServerState {
                         .components()
                         .all(|part| !matches!(part, std::path::Component::ParentDir));
                 if !plain {
-                    return false;
+                    return None;
                 }
                 let mut tail = Vec::new();
                 let mut head = path;
@@ -1044,7 +1053,120 @@ impl ServerState {
                 resolved
             }
         };
-        roots.iter().any(|root| canonical.starts_with(root))
+        roots
+            .iter()
+            .any(|root| canonical.starts_with(root))
+            .then(|| canonical.to_string_lossy().into_owned())
+    }
+
+    /// Rewrites the paths in a cache row's arguments for a rooted server: a
+    /// value equal to `stored`, or the cache's cut of it (the first 200
+    /// characters plus "... (N characters in all)"), becomes `shown`; any
+    /// other string argument whose key ends in `path` is printed in its
+    /// canonical spelling, or as a placeholder when it is outside the roots.
+    pub fn show_args_path(
+        &self,
+        args: &mut std::collections::HashMap<String, serde_json::Value>,
+        stored: &str,
+        shown: &str,
+    ) {
+        const CUT_TAIL: &str = " characters in all)";
+        const CUT_HEAD: usize = 200;
+        let stored_head: String = stored.chars().take(CUT_HEAD).collect();
+        for (key, value) in args.iter_mut() {
+            let Some(text) = value.as_str() else { continue };
+            let is_stored = text == stored
+                || (stored.chars().count() > CUT_HEAD
+                    && text.starts_with(&stored_head)
+                    && text.ends_with(CUT_TAIL));
+            let replacement = if is_stored {
+                Some(shown.to_string())
+            } else if key.ends_with("path") {
+                Some(
+                    self.display_path(text)
+                        .unwrap_or_else(|| "<outside the allowed roots>".to_string()),
+                )
+            } else {
+                None
+            };
+            if let Some(new) = replacement {
+                if new != text {
+                    *value = serde_json::Value::String(new);
+                }
+            }
+        }
+    }
+
+    /// Replaces, anywhere in a stored result, each string equal to `stored`
+    /// by `shown` (one pass over the value).
+    fn show_value_path(value: &mut serde_json::Value, stored: &str, shown: &str) {
+        match value {
+            serde_json::Value::String(text) if text == stored => *text = shown.to_string(),
+            serde_json::Value::Array(items) => items
+                .iter_mut()
+                .for_each(|item| Self::show_value_path(item, stored, shown)),
+            serde_json::Value::Object(map) => map
+                .values_mut()
+                .for_each(|item| Self::show_value_path(item, stored, shown)),
+            _ => {}
+        }
+    }
+
+    /// The history rows this server may show, newest first. A rooted server
+    /// prints each row under its canonical path (also in the arguments) and
+    /// matches `file_path_pattern` against that printed path, never against
+    /// the spelling the row was stored under.
+    pub fn visible_cache_rows(
+        &self,
+        query: &crate::cache::CacheSearchQuery,
+    ) -> Vec<crate::cache::EntrySummary> {
+        if self.policy.roots().is_empty() {
+            return self.analysis_cache().list_summaries(query);
+        }
+        let mut stored_query = query.clone();
+        stored_query.file_path_pattern = None;
+        self.analysis_cache()
+            .list_summaries(&stored_query)
+            .into_iter()
+            .filter_map(|mut row| {
+                let shown = self.display_path(&row.file_path)?;
+                if let Some(pattern) = &query.file_path_pattern {
+                    if !shown.contains(pattern.as_str()) {
+                        return None;
+                    }
+                }
+                self.show_args_path(&mut row.tool_args, &row.file_path, &shown);
+                row.file_path = shown;
+                Some(row)
+            })
+            .collect()
+    }
+
+    /// Full cache entries this server may show, with the same printing and
+    /// matching rule as `visible_cache_rows`.
+    pub fn visible_cache_entries(
+        &self,
+        entries: Vec<crate::cache::CacheEntry>,
+        pattern: Option<&str>,
+    ) -> Vec<crate::cache::CacheEntry> {
+        if self.policy.roots().is_empty() {
+            return entries;
+        }
+        entries
+            .into_iter()
+            .filter_map(|mut entry| {
+                let shown = self.display_path(&entry.file_path)?;
+                if pattern.is_some_and(|p| !shown.contains(p)) {
+                    return None;
+                }
+                self.show_args_path(&mut entry.tool_args, &entry.file_path, &shown);
+                if entry.file_path != shown {
+                    Self::show_value_path(&mut entry.result, &entry.file_path, &shown);
+                }
+                entry.file_path = shown;
+                Some(entry)
+            })
+            .collect()
     }
 
     /// A string-index entry as this server may show it: occurrences and files

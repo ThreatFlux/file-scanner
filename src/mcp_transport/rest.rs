@@ -417,8 +417,8 @@ async fn handle_api_info(State(state): State<RestState>) -> AxumJson<Value> {
 // Cache management handlers
 #[utoipa::path(get, path = "/cache/list", responses((status = 200, description = "`{entries, count}`")))]
 async fn list_cache_entries(State(state): State<RestState>) -> AxumJson<Value> {
-    let mut entries = state.cache.get_all_entries().await;
-    entries.retain(|entry| state.handler.state().path_is_visible(&entry.file_path));
+    let entries = state.cache.get_all_entries().await;
+    let entries = state.handler.state().visible_cache_entries(entries, None);
     AxumJson(json!({
         "entries": entries,
         "count": entries.len()
@@ -430,8 +430,19 @@ async fn search_cache(
     State(state): State<RestState>,
     JsonBody(query): JsonBody<CacheSearchQuery>,
 ) -> AxumJson<Value> {
-    let mut results = state.cache.search_entries(&query).await;
-    results.retain(|entry| state.handler.state().path_is_visible(&entry.file_path));
+    let rooted = !state.handler.state().allowed_roots().is_empty();
+    // A rooted server matches the pattern against the path it prints.
+    let results = if rooted {
+        let mut stored = query.clone();
+        stored.file_path_pattern = None;
+        state.cache.search_entries(&stored).await
+    } else {
+        state.cache.search_entries(&query).await
+    };
+    let results = state
+        .handler
+        .state()
+        .visible_cache_entries(results, query.file_path_pattern.as_deref());
     AxumJson(json!({
         "results": results,
         "count": results.len()
