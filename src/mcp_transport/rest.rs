@@ -91,7 +91,7 @@ pub const ROUTES: &[RouteInfo] = &[
     RouteInfo {
         method: "POST",
         path: "/cache/clear",
-        summary: "Clear the analysis history, cached sections and tracked strings (optional ?scope=all|analysis|strings)",
+        summary: "Clear the analysis history, cached sections and tracked strings (optional scope all|analysis|strings, as ?scope= or a JSON body {\"scope\": ...})",
     },
     RouteInfo {
         method: "GET",
@@ -152,6 +152,7 @@ pub const ROUTES: &[RouteInfo] = &[
         StringFilter,
         ToolCallParams,
         StringSearchRequest,
+        CacheClearBody,
         StringValueRequest
     )),
     info(
@@ -466,29 +467,91 @@ async fn get_cache_stats(State(state): State<RestState>) -> AxumJson<Value> {
     }))
 }
 
-#[utoipa::path(post, path = "/cache/clear", responses((status = 200, description = "`{status, message, cleared}`")))]
+/// Body of `POST /cache/clear` (optional; the scope may be in the query instead).
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CacheClearBody {
+    /// `all` (default), `analysis` or `strings`.
+    pub scope: Option<String>,
+}
+
+/// Accepted values named in every scope refusal.
+const SCOPE_VALUES: &str = "all (default), analysis or strings";
+
+fn parse_scope(
+    text: &str,
+    from: &str,
+) -> Result<crate::mcp_server::tools_services::ClearScope, String> {
+    use crate::mcp_server::tools_services::ClearScope;
+    match text.to_ascii_lowercase().as_str() {
+        "" | "all" => Ok(ClearScope::All),
+        "analysis" => Ok(ClearScope::Analysis),
+        "strings" => Ok(ClearScope::Strings),
+        other => Err(format!(
+            "Unknown scope '{other}' in the {from}: use {SCOPE_VALUES}. Nothing was cleared."
+        )),
+    }
+}
+
+/// The scope a `POST /cache/clear` asks for, from the query string and the
+/// optional JSON body. Any refusal clears nothing.
+fn requested_clear_scope(
+    query: &BTreeMap<String, String>,
+    body: &[u8],
+) -> Result<crate::mcp_server::tools_services::ClearScope, String> {
+    use crate::mcp_server::tools_services::ClearScope;
+    let from_query = query
+        .get("scope")
+        .filter(|s| !s.is_empty())
+        .map(|s| parse_scope(s, "query string"))
+        .transpose()?;
+    let from_body = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        let parsed: CacheClearBody = serde_json::from_slice(body).map_err(|e| {
+            format!(
+                "The body must be a JSON object with at most one field, \"scope\" ({SCOPE_VALUES}), \
+                 for example {{\"scope\": \"analysis\"}}: {e}. Nothing was cleared."
+            )
+        })?;
+        parsed
+            .scope
+            .filter(|s| !s.is_empty())
+            .map(|s| parse_scope(&s, "body"))
+            .transpose()?
+    };
+    match (from_query, from_body) {
+        (Some(q), Some(b)) if std::mem::discriminant(&q) != std::mem::discriminant(&b) => {
+            Err(format!(
+                "The query string and the body ask for different scopes ({q:?} and {b:?}): send \
+                 one of them, or the same value in both (accepted: {SCOPE_VALUES}). Nothing was \
+                 cleared."
+            ))
+        }
+        (Some(scope), _) | (None, Some(scope)) => Ok(scope),
+        (None, None) => Ok(ClearScope::All),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/cache/clear",
+    request_body(content = Option<CacheClearBody>, description = "Optional `{\"scope\": \"all\" | \"analysis\" | \"strings\"}`; the same value may be sent as `?scope=` instead"),
+    params(("scope" = Option<String>, Query, description = "all (default), analysis or strings")),
+    responses((status = 200, description = "`{status, message, cleared}`"), (status = 400, description = "Bad body, unknown scope, or the query and body disagree; nothing was cleared"))
+)]
 async fn clear_cache(
     State(state): State<RestState>,
     axum::extract::Query(query): axum::extract::Query<BTreeMap<String, String>>,
+    body: axum::body::Bytes,
 ) -> (StatusCode, AxumJson<Value>) {
-    use crate::mcp_server::tools_services::{clear_scope, ClearScope};
-    // The same optional scope as the cache_clear tool: all (default),
-    // analysis or strings.
-    let scope = match query
-        .get("scope")
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        None | Some("" | "all") => ClearScope::All,
-        Some("analysis") => ClearScope::Analysis,
-        Some("strings") => ClearScope::Strings,
-        Some(other) => {
+    use crate::mcp_server::tools_services::clear_scope;
+    let scope = match requested_clear_scope(&query, &body) {
+        Ok(scope) => scope,
+        Err(message) => {
             return (
                 StatusCode::BAD_REQUEST,
-                AxumJson(json!({
-                    "status": "error",
-                    "message": format!("Unknown scope '{other}': use all (default), analysis or strings")
-                })),
+                AxumJson(json!({"status": "error", "message": message, "error": message})),
             )
         }
     };
@@ -538,12 +601,17 @@ async fn search_strings(
     State(state): State<RestState>,
     JsonBody(request): JsonBody<StringSearchRequest>,
 ) -> RestResult {
+    let limit = request.limit.unwrap_or(100);
+    // With allowed roots, `limit` counts what the caller may see: take every
+    // match, drop the hidden ones, then cut to the limit.
+    let rooted = !state.handler.state().allowed_roots().is_empty();
     let results: Vec<_> = state
         .string_tracker
-        .try_search_strings(&request.query, request.limit.unwrap_or(100))
+        .try_search_strings(&request.query, if rooted { usize::MAX } else { limit })
         .map_err(|e| rest_error(StatusCode::BAD_REQUEST, e))?
         .into_iter()
         .filter_map(|entry| state.handler.state().visible_string_entry(entry))
+        .take(limit)
         .collect();
     Ok(AxumJson(json!({
         "results": results,
@@ -577,15 +645,20 @@ async fn handle_strings_related(
     JsonBody(request): JsonBody<StringValueRequest>,
 ) -> RestResult {
     let shared = state.handler.state();
+    let limit = request.limit.unwrap_or(20);
+    // With allowed roots, `limit` counts visible relatives, so ask for all of
+    // them, drop the hidden ones, then cut to the limit.
+    let rooted = !shared.allowed_roots().is_empty();
     let mut related = state
         .string_tracker
-        .try_get_related_strings(&request.value, request.limit.unwrap_or(20))
+        .try_get_related_strings(&request.value, if rooted { usize::MAX } else { limit })
         .map_err(|e| rest_error(StatusCode::BAD_REQUEST, e))?;
     // Neither the asked value nor its relatives may live only outside the roots.
     if !shared.string_value_is_visible(&request.value) {
         related.clear();
     }
     related.retain(|(value, _)| shared.string_value_is_visible(value));
+    related.truncate(limit);
     Ok(AxumJson(json!({
         "related": related,
         "count": related.len()
