@@ -61,7 +61,7 @@ const MAX_TAR_EXTENSIONS: usize = 100_000;
 /// Most entries visited while listing one archive or directory, counting the
 /// ones that are dropped (directories, metadata): a tar of empty entries
 /// costs a header each.
-const MAX_VISITED_ENTRIES: usize = 500_000;
+pub(crate) const MAX_VISITED_ENTRIES: usize = 500_000;
 /// Message for every tar read failure; the library's text can echo file bytes.
 const TAR_DAMAGED: &str =
     "The tar archive is damaged or is not a tar archive, and could not be read to the end.";
@@ -404,8 +404,11 @@ pub fn unsafe_entry_findings(loaded: &LoadedPackage) -> Vec<SourceFinding> {
 }
 
 /// One note for a package archive's unsafe entries, `None` when there are none.
+/// The count is the true number in the archive, which can be more than the
+/// `MAX_UNSAFE_ENTRIES` that are kept and listed as findings.
 pub fn unsafe_entry_note(loaded: &LoadedPackage) -> Option<String> {
-    if loaded.unsafe_entries.is_empty() {
+    let total = loaded.unsafe_entries_total.max(loaded.unsafe_entries.len());
+    if total == 0 {
         return None;
     }
     let shown: Vec<String> = loaded
@@ -414,15 +417,24 @@ pub fn unsafe_entry_note(loaded: &LoadedPackage) -> Option<String> {
         .take(5)
         .map(UnsafeEntry::describe)
         .collect();
-    let more = loaded.unsafe_entries.len().saturating_sub(5);
+    let more = total.saturating_sub(shown.len());
     let tail = if more > 0 {
         format!(" and {more} more")
     } else {
         String::new()
     };
+    let unlisted = total.saturating_sub(loaded.unsafe_entries.len());
+    let cap = if unlisted > 0 {
+        let verb = if unlisted == 1 { "is" } else { "are" };
+        format!(
+            " Only the first {} are listed as findings; {unlisted} more {verb} not listed.",
+            loaded.unsafe_entries.len()
+        )
+    } else {
+        String::new()
+    };
     Some(format!(
-        "UNSAFE ARCHIVE ENTRIES: {} entries leave the package directory or link outside it: {}{tail}. A tarball made by npm pack or an sdist never has such entries; extracting it could write outside the target directory.",
-        loaded.unsafe_entries.len(),
+        "UNSAFE ARCHIVE ENTRIES: {total} entries leave the package directory or link outside it: {}{tail}. A tarball made by npm pack or an sdist never has such entries; extracting it could write outside the target directory.{cap}",
         shown.join("; ")
     ))
 }
@@ -447,7 +459,10 @@ pub struct LoadedPackage {
     /// Source files not read because a limit was reached.
     pub files_skipped: usize,
     /// Archive entries with `..` or absolute paths, and links (tar and zip only).
+    /// At most `MAX_UNSAFE_ENTRIES` are kept; see `unsafe_entries_total`.
     pub unsafe_entries: Vec<UnsafeEntry>,
+    /// How many unsafe entries the archive holds, counting those past the cap.
+    pub unsafe_entries_total: usize,
 }
 
 impl LoadedFile {
@@ -545,12 +560,17 @@ struct Listed {
 pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<LoadedPackage> {
     let mut notes = Vec::new();
     let mut unsafe_entries: Vec<UnsafeEntry> = Vec::new();
+    let mut unsafe_total = 0usize;
     let (listed, listing_truncated, ignored) = match container {
         ContainerKind::Directory => list_dir(path, &mut notes)?,
-        ContainerKind::TarGz | ContainerKind::Tar => {
-            list_tar(path, container, &mut notes, &mut unsafe_entries)?
-        }
-        ContainerKind::Zip => list_zip(path, &mut unsafe_entries)?,
+        ContainerKind::TarGz | ContainerKind::Tar => list_tar(
+            path,
+            container,
+            &mut notes,
+            &mut unsafe_entries,
+            &mut unsafe_total,
+        )?,
+        ContainerKind::Zip => list_zip(path, &mut unsafe_entries, &mut unsafe_total)?,
     };
     if ignored > 0 {
         notes.push(format!(
@@ -724,6 +744,7 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
         files_partial,
         files_skipped,
         unsafe_entries,
+        unsafe_entries_total: unsafe_total,
     })
 }
 
@@ -1213,6 +1234,7 @@ fn list_tar(
     container: ContainerKind,
     notes: &mut Vec<String>,
     unsafe_entries: &mut Vec<UnsafeEntry>,
+    unsafe_total: &mut usize,
 ) -> Result<Listing> {
     let mut listed = Vec::new();
     let mut truncated = false;
@@ -1233,8 +1255,11 @@ fn list_tar(
                 truncated = true;
                 return Ok(false);
             }
+            // Every unsafe entry is counted; only the first ones are kept.
+            let found = classify_unsafe(&item.path, item.kind, item.link.clone());
+            *unsafe_total += found.len();
             if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
-                unsafe_entries.extend(classify_unsafe(&item.path, item.kind, item.link.clone()));
+                unsafe_entries.extend(found);
             }
             if !item.kind.is_file() {
                 // Directories, links and devices carry no package content.
@@ -1298,7 +1323,11 @@ fn read_tar_files(
     Ok(out)
 }
 
-fn list_zip(path: &Path, unsafe_entries: &mut Vec<UnsafeEntry>) -> Result<Listing> {
+fn list_zip(
+    path: &Path,
+    unsafe_entries: &mut Vec<UnsafeEntry>,
+    unsafe_total: &mut usize,
+) -> Result<Listing> {
     let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
     let mut zip = zip::ZipArchive::new(file).context("The file is not a readable zip archive")?;
     let mut listed = Vec::new();
@@ -1310,14 +1339,17 @@ fn list_zip(path: &Path, unsafe_entries: &mut Vec<UnsafeEntry>) -> Result<Listin
         if entry.is_dir() {
             continue;
         }
-        if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
+        {
             let raw = entry.name()?.to_string();
             if let Some(kind) = unsafe_path_kind(&raw) {
-                unsafe_entries.push(UnsafeEntry {
-                    path: raw,
-                    kind,
-                    target: None,
-                });
+                *unsafe_total += 1;
+                if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
+                    unsafe_entries.push(UnsafeEntry {
+                        path: raw,
+                        kind,
+                        target: None,
+                    });
+                }
             }
         }
         let name = normalise_entry_path(&entry.name()?);

@@ -185,8 +185,8 @@ impl Ecosystem {
 
     const fn cache_key(self) -> &'static str {
         match self {
-            Self::Npm => "package:npm:v3",
-            Self::Python => "package:python:v3",
+            Self::Npm => "package:npm:v4",
+            Self::Python => "package:python:v4",
         }
     }
 
@@ -338,8 +338,12 @@ impl FileScannerMcp {
         };
 
         let cache = self.state.section_cache();
-        let (full, cache_state) = if let Some(hit) = cache.get(&fingerprint, ecosystem.cache_key())
-        {
+        // No fingerprint: the digest could not cover the whole tree the analysis
+        // can read, so the answer is computed on every call and never stored.
+        let cached = fingerprint
+            .as_deref()
+            .and_then(|key| cache.get(key, ecosystem.cache_key()));
+        let (full, cache_state) = if let Some(hit) = cached {
             (hit, "hit")
         } else {
             let analysis_path = path.clone();
@@ -353,7 +357,9 @@ impl FileScannerMcp {
                 Ok(Ok(value)) => value,
                 Ok(Err(message)) | Err(message) => return tool_error(message),
             };
-            cache.put(&fingerprint, ecosystem.cache_key(), &value);
+            if let Some(key) = fingerprint.as_deref() {
+                cache.put(key, ecosystem.cache_key(), &value);
+            }
             (std::sync::Arc::new(value), "miss")
         };
 
@@ -455,7 +461,15 @@ fn run_analysis(ecosystem: Ecosystem, path: &Path) -> Result<Value, String> {
 
 /// A stable identity for the package: the SHA-256 of a file, or a digest of
 /// the names, sizes and modification times of the files of a directory.
-fn fingerprint(path: &Path) -> Result<String, String> {
+/// `None` when the walk of a directory stopped at the entry limit the scan
+/// also uses: the digest does not cover the whole tree, so the answer is
+/// never cached.
+fn fingerprint(path: &Path) -> Result<Option<String>, String> {
+    fingerprint_with(path, crate::package_scan::MAX_VISITED_ENTRIES)
+}
+
+/// [`fingerprint`] with the entry limit as a parameter.
+fn fingerprint_with(path: &Path, max_entries: usize) -> Result<Option<String>, String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
 
@@ -484,7 +498,12 @@ fn fingerprint(path: &Path) -> Result<String, String> {
         // is covered by size and time, so a call on a big tree does not read it all.
         let mut manifests: Vec<std::path::PathBuf> = Vec::new();
         let mut sources: Vec<(usize, std::path::PathBuf)> = Vec::new();
-        for entry in walker.filter_map(Result::ok).take(200_000) {
+        let mut visited = 0usize;
+        for entry in walker.filter_map(Result::ok) {
+            visited += 1;
+            if visited > max_entries {
+                return Ok(None);
+            }
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -574,11 +593,13 @@ fn fingerprint(path: &Path) -> Result<String, String> {
             hasher.update(&buffer[..n]);
         }
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+    Ok(Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -820,6 +841,23 @@ fn findings_page(full: &Value, view: &View) -> Value {
         })
         .unwrap_or_default();
     let mut out = page(&rows, view.offset, view.limit);
+    // The unsafe-entry findings stop at a cap; the list says how many are not there.
+    let cap_sentence = full["input"]["notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|note| note.starts_with("UNSAFE ARCHIVE ENTRIES"))
+        .find_map(|note| {
+            // The cap sentence follows the fixed last sentence of the note; entry names,
+            // which come from the archive, are all before it.
+            note.rsplit_once("outside the target directory.")
+                .map(|(_, tail)| tail.trim())
+                .filter(|tail| tail.starts_with("Only the first "))
+        });
+    if let (Some(sentence), Some(object)) = (cap_sentence, out.as_object_mut()) {
+        object.insert("unsafe_entries_note".to_string(), json!(sentence));
+    }
     let indicators = &full["malicious_indicators"];
     let mut signals = serde_json::Map::new();
     for key in [
@@ -1223,12 +1261,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "one").unwrap();
-        let first = fingerprint(&file).unwrap();
+        let first = fingerprint(&file).unwrap().unwrap();
         std::fs::write(&file, "two").unwrap();
-        assert_ne!(first, fingerprint(&file).unwrap());
-        let dir_first = fingerprint(dir.path()).unwrap();
+        assert_ne!(first, fingerprint(&file).unwrap().unwrap());
+        let dir_first = fingerprint(dir.path()).unwrap().unwrap();
         std::fs::write(dir.path().join("b.txt"), "x").unwrap();
-        assert_ne!(dir_first, fingerprint(dir.path()).unwrap());
+        assert_ne!(dir_first, fingerprint(dir.path()).unwrap().unwrap());
     }
 
     #[test]
@@ -1244,7 +1282,7 @@ mod tests {
             std::fs::write(modules.join(format!("m{n}.js")), "x\n").unwrap();
         }
         let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
-        let first = fingerprint(dir.path()).unwrap();
+        let first = fingerprint(dir.path()).unwrap().unwrap();
         // Same length, same modification time, different content.
         std::fs::write(&file, "// bbbb\n").unwrap();
         std::fs::File::options()
@@ -1253,7 +1291,7 @@ mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
-        assert_ne!(first, fingerprint(dir.path()).unwrap());
+        assert_ne!(first, fingerprint(dir.path()).unwrap().unwrap());
     }
 
     #[test]
@@ -1267,7 +1305,7 @@ mod tests {
         let root = dir.path().join("package.json");
         std::fs::write(&root, "{\"scripts\":{\"postinstall\":\"echo aaaa\"}}").unwrap();
         let modified = std::fs::metadata(&root).unwrap().modified().unwrap();
-        let first = fingerprint(dir.path()).unwrap();
+        let first = fingerprint(dir.path()).unwrap().unwrap();
         // Same length, same modification time, different content.
         std::fs::write(&root, "{\"scripts\":{\"postinstall\":\"echo bbbb\"}}").unwrap();
         std::fs::File::options()
@@ -1276,6 +1314,20 @@ mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
-        assert_ne!(first, fingerprint(dir.path()).unwrap());
+        assert_ne!(first, fingerprint(dir.path()).unwrap().unwrap());
+    }
+
+    #[test]
+    fn fingerprint_of_a_tree_past_the_entry_limit_is_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for n in 0..20 {
+            std::fs::create_dir_all(dir.path().join(format!("aaa/{n:02}"))).unwrap();
+        }
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("index.js"), "1\n").unwrap();
+        // root + aaa + 20 + package.json + index.js = 24 entries.
+        assert!(fingerprint_with(dir.path(), 24).unwrap().is_some());
+        assert!(fingerprint_with(dir.path(), 23).unwrap().is_none());
+        assert!(fingerprint_with(dir.path(), 10).unwrap().is_none());
     }
 }
