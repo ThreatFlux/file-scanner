@@ -504,11 +504,18 @@ answer `No signature found` is stored under the section key `signatures:r2`, so 
 served. A side file is read only when it is safe to read; otherwise `is_signed` is false and `verification_status`
 says why, and gpg is not run:
 
-| Side file | `verification_status` |
-| --- | --- |
-| A link that resolves outside the allowed roots (server started with `--allow-root`) | `Not checked: a detached signature file (.sig or .asc) exists beside the file but was not read because it is a link that leads to <outside the allowed roots>; copy it under an allowed root, or start the server with --allow-root for the directory it is in` |
-| Not a regular file after following links (named pipe, socket, device, directory) | `Not checked: a detached signature file (a.txt.sig) exists beside the file but is a named pipe (FIFO) and was not read; only a regular file is used as a signature` (also `a socket`, `a device file`, `a directory`) |
-| Larger than 16 MiB | `Not checked: a detached signature file (a.txt.sig) exists beside the file but is 17000000 bytes, larger than the 16 MiB a detached signature can be and was not read; only a regular file is used as a signature` |
+The `verification_status` for each kind of side file:
+
+- A link that resolves outside the allowed roots (server started with `--allow-root`):
+  `Not checked: a detached signature file (.sig or .asc) exists beside the file but was not read because it is a link
+  that leads to <outside the allowed roots>; copy it under an allowed root, or start the server with --allow-root for
+  the directory it is in`
+- Not a regular file after following links (named pipe, socket, device, directory):
+  `Not checked: a detached signature file (a.txt.sig) exists beside the file but is a named pipe (FIFO) and was not
+  read; only a regular file is used as a signature` (also `a socket`, `a device file`, `a directory`)
+- Larger than 16 MiB:
+  `Not checked: a detached signature file (a.txt.sig) exists beside the file but is 17000000 bytes, larger than the 16
+  MiB a detached signature can be and was not read; only a regular file is used as a signature`
 
 The regular-file and 16 MiB rules apply with or without `--allow-root`, so a pipe named `a.txt.sig` no longer hangs
 the call. The roots rule applies on stdio, on `/mcp` and on REST `/tools/call`. On a rooted server a side-file link
@@ -714,13 +721,12 @@ symbol-table-only functions together, the same list `filter` shows: one match is
 `c_advanced_binary` lists `check_environment`), several are an error, and no match is an error that also says the
 symbol table has none:
 
-```text
-'tm_clones' matches 2 functions: deregister_tm_clones at 0x1490; register_tm_clones at 0x14c0. Pass the exact name or an `address`.
-```
+``'tm_clones' matches 2 functions: deregister_tm_clones at 0x1490; register_tm_clones at 0x14c0. Pass the exact name
+or an `address`.``
 
 The count equals `total` of the function list for that `filter`; 12 names are listed, then `(and K more)` (the part
 `_` on that file gives `matches 19 functions: ... (and 7 more)`). The message may come with or without the prefix
-`The disassembly failed: `. A stripped Mach-O, or a PE
+`The disassembly failed:` plus a space. A stripped Mach-O, or a PE
 whose symbols are RVAs, lists no functions under any name: pass an `address`, or use `query_analysis` with the
 `symbols` section.
 Following `next_address` of such a listing continues past the symbol's end, because an address lists from that
@@ -1197,7 +1203,8 @@ When a tarball, sdist or zip has entries that leave the package directory or lin
 and `and {total - shown} more`, and ends with `A tarball made by npm pack or an sdist never has such entries;
 extracting it could write outside the target directory.` `{total}` is the true number of unsafe findings in the
 archive (80 for an archive with 80 `..` entries, `and 75 more`), not the number kept. At most 50 are kept as
-findings; when more exist the note ends with ` Only the first 50 are listed as findings; 30 more are not listed.`
+findings; when more exist the note ends with a space and the sentence `Only the first 50 are listed as findings;
+30 more are not listed.`
 (`1 more is not listed.` for one), and the `findings` section carries the same sentence in the field
 `unsafe_entries_note` (present only when the findings were capped, also with `min_severity`; entry names in an
 archive cannot forge it). The count is of problems, not of archive entries: a tar entry that is both a `..` path and a
