@@ -1,3 +1,4 @@
+use crate::binary_parser::{capped_name, NameBudget};
 use anyhow::Result;
 use goblin::{elf, mach, pe, Object};
 use serde::{Deserialize, Serialize};
@@ -122,10 +123,33 @@ pub struct SymbolCounts {
 }
 
 pub fn analyze_symbols(path: &Path) -> Result<SymbolTable> {
+    analyze_symbols_with_arch(path, None)
+}
+
+/// Like [`analyze_symbols`], but for a universal Mach-O analyzes the slice
+/// named by `arch` (default: the host architecture if present, else the first).
+pub fn analyze_symbols_with_arch(path: &Path, arch: Option<&str>) -> Result<SymbolTable> {
     let mut file = File::open(path)?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
 
+    if let Some(selection) = crate::binary_parser::select_fat_slice(&buffer, arch) {
+        crate::binary_parser::check_mach_load_commands(selection.data)
+            .map_err(|why| anyhow::anyhow!("The Mach-O file was not analyzed: {why}"))?;
+        return match Object::parse(selection.data)? {
+            Object::Mach(mach @ mach::Mach::Binary(_)) => {
+                analyze_mach_symbols(mach, selection.data)
+            }
+            _ => Err(anyhow::anyhow!(
+                "The selected slice of the universal binary is not a Mach-O image"
+            )),
+        };
+    }
+
+    crate::binary_parser::check_mach_load_commands(&buffer)
+        .map_err(|why| anyhow::anyhow!("The Mach-O file was not analyzed: {why}"))?;
+    crate::binary_parser::check_pe_imports(&buffer)
+        .map_err(|why| anyhow::anyhow!("The PE file was not analyzed: {why}"))?;
     match Object::parse(&buffer)? {
         Object::Elf(elf) => analyze_elf_symbols(elf, &buffer),
         Object::PE(pe) => analyze_pe_symbols(pe, &buffer),
@@ -136,6 +160,44 @@ pub fn analyze_symbols(path: &Path) -> Result<SymbolTable> {
     }
 }
 
+/// `strcpy@GLIBC_2.2.5` / `strcpy@@GLIBC_2.2.5` -> `strcpy`.
+fn strip_symbol_version(name: &str) -> &str {
+    match name.find('@') {
+        Some(0) | None => name,
+        Some(i) => &name[..i],
+    }
+}
+
+fn budget_note() -> String {
+    format!(
+        "Symbol names were kept only up to a budget of {} MiB (each name is also cut at {} bytes); the symbols after that point are not listed.",
+        crate::binary_parser::SYMBOL_NAME_BUDGET >> 20,
+        crate::binary_parser::MAX_SYMBOL_NAME
+    )
+}
+
+/// Puts one marker entry per note at the front of the function list, after the
+/// counts were taken, so a cut is visible in every listing of the table and in
+/// the first rows of an overview sample. The markers are not
+/// counted in `symbol_count`.
+fn push_notes(functions: &mut Vec<FunctionInfo>, notes: &[String]) {
+    let markers: Vec<FunctionInfo> = notes
+        .iter()
+        .map(|note| FunctionInfo {
+            name: format!("[note] {note}"),
+            address: 0,
+            size: 0,
+            function_type: FunctionType::Local,
+            calling_convention: None,
+            parameters: Vec::new(),
+            is_entry_point: false,
+            is_exported: false,
+            is_imported: false,
+        })
+        .collect();
+    functions.splice(0..0, markers);
+}
+
 pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable> {
     let mut functions = Vec::new();
     let mut global_variables = Vec::new();
@@ -143,18 +205,43 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
     let mut exports = Vec::new();
     let cross_references = Vec::new();
 
-    // Analyze ELF symbols
-    for sym in &elf.syms {
-        let name = elf.strtab.get_at(sym.st_name).unwrap_or("").to_string();
+    let mut budget = NameBudget::default();
+    let mut notes: Vec<String> = Vec::new();
 
-        if name.is_empty() || name.starts_with('$') {
+    // Analyze ELF symbols. A name is copied only for a symbol that is kept, with
+    // the length cap, and the copies are charged against a per-call budget.
+    for sym in &elf.syms {
+        let mut raw = elf.strtab.get_at(sym.st_name).unwrap_or("");
+
+        if raw.is_empty() || raw.starts_with('$') {
             continue;
+        }
+
+        // .symtab spells imports with their version (`strcpy@GLIBC_2.2.5`);
+        // keep the plain name so the same import is not listed twice.
+        if sym.st_shndx == 0 {
+            raw = strip_symbol_version(raw);
         }
 
         let sym_type = sym.st_type();
         let binding = sym.st_bind();
         let address = sym.st_value;
         let size = sym.st_size;
+
+        let keep = match sym_type {
+            goblin::elf::sym::STT_FUNC => true,
+            goblin::elf::sym::STT_OBJECT => {
+                binding == goblin::elf::sym::STB_GLOBAL || binding == goblin::elf::sym::STB_LOCAL
+            }
+            _ => false,
+        };
+        if !keep {
+            continue;
+        }
+        let name = capped_name(raw).into_owned();
+        if !budget.charge(&name, 2) {
+            break;
+        }
 
         match sym_type {
             goblin::elf::sym::STT_FUNC => {
@@ -167,25 +254,15 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
                         }
                     }
                     goblin::elf::sym::STB_LOCAL => FunctionType::Local,
+                    // Weak and other bindings: an undefined one is still an import.
+                    _ if sym.st_shndx == 0 => FunctionType::Imported,
                     _ => FunctionType::Local,
                 };
 
                 let is_entry_point =
-                    name == "_start" || name == "main" || address == elf.header.e_entry;
+                    raw == "_start" || raw == "main" || address == elf.header.e_entry;
                 let is_exported = binding == goblin::elf::sym::STB_GLOBAL && sym.st_shndx != 0;
                 let is_imported = sym.st_shndx == 0;
-
-                functions.push(FunctionInfo {
-                    name: name.clone(),
-                    address,
-                    size,
-                    function_type,
-                    calling_convention: Some(CallingConvention::SysV),
-                    parameters: Vec::new(), // Would need debug info for this
-                    is_entry_point,
-                    is_exported,
-                    is_imported,
-                });
 
                 // Add to imports/exports lists
                 if is_imported {
@@ -205,13 +282,22 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
                         forwarder_name: None,
                     });
                 }
+
+                functions.push(FunctionInfo {
+                    name,
+                    address,
+                    size,
+                    function_type,
+                    calling_convention: Some(CallingConvention::SysV),
+                    parameters: Vec::new(), // Would need debug info for this
+                    is_entry_point,
+                    is_exported,
+                    is_imported,
+                });
             }
-            goblin::elf::sym::STT_OBJECT
-                if binding == goblin::elf::sym::STB_GLOBAL
-                    || binding == goblin::elf::sym::STB_LOCAL =>
-            {
+            _ => {
                 global_variables.push(VariableInfo {
-                    name: name.clone(),
+                    name,
                     address,
                     size,
                     var_type: if binding == goblin::elf::sym::STB_GLOBAL {
@@ -222,20 +308,93 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
                     section: None, // Could be enhanced to include section name
                 });
             }
-            _ => {}
+        }
+    }
+
+    // Which library provides an imported dynamic symbol: the version-needs
+    // table names the file for every version index (GLIBC_2.2.5 -> libc.so.6).
+    // Both the number of needs and the number of aux entries come from the
+    // file and the chains may loop, so the walk is capped (65,536 covers every
+    // possible u16 version index) and each file name is stored once.
+    const MAX_VERNEED: usize = 4096;
+    const MAX_VERNAUX_TOTAL: usize = 65_536;
+    let mut version_files: std::collections::HashMap<u16, std::rc::Rc<str>> =
+        std::collections::HashMap::new();
+    if let Some(verneed) = &elf.verneed {
+        let mut aux_total = 0usize;
+        let mut needs = verneed.iter();
+        for need in needs.by_ref().take(MAX_VERNEED) {
+            let file = elf.dynstrtab.get_at(need.vn_file).unwrap_or("");
+            if file.is_empty() {
+                continue;
+            }
+            let file: std::rc::Rc<str> = std::rc::Rc::from(capped_name(file).as_ref());
+            for aux in need.iter() {
+                aux_total += 1;
+                if aux_total > MAX_VERNAUX_TOTAL {
+                    break;
+                }
+                version_files.insert(aux.vna_other, std::rc::Rc::clone(&file));
+            }
+            if aux_total > MAX_VERNAUX_TOTAL {
+                break;
+            }
+        }
+        if aux_total > MAX_VERNAUX_TOTAL || needs.next().is_some() {
+            notes.push(format!(
+                "The ELF version-needs table was cut at {MAX_VERNEED} entries or {MAX_VERNAUX_TOTAL} version records; some imports may lack the name of their library."
+            ));
+        }
+    }
+    let mut import_library: std::collections::HashMap<String, std::rc::Rc<str>> =
+        std::collections::HashMap::new();
+    if !version_files.is_empty() {
+        for (index, sym) in elf.dynsyms.iter().enumerate() {
+            if sym.st_shndx != 0 {
+                continue;
+            }
+            let Some(version) = elf.versym.as_ref().and_then(|v| v.get_at(index)) else {
+                continue;
+            };
+            if let (Some(file), Some(name)) = (
+                version_files.get(&version.version()),
+                elf.dynstrtab.get_at(sym.st_name),
+            ) {
+                let name = capped_name(strip_symbol_version(name)).into_owned();
+                if !budget.charge(&name, 1) {
+                    break;
+                }
+                import_library.insert(name, std::rc::Rc::clone(file));
+            }
         }
     }
 
     // Analyze dynamic symbols if available
+    let mut known_names: std::collections::HashSet<String> =
+        functions.iter().map(|f| f.name.clone()).collect();
     for sym in &elf.dynsyms {
-        let name = elf.dynstrtab.get_at(sym.st_name).unwrap_or("").to_string();
-
-        if name.is_empty() || functions.iter().any(|f| f.name == name) {
+        if budget.is_cut() {
+            break;
+        }
+        if !(sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_shndx == 0) {
             continue;
         }
+        let raw = strip_symbol_version(elf.dynstrtab.get_at(sym.st_name).unwrap_or(""));
+        if raw.is_empty() {
+            continue;
+        }
+        let name = capped_name(raw).into_owned();
 
-        if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_shndx == 0 {
+        if known_names.contains(&name) {
+            continue;
+        }
+        if !budget.charge(&name, 4) {
+            break;
+        }
+
+        {
             // This is an imported function
+            known_names.insert(name.clone());
             functions.push(FunctionInfo {
                 name: name.clone(),
                 address: sym.st_value,
@@ -262,6 +421,19 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
         }
     }
 
+    for import in &mut imports {
+        if import.library.is_none() {
+            if let Some(file) = import_library.get(&import.name) {
+                if budget.charge(file, 1) {
+                    import.library = Some(file.to_string());
+                }
+            }
+        }
+    }
+    if budget.is_cut() {
+        notes.push(budget_note());
+    }
+
     let symbol_count = SymbolCounts {
         total_functions: functions.len(),
         local_functions: functions
@@ -273,6 +445,8 @@ pub fn analyze_elf_symbols(elf: elf::Elf, _buffer: &[u8]) -> Result<SymbolTable>
         global_variables: global_variables.len(),
         cross_references: cross_references.len(),
     };
+
+    push_notes(&mut functions, &notes);
 
     Ok(SymbolTable {
         functions,
@@ -291,11 +465,19 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
     let mut exports = Vec::new();
     let cross_references = Vec::new();
 
+    let mut budget = NameBudget::default();
+    let mut notes: Vec<String> = Vec::new();
+
     // Analyze PE imports
     for import in &pe.imports {
+        let name = capped_name(&import.name).into_owned();
+        let dll = capped_name(import.dll).into_owned();
+        if !(budget.charge(&name, 2) && budget.charge(&dll, 1)) {
+            break;
+        }
         imports.push(ImportInfo {
-            name: import.name.to_string(),
-            library: Some(import.dll.to_string()),
+            name: name.clone(),
+            library: Some(dll),
             address: Some(import.rva as u64),
             ordinal: Some(import.ordinal),
             is_delayed: false, // Would need to check delay import table
@@ -303,7 +485,7 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
 
         // Add imported functions to function list
         functions.push(FunctionInfo {
-            name: import.name.to_string(),
+            name,
             address: import.rva as u64,
             size: 0, // PE imports don't have size info
             function_type: FunctionType::Imported,
@@ -317,7 +499,10 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
 
     // Analyze PE exports
     for export in &pe.exports {
-        let export_name = export.name.unwrap_or("").to_string();
+        let export_name = capped_name(export.name.unwrap_or("")).into_owned();
+        if !budget.charge(&export_name, 2) {
+            break;
+        }
         let export_address = export.rva as u64;
 
         exports.push(ExportInfo {
@@ -363,6 +548,11 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
         cross_references: cross_references.len(),
     };
 
+    if budget.is_cut() {
+        notes.push(budget_note());
+    }
+    push_notes(&mut functions, &notes);
+
     Ok(SymbolTable {
         functions,
         global_variables,
@@ -373,7 +563,20 @@ pub fn analyze_pe_symbols(pe: pe::PE, _buffer: &[u8]) -> Result<SymbolTable> {
     })
 }
 
-fn mach_import_library<'a>(
+fn is_mach_linker_symbol(name: &str) -> bool {
+    matches!(
+        name,
+        "__mh_execute_header"
+            | "__mh_dylib_header"
+            | "__mh_bundle_header"
+            | "__mh_object_header"
+            | "__mh_preload_header"
+            | "__mh_dylinker_header"
+            | "dyld_stub_binder"
+    )
+}
+
+pub(crate) fn mach_import_library<'a>(
     macho: &mach::MachO<'a>,
     symbol: &mach::symbols::Nlist,
 ) -> Option<&'a str> {
@@ -390,33 +593,88 @@ fn mach_import_library<'a>(
     macho.libs.get(ordinal).copied()
 }
 
-pub fn analyze_mach_symbols(mach: mach::Mach, _buffer: &[u8]) -> Result<SymbolTable> {
+/// True for a Mach-O section that holds instructions (`S_ATTR_PURE_INSTRUCTIONS`
+/// or `S_ATTR_SOME_INSTRUCTIONS`).
+fn mach_section_holds_code(flags: u32) -> bool {
+    flags & 0x8000_0000 != 0 || flags & 0x0000_0400 != 0
+}
+
+pub fn analyze_mach_symbols(mach: mach::Mach, buffer: &[u8]) -> Result<SymbolTable> {
     let mut functions = Vec::new();
     let mut global_variables = Vec::new();
     let mut imports = Vec::new();
     let mut exports = Vec::new();
     let cross_references = Vec::new();
+    let mut budget = NameBudget::default();
 
     match mach {
         mach::Mach::Fat(_) => {
-            // For fat binaries, we'd need to choose an architecture
-            // For now, return empty symbol table
+            // analyze_symbols_with_arch picks a slice first; a caller that
+            // hands over a fat Mach directly gets the slice chosen the same way.
+            if let Some(selection) = crate::binary_parser::select_fat_slice(buffer, None) {
+                // Only a thin image is accepted: a slice that is itself
+                // universal must never recurse.
+                if let Ok(Object::Mach(inner @ mach::Mach::Binary(_))) =
+                    Object::parse(selection.data)
+                {
+                    return analyze_mach_symbols(inner, selection.data);
+                }
+            }
         }
         mach::Mach::Binary(macho) => {
+            // The sections of every segment in load-command order: an `n_sect`
+            // of a symbol is a 1-based index into this list. A symbol is a
+            // function only when its section holds code.
+            let code_sections: Vec<bool> = macho
+                .segments
+                .iter()
+                .flat_map(|segment| segment.sections().unwrap_or_default())
+                .map(|(section, _)| mach_section_holds_code(section.flags))
+                .collect();
             // Analyze Mach-O symbols
-            for sym in macho.symbols().flatten() {
-                let name = sym.0.to_string();
-                let nlist = sym.1;
+            for (name, nlist) in crate::binary_parser::mach_symbols_bounded(&macho, buffer) {
+                if nlist.is_stab() {
+                    continue;
+                }
 
-                if name.is_empty() || name.starts_with("__") {
+                // Linker-provided markers are not functions. Everything else with
+                // a leading double underscore (Itanium C++ and Rust names such
+                // as `__ZN3foo3barEv`) is a real function.
+                if name.is_empty() || is_mach_linker_symbol(&name) {
                     continue;
                 }
 
                 let address = nlist.n_value;
                 let is_external = nlist.is_global();
 
-                // Check if this is a function symbol (simplified check)
                 if nlist.n_type & mach::symbols::N_TYPE == mach::symbols::N_SECT {
+                    // `n_sect` is 1-based; one that names no section (a file
+                    // without a section table) cannot be told apart and keeps
+                    // the symbol in the function list.
+                    let holds_code = nlist
+                        .n_sect
+                        .checked_sub(1)
+                        .and_then(|i| code_sections.get(i))
+                        .copied()
+                        .unwrap_or(true);
+                    if !holds_code {
+                        // A variable (data, bss, constants): never a function
+                        if !budget.charge(&name, 1) {
+                            break;
+                        }
+                        global_variables.push(VariableInfo {
+                            name: name.to_string(),
+                            address,
+                            size: 0,
+                            var_type: if is_external {
+                                VariableType::Global
+                            } else {
+                                VariableType::Static
+                            },
+                            section: None,
+                        });
+                        continue;
+                    }
                     let function_type = if is_external {
                         FunctionType::Exported
                     } else {
@@ -424,9 +682,12 @@ pub fn analyze_mach_symbols(mach: mach::Mach, _buffer: &[u8]) -> Result<SymbolTa
                     };
 
                     let is_entry_point = name == "_main" || name == "main";
+                    if !budget.charge(&name, 2) {
+                        break;
+                    }
 
                     functions.push(FunctionInfo {
-                        name: name.clone(),
+                        name: name.to_string(),
                         address,
                         size: 0, // Mach-O doesn't provide function sizes directly
                         function_type,
@@ -439,46 +700,41 @@ pub fn analyze_mach_symbols(mach: mach::Mach, _buffer: &[u8]) -> Result<SymbolTa
 
                     if is_external {
                         exports.push(ExportInfo {
-                            name: name.clone(),
+                            name: name.to_string(),
                             address,
                             ordinal: None,
                             is_forwarder: false,
                             forwarder_name: None,
                         });
                     }
-                } else if nlist.n_type & mach::symbols::N_TYPE == mach::symbols::N_SECT
-                    && !name.contains("func")
-                {
-                    global_variables.push(VariableInfo {
-                        name: name.clone(),
-                        address,
-                        size: 0, // Size not available
-                        var_type: if is_external {
-                            VariableType::Global
-                        } else {
-                            VariableType::Static
-                        },
-                        section: None,
-                    });
                 }
             }
 
             // Analyze imports (undefined symbols)
-            for sym in macho.symbols().flatten() {
-                let name = sym.0.to_string();
-                let nlist = sym.1;
-
-                if nlist.is_undefined() && !name.is_empty() {
+            for (name, nlist) in crate::binary_parser::mach_symbols_bounded(&macho, buffer) {
+                if budget.is_cut() {
+                    break;
+                }
+                if !nlist.is_stab() && nlist.is_undefined() && !name.is_empty() {
+                    // The library name is shared by every import of it: cap it
+                    // and charge each copy like a symbol name.
+                    let library =
+                        mach_import_library(&macho, &nlist).map(crate::binary_parser::capped_name);
+                    if !budget.charge(&name, 2)
+                        || !library.as_ref().is_none_or(|lib| budget.charge(lib, 1))
+                    {
+                        break;
+                    }
                     imports.push(ImportInfo {
-                        name: name.clone(),
-                        library: mach_import_library(&macho, &nlist).map(str::to_owned),
+                        name: name.to_string(),
+                        library: library.map(std::borrow::Cow::into_owned),
                         address: None,
                         ordinal: None,
                         is_delayed: false,
                     });
 
                     functions.push(FunctionInfo {
-                        name: name.clone(),
+                        name: name.to_string(),
                         address: 0,
                         size: 0,
                         function_type: FunctionType::Imported,
@@ -504,6 +760,12 @@ pub fn analyze_mach_symbols(mach: mach::Mach, _buffer: &[u8]) -> Result<SymbolTa
         global_variables: global_variables.len(),
         cross_references: cross_references.len(),
     };
+
+    let mut notes: Vec<String> = Vec::new();
+    if budget.is_cut() {
+        notes.push(budget_note());
+    }
+    push_notes(&mut functions, &notes);
 
     Ok(SymbolTable {
         functions,
@@ -1283,5 +1545,20 @@ mod tests {
             exported_func.function_type,
             FunctionType::Exported
         ));
+    }
+
+    #[test]
+    fn symbol_versions_are_stripped_for_comparison() {
+        assert_eq!(strip_symbol_version("strcpy@GLIBC_2.2.5"), "strcpy");
+        assert_eq!(strip_symbol_version("strcpy@@GLIBC_2.2.5"), "strcpy");
+        assert_eq!(strip_symbol_version("strcpy"), "strcpy");
+        assert_eq!(strip_symbol_version("@odd"), "@odd");
+    }
+
+    #[test]
+    fn only_linker_markers_are_skipped_on_macho() {
+        assert!(is_mach_linker_symbol("__mh_execute_header"));
+        assert!(!is_mach_linker_symbol("__ZN7Counter4bumpEi"));
+        assert!(!is_mach_linker_symbol("__Z7cpp_addii"));
     }
 }

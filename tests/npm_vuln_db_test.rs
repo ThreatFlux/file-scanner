@@ -192,10 +192,10 @@ fn test_get_known_malicious_packages() {
 
     // Check that known malicious packages are included
     assert!(malicious.contains(&"flatmap-stream"));
-    assert!(malicious.contains(&"event-stream@3.3.6"));
-    // Note: The list might not include version-specific entries for all packages
-    // Check for packages without version or look for other known entries
-    assert!(malicious.iter().any(|&m| m.contains("event-stream")));
+    // Compromised releases of legitimate packages are (name, version) pairs, not names.
+    assert!(file_scanner::npm_vuln_db::get_known_malicious_versions()
+        .contains(&("event-stream", "3.3.6")));
+    assert!(!malicious.contains(&"event-stream"));
     assert!(malicious.contains(&"crossenv"));
     assert!(malicious.contains(&"mongose")); // typosquatting of mongoose
 }

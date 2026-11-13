@@ -41,7 +41,7 @@
     clippy::wildcard_enum_match_arm
 )]
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -65,11 +65,11 @@ mod metadata;
 mod npm_analysis;
 mod npm_vuln_db;
 mod ole_vba_analysis;
+mod package_scan;
 mod pdf_analysis;
 mod python_analysis;
 mod python_vuln_db;
 mod rar_analysis;
-pub mod repository_integrity;
 mod script_analysis;
 mod sevenz_analysis;
 mod signature;
@@ -78,7 +78,6 @@ mod strings;
 pub mod taint_tracking;
 mod tar_analysis;
 mod threat_detection;
-pub mod typosquatting_detection;
 mod vulnerability_detection;
 
 use behavioral_analysis::analyze_behavior;
@@ -89,7 +88,7 @@ use disassembly::disassemble_binary;
 use entropy_analysis::analyze_entropy;
 use function_analysis::analyze_symbols;
 use hexdump::{extract_footer_hex, extract_header_hex, generate_hex_dump, HexDumpOptions};
-use java_analysis::{analyze_class_file, analyze_java_archive};
+use java_analysis::{analyze_java_path, LEGACY_LIST_CAP};
 use mcp_server::{
     analyze_file_llm, yara_scan_files, LlmFileAnalysisRequest, YaraIndicators, YaraScanRequest,
 };
@@ -169,20 +168,101 @@ struct Args {
     yara_indicators: bool,
 }
 
+/// Which files the MCP tools may read (all three mcp-* subcommands).
+#[derive(clap::Args, Debug)]
+struct ScopeArgs {
+    /// Directory the tools may read; repeatable. When any is set, every tool path
+    /// must resolve (symlinks and `..` included) to a location under one of them.
+    /// Without this option the environment variable FILE_SCANNER_ALLOWED_ROOTS
+    /// (`:`-separated) is used; with neither, every readable path is allowed.
+    #[arg(long = "allow-root", value_name = "DIR")]
+    allow_root: Vec<PathBuf>,
+    /// Directory for cached results (private, mode 0700). Default: the user's cache
+    /// directory; environment variable FILE_SCANNER_CACHE_DIR
+    #[arg(long = "cache-dir", value_name = "DIR")]
+    cache_dir: Option<PathBuf>,
+    /// Turn result caching off: nothing is stored or served from a cache
+    #[arg(long = "no-cache")]
+    no_cache: bool,
+}
+
+/// Network settings of mcp-http and mcp-sse.
+#[derive(clap::Args, Debug)]
+struct HttpArgs {
+    /// Port to listen on (0 picks a free one)
+    #[arg(short, long, default_value_t = mcp_transport::http::DEFAULT_PORT)]
+    port: u16,
+    /// Address to bind. The default accepts local connections only; use 0.0.0.0 for
+    /// all interfaces together with --auth-token and --allow-root
+    #[arg(long, default_value = mcp_transport::http::DEFAULT_HOST)]
+    host: String,
+    /// Extra Host header value to accept besides localhost, 127.0.0.1 and ::1
+    /// (`name` or `name:port`); repeatable
+    #[arg(long = "allowed-host", value_name = "HOST")]
+    allowed_host: Vec<String>,
+    /// Extra browser Origin to accept besides loopback ones
+    /// (`scheme://host[:port|:*]`); repeatable
+    #[arg(long = "allowed-origin", value_name = "ORIGIN")]
+    allowed_origin: Vec<String>,
+    /// Bearer token every request except /health must present
+    /// (`Authorization: Bearer <token>`). Prefer the environment variable: command
+    /// lines are visible to other users
+    #[arg(
+        long = "auth-token",
+        env = "FILE_SCANNER_AUTH_TOKEN",
+        hide_env_values = true,
+        value_name = "TOKEN"
+    )]
+    auth_token: Option<String>,
+}
+
+impl HttpArgs {
+    fn into_config(self) -> mcp_transport::HttpConfig {
+        mcp_transport::HttpConfig {
+            host: self.host,
+            port: self.port,
+            allowed_hosts: self.allowed_host,
+            allowed_origins: self.allowed_origin,
+            auth_token: self.auth_token,
+            ..mcp_transport::HttpConfig::default()
+        }
+    }
+}
+
+/// The server state for the command line: `--allow-root` wins over the environment.
+fn mcp_server_for(scope: ScopeArgs) -> McpTransportServer {
+    let mut config = mcp_server::StateConfig::from_env();
+    if !scope.allow_root.is_empty() {
+        config.allow_roots = scope.allow_root;
+    }
+    if let Some(dir) = scope.cache_dir {
+        config.cache_dir = dir;
+    }
+    config.cache_enabled = !scope.no_cache;
+    McpTransportServer::with_config(config)
+}
+
 #[derive(Subcommand, Debug)]
 #[allow(clippy::enum_variant_names)]
 enum Commands {
     /// Run as MCP server with stdio transport
-    McpStdio,
-    /// Run as MCP server with HTTP transport
-    McpHttp {
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
+    McpStdio {
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
-    /// Run as MCP server with SSE transport
+    /// Run as MCP server with Streamable HTTP transport (endpoint /mcp)
+    McpHttp {
+        #[command(flatten)]
+        http: HttpArgs,
+        #[command(flatten)]
+        scope: ScopeArgs,
+    },
+    /// Deprecated alias of mcp-http (the old SSE transport is gone)
     McpSse {
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
+        #[command(flatten)]
+        http: HttpArgs,
+        #[command(flatten)]
+        scope: ScopeArgs,
     },
     /// Analyze file with LLM-optimized output
     LlmAnalyze {
@@ -203,7 +283,11 @@ enum Commands {
     YaraScan {
         #[arg(help = "Path to file or directory to scan")]
         path: PathBuf,
-        #[arg(short, long, help = "YARA rule file or inline rule")]
+        #[arg(
+            short,
+            long,
+            help = "YARA rule file, directory of .yar/.yara files, or inline rule"
+        )]
         rule: String,
         #[arg(short = 'R', long, help = "Recursively scan directories")]
         recursive: bool,
@@ -211,6 +295,13 @@ enum Commands {
         max_file_size_mb: u64,
         #[arg(long, help = "Show detailed match information")]
         detailed: bool,
+        #[arg(long, help = "Most files to examine (default: no limit)")]
+        max_files: Option<usize>,
+        #[arg(
+            long,
+            help = "Stop the scan after this many seconds (default: no limit)"
+        )]
+        timeout: Option<u64>,
     },
     /// Analyze NPM package for security issues
     AnalyzeNpm {
@@ -229,23 +320,31 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // An explicit runtime instead of `#[tokio::main]`: dropping a runtime waits
+    // for running `spawn_blocking` closures, which would keep a stdio server
+    // alive for minutes after its client left. Bound that wait.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let outcome = runtime.block_on(run());
+    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+    outcome
+}
+
+async fn run() -> Result<()> {
     let args = Args::parse();
 
     // Handle commands
     match args.command {
-        Some(Commands::McpStdio) => {
-            let server = McpTransportServer::new();
-            return server.run_stdio().await;
+        Some(Commands::McpStdio { scope }) => {
+            return mcp_server_for(scope).run_stdio().await;
         }
-        Some(Commands::McpHttp { port }) => {
-            let server = McpTransportServer::new();
-            return server.run_http(port).await;
+        Some(Commands::McpHttp { http, scope }) => {
+            return mcp_server_for(scope).run_http(http.into_config()).await;
         }
-        Some(Commands::McpSse { port }) => {
-            let server = McpTransportServer::new();
-            return server.run_sse(port).await;
+        Some(Commands::McpSse { http, scope }) => {
+            return mcp_server_for(scope).run_sse(http.into_config()).await;
         }
         Some(Commands::LlmAnalyze {
             file_path,
@@ -271,8 +370,18 @@ async fn main() -> Result<()> {
             recursive,
             max_file_size_mb,
             detailed,
+            max_files,
+            timeout,
         }) => {
-            return handle_yara_scan(path, rule, recursive, max_file_size_mb, detailed).await;
+            return handle_yara_scan(
+                path,
+                rule,
+                recursive,
+                max_file_size_mb,
+                detailed,
+                (max_files, timeout),
+            )
+            .await;
         }
         Some(Commands::AnalyzeNpm { package_path }) => {
             return handle_npm_analysis(package_path).await;
@@ -541,13 +650,18 @@ async fn handle_yara_scan(
     recursive: bool,
     max_file_size_mb: u64,
     detailed: bool,
+    (max_files, timeout_seconds): (Option<usize>, Option<u64>),
 ) -> Result<()> {
+    // A rule file or directory goes in as `rule_path`, so diagnostics name the
+    // file and a directory of rules works; anything else is rule text.
     let rule_path = PathBuf::from(&rule);
-    let yara_rule = if rule_path.exists() {
-        std::fs::read_to_string(&rule_path)
-            .with_context(|| format!("failed to read YARA rule file: {}", rule_path.display()))?
+    let (yara_rule, rule_path) = if rule_path.exists() {
+        (
+            String::new(),
+            Some(rule_path.to_string_lossy().into_owned()),
+        )
     } else {
-        rule
+        (rule, None)
     };
     let max_file_size = max_file_size_mb
         .checked_mul(1024 * 1024)
@@ -555,9 +669,12 @@ async fn handle_yara_scan(
     let result = yara_scan_files(YaraScanRequest {
         path: path.to_string_lossy().into_owned(),
         yara_rule,
+        rule_path,
         recursive: Some(recursive),
         max_file_size: Some(max_file_size),
         detailed_matches: Some(detailed),
+        max_files,
+        timeout_seconds,
     })
     .await?;
     println!("{}", serde_json::to_string(&result)?);
@@ -577,24 +694,8 @@ async fn handle_python_analysis(package_path: PathBuf) -> Result<()> {
 }
 
 async fn handle_java_analysis(file_path: PathBuf) -> Result<()> {
-    // Check if it's a JAR/WAR/EAR or a class file
-    let extension = file_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_lowercase);
-
-    let result = match extension.as_deref() {
-        Some("jar" | "war" | "ear" | "apk" | "aar") => analyze_java_archive(&file_path)?,
-        Some("class") => analyze_class_file(&file_path)?,
-        _ => {
-            // Try to detect based on content
-            if let Ok(result) = analyze_java_archive(&file_path) {
-                result
-            } else {
-                analyze_class_file(&file_path)?
-            }
-        }
-    };
+    // The kind is decided by content (class file or ZIP archive), never by extension.
+    let result = analyze_java_path(&file_path)?.bounded(LEGACY_LIST_CAP);
 
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())

@@ -1266,12 +1266,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "edit-distance"
-version = "2.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "324d428080b707bac399325341bd61af5ded1b30f33b7c949792ca464733c2d5"
-
-[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2430,16 +2424,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5848f5a9e8117cf94f2f90faac24a87ff81600ff8628c1e3deaab572e76bfa1"
 
 [[package]]
-name = "mime_guess"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
-dependencies = [
- "mime",
- "unicase",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3377,21 +3361,30 @@ version = "3.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5949e504d5ab9944a168259afc0c39ac0230627b6ec5367ace194c59bcbe163"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
+ "bytes",
  "chrono",
  "futures",
+ "http",
+ "http-body",
+ "http-body-util",
  "indexmap",
  "libc",
  "pastey",
  "pin-project-lite",
+ "rand 0.10.3",
  "rmcp-macros",
  "schemars",
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "sse-stream",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
  "uuid",
 ]
@@ -4027,6 +4020,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "sse-stream"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c25ac7aff0abd1dbc474536e40416e1102c7dd9bfba0b9861c6d357f835dcfb4"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4281,20 +4287,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "threatflux-cache"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b19f59e1f1fe400c7f5fb118295c06a46f6337f203dd6eec4a172897c2758eea"
-dependencies = [
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
 name = "threatflux-file-scanner"
 version = "0.3.13"
 dependencies = [
@@ -4302,7 +4294,6 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "assert_fs",
- "async-trait",
  "axum",
  "base64 0.23.1",
  "blake3",
@@ -4311,11 +4302,9 @@ dependencies = [
  "chrono",
  "clap",
  "criterion",
- "edit-distance",
  "encoding_rs",
  "filetime",
  "flate2",
- "futures-util",
  "git2",
  "goblin",
  "hyper",
@@ -4342,45 +4331,24 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2 0.11.1",
- "strsim",
  "tar",
  "tempfile",
  "test-case",
  "thiserror 2.0.21",
  "threatflux-binary-analysis",
- "threatflux-cache",
- "threatflux-hashing",
  "threatflux-string-analysis",
  "threatflux-threat-detection",
  "tokio",
- "tokio-stream",
  "tokio-test",
+ "tokio-util",
  "tower",
  "tower-http 0.7.1",
- "url",
  "utoipa",
- "utoipa-redoc",
- "utoipa-swagger-ui",
  "uuid",
  "walkdir",
  "wiremock",
  "yara-x",
  "zip",
-]
-
-[[package]]
-name = "threatflux-hashing"
-version = "1.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bab8f971e521cc917e30904bc90af1139061e9faa498558094cb73aea6261f7e"
-dependencies = [
- "blake3",
- "futures",
- "md-5",
- "serde",
- "sha2 0.11.1",
- "thiserror 2.0.21",
- "tokio",
 ]
 
 [[package]]
@@ -4741,12 +4709,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
-name = "unicase"
-version = "2.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
-
-[[package]]
 name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4826,35 +4788,6 @@ dependencies = [
  "regex",
  "syn 3.0.10",
  "uuid",
-]
-
-[[package]]
-name = "utoipa-redoc"
-version = "7.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eab923f05c427c0d0729f292d84a74e1c7b34bb97463448fec1492cc4a9e7262"
-dependencies = [
- "axum",
- "serde",
- "serde_json",
- "utoipa",
-]
-
-[[package]]
-name = "utoipa-swagger-ui"
-version = "10.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f1fd2f9615838885c6ff4115fde8a2b58825dc7b4617f78d29c167377a15c92"
-dependencies = [
- "axum",
- "base64 0.23.1",
- "mime_guess",
- "regex",
- "serde",
- "serde_json",
- "url",
- "utoipa",
- "zip",
 ]
 
 [[package]]

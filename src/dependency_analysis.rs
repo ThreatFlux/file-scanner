@@ -14,6 +14,16 @@ pub struct DependencyAnalysisResult {
     pub security_assessment: SecurityAssessment,
     pub license_summary: LicenseSummary,
     pub analysis_stats: DependencyAnalysisStats,
+    /// Imported functions whose providing library the file does not record
+    /// (ELF with several `DT_NEEDED` entries whose version-needs table does not
+    /// name a file for the import). The
+    /// functions themselves are listed by the symbols analysis.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unattributed_import_count: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -209,6 +219,48 @@ const SYSTEM_LIBRARIES: &[&str] = &[
     "libsystem",
     "libobjc",
     "corefoundation",
+    // Windows system DLLs
+    "shlwapi",
+    "gdi32",
+    "shell32",
+    "ole32",
+    "oleaut32",
+    "ws2_32",
+    "wsock32",
+    "comctl32",
+    "comdlg32",
+    "wininet",
+    "winmm",
+    "crypt32",
+    "rpcrt4",
+    "setupapi",
+    "secur32",
+    "userenv",
+    "iphlpapi",
+    "ucrtbase",
+    "vcruntime140",
+    "msvcp140",
+    // GCC / C++ runtime and other base Unix libraries
+    "libstdc++",
+    "libgcc_s",
+    "libc++",
+    "libc++abi",
+    "libutil",
+    "librt",
+    "libresolv",
+    "libncurses",
+];
+
+/// Locations the operating system owns: a library loaded from here is a
+/// system library whatever its name.
+const SYSTEM_LIBRARY_DIRS: &[&str] = &[
+    "/usr/lib/",
+    "/System/Library/",
+    "/lib/",
+    "/lib64/",
+    "/usr/lib64/",
+    "/usr/lib/x86_64-linux-gnu/",
+    "/usr/lib/aarch64-linux-gnu/",
 ];
 
 struct VulnerabilityDatabase {
@@ -310,36 +362,137 @@ impl DependencyAnalyzer {
 
     pub fn analyze(
         &self,
-        _path: &Path,
+        path: &Path,
         symbol_table: &SymbolTable,
         extracted_strings: Option<&ExtractedStrings>,
     ) -> Result<DependencyAnalysisResult> {
         let start_time = std::time::Instant::now();
         let mut dependencies = Vec::new();
         let mut dependency_names = HashSet::new();
+        let needed = crate::binary_parser::needed_libraries(path);
 
-        // Analyze imports from symbol table
+        // One dependency per library. Imported functions are attached to the
+        // library that provides them; they are not dependencies themselves.
+        struct Group {
+            display: String,
+            path: Option<String>,
+            functions: Vec<String>,
+            listed: HashSet<String>,
+            system_hint: bool,
+            source: DependencySource,
+        }
+        let mut groups: Vec<Group> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
+        let mut unattributed = 0usize;
+
         for import in &symbol_table.imports {
-            let dep_name = self.extract_library_name(&import.name);
-            dependency_names.insert(dep_name.clone());
+            let (key, display, lib_path, source) =
+                match import.library.as_deref().filter(|l| !l.is_empty()) {
+                    Some(lib) => {
+                        let base = library_file_name(lib);
+                        (
+                            base.to_lowercase(),
+                            base.to_string(),
+                            (base != lib).then(|| lib.to_string()),
+                            DependencySource::Import,
+                        )
+                    }
+                    None if import.name.contains('@') && !import.name.starts_with('@') => {
+                        // Versioned symbol (`printf@GLIBC_2.2.5`): the version tag
+                        // names the runtime that provides it.
+                        let name = self.extract_library_name(&import.name);
+                        (name.clone(), name, None, DependencySource::Import)
+                    }
+                    None if needed.len() == 1 => {
+                        let base = library_file_name(&needed[0]);
+                        (
+                            base.to_lowercase(),
+                            base.to_string(),
+                            (base != needed[0]).then(|| needed[0].clone()),
+                            DependencySource::DynamicLink,
+                        )
+                    }
+                    None => {
+                        unattributed += 1;
+                        continue;
+                    }
+                };
+            let display_for_hint = display.clone();
+            let in_system_dir = lib_path
+                .as_deref()
+                .is_some_and(Self::is_system_library_path);
+            let idx = *index.entry(key).or_insert_with(|| {
+                groups.push(Group {
+                    display,
+                    path: lib_path,
+                    functions: Vec::new(),
+                    listed: HashSet::new(),
+                    system_hint: if in_system_dir {
+                        true
+                    } else if import.library.as_deref().is_none_or(str::is_empty)
+                        && source == DependencySource::DynamicLink
+                    {
+                        // attributed through DT_NEEDED: judge the library, not the function
+                        Self::is_system_library_file_name(&display_for_hint)
+                    } else {
+                        self.import_is_system_library(import)
+                    },
+                    source,
+                });
+                groups.len() - 1
+            });
+            if groups[idx].listed.insert(import.name.clone()) {
+                groups[idx].functions.push(import.name.clone());
+            }
+        }
 
-            let version = self.extract_version(&import.name, extracted_strings);
+        // Libraries the loader needs even when no imported function names them
+        for lib in &needed {
+            let base = library_file_name(lib);
+            if index.contains_key(&base.to_lowercase()) {
+                continue;
+            }
+            index.insert(base.to_lowercase(), groups.len());
+            groups.push(Group {
+                display: base.to_string(),
+                path: (base != lib).then(|| lib.clone()),
+                functions: Vec::new(),
+                listed: HashSet::new(),
+                system_hint: Self::is_system_library_file_name(lib),
+                source: DependencySource::DynamicLink,
+            });
+        }
+
+        for group in groups {
+            let lookup_name = self.extract_library_name(&group.display);
+            dependency_names.insert(lookup_name.clone());
+
+            let version = self.extract_version(&group.display, extracted_strings);
             let vulnerabilities = self
                 .vulnerability_db
-                .check_vulnerabilities(&dep_name, version.as_deref());
-            let license = self.detect_license(&dep_name, extracted_strings);
+                .check_vulnerabilities(&lookup_name, version.as_deref());
+            let license = self.detect_license(&lookup_name, extracted_strings);
+            let library_type = if group
+                .path
+                .as_deref()
+                .is_some_and(|p| p.contains(".framework/"))
+            {
+                LibraryType::Framework
+            } else {
+                LibraryType::DynamicLibrary
+            };
 
             dependencies.push(DependencyInfo {
-                name: dep_name,
+                name: group.display,
                 version,
-                library_type: LibraryType::DynamicLibrary,
-                path: None,
+                library_type,
+                path: group.path,
                 hash: None,
                 vulnerabilities,
                 license,
-                source: DependencySource::Import,
-                is_system_library: self.import_is_system_library(import),
-                imported_functions: vec![import.name.clone()],
+                source: group.source,
+                is_system_library: group.system_hint,
+                imported_functions: group.functions,
             });
         }
 
@@ -358,6 +511,7 @@ impl DependencyAnalyzer {
         let license_summary = self.summarize_licenses(&dependencies, extracted_strings);
 
         let duration = start_time.elapsed().as_millis() as u64;
+        let dependencies_total = dependencies.len();
         let total_vulnerabilities = security_assessment.total_vulnerabilities;
         let licenses_count = license_summary.licenses_found.len();
 
@@ -366,10 +520,11 @@ impl DependencyAnalyzer {
             dependency_graph,
             security_assessment,
             license_summary,
+            unattributed_import_count: unattributed,
             analysis_stats: DependencyAnalysisStats {
                 analysis_duration_ms: duration,
-                total_dependencies_found: dependency_names.len(),
-                libraries_analyzed: dependency_names.len(),
+                total_dependencies_found: dependencies_total,
+                libraries_analyzed: dependencies_total,
                 vulnerabilities_checked: total_vulnerabilities,
                 licenses_identified: licenses_count,
             },
@@ -438,7 +593,7 @@ impl DependencyAnalyzer {
         let lib_patterns = vec![
             r"lib(\w+)\.so(?:\.\d+)*",
             r"(\w+)\.dll",
-            r"(\w+)\.dylib",
+            r"([\w+-]+)(?:\.[\w+-]+)*?\.dylib",
             r"lib(\w+)\.a",
         ];
 
@@ -447,6 +602,32 @@ impl DependencyAnalyzer {
 
             for string in &strings.ascii_strings {
                 if let Some(captures) = regex.captures(string) {
+                    // The whole matched file name, for example `libutil.dylib`:
+                    // a library already listed from the load commands or the
+                    // import table must not be added a second time.
+                    let matched_file = captures
+                        .get(0)
+                        .map(|m| m.as_str().to_lowercase())
+                        .unwrap_or_default();
+                    let matched_base = matched_file
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or("")
+                        .to_string();
+                    let already_listed = dependencies.iter().any(|d| {
+                        let base = |t: &str| {
+                            t.to_lowercase()
+                                .rsplit(['/', '\\'])
+                                .next()
+                                .unwrap_or("")
+                                .to_string()
+                        };
+                        base(&d.name) == matched_base
+                            || d.path.as_deref().is_some_and(|p| base(p) == matched_base)
+                    });
+                    if already_listed {
+                        continue;
+                    }
                     if let Some(lib_name) = captures.get(1) {
                         let name = lib_name.as_str().to_lowercase();
 
@@ -496,7 +677,42 @@ impl DependencyAnalyzer {
             )
     }
 
+    fn is_system_library_path(path: &str) -> bool {
+        // A `..` component can leave the system directory ("/usr/lib/../../tmp")
+        if path.split(['/', '\\']).any(|part| part == "..") {
+            return false;
+        }
+        if SYSTEM_LIBRARY_DIRS.iter().any(|dir| path.starts_with(dir)) {
+            return true;
+        }
+        // Windows: `<drive>:\Windows\System32\...` or `...\SysWOW64\...`
+        let lower = path.to_lowercase().replace('/', "\\");
+        let rest = lower.get(1..).unwrap_or("");
+        lower.starts_with(|c: char| c.is_ascii_alphabetic())
+            && (rest.starts_with(":\\windows\\system32\\")
+                || rest.starts_with(":\\windows\\syswow64\\"))
+    }
+
+    /// An absolute path (Unix, or a Windows drive or UNC path).
+    fn is_absolute_library_path(name: &str) -> bool {
+        name.starts_with(['/', '\\'])
+            || (name.len() >= 3
+                && name.as_bytes()[0].is_ascii_alphabetic()
+                && name.as_bytes()[1] == b':'
+                && matches!(name.as_bytes()[2], b'\\' | b'/'))
+    }
+
     fn is_system_library_file_name(name: &str) -> bool {
+        if Self::is_system_library_path(name) {
+            return true;
+        }
+        // A name with any directory part (absolute, `@rpath/`, `@executable_path/`,
+        // relative) is judged by its directory alone: `libSystem.B.dylib` loaded
+        // from /tmp or `@rpath/` is not the system's. Only a bare name is
+        // matched by its file name.
+        if Self::is_absolute_library_path(name) || name.contains(['/', '\\']) {
+            return false;
+        }
         let file_name = name
             .rsplit(['/', '\\'])
             .next()
@@ -882,6 +1098,15 @@ impl LicenseDetector {
     }
 }
 
+/// File name of a library path (`/usr/lib/libz.dylib` -> `libz.dylib`,
+/// `C:\\Windows\\KERNEL32.DLL` -> `KERNEL32.DLL`).
+fn library_file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
+        .next()
+        .filter(|n| !n.is_empty())
+        .unwrap_or(path)
+}
+
 pub fn analyze_dependencies(
     path: &Path,
     symbol_table: &SymbolTable,
@@ -1086,6 +1311,42 @@ mod tests {
         // Test non-system libraries
         assert!(!analyzer.is_system_library("libssl"));
         assert!(!analyzer.is_system_library("custom_lib"));
+    }
+
+    #[test]
+    fn system_library_name_under_a_non_system_absolute_path_is_not_system() {
+        assert!(DependencyAnalyzer::is_system_library_file_name(
+            "/usr/lib/libSystem.B.dylib"
+        ));
+        assert!(DependencyAnalyzer::is_system_library_file_name(
+            "libSystem.B.dylib"
+        ));
+        assert!(DependencyAnalyzer::is_system_library_file_name(
+            "kernel32.dll"
+        ));
+        assert!(DependencyAnalyzer::is_system_library_file_name(
+            "C:\\Windows\\System32\\kernel32.dll"
+        ));
+        assert!(!DependencyAnalyzer::is_system_library_file_name(
+            "/tmp/xxx/libSystem.B.dylib"
+        ));
+        assert!(!DependencyAnalyzer::is_system_library_file_name(
+            "D:\\evil\\kernel32.dll"
+        ));
+        assert!(!DependencyAnalyzer::is_system_library_file_name(
+            "/usr/lib/../../tmp/libc.so.6"
+        ));
+        for name in [
+            "@rpath/libSystem.B.dylib",
+            "@executable_path/libc.dylib",
+            "evil/libSystem.B.dylib",
+            "@loader_path/kernel32.dll",
+        ] {
+            assert!(
+                !DependencyAnalyzer::is_system_library_file_name(name),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -1566,8 +1827,9 @@ mod tests {
 
         // Check that dependencies from both imports and strings were found
         let dep_names: Vec<&String> = analysis.dependencies.iter().map(|d| &d.name).collect();
-        assert!(dep_names.contains(&&"glibc".to_string())); // from imports
-        assert!(dep_names.contains(&&"ssl".to_string())); // from strings
+        assert!(dep_names.contains(&&"libc.so.6".to_string())); // from imports, named by library
+        assert!(dep_names.contains(&&"libssl.so.1.1".to_string())); // import, not repeated from strings
+        assert!(dep_names.contains(&&"boost".to_string())); // from strings
 
         // Check security assessment
         assert!(analysis.security_assessment.security_score >= 0.0);

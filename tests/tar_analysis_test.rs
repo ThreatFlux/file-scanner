@@ -100,8 +100,6 @@ fn test_plain_tar_detection() {
     let temp_file = NamedTempFile::new().unwrap();
     std::fs::write(temp_file.path(), &tar_data).unwrap();
 
-    assert!(is_tar_file(temp_file.path()));
-
     let analysis = analyze_tar(temp_file.path()).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::Tar));
     assert_eq!(analysis.metadata.total_entries, 1);
@@ -121,8 +119,6 @@ fn test_tar_gz_detection() {
     data.extend_from_slice(&create_test_tar());
     std::fs::write(&tar_gz_path, &data).unwrap();
 
-    assert!(is_tar_file(&tar_gz_path));
-
     let analysis = analyze_tar(&tar_gz_path).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::TarGz));
     assert!(analysis.metadata.created_by.unwrap().contains("gzip"));
@@ -137,8 +133,6 @@ fn test_tar_bz2_detection() {
     data.extend_from_slice(&create_test_tar());
     std::fs::write(&tar_bz2_path, &data).unwrap();
 
-    assert!(is_tar_file(&tar_bz2_path));
-
     let analysis = analyze_tar(&tar_bz2_path).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::TarBz2));
     assert!(analysis.metadata.created_by.unwrap().contains("bzip2"));
@@ -152,8 +146,6 @@ fn test_tar_xz_detection() {
     let mut data = create_xz_header();
     data.extend_from_slice(&create_test_tar());
     std::fs::write(&tar_xz_path, &data).unwrap();
-
-    assert!(is_tar_file(&tar_xz_path));
 
     let analysis = analyze_tar(&tar_xz_path).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::TarXz));
@@ -204,8 +196,6 @@ fn test_invalid_tar_file() {
     let temp_file = NamedTempFile::new().unwrap();
     std::fs::write(temp_file.path(), b"This is not a TAR file").unwrap();
 
-    assert!(!is_tar_file(temp_file.path()));
-
     let result = analyze_tar(temp_file.path());
     assert!(result.is_err());
     assert!(result
@@ -217,8 +207,6 @@ fn test_invalid_tar_file() {
 #[test]
 fn test_empty_file() {
     let temp_file = NamedTempFile::new().unwrap();
-
-    assert!(!is_tar_file(temp_file.path()));
 
     let result = analyze_tar(temp_file.path());
     assert!(result.is_err());
@@ -244,12 +232,13 @@ fn test_suspicious_tar_filenames() {
         std::fs::write(&path, &tar_data).unwrap();
 
         let analysis = analyze_tar(&path).unwrap();
-        assert!(analysis.suspicious_indicators.has_suspicious_names);
-        assert!(!analysis
+        // The archive's own file name is not evidence about its content.
+        assert!(!analysis.suspicious_indicators.has_suspicious_names);
+        assert!(analysis
             .suspicious_indicators
             .suspicious_patterns
             .is_empty());
-        assert!(analysis.suspicious_indicators.risk_score > 0);
+        assert_eq!(analysis.suspicious_indicators.risk_score, 0);
     }
 }
 
@@ -384,7 +373,8 @@ fn test_compressed_tar_metadata() {
     let analysis = analyze_tar(&tar_gz_path).unwrap();
 
     assert!(matches!(analysis.archive_type, ArchiveType::TarGz));
-    assert_eq!(analysis.metadata.compression_ratio, 0.7); // Estimated compression
+    // The fixture is not a real gzip stream, so nothing can be measured; the old constant 0.7 estimate is gone.
+    assert_eq!(analysis.metadata.compression_ratio, 0.0);
     assert!(analysis.metadata.created_by.unwrap().contains("gzip"));
 }
 
@@ -398,10 +388,8 @@ fn test_risk_level_calculation() {
     std::fs::write(&high_risk_path, &tar_data).unwrap();
 
     let analysis = analyze_tar(&high_risk_path).unwrap();
-    assert!(matches!(
-        analysis.security_analysis.overall_risk,
-        RiskLevel::High | RiskLevel::Medium
-    ));
+    // A keyword in the archive's own name is not evidence about its content.
+    assert!(!analysis.suspicious_indicators.has_suspicious_names);
 
     // Low risk: normal name
     let low_risk_path = temp_dir.path().join("documents.tar");
@@ -492,7 +480,7 @@ fn test_tar_analysis_integration() {
 
     // Verify it returns proper ArchiveAnalysis structure
     assert!(matches!(analysis.archive_type, ArchiveType::Tar));
-    assert!(analysis.entries.is_empty()); // Basic implementation doesn't parse entries
+    assert_eq!(analysis.entries.len(), 1); // entries are read from the archive
     assert!(analysis.nested_archives.is_empty());
 
     // Check security analysis structure
@@ -525,9 +513,92 @@ fn test_edge_case_filenames() {
         std::fs::write(&path, &tar_data).unwrap();
 
         let analysis = analyze_tar(&path).unwrap();
-        assert_eq!(
-            analysis.suspicious_indicators.has_suspicious_names, should_be_suspicious,
-            "Failed for filename: {filename}"
+        // The archive's own name never sets the flag (entry names do).
+        assert!(
+            !analysis.suspicious_indicators.has_suspicious_names,
+            "Failed for filename: {filename} (name-based: {should_be_suspicious})"
         );
     }
+}
+
+fn write_tar(dir: &TempDir, name: &str, builder: tar::Builder<Vec<u8>>) -> std::path::PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, builder.into_inner().unwrap()).unwrap();
+    path
+}
+
+/// Names made of four-byte characters are capped in bytes, not characters,
+/// and everything kept from them is small once the archive-wide name budget
+/// is spent (one such name used to be kept four times over at 1 KB each).
+#[test]
+fn four_byte_names_are_capped_in_bytes() {
+    let emoji = "\u{1F600}".repeat(290);
+    let mut builder = tar::Builder::new(Vec::new());
+    for i in 0..3500 {
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_mode(0o7777);
+        header.set_size(0);
+        header.set_cksum();
+        let path = format!("dir/{i:05}{emoji}.txt");
+        let target = format!("x/{emoji}");
+        builder
+            .append_pax_extensions([("path", path.as_bytes()), ("linkpath", target.as_bytes())])
+            .unwrap();
+        builder.append(&header, std::io::empty()).unwrap();
+    }
+    let dir = TempDir::new().unwrap();
+    let path = write_tar(&dir, "emoji.tar", builder);
+    let analysis = analyze_tar(&path).unwrap();
+    assert_eq!(analysis.entries.len(), 3500);
+    let marker = " (... bytes in all)".len() + 8;
+    let mut kept = 0usize;
+    for entry in &analysis.entries[3000..] {
+        for text in [
+            Some(entry.path.as_str()),
+            Some(entry.file_name.as_str()),
+            entry.link_target.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(text.len() <= 255 + marker, "{} bytes", text.len());
+        }
+        for risk in &entry.risk_indicators {
+            assert!(risk.description.len() <= 256 + 2 * marker + 64);
+        }
+        kept += entry.path.len() + entry.file_name.len();
+    }
+    assert!(kept < 500 * (2 * (255 + marker)));
+    assert!(analysis.suspicious_indicators.name_bytes > 0);
+}
+
+/// An archive with exactly the entry cap is complete; one more is not.
+#[test]
+fn an_archive_of_exactly_the_entry_cap_has_no_cap_note() {
+    use file_scanner::archive_analysis::MAX_ENTRIES;
+    let build = |n: usize| {
+        let mut builder = tar::Builder::new(Vec::new());
+        for i in 0..n {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            builder
+                .append_data(&mut header, format!("f{i}"), std::io::empty())
+                .unwrap();
+        }
+        builder
+    };
+    let dir = TempDir::new().unwrap();
+    let exact = analyze_tar(write_tar(&dir, "exact.tar", build(MAX_ENTRIES))).unwrap();
+    assert_eq!(exact.entries.len(), MAX_ENTRIES);
+    assert!(exact.notes.is_empty(), "{:?}", exact.notes);
+    let over = analyze_tar(write_tar(&dir, "over.tar", build(MAX_ENTRIES + 1))).unwrap();
+    assert_eq!(over.entries.len(), MAX_ENTRIES);
+    assert!(
+        over.notes.iter().any(|n| n.contains("only the first")),
+        "{:?}",
+        over.notes
+    );
 }

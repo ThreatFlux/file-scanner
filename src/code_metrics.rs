@@ -119,6 +119,11 @@ pub struct QualityAnalysisStats {
 
 pub struct CodeQualityAnalyzer;
 
+/// `usize` to `u32`, clamped at `u32::MAX` instead of wrapping.
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 impl Default for CodeQualityAnalyzer {
     fn default() -> Self {
         Self::new()
@@ -173,17 +178,31 @@ impl CodeQualityAnalyzer {
         let cyclomatic_complexity = cfg.complexity.cyclomatic_complexity;
         let cognitive_complexity = cfg.complexity.cognitive_complexity;
         let nesting_depth = cfg.complexity.nesting_depth;
-        let basic_block_count = cfg.basic_blocks.len() as u32;
+        let basic_block_count = saturating_u32(cfg.basic_blocks.len());
 
         // Count total instructions
         let function_length = cfg
             .basic_blocks
             .iter()
             .map(|bb| bb.instruction_count)
-            .sum::<usize>() as u32;
+            .fold(0usize, |total, count| total.saturating_add(count));
+        let function_length = saturating_u32(function_length);
 
         // Count return paths
-        let return_paths = cfg.exit_blocks.len() as u32;
+        // From the blocks, not `exit_blocks`: that list may be cut by the analysis budget.
+        let return_paths = saturating_u32(
+            cfg.basic_blocks
+                .iter()
+                .filter(|bb| {
+                    matches!(
+                        bb.block_type,
+                        crate::control_flow::BlockType::Return
+                            | crate::control_flow::BlockType::Exit
+                    )
+                })
+                .count()
+                .max(cfg.exit_blocks.len()),
+        );
 
         // Calculate Halstead metrics
         let halstead_metrics = self.calculate_halstead_metrics(&cfg.basic_blocks)?;
@@ -225,8 +244,8 @@ impl CodeQualityAnalyzer {
     fn calculate_halstead_metrics(&self, basic_blocks: &[BasicBlock]) -> Result<HalsteadMetrics> {
         let mut operators = HashMap::new();
         let mut operands = HashMap::new();
-        let mut total_operators = 0;
-        let mut total_operands = 0;
+        let mut total_operators = 0u32;
+        let mut total_operands = 0u32;
 
         for block in basic_blocks {
             for instruction in &block.instructions {
@@ -238,8 +257,11 @@ impl CodeQualityAnalyzer {
                     | InstructionType::Call
                     | InstructionType::Jump
                     | InstructionType::Conditional => {
-                        *operators.entry(instruction.mnemonic.clone()).or_insert(0) += 1;
-                        total_operators += 1;
+                        let count = operators
+                            .entry(instruction.mnemonic.clone())
+                            .or_insert(0u32);
+                        *count = count.saturating_add(1);
+                        total_operators = total_operators.saturating_add(1);
                     }
                     _ => {}
                 }
@@ -247,14 +269,15 @@ impl CodeQualityAnalyzer {
                 // Extract operands from instruction
                 let operand_tokens = self.extract_operand_tokens(&instruction.operands);
                 for token in operand_tokens {
-                    *operands.entry(token).or_insert(0) += 1;
-                    total_operands += 1;
+                    let count = operands.entry(token).or_insert(0u32);
+                    *count = count.saturating_add(1);
+                    total_operands = total_operands.saturating_add(1);
                 }
             }
         }
 
-        let distinct_operators = operators.len() as u32;
-        let distinct_operands = operands.len() as u32;
+        let distinct_operators = saturating_u32(operators.len());
+        let distinct_operands = saturating_u32(operands.len());
         let vocabulary = distinct_operators + distinct_operands;
         let length = total_operators + total_operands;
 
@@ -264,7 +287,7 @@ impl CodeQualityAnalyzer {
             0.0
         };
 
-        let difficulty = if distinct_operands > 0 && operands.values().sum::<u32>() > 0 {
+        let difficulty = if distinct_operands > 0 && operands.values().any(|&n| n > 0) {
             (f64::from(distinct_operators) / 2.0)
                 * (f64::from(total_operands) / f64::from(distinct_operands))
         } else {
@@ -329,26 +352,30 @@ impl CodeQualityAnalyzer {
         function_length: u32,
         nesting_depth: u32,
     ) -> u32 {
-        let mut debt_minutes = 0;
+        // Saturating arithmetic: a pathological binary can report enormous
+        // metrics, and an overflow here used to panic and end the whole server.
+        let mut debt_minutes: u32 = 0;
 
         // High complexity penalty
         if cyclomatic_complexity > 10 {
-            debt_minutes += (cyclomatic_complexity - 10) * 10;
+            debt_minutes =
+                debt_minutes.saturating_add((cyclomatic_complexity - 10).saturating_mul(10));
         }
 
         // Cognitive complexity penalty
         if cognitive_complexity > 15 {
-            debt_minutes += (cognitive_complexity - 15) * 8;
+            debt_minutes =
+                debt_minutes.saturating_add((cognitive_complexity - 15).saturating_mul(8));
         }
 
         // Long function penalty
         if function_length > 50 {
-            debt_minutes += (function_length - 50) * 2;
+            debt_minutes = debt_minutes.saturating_add((function_length - 50).saturating_mul(2));
         }
 
         // Deep nesting penalty
         if nesting_depth > 4 {
-            debt_minutes += (nesting_depth - 4) * 15;
+            debt_minutes = debt_minutes.saturating_add((nesting_depth - 4).saturating_mul(15));
         }
 
         debt_minutes
@@ -369,7 +396,7 @@ impl CodeQualityAnalyzer {
                 }
             }
 
-            max_param as u32
+            saturating_u32(max_param)
         } else {
             0
         }
@@ -437,7 +464,7 @@ impl CodeQualityAnalyzer {
         overall_metrics: &OverallCodeMetrics,
     ) -> QualityReport {
         let mut quality_issues = Vec::new();
-        let mut total_debt_minutes = 0;
+        let mut total_debt_minutes: u32 = 0;
 
         // Check each function for quality issues
         for metrics in function_metrics {
@@ -458,7 +485,7 @@ impl CodeQualityAnalyzer {
                     recommendation:
                         "Consider breaking this function into smaller, more focused functions"
                             .to_string(),
-                    debt_minutes: (metrics.cyclomatic_complexity - 10) * 10,
+                    debt_minutes: (metrics.cyclomatic_complexity - 10).saturating_mul(10),
                 });
             }
 
@@ -477,7 +504,7 @@ impl CodeQualityAnalyzer {
                         metrics.function_length
                     ),
                     recommendation: "Extract cohesive blocks into separate functions".to_string(),
-                    debt_minutes: (metrics.function_length - 50) * 2,
+                    debt_minutes: (metrics.function_length - 50).saturating_mul(2),
                 });
             }
 
@@ -492,7 +519,7 @@ impl CodeQualityAnalyzer {
                         metrics.nesting_depth
                     ),
                     recommendation: "Use early returns or extract nested logic".to_string(),
-                    debt_minutes: (metrics.nesting_depth - 4) * 15,
+                    debt_minutes: (metrics.nesting_depth - 4).saturating_mul(15),
                 });
             }
 
@@ -508,7 +535,7 @@ impl CodeQualityAnalyzer {
                     ),
                     recommendation: "Consolidate return paths for better maintainability"
                         .to_string(),
-                    debt_minutes: (metrics.return_paths - 5) * 5,
+                    debt_minutes: (metrics.return_paths - 5).saturating_mul(5),
                 });
             }
 
@@ -527,7 +554,7 @@ impl CodeQualityAnalyzer {
                 });
             }
 
-            total_debt_minutes += metrics.technical_debt_minutes;
+            total_debt_minutes = total_debt_minutes.saturating_add(metrics.technical_debt_minutes);
         }
 
         // Calculate quality scores
@@ -784,6 +811,15 @@ mod tests {
     }
 
     #[test]
+    fn test_estimate_technical_debt_saturates_instead_of_overflowing() {
+        let analyzer = CodeQualityAnalyzer::new();
+        let debt = analyzer.estimate_technical_debt(u32::MAX, u32::MAX, u32::MAX, u32::MAX);
+        assert_eq!(debt, u32::MAX);
+        let debt = analyzer.estimate_technical_debt(0, 0, 0, u32::MAX / 2);
+        assert_eq!(debt, u32::MAX);
+    }
+
+    #[test]
     fn test_estimate_technical_debt() {
         let analyzer = CodeQualityAnalyzer::new();
 
@@ -933,6 +969,56 @@ mod tests {
         assert_eq!(analyzer.calculate_complexity_score(15.0), 55.0);
         assert_eq!(analyzer.calculate_complexity_score(25.0), 30.0);
         assert!(analyzer.calculate_complexity_score(40.0) <= 20.0);
+    }
+
+    #[test]
+    fn quality_report_saturates_instead_of_overflowing_on_extreme_metrics() {
+        // Regression: the Go samples produce metrics near u32::MAX; the debt
+        // arithmetic panicked in debug builds (and wrapped in release ones).
+        let analyzer = CodeQualityAnalyzer::new();
+        let extreme = |name: &str| FunctionMetrics {
+            function_name: name.to_string(),
+            function_address: 0x1000,
+            cyclomatic_complexity: u32::MAX,
+            cognitive_complexity: u32::MAX,
+            nesting_depth: u32::MAX,
+            function_length: u32::MAX,
+            basic_block_count: u32::MAX,
+            parameter_count: 0,
+            return_paths: u32::MAX,
+            halstead_metrics: HalsteadMetrics {
+                distinct_operators: 0,
+                distinct_operands: 0,
+                total_operators: 0,
+                total_operands: 0,
+                length: 0,
+                vocabulary: 0,
+                volume: 0.0,
+                difficulty: 0.0,
+                effort: 0.0,
+                time_to_program: 0.0,
+                delivered_bugs: 0.0,
+            },
+            maintainability_index: 0.0,
+            technical_debt_minutes: u32::MAX,
+        };
+        let metrics = vec![extreme("a"), extreme("b")];
+        let overall = OverallCodeMetrics {
+            total_functions: 2,
+            total_instructions: u32::MAX as usize,
+            average_complexity: f64::from(u32::MAX),
+            average_function_length: f64::from(u32::MAX),
+            total_code_volume: 0.0,
+            total_estimated_bugs: 0.0,
+            most_complex_function: None,
+            highest_complexity: u32::MAX,
+        };
+        let report = analyzer.generate_quality_report(&metrics, &overall);
+        assert!(report
+            .quality_issues
+            .iter()
+            .all(|issue| issue.debt_minutes > 0));
+        assert!(report.technical_debt_hours.is_finite());
     }
 
     #[test]

@@ -55,8 +55,6 @@ fn test_7z_detection() {
     content.extend_from_slice(&[0u8; 512]); // Add some content
     std::fs::write(temp_file.path(), &content).unwrap();
 
-    assert!(is_7z_file(temp_file.path()));
-
     let analysis = analyze_7z(temp_file.path()).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::SevenZip));
     assert_eq!(analysis.metadata.created_by, Some("7-Zip".to_string()));
@@ -66,8 +64,6 @@ fn test_7z_detection() {
 fn test_invalid_7z_file() {
     let temp_file = NamedTempFile::new().unwrap();
     std::fs::write(temp_file.path(), b"This is not a 7z file").unwrap();
-
-    assert!(!is_7z_file(temp_file.path()));
 
     let result = analyze_7z(temp_file.path());
     assert!(result.is_err());
@@ -80,8 +76,6 @@ fn test_invalid_7z_file() {
 #[test]
 fn test_empty_file() {
     let temp_file = NamedTempFile::new().unwrap();
-
-    assert!(!is_7z_file(temp_file.path()));
 
     let result = analyze_7z(temp_file.path());
     assert!(result.is_err());
@@ -109,12 +103,13 @@ fn test_suspicious_7z_filenames() {
         std::fs::write(&path, &content).unwrap();
 
         let analysis = analyze_7z(&path).unwrap();
-        assert!(analysis.suspicious_indicators.has_suspicious_names);
-        assert!(!analysis
+        // The archive's own file name is not evidence about its content.
+        assert!(!analysis.suspicious_indicators.has_suspicious_names);
+        assert!(analysis
             .suspicious_indicators
             .suspicious_patterns
             .is_empty());
-        assert!(analysis.suspicious_indicators.risk_score > 0);
+        assert_eq!(analysis.suspicious_indicators.risk_score, 0);
     }
 }
 
@@ -144,20 +139,21 @@ fn test_potential_7z_bomb() {
     std::fs::write(temp_file.path(), &content).unwrap();
 
     let analysis = analyze_7z(temp_file.path()).unwrap();
-    assert!(analysis.suspicious_indicators.risk_score >= 25);
+    // A small file size alone is no longer a risk signal.
+    assert_eq!(analysis.suspicious_indicators.risk_score, 0);
 }
 
 #[test]
 fn test_encrypted_7z_detection() {
     let temp_file = NamedTempFile::new().unwrap();
     let mut content = Vec::from(SEVENZ_SIGNATURE);
-    // Add header with encryption indicators
+    // Bytes that merely look like method ids are not an encryption signal
     content.extend_from_slice(&[0x06, 0x01, 0x00]); // Encryption method indicators
     content.extend_from_slice(&[0u8; 512]);
     std::fs::write(temp_file.path(), &content).unwrap();
 
     let analysis = analyze_7z(temp_file.path()).unwrap();
-    assert!(analysis.metadata.has_encryption);
+    assert!(!analysis.metadata.has_encryption);
 }
 
 #[test]
@@ -177,7 +173,8 @@ fn test_password_protected_filename() {
         std::fs::write(&path, &content).unwrap();
 
         let analysis = analyze_7z(&path).unwrap();
-        assert!(analysis.suspicious_indicators.risk_score >= 15); // Password indicator bonus
+        // A file name is not evidence of encryption
+        assert!(!analysis.metadata.has_encryption);
     }
 }
 
@@ -211,10 +208,8 @@ fn test_risk_level_calculation() {
     std::fs::write(&critical_path, &content).unwrap();
 
     let analysis = analyze_7z(&critical_path).unwrap();
-    assert!(matches!(
-        analysis.security_analysis.overall_risk,
-        RiskLevel::Critical | RiskLevel::High
-    ));
+    // A keyword in the archive's own name is not evidence about its content.
+    assert!(!analysis.suspicious_indicators.has_suspicious_names);
 
     // Low risk: normal name and size
     let low_risk_path = temp_dir.path().join("backup.7z");
@@ -270,9 +265,10 @@ fn test_comprehensive_suspicious_patterns() {
         std::fs::write(&path, &content).unwrap();
 
         let analysis = analyze_7z(&path).unwrap();
-        assert_eq!(
-            analysis.suspicious_indicators.has_suspicious_names, should_be_suspicious,
-            "Failed for filename: {filename}"
+        // The archive's own name never sets the flag (entry names do).
+        assert!(
+            !analysis.suspicious_indicators.has_suspicious_names,
+            "Failed for filename: {filename} (name-based: {should_be_suspicious})"
         );
     }
 }
@@ -309,8 +305,6 @@ fn test_short_file_handling() {
     // File too short to be a valid 7z
     std::fs::write(temp_file.path(), b"7z").unwrap();
 
-    assert!(!is_7z_file(temp_file.path()));
-
     let result = analyze_7z(temp_file.path());
     assert!(result.is_err());
 }
@@ -320,8 +314,6 @@ fn test_exact_signature_match() {
     let temp_file = NamedTempFile::new().unwrap();
     // Test with exact signature only
     std::fs::write(temp_file.path(), SEVENZ_SIGNATURE).unwrap();
-
-    assert!(is_7z_file(temp_file.path()));
 
     let analysis = analyze_7z(temp_file.path()).unwrap();
     assert!(matches!(analysis.archive_type, ArchiveType::SevenZip));

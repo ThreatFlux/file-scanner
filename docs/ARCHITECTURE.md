@@ -1,745 +1,152 @@
 # Architecture
 
-This document describes the modular architecture and design of the File Scanner project, built using specialized ThreatFlux libraries.
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Modular Architecture](#modular-architecture)
-- [ThreatFlux Libraries](#threatflux-libraries)
-- [Core Application](#core-application)
-- [Data Flow](#data-flow)
-- [Integration Patterns](#integration-patterns)
-- [Concurrency Model](#concurrency-model)
-- [Error Handling](#error-handling)
-- [Extension Points](#extension-points)
+This page describes how the code is laid out so that you can find the right file to change. It describes
+the code as built. Names of files and functions here exist in the repository.
 
 ## Overview
 
-File Scanner follows a **modular, library-based architecture** designed for:
+One crate, `threatflux-file-scanner`, builds two things from the same source:
 
-- **Modularity**: Independent libraries that can be used separately
-- **Performance**: Async-first design with parallel processing
-- **Extensibility**: Easy to add new analysis capabilities
-- **Maintainability**: Clear separation of concerns between libraries
-- **Reusability**: Libraries can be used in other projects
-- **Flexibility**: Mix and match capabilities as needed
+- the library `file_scanner` (`src/lib.rs`), and
+- the binary `file-scanner` (`src/main.rs`), a command-line scanner and an MCP server.
 
-## Modular Architecture
+`src/main.rs` declares the same modules as `src/lib.rs`, so the binary does not link the library: it
+compiles the modules again. Add a module to both lists.
 
-```mermaid
-graph TB
-    subgraph "Application Layer"
-        CLI[CLI Interface]
-        MCP[MCP Server]
-        API[HTTP API]
-    end
-    
-    subgraph "Core File Scanner"
-        MAIN[Main Application Logic]
-        ORCH[Analysis Orchestrator]
-        ROUTER[Tool Router]
-    end
-    
-    subgraph "ThreatFlux Libraries"
-        HASH[threatflux-hashing]
-        CACHE[threatflux-cache]
-        STRINGS[threatflux-string-analysis]
-        BINARY[threatflux-binary-analysis]
-        PACKAGES[threatflux-package-security]
-        THREATS[threatflux-threat-detection]
-    end
-    
-    subgraph "System Resources"
-        FS[File System]
-        NET[Network]
-        DB[(Cache DB)]
-    end
-    
-    CLI --> MAIN
-    MCP --> ROUTER
-    API --> ROUTER
-    
-    MAIN --> ORCH
-    ROUTER --> ORCH
-    
-    ORCH --> HASH
-    ORCH --> CACHE
-    ORCH --> STRINGS
-    ORCH --> BINARY
-    ORCH --> PACKAGES
-    ORCH --> THREATS
-    
-    HASH --> FS
-    STRINGS --> FS
-    BINARY --> FS
-    PACKAGES --> NET
-    THREATS --> FS
-    CACHE --> DB
-    
-    style CLI fill:#e1f5fe
-    style MCP fill:#e1f5fe
-    style API fill:#e1f5fe
-    style HASH fill:#e8f5e8
-    style CACHE fill:#e8f5e8
-    style STRINGS fill:#e8f5e8
-    style BINARY fill:#fff3e0
-    style PACKAGES fill:#fff3e0
-    style THREATS fill:#fff3e0
-```
+The binary runs in one of these modes, chosen by the first argument:
 
-## ThreatFlux Libraries
+| Invocation | Code |
+|------------|------|
+| `file-scanner <file> [flags]` | `main.rs` builds a `FileMetadata` and runs the analyses the flags ask for. |
+| `llm-analyze`, `yara-scan`, `analyze-npm`, `analyze-python`, `analyze-java` | Handlers in `main.rs`. |
+| `mcp-stdio`, `mcp-http`, `mcp-sse` | `McpTransportServer` in `src/mcp_transport.rs`. |
 
-### Core Infrastructure Libraries
-
-#### threatflux-hashing
-```rust
-// High-performance async hash calculations
-use threatflux_hashing::{calculate_all_hashes, HashConfig};
-
-let config = HashConfig::default()
-    .with_algorithms(HashAlgorithms::all())
-    .with_buffer_size(16384);
-    
-let hashes = calculate_all_hashes_with_config(&file_path, &config).await?;
-```
-
-**Architecture:**
-- Zero dependencies (leaf library)
-- Async-first with tokio
-- Concurrent algorithm processing
-- Configurable buffer sizes
-- Memory-efficient streaming
-
-#### threatflux-cache
-```rust
-// Flexible caching with multiple backends
-use threatflux_cache::{Cache, CacheConfig, FilesystemBackend};
-
-let backend = FilesystemBackend::new("/tmp/cache").await?;
-let cache: Cache<String, AnalysisResult> = Cache::new(
-    CacheConfig::default(),
-    backend
-).await?;
-```
-
-**Architecture:**
-- Pluggable backend system
-- Async storage operations
-- Thread-safe concurrent access
-- Multiple eviction policies
-- Persistent storage support
-
-### Analysis Libraries
-
-#### threatflux-string-analysis
-```rust
-// Advanced string extraction and categorization
-use threatflux_string_analysis::{StringAnalyzer, AnalysisConfig};
-
-let analyzer = StringAnalyzer::new(AnalysisConfig::default());
-let results = analyzer.analyze_file(&file_path).await?;
-```
-
-**Architecture:**
-- Pattern-based categorization
-- Entropy analysis
-- Encoding detection
-- Memory-efficient processing
-- Customizable extraction rules
-
-#### threatflux-binary-analysis
-```rust
-// Binary format parsing and analysis
-use threatflux_binary_analysis::{BinaryAnalyzer, SupportedFormat};
-
-let analyzer = BinaryAnalyzer::new();
-let info = analyzer.analyze(&file_path).await?;
-```
-
-**Architecture:**
-- Format-specific parsers (PE/ELF/Mach-O)
-- Memory-mapped file access
-- Section and symbol analysis
-- Compiler detection
-- Disassembly capabilities
-
-### Security Libraries
-
-#### threatflux-package-security
-```rust
-// Package vulnerability and security analysis
-use threatflux_package_security::{PackageAnalyzer, PackageType};
-
-let analyzer = PackageAnalyzer::new().await?;
-let analysis = analyzer.analyze_package(&package_path, PackageType::Npm).await?;
-```
-
-**Architecture:**
-- Multi-language support (npm, Python, Java)
-- Vulnerability database integration
-- Typosquatting detection
-- Dependency analysis
-- Supply chain risk assessment
-
-#### threatflux-threat-detection
-```rust
-// Advanced threat and malware detection
-use threatflux_threat_detection::{ThreatDetector, DetectionConfig};
-
-let detector = ThreatDetector::new(DetectionConfig::default()).await?;
-let threats = detector.scan_file(&file_path).await?;
-```
-
-**Architecture:**
-- YARA rule engine
-- Behavioral pattern analysis
-- IoC matching
-- Rule compilation and caching
-- Extensible detection modules
-
-## Core Application
-
-### Application Entry Points
-
-```rust
-// src/main.rs - CLI Interface
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
-        Commands::Scan { options } => run_scanner(options).await,
-        Commands::McpStdio => run_mcp_stdio().await,
-        Commands::McpHttp { port } => run_mcp_http(port).await,
-    }
-}
-```
-
-### Analysis Orchestrator
-
-```rust
-pub struct AnalysisOrchestrator {
-    hashing: Arc<ThreatFluxHashing>,
-    cache: Arc<ThreatFluxCache>,
-    strings: Arc<ThreatFluxStringAnalysis>,
-    binary: Option<Arc<ThreatFluxBinaryAnalysis>>,
-    packages: Option<Arc<ThreatFluxPackageSecurity>>,
-    threats: Option<Arc<ThreatFluxThreatDetection>>,
-}
-
-impl AnalysisOrchestrator {
-    pub async fn analyze_file(&self, path: &Path, options: &AnalysisOptions) -> Result<AnalysisResult> {
-        // Check cache first
-        let file_hash = self.calculate_file_hash(path).await?;
-        if let Some(cached) = self.cache.get(&file_hash).await? {
-            return Ok(cached);
-        }
-        
-        // Perform requested analyses
-        let mut tasks = Vec::new();
-        
-        if options.metadata {
-            tasks.push(tokio::spawn(self.extract_metadata(path.to_path_buf())));
-        }
-        
-        if options.hashes {
-            tasks.push(tokio::spawn(self.hashing.calculate_all_hashes(path.to_path_buf())));
-        }
-        
-        if options.strings {
-            tasks.push(tokio::spawn(self.strings.analyze_file(path.to_path_buf())));
-        }
-        
-        // Collect results and cache
-        let results = join_all(tasks).await;
-        let analysis_result = AnalysisResult::from(results);
-        
-        self.cache.put(file_hash, analysis_result.clone()).await?;
-        Ok(analysis_result)
-    }
-}
-```
-
-### MCP Integration
-
-```rust
-pub struct FileAnalysisServer {
-    orchestrator: Arc<AnalysisOrchestrator>,
-}
-
-impl McpServer for FileAnalysisServer {
-    async fn handle_tool_call(&self, tool_name: &str, args: Value) -> Result<Value> {
-        match tool_name {
-            "analyze_file" => {
-                let request: AnalyzeFileRequest = serde_json::from_value(args)?;
-                let result = self.orchestrator.analyze_file(&request.file_path, &request.options).await?;
-                Ok(serde_json::to_value(result)?)
-            }
-            "llm_analyze_file" => {
-                let request: LlmAnalyzeFileRequest = serde_json::from_value(args)?;
-                let result = self.orchestrator.llm_optimized_analysis(&request.file_path, &request).await?;
-                Ok(serde_json::to_value(result)?)
-            }
-            _ => Err(McpError::MethodNotFound(tool_name.to_string()))
-        }
-    }
-}
-```
-
-## Data Flow
-
-### Library Integration Flow
+## Source layout
 
 ```text
-File Input
-    │
-    ├─► threatflux-hashing
-    │   ├─► MD5 (parallel)
-    │   ├─► SHA256 (parallel)
-    │   ├─► SHA512 (parallel)
-    │   └─► BLAKE3 (parallel)
-    │
-    ├─► threatflux-string-analysis
-    │   ├─► String extraction
-    │   ├─► Pattern categorization
-    │   ├─► Entropy analysis
-    │   └─► Suspicious detection
-    │
-    ├─► threatflux-binary-analysis
-    │   ├─► Format detection
-    │   ├─► Section parsing
-    │   ├─► Symbol analysis
-    │   └─► Compiler detection
-    │
-    ├─► threatflux-package-security
-    │   ├─► Package type detection
-    │   ├─► Vulnerability scanning
-    │   ├─► Dependency analysis
-    │   └─► Supply chain assessment
-    │
-    └─► threatflux-threat-detection
-        ├─► YARA rule matching
-        ├─► Behavioral analysis
-        ├─► IoC detection
-        └─► Risk scoring
-    
-Results Aggregation
-    │
-    ├─► threatflux-cache (storage)
-    │
-    └─► Output Formatting
-        ├─► JSON
-        ├─► YAML
-        └─► MCP Response
+src/
+  main.rs                  CLI: flags, subcommands, output formats
+  lib.rs                   public module list
+  metadata.rs              FileMetadata: basic info plus the optional analysis sections
+  hash.rs                  MD5, SHA-256, SHA-512, BLAKE3 with bounded concurrency
+  strings.rs               ASCII and UTF-16 string extraction and categorization
+  binary_parser.rs         PE / ELF / Mach-O via threatflux-binary-analysis
+  signature.rs             Authenticode, macOS and GPG signature checks
+  hexdump.rs               header, footer and offset hex dumps
+  entropy_analysis.rs, control_flow.rs, call_graph.rs, disassembly.rs, function_analysis.rs,
+  vulnerability_detection.rs, code_metrics.rs, dependency_analysis.rs, taint_tracking.rs,
+  behavioral_analysis.rs, threat_detection.rs   the analyses behind the CLI flags
+  archive_analysis.rs, tar_analysis.rs, rar_analysis.rs, sevenz_analysis.rs   archive listing
+  pdf_analysis.rs, ole_vba_analysis.rs, script_analysis.rs   documents and scripts
+  java_analysis.rs (+ java_analysis/)   Java archives and class files
+  package_scan.rs          shared loader for package archives and directories
+  npm_analysis.rs, npm_vuln_db.rs, python_analysis.rs, python_vuln_db.rs   package vetting
+  cache.rs                 on-disk analysis history (one file per file hash)
+  string_tracker_compat.rs adapter over threatflux-string-analysis
+  mcp_server.rs            FileScannerMcp handler, INSTRUCTIONS, tool router assembly
+  mcp_server/              state, output budget, path policy and the tools
+  mcp_transport.rs         McpTransportServer: stdio, HTTP, the mcp-sse alias
+  mcp_transport/           http.rs (axum app and guard), rest.rs (REST helper routes)
 ```
 
-### Dependency Graph
+### Libraries it uses
 
-```text
-file-scanner (main app)
-├── threatflux-hashing (✅ stable)
-├── threatflux-cache (✅ stable)  
-├── threatflux-string-analysis (✅ stable)
-├── threatflux-binary-analysis (🚧 beta)
-├── threatflux-package-security (🚧 beta)
-│   └── threatflux-string-analysis
-└── threatflux-threat-detection (🚧 beta)
-    ├── threatflux-string-analysis
-    └── threatflux-binary-analysis
-```
+Three ThreatFlux crates from crates.io do part of the work: `threatflux-binary-analysis` (format parsing;
+the build uses a vendored copy under `vendor/`), `threatflux-string-analysis` (string tracking, wrapped by
+`string_tracker_compat.rs`) and `threatflux-threat-detection` (YARA engine and built-in rules, wrapped by
+`threat_detection.rs`). Hashing, caching and package analysis are in this crate. The directory
+`threatflux-package-security/` is a separate crate that is excluded from the workspace and is not used.
 
-## Integration Patterns
+YARA rules run on `yara-x` (vendored under `vendor/`). The MCP runtime is the `rmcp` SDK, and the HTTP
+server is `axum`.
 
-### Pattern 1: Progressive Analysis
+## The MCP server
 
-```rust
-use threatflux_hashing::calculate_md5;
-use threatflux_binary_analysis::BinaryAnalyzer;
+### Handler and state
 
-async fn progressive_analysis(file_path: &Path) -> Result<AnalysisLevel> {
-    // Quick hash check
-    let md5 = calculate_md5(file_path).await?;
-    if is_known_safe(&md5) {
-        return Ok(AnalysisLevel::Basic);
-    }
-    
-    // If suspicious, perform deeper analysis
-    let binary_analyzer = BinaryAnalyzer::new();
-    if binary_analyzer.is_executable(file_path).await? {
-        let analysis = binary_analyzer.analyze(file_path).await?;
-        return Ok(AnalysisLevel::Deep(analysis));
-    }
-    
-    Ok(AnalysisLevel::Standard)
-}
-```
+`src/mcp_server.rs` defines `FileScannerMcp`, the handler the SDK serves. Each `tools_*` module registers
+its tools with `#[tool_router]`, and `FileScannerMcp::with_state` adds the routers together.
+`get_info` returns the server name, version and the `INSTRUCTIONS` text that clients read at `initialize`.
 
-### Pattern 2: Parallel Library Usage
+`FileScannerMcp` is cheap to clone. All clones share one `ServerState` (`src/mcp_server/state.rs`), created
+once per process, which owns:
 
-```rust
-use tokio::task::JoinSet;
+- the analysis cache (`src/cache.rs`) and the section cache (full per-section results, in memory and on
+  disk, keyed by file hash),
+- the string tracker that `search_strings`, `string_details` and the `/strings/*` routes read,
+- the path scope (`--allow-root`), and
+- a limit on how many analyses run at once. Analyses run on the blocking thread pool, and a panic inside
+  one is caught and returned as a tool error.
 
-async fn parallel_analysis(file_path: &Path) -> Result<CombinedResults> {
-    let mut tasks = JoinSet::new();
-    
-    // Spawn parallel analysis tasks
-    tasks.spawn(hash_analysis(file_path.to_path_buf()));
-    tasks.spawn(string_analysis(file_path.to_path_buf()));
-    tasks.spawn(binary_analysis(file_path.to_path_buf()));
-    
-    let mut results = CombinedResults::new();
-    
-    // Collect results as they complete
-    while let Some(result) = tasks.join_next().await {
-        match result? {
-            AnalysisType::Hash(h) => results.hashes = Some(h),
-            AnalysisType::Strings(s) => results.strings = Some(s),
-            AnalysisType::Binary(b) => results.binary = Some(b),
-        }
-    }
-    
-    Ok(results)
-}
-```
+### Tool modules
 
-### Pattern 3: Cached Analysis Pipeline
+| File (in `src/mcp_server/`) | Tools |
+|------|-------|
+| `tools_analyze.rs` | `analyze_file`, `query_analysis`, `llm_analyze_file` |
+| (same file) | `disassemble`, `read_hex`, `compare_files` |
+| `tools_documents.rs` | `analyze_document`, `analyze_script` |
+| `tools_formats.rs` | `inspect_archive`, and the file-kind detection `analyze_file` uses |
+| `tools_java.rs` | `analyze_java_file` |
+| `tools_packages.rs` | `analyze_npm_package`, `analyze_python_package` |
+| `tools_services.rs` | `search_strings`, `string_details`, `cache_status`, `cache_clear` |
+| `tools_yara.rs` | `yara_scan_file` |
 
-```rust
-use threatflux_cache::{Cache, CacheKey};
+That is 17 tools. `tools_analyze/` splits the analysis tools: `triage.rs` (the overview),
+`sections.rs` (section summaries), `query.rs` (paged lists), `compare.rs`, `inspect.rs`, `llm.rs`.
 
-pub struct CachedAnalyzer {
-    cache: Cache<CacheKey, AnalysisResult>,
-    libraries: LibraryCollection,
-}
+Two shared modules shape every result:
 
-impl CachedAnalyzer {
-    async fn analyze(&self, file_path: &Path) -> Result<AnalysisResult> {
-        let cache_key = CacheKey::from_file(file_path).await?;
-        
-        // Check cache first
-        if let Some(cached) = self.cache.get(&cache_key).await? {
-            return Ok(cached);
-        }
-        
-        // Perform analysis using libraries
-        let result = self.libraries.analyze_comprehensive(file_path).await?;
-        
-        // Cache the result
-        self.cache.put(cache_key, result.clone()).await?;
-        
-        Ok(result)
-    }
-}
-```
+- `output.rs` caps each result at `max_output_bytes` (default 80000, ceiling 400000). Lists are paged
+  (`returned`, `next_offset`, `total`), and whatever is cut is listed under `truncated`.
+- `paths.rs` expands `~/`, applies `--allow-root`, and detects file kinds. Its errors say what to fix.
 
-## Concurrency Model
+The design rule across the tools is: overview first, then targeted, paged drill-down. The first call on a
+file returns a small summary and `next_steps`. A full analysis is computed once, stored in the section
+cache, and later `query_analysis` and `disassemble` calls are answered from it (`"cache": "hit"` in the
+result). `read_hex` reads the file directly and has no `cache` field.
 
-### Library-Level Concurrency
+### Transports
 
-Each ThreatFlux library implements its own concurrency strategy:
+`src/mcp_transport.rs` wires one handler to a transport:
 
-- **threatflux-hashing**: Parallel algorithm execution
-- **threatflux-cache**: Thread-safe storage operations
-- **threatflux-string-analysis**: Concurrent pattern matching
-- **threatflux-binary-analysis**: Async file parsing
-- **threatflux-package-security**: Parallel dependency analysis
-- **threatflux-threat-detection**: Concurrent rule evaluation
+- `run_stdio`: JSON-RPC on stdin and stdout through the SDK. Diagnostics go to stderr only.
+- `run_http`: `src/mcp_transport/http.rs` builds an axum app with the SDK's Streamable HTTP service at
+  `/mcp` and the REST routes from `rest.rs`, behind one guard. In order: Host and Origin checks, CORS for
+  allowed origins only, the optional bearer token (all routes except `/health`), and a concurrency limit
+  and timeout on the REST routes. It binds `127.0.0.1` unless told otherwise, prints warnings for unsafe
+  combinations, and shuts down on SIGINT or SIGTERM.
+- `run_sse`: prints a deprecation line and calls `run_http`. There is no SSE transport.
 
-### Application-Level Orchestration
+The REST routes call the same tool router as MCP, so a call on either path updates the same caches.
 
-```rust
-pub struct ConcurrencyConfig {
-    pub max_concurrent_files: usize,
-    pub max_concurrent_libraries: usize,
-    pub library_specific: HashMap<String, usize>,
-}
+## Adding or changing a tool
 
-impl AnalysisOrchestrator {
-    async fn analyze_batch(&self, files: Vec<PathBuf>) -> Result<Vec<AnalysisResult>> {
-        let semaphore = Semaphore::new(self.config.max_concurrent_files);
-        let mut tasks = Vec::new();
-        
-        for file in files {
-            let permit = semaphore.acquire().await?;
-            let orchestrator = self.clone();
-            
-            tasks.push(tokio::spawn(async move {
-                let _permit = permit;
-                orchestrator.analyze_file(&file, &AnalysisOptions::default()).await
-            }));
-        }
-        
-        let results = join_all(tasks).await;
-        Ok(results.into_iter().collect::<Result<Vec<_>, _>>()?)
-    }
-}
-```
+1. Add a request struct (`Deserialize`, `JsonSchema`, `#[serde(deny_unknown_fields)]`) and a method
+   annotated `#[tool(name = ..., description = ...)]` in the right `tools_*` module. A new group needs a
+   router function and a line in `FileScannerMcp::with_state`.
+2. Send the result through `output::respond` so the byte budget and paging apply, and check the path with
+   the helpers in `paths.rs` before touching the file.
+3. Mention the tool in `INSTRUCTIONS` in `src/mcp_server.rs`. A unit test there fails if a tool is missing
+   from the text.
+4. Add the name to `EXPECTED_TOOLS` in `scripts/mcp-smoke.py`, and document the tool in `docs/MCP.md`.
+5. Add a test in `tests/` (`mcp_tools_*_test.rs`, `mcp_transport_*_test.rs`).
 
-## Error Handling
+The tool list is generated from the router, so there is no second list to edit.
 
-### Library Error Types
+## Concurrency
 
-```rust
-// Each library defines its own error types
-use threatflux_hashing::HashError;
-use threatflux_cache::CacheError;
-use threatflux_string_analysis::StringAnalysisError;
+- Hashing runs on tokio tasks with a semaphore (at most 10 hashes at once).
+- MCP analyses run on the blocking pool behind the state's concurrency limit.
+- The REST routes allow 16 requests at a time; `/mcp` is bounded by the SDK.
+- Caches use their own locks; the on-disk cache writes each entry to a temporary name and renames it.
 
-#[derive(Error, Debug)]
-pub enum FileAnalysisError {
-    #[error("Hash calculation failed: {0}")]
-    Hash(#[from] HashError),
-    
-    #[error("Cache operation failed: {0}")]
-    Cache(#[from] CacheError),
-    
-    #[error("String analysis failed: {0}")]
-    StringAnalysis(#[from] StringAnalysisError),
-    
-    #[error("Library not available: {library}")]
-    LibraryUnavailable { library: String },
-    
-    #[error("Analysis timeout after {seconds}s")]
-    Timeout { seconds: u64 },
-}
-```
+## Errors
 
-### Error Aggregation Strategy
+The library uses `anyhow::Result`. In the MCP server, a failed call returns a result with `isError: true`
+and a message written for the caller to act on (what is wrong, what to pass). Only protocol faults are
+JSON-RPC errors. The CLI prints `Error: ...` on stderr and exits with status 1.
 
-```rust
-pub struct AnalysisResult {
-    pub successful_analyses: HashMap<String, Value>,
-    pub failed_analyses: HashMap<String, String>,
-    pub partial_results: HashMap<String, Value>,
-}
+## Tests
 
-impl AnalysisOrchestrator {
-    async fn analyze_with_error_handling(&self, file_path: &Path) -> AnalysisResult {
-        let mut result = AnalysisResult::new();
-        
-        // Try each library, collecting successes and failures
-        if let Ok(hashes) = self.hashing.calculate_all_hashes(file_path).await {
-            result.successful_analyses.insert("hashes".to_string(), json!(hashes));
-        } else {
-            result.failed_analyses.insert("hashes".to_string(), "Hash calculation failed".to_string());
-        }
-        
-        // Continue with other libraries even if some fail
-        // ...
-        
-        result
-    }
-}
-```
-
-## Extension Points
-
-### Adding New Libraries
-
-1. **Create Library**: Follow ThreatFlux library conventions
-2. **Define Interface**: Implement common analysis traits
-3. **Integration**: Add to orchestrator dependency injection
-4. **Configuration**: Add library-specific configuration options
-5. **Testing**: Create integration tests
-
-### Library Development Template
-
-```rust
-// threatflux-new-analysis/src/lib.rs
-use async_trait::async_trait;
-use std::path::Path;
-
-#[async_trait]
-pub trait NewAnalysisCapability {
-    type Config;
-    type Result;
-    type Error;
-    
-    async fn analyze(&self, file_path: &Path) -> Result<Self::Result, Self::Error>;
-}
-
-pub struct NewAnalyzer {
-    config: NewAnalysisConfig,
-}
-
-impl NewAnalyzer {
-    pub fn new(config: NewAnalysisConfig) -> Self {
-        Self { config }
-    }
-}
-
-#[async_trait]
-impl NewAnalysisCapability for NewAnalyzer {
-    type Config = NewAnalysisConfig;
-    type Result = NewAnalysisResult;
-    type Error = NewAnalysisError;
-    
-    async fn analyze(&self, file_path: &Path) -> Result<Self::Result, Self::Error> {
-        // Implementation
-        todo!()
-    }
-}
-```
-
-### Adding MCP Tools
-
-```rust
-// Register new tool in MCP server
-impl FileAnalysisServer {
-    fn register_tools(&self) -> Vec<ToolDefinition> {
-        vec![
-            // Existing tools...
-            ToolDefinition {
-                name: "new_analysis_tool".to_string(),
-                description: "Performs new type of analysis".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string"},
-                        "options": {"type": "object"}
-                    }
-                }),
-            }
-        ]
-    }
-    
-    async fn handle_new_analysis_tool(&self, args: Value) -> Result<Value> {
-        // Implementation using new library
-        todo!()
-    }
-}
-```
-
-## Performance Considerations
-
-### Library Performance Characteristics
-
-| Library | Typical Throughput | Memory Usage | Scaling Factor |
-|---------|------------------|--------------|----------------|
-| threatflux-hashing | 500MB/s - 1GB/s | 64KB buffers | Linear with file size |
-| threatflux-string-analysis | 100MB/s | 32MB limit | Linear with content |
-| threatflux-binary-analysis | 500 files/s | Memory-mapped | Constant per file |
-| threatflux-cache | 10K ops/s | Configurable | Constant per operation |
-
-### Optimization Strategies
-
-1. **Selective Analysis**: Only use needed libraries
-2. **Parallel Execution**: Utilize multiple libraries concurrently
-3. **Caching**: Leverage threatflux-cache for expensive operations
-4. **Streaming**: Use streaming APIs for large files
-5. **Configuration Tuning**: Optimize library-specific settings
-
-## Security Considerations
-
-### Library Isolation
-
-Each ThreatFlux library implements its own security measures:
-
-- Input validation and sanitization
-- Resource usage limits
-- Timeout mechanisms
-- Safe parsing with bounds checking
-
-### Application Security
-
-```rust
-pub struct SecurityPolicy {
-    pub max_file_size: u64,
-    pub analysis_timeout: Duration,
-    pub allowed_file_types: HashSet<String>,
-    pub sandbox_mode: bool,
-}
-
-impl AnalysisOrchestrator {
-    async fn secure_analyze(&self, file_path: &Path) -> Result<AnalysisResult> {
-        // Validate file before analysis
-        self.validate_file(file_path)?;
-        
-        // Apply resource limits
-        let _guard = ResourceGuard::new(&self.security_policy);
-        
-        // Perform analysis with timeout
-        tokio::time::timeout(
-            self.security_policy.analysis_timeout,
-            self.analyze_file(file_path, &AnalysisOptions::default())
-        ).await?
-    }
-}
-```
-
-## Future Architecture Goals
-
-### Short Term (Q1 2025)
-- Complete modularization of all components
-- Stabilize all ThreatFlux libraries
-- Performance optimization across libraries
-
-### Medium Term (Q2-Q3 2025)
-- Plugin system for custom libraries
-- Distributed analysis capabilities
-- Enhanced caching strategies
-
-### Long Term (Q4 2025+)
-- Real-time analysis streaming
-- Machine learning integration
-- Cloud-native deployment options
-- Custom rule engines
-
-## Testing Architecture
-
-### Library Testing
-
-Each ThreatFlux library includes:
-- Unit tests for core functionality
-- Integration tests with real files
-- Performance benchmarks
-- Property-based testing
-
-### Application Testing
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use threatflux_cache::MemoryBackend;
-    
-    #[tokio::test]
-    async fn test_orchestrator_integration() {
-        let orchestrator = AnalysisOrchestrator::new_for_testing().await;
-        let result = orchestrator.analyze_file(
-            Path::new("test_files/sample.exe"),
-            &AnalysisOptions::all()
-        ).await?;
-        
-        assert!(result.hashes.is_some());
-        assert!(result.strings.is_some());
-        assert!(result.binary_info.is_some());
-    }
-}
-```
-
-### Performance Testing
-
-```rust
-#[cfg(test)]
-mod benches {
-    use criterion::{criterion_group, criterion_main, Criterion};
-    
-    fn bench_full_analysis(c: &mut Criterion) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        
-        c.bench_function("full_analysis", |b| {
-            b.to_async(&rt).iter(|| async {
-                let orchestrator = AnalysisOrchestrator::new().await;
-                orchestrator.analyze_file(
-                    Path::new("benches/test_binary"),
-                    &AnalysisOptions::all()
-                ).await
-            })
-        });
-    }
-    
-    criterion_group!(benches, bench_full_analysis);
-    criterion_main!(benches);
-}
-```
+`tests/` holds integration tests; the MCP ones are `mcp_*_test.rs`. `make mcp-test` runs the transport
+tests. `scripts/mcp-smoke.py` runs a handshake against a built binary and is called from CI.

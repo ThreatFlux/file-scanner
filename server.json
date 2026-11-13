@@ -1,0 +1,69 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.threatflux/file-scanner",
+  "title": "File Scanner",
+  "description": "Static analysis of files and packages: hashes, strings, binaries, YARA, npm and Python vetting.",
+  "repository": {
+    "url": "https://github.com/ThreatFlux/file-scanner",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/ThreatFlux/file-scanner",
+  "version": "0.3.12",
+  "packages": [
+    {
+      "registryType": "cargo",
+      "identifier": "threatflux-file-scanner",
+      "version": "0.3.12",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp-stdio"
+        }
+      ]
+    },
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/threatflux/file-scanner:0.3.12",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--volume",
+          "description": "Host directory to analyze, mounted read-only at the same path inside the container.",
+          "value": "{host_dir}:{host_dir}:ro",
+          "variables": {
+            "host_dir": {
+              "description": "Absolute path of the directory that holds the files to analyze.",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        },
+        {
+          "type": "named",
+          "name": "--workdir",
+          "value": "{host_dir}",
+          "variables": {
+            "host_dir": {
+              "description": "The same directory as the mount.",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        }
+      ],
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp-stdio"
+        }
+      ],
+      "runtimeHint": "docker"
+    }
+  ]
+}

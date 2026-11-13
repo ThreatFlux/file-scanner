@@ -6,7 +6,8 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard};
 use threatflux_string_analysis as current;
 
 type StringCountVec = Vec<(String, usize)>;
@@ -133,7 +134,7 @@ pub struct StringStatistics {
 }
 
 /// Filter criteria for string queries
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct StringFilter {
     /// Minimum number of occurrences a string must have
     pub min_occurrences: Option<usize>,
@@ -158,6 +159,7 @@ pub struct StringFilter {
     /// Maximum entropy score for strings
     pub max_entropy: Option<f64>,
     /// Date range filter for when strings were discovered
+    #[schema(value_type = Option<Vec<String>>)]
     pub date_range: Option<DateTimeRange>,
 }
 
@@ -285,10 +287,87 @@ impl From<&StringFilter> for current::StringFilter {
     }
 }
 
+/// Most distinct values the side index of values keeps (the upstream tracker
+/// holds at most 100,000 distinct strings; this follows it).
+const MAX_INDEXED_VALUES: usize = 100_000;
+/// Most batch fingerprints remembered (a batch is one file's strings).
+const MAX_REMEMBERED_BATCHES: usize = 10_000;
+/// Most values the classifier holds before it starts over.
+const MAX_CLASSIFIED_VALUES: usize = 20_000;
+
+/// Most file identities the upstream tracker keeps for one string.
+pub const MAX_FILE_IDENTITIES: usize = 1_024;
+
+/// What [`StringTracker::track_strings_at`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TrackReport {
+    /// True when this exact batch was tracked before, so nothing was added.
+    pub already_indexed: bool,
+    /// Occurrences recorded.
+    pub tracked: usize,
+    /// Values the tracker refused (too long, or its capacity was full). A
+    /// repeated batch reports the count of the call that indexed it.
+    pub skipped: usize,
+}
+
+/// Most occurrence keys the de-duplication sets remember (each key is 16
+/// bytes). Past it new occurrences are counted as skipped, never doubled.
+const MAX_DEDUP_KEYS: usize = 1_000_000;
+
+/// Which occurrences were recorded, so a file's strings are counted once
+/// whichever tool, option or repeat brings them: the key of an occurrence is
+/// `(file path, file hash, value, offset)`.
+#[derive(Default)]
+struct Dedup {
+    /// Occurrences with an offset.
+    with_offset: HashSet<u128>,
+    /// Values of a file recorded with at least one offset.
+    offset_values: HashSet<u128>,
+    /// Values of a file recorded without an offset (by `analyze_file`).
+    plain_values: HashSet<u128>,
+    /// Values recorded both ways: the offset-less occurrence is hidden, the
+    /// richer one wins.
+    superseded: HashSet<u128>,
+}
+
+fn key128(parts: &[&[u8]]) -> u128 {
+    let mut hasher = blake3::Hasher::new();
+    for part in parts {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    let mut key = [0u8; 16];
+    key.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    u128::from_le_bytes(key)
+}
+
+fn value_key(file_path: &str, file_hash: &str, value: &str) -> u128 {
+    key128(&[file_path.as_bytes(), file_hash.as_bytes(), value.as_bytes()])
+}
+
 /// Existing scanner interface backed by bounded upstream tracking.
+///
+/// Memory is bounded by the upstream limits (distinct strings, occurrences
+/// per string, files per string); the side index of values and the batch
+/// fingerprints follow the same bounds. Tracking the same batch twice (a
+/// repeated call on an unchanged file) records nothing the second time.
 #[derive(Clone)]
 pub struct StringTracker {
     inner: current::StringTracker,
+    values: Arc<Mutex<BTreeSet<String>>>,
+    /// Batches tracked so far, with the values each one could not track.
+    batches: Arc<Mutex<HashMap<[u8; 16], usize>>>,
+    /// Which occurrences were recorded (see [`Dedup`]).
+    dedup: Arc<Mutex<Dedup>>,
+    /// Classifies values without recording them (category, entropy, suspicion
+    /// as the tracker would give a string found in a file), so a per-file
+    /// answer does not depend on whether the shared tracker had room.
+    classifier: Arc<Mutex<ClassifierState>>,
+}
+
+struct ClassifierState {
+    tracker: current::StringTracker,
+    held: usize,
 }
 
 impl Default for StringTracker {
@@ -300,6 +379,19 @@ impl Default for StringTracker {
 impl StringTracker {
     /// Create a tracker retaining up to 1,000 details per distinct string.
     pub fn new() -> Self {
+        Self {
+            inner: Self::build_inner(),
+            values: Arc::new(Mutex::new(BTreeSet::new())),
+            batches: Arc::new(Mutex::new(HashMap::new())),
+            dedup: Arc::new(Mutex::new(Dedup::default())),
+            classifier: Arc::new(Mutex::new(ClassifierState {
+                tracker: Self::build_inner(),
+                held: 0,
+            })),
+        }
+    }
+
+    fn build_inner() -> current::StringTracker {
         let patterns = legacy_patterns()
             .into_iter()
             .map(current::PatternDef::compile)
@@ -311,19 +403,244 @@ impl StringTracker {
             .expect("the scanner's static entropy threshold must be valid")
             .with_patterns(patterns)
             .expect("file-scanner's static string patterns must be valid");
-        Self {
-            inner: current::StringTracker::with_components_and_config(
-                Box::new(analyzer),
-                Box::new(current::DefaultCategorizer::new()),
-                current::AnalysisConfig {
-                    // Statistical samples historically include entropy > 4.0,
-                    // independently of the analyzer's suspicion threshold.
-                    min_suspicious_entropy: f64::from_bits(4.0_f64.to_bits() + 1),
-                    ..current::AnalysisConfig::default()
-                },
-            )
-            .expect("the scanner's static tracker configuration must be valid"),
+        current::StringTracker::with_components_and_config(
+            Box::new(analyzer),
+            Box::new(current::DefaultCategorizer::new()),
+            current::AnalysisConfig {
+                // Statistical samples historically include entropy > 4.0,
+                // independently of the analyzer's suspicion threshold.
+                min_suspicious_entropy: f64::from_bits(4.0_f64.to_bits() + 1),
+                ..current::AnalysisConfig::default()
+            },
+        )
+        .expect("the scanner's static tracker configuration must be valid")
+    }
+
+    /// Category, entropy and suspicion of `value` as a string found in a file,
+    /// without recording it in the tracker (the returned entry has no
+    /// occurrences worth reading). `None` when the value is not acceptable to
+    /// the tracker at all (empty or too long).
+    pub fn classify(&self, value: &str) -> Option<StringEntry> {
+        let mut state = self
+            .classifier
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = state.tracker.get_string_details(value) {
+            return Some(entry.into());
         }
+        if state.held >= MAX_CLASSIFIED_VALUES {
+            state.tracker.clear();
+            state.held = 0;
+        }
+        state
+            .tracker
+            .track_string(
+                value,
+                "classify",
+                "classify",
+                "classify",
+                StringContext::FileString { offset: None }.into(),
+            )
+            .ok()?;
+        state.held += 1;
+        state.tracker.get_string_details(value).map(Into::into)
+    }
+
+    /// Most distinct values the tracker holds.
+    pub const CAPACITY: usize = MAX_INDEXED_VALUES;
+
+    /// Tracked values that start with `prefix`, at most `limit`, in order.
+    pub fn values_with_prefix(&self, prefix: &str, limit: usize) -> Vec<String> {
+        self.values()
+            .range::<str, _>((
+                std::ops::Bound::Included(prefix),
+                std::ops::Bound::Unbounded,
+            ))
+            .take_while(|value| value.starts_with(prefix))
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// True when a total for one string may be short: the upstream tracker
+    /// keeps at most [`MAX_FILE_IDENTITIES`] files per string
+    /// (`unique_files` is how many this string shows), or the memory of
+    /// recorded occurrences is full and later occurrences were not counted.
+    pub fn totals_may_be_capped(&self, unique_files: usize) -> bool {
+        if unique_files >= MAX_FILE_IDENTITIES {
+            return true;
+        }
+        let dedup = self.dedup();
+        dedup.with_offset.len() >= MAX_DEDUP_KEYS || dedup.plain_values.len() >= MAX_DEDUP_KEYS
+    }
+
+    /// True when the tracker cannot take another distinct value.
+    pub fn is_full(&self) -> bool {
+        self.values().len() >= MAX_INDEXED_VALUES
+    }
+
+    fn values(&self) -> MutexGuard<'_, BTreeSet<String>> {
+        self.values
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn note_value(&self, value: &str) {
+        let mut values = self.values();
+        if values.len() < MAX_INDEXED_VALUES && !values.contains(value) {
+            values.insert(value.to_string());
+        }
+    }
+
+    /// Remember a batch. `None` the first time; the skipped count of the
+    /// call that indexed it when it was remembered already.
+    fn seen_batch(&self, fingerprint: [u8; 16]) -> Option<usize> {
+        let mut batches = self
+            .batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(skipped) = batches.get(&fingerprint) {
+            return Some(*skipped);
+        }
+        if batches.len() >= MAX_REMEMBERED_BATCHES {
+            batches.clear();
+        }
+        batches.insert(fingerprint, 0);
+        None
+    }
+
+    fn set_batch_skipped(&self, fingerprint: [u8; 16], skipped: usize) {
+        if let Some(slot) = self
+            .batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&fingerprint)
+        {
+            *slot = skipped;
+        }
+    }
+
+    fn dedup(&self) -> MutexGuard<'_, Dedup> {
+        self.dedup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Hide what a richer record replaced: an occurrence `analyze_file`
+    /// recorded without an offset, for a value that a scan with offsets
+    /// recorded as well.
+    fn fixup(&self, entry: &mut StringEntry) {
+        let dedup = self.dedup();
+        if dedup.superseded.is_empty() {
+            return;
+        }
+        let before = entry.occurrences.len();
+        entry.occurrences.retain(|o| {
+            !(o.tool_name == "analyze_file"
+                && dedup
+                    .superseded
+                    .contains(&value_key(&o.file_path, &o.file_hash, &entry.value)))
+        });
+        let removed = before - entry.occurrences.len();
+        entry.total_occurrences = entry.total_occurrences.saturating_sub(removed);
+    }
+
+    /// Track values with the offset each was found at. Every occurrence counts
+    /// once per `(file_path, file_hash, value, offset)`, whichever tool or
+    /// option (`batch_key`, for example `min=4`) brings it: the same call
+    /// repeated, or the same file searched with another `min_length`, adds
+    /// only what is new. A value `analyze_file` recorded without an offset is
+    /// replaced by the occurrence with its offset (the richer scan wins).
+    pub fn track_strings_at(
+        &self,
+        items: impl FnOnce() -> Vec<(String, usize)>,
+        file_path: &str,
+        file_hash: &str,
+        tool_name: &str,
+        batch_key: &str,
+    ) -> TrackReport {
+        let mut hasher = blake3::Hasher::new();
+        for part in [file_path, file_hash, tool_name, batch_key] {
+            hasher.update(part.as_bytes());
+            hasher.update(&[0]);
+        }
+        let mut fingerprint = [0u8; 16];
+        fingerprint.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+        if let Some(skipped) = self.seen_batch(fingerprint) {
+            return TrackReport {
+                already_indexed: true,
+                skipped,
+                ..TrackReport::default()
+            };
+        }
+        let items = items();
+        let mut report = TrackReport::default();
+        let mut dedup = self.dedup();
+        for (value, offset) in items {
+            let vkey = value_key(file_path, file_hash, &value);
+            let okey = key128(&[&vkey.to_le_bytes(), &(offset as u64).to_le_bytes()]);
+            if dedup.with_offset.contains(&okey) {
+                continue;
+            }
+            if dedup.with_offset.len() >= MAX_DEDUP_KEYS {
+                report.skipped += 1;
+                continue;
+            }
+            let context = StringContext::FileString {
+                offset: Some(offset),
+            };
+            match self.track_string(&value, file_path, file_hash, tool_name, context) {
+                Ok(()) => {
+                    report.tracked += 1;
+                    dedup.with_offset.insert(okey);
+                    dedup.offset_values.insert(vkey);
+                    if dedup.plain_values.contains(&vkey) {
+                        dedup.superseded.insert(vkey);
+                    }
+                }
+                Err(_) => report.skipped += 1,
+            }
+        }
+        drop(dedup);
+        self.set_batch_skipped(fingerprint, report.skipped);
+        report
+    }
+
+    /// Entries whose value contains `query` (case-insensitive) and matches
+    /// `pattern`, then accepted by `accept`, most frequent first, at most
+    /// `limit`. Every tracked value is inspected (the tracker holds at most
+    /// 100,000), so the filters never miss a match.
+    pub fn search_filtered(
+        &self,
+        query: Option<&str>,
+        pattern: Option<&regex::Regex>,
+        limit: usize,
+        accept: &dyn Fn(&StringEntry) -> bool,
+    ) -> Vec<StringEntry> {
+        let query = query.map(str::to_lowercase);
+        let candidates: Vec<String> = self
+            .values()
+            .iter()
+            .filter(|value| {
+                query
+                    .as_ref()
+                    .is_none_or(|q| value.to_lowercase().contains(q.as_str()))
+                    && pattern.is_none_or(|p| p.is_match(value))
+            })
+            .cloned()
+            .collect();
+        let mut found: Vec<StringEntry> = candidates
+            .iter()
+            .filter_map(|value| self.get_string_details(value))
+            .filter(|entry| accept(entry))
+            .collect();
+        found.sort_by(|a, b| {
+            b.total_occurrences
+                .cmp(&a.total_occurrences)
+                .then_with(|| a.value.cmp(&b.value))
+        });
+        found.truncate(limit);
+        found
     }
 
     /// Track an occurrence, returning upstream input or capacity errors.
@@ -337,6 +654,7 @@ impl StringTracker {
     ) -> Result<()> {
         self.inner
             .track_string(value, file_path, file_hash, tool_name, context.into())
+            .map(|()| self.note_value(value))
             .map_err(Into::into)
     }
 
@@ -349,19 +667,52 @@ impl StringTracker {
         file_hash: &str,
         tool_name: &str,
     ) -> Result<()> {
-        let mut first_error = None;
+        let mut hasher = blake3::Hasher::new();
+        for part in [file_path, file_hash, tool_name] {
+            hasher.update(part.as_bytes());
+            hasher.update(&[0]);
+        }
         for value in strings {
-            if let Err(error) = self.inner.track_strings_from_results(
+            hasher.update(value.as_bytes());
+            hasher.update(&[0]);
+        }
+        let mut fingerprint = [0u8; 16];
+        fingerprint.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+        if self.seen_batch(fingerprint).is_some() {
+            // The same strings of the same file were tracked by an earlier call.
+            return Ok(());
+        }
+        let mut first_error = None;
+        let mut dedup = self.dedup();
+        for value in strings {
+            let vkey = value_key(file_path, file_hash, value);
+            // Recorded already, by this call's route or with offsets.
+            if dedup.plain_values.contains(&vkey) || dedup.offset_values.contains(&vkey) {
+                continue;
+            }
+            if dedup.plain_values.len() >= MAX_DEDUP_KEYS {
+                first_error.get_or_insert(anyhow::anyhow!(
+                    "the string index remembers at most {MAX_DEDUP_KEYS} occurrences"
+                ));
+                continue;
+            }
+            match self.inner.track_strings_from_results(
                 std::slice::from_ref(value),
                 file_path,
                 file_hash,
                 tool_name,
             ) {
-                first_error.get_or_insert(error);
+                Ok(()) => {
+                    self.note_value(value);
+                    dedup.plain_values.insert(vkey);
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error.into());
+                }
             }
         }
         match first_error {
-            Some(error) => Err(error.into()),
+            Some(error) => Err(error),
             None => Ok(()),
         }
     }
@@ -375,15 +726,20 @@ impl StringTracker {
     /// Return statistics with validated filter criteria.
     pub fn try_get_statistics(&self, filter: Option<&StringFilter>) -> Result<StringStatistics> {
         let filter = filter.map(current::StringFilter::from);
-        self.inner
-            .get_statistics(filter.as_ref())
-            .map(Into::into)
-            .map_err(Into::into)
+        let mut stats: StringStatistics =
+            self.inner.get_statistics(filter.as_ref()).map(Into::into)?;
+        if filter.is_none() {
+            let hidden = self.dedup().superseded.len();
+            stats.total_occurrences = stats.total_occurrences.saturating_sub(hidden);
+        }
+        Ok(stats)
     }
 
     /// Get detailed information about a specific string.
     pub fn get_string_details(&self, value: &str) -> Option<StringEntry> {
-        self.inner.get_string_details(value).map(Into::into)
+        let mut entry: StringEntry = self.inner.get_string_details(value)?.into();
+        self.fixup(&mut entry);
+        Some(entry)
     }
 
     /// Search values, returning no matches for invalid queries.
@@ -394,10 +750,15 @@ impl StringTracker {
 
     /// Search values with upstream input validation.
     pub fn try_search_strings(&self, query: &str, limit: usize) -> Result<Vec<StringEntry>> {
-        self.inner
-            .search_strings(query, limit)
-            .map(|entries| entries.into_iter().map(Into::into).collect())
-            .map_err(Into::into)
+        let entries = self.inner.search_strings(query, limit)?;
+        Ok(entries
+            .into_iter()
+            .map(|entry| {
+                let mut entry: StringEntry = entry.into();
+                self.fixup(&mut entry);
+                entry
+            })
+            .collect())
     }
 
     /// Get related strings, returning no matches for invalid input.
@@ -414,9 +775,15 @@ impl StringTracker {
             .map_err(Into::into)
     }
 
-    /// Clear all tracked strings.
+    /// Clear all tracked strings (and the memory of which files were indexed).
     pub fn clear(&self) {
         self.inner.clear();
+        self.values().clear();
+        self.batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        *self.dedup() = Dedup::default();
     }
 }
 

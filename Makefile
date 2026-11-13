@@ -7,6 +7,8 @@ BINARY_PACKAGE ?= threatflux-file-scanner
 SBOM_MANIFEST_PATH ?= Cargo.toml
 DOCKER_IMAGE ?= threatflux/file-scanner
 DOCKER_TAG ?= latest
+# Directory mounted read-only by docker-run-http
+SAMPLES_DIR ?= $(CURDIR)
 
 # Define all ThreatFlux libraries
 LIBRARIES := threatflux-package-security
@@ -82,7 +84,7 @@ help:
 	@echo "DOCKER COMMANDS:"
 	@echo "  docker-build  - Build Docker image"
 	@echo "  docker-run    - Run Docker container"
-	@echo "  docker-run-http - Run Docker container in MCP HTTP mode (port 3111)"
+	@echo "  docker-run-http - Run Docker container in MCP HTTP mode (127.0.0.1:3111, needs FILE_SCANNER_AUTH_TOKEN)"
 	@echo ""
 	@echo "LIBRARY COMMANDS:"
 	@echo "  libs-build    - Build all ThreatFlux libraries"
@@ -283,8 +285,9 @@ docker-run:
 	docker run --rm -v /bin:/data:ro threatflux/file-scanner:latest /data/ls
 
 docker-run-http:
-	@echo "Running Docker container in MCP HTTP mode..."
-	docker run --rm -p 3111:3000 threatflux/file-scanner:latest mcp-http --port 3000
+	@test -n "$$FILE_SCANNER_AUTH_TOKEN" || { echo "Set FILE_SCANNER_AUTH_TOKEN first (export FILE_SCANNER_AUTH_TOKEN=<random string>)"; exit 1; }
+	@echo "Running Docker container in MCP HTTP mode on 127.0.0.1:3111 (read-only mount of $(SAMPLES_DIR) at /data)..."
+	docker run --rm -p 127.0.0.1:3111:3000 -e FILE_SCANNER_AUTH_TOKEN -v "$(SAMPLES_DIR):/data:ro" $(DOCKER_IMAGE):$(DOCKER_TAG) mcp-http --host 0.0.0.0 --port 3000 --allow-root /data
 
 # Code quality
 lint:

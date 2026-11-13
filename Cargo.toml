@@ -16,7 +16,6 @@ exclude = ["threatflux-package-security"]
 [workspace.dependencies]
 # Core Rust async and runtime
 tokio = { version = "1.54.1", features = ["full"] }
-async-trait = "0.1.92"
 
 # Error handling
 anyhow = "1.0.104"
@@ -29,7 +28,7 @@ serde_json = "1.0.154"
 serde_yaml = { package = "serde-saphyr", version = "2.1.1" }
 
 # CLI and configuration
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
 
 # File and system utilities
 filetime = "0.2.29"
@@ -54,22 +53,20 @@ object = "0.41.0"
 ring = "0.17.14"
 
 # MCP SDK
-rmcp = { version = "=3.10.0", features = ["transport-io"] }
+rmcp = { version = "=3.10.0", features = ["transport-io", "transport-streamable-http-server"] }
 schemars = "1.2.3"
+tokio-util = "0.7.20"
 
 # HTTP server
 axum = { version = "0.8.9", features = ["ws"] }
-tower = "0.5.3"
+# CORS answers preflights itself (explicit origin allow-list, no wildcard).
 tower-http = { version = "0.7.1", features = ["cors"] }
+tower = "0.5.3"
 hyper = "1.12.0"
-tokio-stream = "0.1.19"
-futures-util = "0.3.34"
 uuid = { version = "1.29.2", features = ["v4"] }
 
 # OpenAPI documentation
 utoipa = { version = "6.0.0", features = ["axum_extras", "chrono", "uuid"] }
-utoipa-redoc = { version = "7.0.0", features = ["axum"] }
-utoipa-swagger-ui = { version = "10.0.2", features = ["axum"] }
 
 # Static analysis
 addr2line = "0.27.1"
@@ -81,12 +78,12 @@ petgraph = "0.8.3"
 # update could silently bypass the reviewed Wasmtime and RSA requirements.
 yara-x = "=1.23.0"
 
-# Network and repository checks
-strsim = "0.11.1"
-reqwest = { version = "0.13.5", features = ["json", "blocking"] }
+# Not used by src/ since the repository-integrity module was removed. Kept because it
+# is what links the reviewed, patched libz-sys (scripts/check-native-zlib.py); remove
+# both together.
 git2 = "0.21.0"
-url = "2.5.8"
-edit-distance = "2.2.2"
+# HTTP client (tests only)
+reqwest = { version = "0.13.5", features = ["json", "blocking"] }
 
 # Archive handling
 cfb = "0.16.0"
@@ -171,9 +168,7 @@ path = "src/main.rs"
 
 [dependencies]
 # ThreatFlux libraries - migrated to crates.io
-threatflux-hashing = { version = "1.7.4", features = ["serde"] }
 threatflux-string-analysis = { version = "0.2.5" }
-threatflux-cache = { version = "0.2.4" }
 threatflux-binary-analysis = { version = "0.3.3", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis
 threatflux-threat-detection = { version = "0.2.6", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
@@ -181,7 +176,6 @@ threatflux-threat-detection = { version = "0.2.6", default-features = false, fea
 
 # Core dependencies (using workspace versions)
 tokio = { workspace = true }
-async-trait = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
@@ -210,20 +204,16 @@ ring = { workspace = true }
 # MCP SDK
 rmcp = { workspace = true }
 schemars = { workspace = true }
+tokio-util = { workspace = true }
 
 # HTTP server for MCP
 axum = { workspace = true }
-tower = { workspace = true }
 tower-http = { workspace = true }
 hyper = { workspace = true }
-tokio-stream = { workspace = true }
-futures-util = { workspace = true }
 uuid = { workspace = true }
 
 # OpenAPI documentation
 utoipa = { workspace = true }
-utoipa-redoc = { workspace = true }
-utoipa-swagger-ui = { workspace = true }
 
 # Static analysis dependencies
 addr2line = { workspace = true }
@@ -235,12 +225,8 @@ petgraph = { workspace = true }
 yara-x = { workspace = true }
 walkdir = { workspace = true }
 
-# Network and repository analysis
-strsim = { workspace = true }
-reqwest = { workspace = true }
+# Links the reviewed native zlib; see the workspace entry.
 git2 = { workspace = true }
-url = { workspace = true }
-edit-distance = { workspace = true }
 
 # Archive analysis
 cfb = { workspace = true }
@@ -253,6 +239,10 @@ quick-xml = { workspace = true }
 base64 = { workspace = true }
 
 [dev-dependencies]
+# The SDK client, compiled only for tests (in-process MCP tests).
+rmcp = { workspace = true, features = ["client"] }
+# `ServiceExt::oneshot` drives the axum Router in-process.
+tower = { workspace = true, features = ["util"] }
 tempfile = { workspace = true }
 mockall = { workspace = true }
 proptest = { workspace = true }
@@ -283,7 +273,6 @@ harness = false
 [profile.release]
 lto = "fat"
 codegen-units = 1
-panic = "abort"
 strip = true
 opt-level = 3
 

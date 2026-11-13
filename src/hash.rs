@@ -73,6 +73,15 @@ pub async fn calculate_all_hashes(path: &Path) -> Result<Hashes> {
     })
 }
 
+/// SHA-256 only (one pass over the file); the cheap way to identify content.
+pub async fn calculate_sha256_only(path: &Path) -> Result<String> {
+    let path = path.to_path_buf();
+    let semaphore = get_hash_semaphore();
+    let _permit = semaphore.acquire().await.unwrap();
+
+    task::spawn_blocking(move || calculate_sha256(&path)).await?
+}
+
 pub async fn calculate_md5(path: &Path) -> Result<String> {
     let path = path.to_path_buf();
     let semaphore = get_hash_semaphore();

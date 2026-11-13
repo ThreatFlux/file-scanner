@@ -1,430 +1,242 @@
 # Usage Guide
 
-Comprehensive guide for using File Scanner's features and capabilities.
+`file-scanner` is a command-line scanner and an MCP server. This guide is the command-line reference.
+The MCP server is described in [MCP.md](MCP.md). Every flag below is taken from `file-scanner --help`
+and each subcommand's `--help`.
 
-## Table of Contents
-
-- [Command Line Interface](#command-line-interface)
-- [Basic Usage](#basic-usage)
-- [Analysis Options](#analysis-options)
-- [Output Examples](#output-examples)
-- [Advanced Examples](#advanced-examples)
-- [Batch Processing](#batch-processing)
-- [Integration with Other Tools](#integration-with-other-tools)
-- [Real-World Scenarios](#real-world-scenarios)
-
-## Command Line Interface
-
-### Synopsis
-
-```bash
-file-scanner [OPTIONS] <FILE_PATH | COMMAND>
-```
-
-### Global Options
+## Synopsis
 
 ```text
--h, --help                    Print help information
--V, --version                 Print version information
--f, --format <FORMAT>         Output format [json|yaml|pretty] (default: pretty)
--o, --output <FILE>           Write output to file instead of stdout
-    --no-color                Disable colored output
-    --quiet                   Suppress non-essential output
+file-scanner [OPTIONS] [FILE_PATH] [COMMAND]
 ```
 
-### Analysis Options
+With a `FILE_PATH` and no subcommand, the scanner analyzes that one file and prints a report on stdout.
+It takes exactly one file. There is no `-` for stdin, no `-o`, no `--quiet` and no `analyze` subcommand.
+`file-scanner --version` prints the version.
+
+## Subcommands
+
+| Command | What it does |
+|---------|--------------|
+| `mcp-stdio` | Run the MCP server on stdin and stdout. |
+| `mcp-http` | Run the MCP server over Streamable HTTP at `/mcp`. |
+| `mcp-sse` | Deprecated alias of `mcp-http`. |
+| `llm-analyze` | A compact digest of one file, meant for writing a YARA rule. |
+| `yara-scan` | Scan a file or directory with YARA rules. |
+| `analyze-npm` | Check an npm package for malicious code and vulnerable dependencies. |
+| `analyze-python` | Check a Python package the same way. |
+| `analyze-java` | Analyze a JAR, WAR, EAR, APK, AAR or class file. |
+
+## Scanning one file
+
+### Options
 
 ```text
--s, --strings                 Extract ASCII and Unicode strings
-    --min-string-len <N>      Minimum string length (default: 4)
-    --max-strings <N>         Maximum strings to extract (default: 10000)
-
--x, --hex-dump                Generate hex dump
-    --hex-dump-size <N>       Hex dump size in bytes (default: 256)
-    --hex-dump-offset <N>     Hex dump offset (-N for end offset)
-
--v, --verify-signatures       Verify digital signatures
-    --sig-check-all           Check all signature types
-
--a, --all                     Enable all analysis features
-    --fast                    Fast mode (skip time-intensive checks)
+  -f, --format <FORMAT>                    Output format (json, yaml, pretty)
+  -a, --all                                Enable all analysis options
+  -s, --strings                            Extract strings from file
+      --min-string-len <MIN_STRING_LEN>    Minimum string length to extract
+  -v, --verify-signatures                  Verify digital signatures
+      --hex-dump                           Include hex dump of file header/footer
+      --hex-dump-size <HEX_DUMP_SIZE>      Bytes to dump from start of file [default: 512]
+      --hex-dump-offset <HEX_DUMP_OFFSET>  Hex dump offset (0 for header, negative for footer)
+      --symbols                            Analyze function symbols and symbol tables
+      --control-flow                       Analyze control flow graphs and patterns
+      --vulnerabilities                    Detect security vulnerabilities
+      --code-quality                       Analyze code quality metrics
+      --dependencies                       Analyze library dependencies and imports
+      --entropy                            Analyze entropy patterns and packing detection
+      --disassembly                        Disassemble binary code
+      --threats                            Detect threats and malware patterns
+      --behavioral                         Analyze behavioral patterns
+      --yara-indicators                    Extract YARA rule indicators
+  -h, --help                               Print help
+  -V, --version                            Print version
 ```
 
-### MCP Server Commands
+Metadata, hashes (MD5, SHA-256, SHA-512, BLAKE3) and binary format information are always included.
+Each other flag adds one section to the report. `--all` turns every section on.
+
+### Output formats
+
+`--format json` prints compact JSON on one line. `--format yaml` prints YAML. Without `--format`, or with
+any other value (including `pretty`), the output is indented JSON. Only `json` and `yaml` change the
+output.
+
+```bash
+file-scanner sample.txt --strings --min-string-len 4 --format yaml
+```
+
+The output below is shortened. The lines before `extracted_strings` (path, size, times, permissions, MIME type,
+`hashes` and `binary_info`) and, after `hex_dump`, `owner_uid`, `group_gid` and the analysis keys
+(all `null` here) are left out.
+
+```yaml
+extracted_strings:
+  total_count: 1
+  unique_count: 1
+  ascii_strings:
+  - hello scanner http://example.com/x
+  unicode_strings: []
+  interesting_strings:
+  - category: URL
+    value: hello scanner http://example.com/x
+    offset: 0
+signature_info: null
+hex_dump: null
+```
+
+Sections you did not ask for are present and `null`. Errors go to stderr and the exit status is 1:
+
+```console
+$ file-scanner /nonexistent
+Error: File not found: /nonexistent
+$ echo $?
+1
+```
+
+An unknown flag is a usage error with exit status 2.
+
+### Strings
+
+```bash
+file-scanner sample.bin --strings                       # minimum length 4
+file-scanner sample.bin --strings --min-string-len 8
+```
+
+The report keeps at most 1000 ASCII and 1000 UTF-16 strings, and puts URLs, paths, IP addresses and
+similar strings in `interesting_strings`. There is no `--max-strings` flag. For more control, use the MCP
+tools `query_analysis` and `search_strings`, or `llm-analyze --max-strings`.
+
+### Hex dump
+
+```bash
+file-scanner sample.bin --hex-dump                              # first 512 bytes
+file-scanner sample.bin --hex-dump --hex-dump-size 64
+file-scanner sample.bin --hex-dump --hex-dump-offset -64 --hex-dump-size 64   # last 64 bytes
+file-scanner sample.bin --hex-dump --hex-dump-offset 4096 --hex-dump-size 128
+```
+
+A negative offset dumps the end of the file. A non-negative offset starts at that byte.
+
+### Signatures
+
+```bash
+file-scanner sample.exe --verify-signatures
+```
+
+Checks Authenticode (PE), macOS code signatures and GPG signatures. The result has `is_signed` and a
+`verification_status`; a check that could not run is reported as not checked rather than as unsigned.
+
+### Everything
+
+```bash
+file-scanner /bin/ls --all --format json > ls.json
+```
+
+## llm-analyze
 
 ```text
-mcp-stdio                     Start MCP server with STDIO transport
-mcp-http --port <PORT>        Start MCP server with HTTP transport
-mcp-sse --port <PORT>         Start MCP server with SSE transport
+Usage: file-scanner llm-analyze [OPTIONS] <FILE_PATH>
+      --token-limit <TOKEN_LIMIT>              Token limit for response [default: 25000]
+      --min-string-length <MIN_STRING_LENGTH>  Minimum string length [default: 6]
+      --max-strings <MAX_STRINGS>              Maximum strings to return [default: 50]
+      --max-imports <MAX_IMPORTS>              Maximum imports to return [default: 30]
+      --suggest-yara-rule                      Generate YARA rule suggestion
 ```
-
-## Basic Usage
-
-### Simple File Scan
 
 ```bash
-# Basic metadata and hashes
-file-scanner /path/to/file.exe
-
-# With string extraction
-file-scanner --strings /path/to/file.exe
-
-# With hex dump
-file-scanner --hex-dump /path/to/file.exe
-
-# All features
-file-scanner --all /path/to/file.exe
+file-scanner llm-analyze sample.bin --max-strings 20 --suggest-yara-rule
 ```
 
-### Output Examples
+```json
+{"md5":"436e...","file_size":34,"key_strings":["hello scanner http://example.com/x"],
+ "hex_patterns":["68 65 6C ...","6C 6C 6F ..."],"imports":[],"opcodes":[],"entropy":3.98,
+ "yara_rule_suggestion":"rule sample_bin {\n    meta:\n        md5 = \"436e...\"\n        file_size = 34\n    ...
+   condition:\n        filesize == 34 and 1 of ($s*) and $header at 0\n}\n"}
+```
 
-#### Default (Pretty) Output
+Without `--suggest-yara-rule`, `yara_rule_suggestion` is `null`. Long values are shortened here.
+
+## yara-scan
 
 ```text
-$ file-scanner /bin/ls
-
-File Scanner Analysis Report
-==========================
-
-File: /bin/ls
-Size: 142,848 bytes
-Type: ELF 64-bit executable
-Modified: 2024-01-15 10:30:00
-
-Hashes:
-  MD5:    d41d8cd98f00b204e9800998ecf8427e
-  SHA256: e3b0c44298fc1c149afbf4c8996fb924
-  SHA512: cf83e1357eefb8bdf1542850d66d8007
-  BLAKE3: af1349b9f5f9a1a6a0404dea36dcc949
-
-Binary Info:
-  Format: ELF
-  Arch:   x86_64
-  Compiler: GCC 9.3.0
+Usage: file-scanner yara-scan [OPTIONS] --rule <RULE> <PATH>
+  -r, --rule <RULE>                        YARA rule file, directory of .yar/.yara files, or inline rule
+  -R, --recursive                          Recursively scan directories
+      --max-file-size-mb <MAX_FILE_SIZE_MB>  Maximum file size to scan in MB [default: 100]
+      --detailed                           Show detailed match information
+      --max-files <MAX_FILES>              Most files to examine (default: no limit)
+      --timeout <TIMEOUT>                  Stop the scan after this many seconds (default: no limit)
 ```
-
-#### JSON Output
 
 ```bash
-file-scanner --format json /bin/ls > analysis.json
+file-scanner yara-scan ./samples --recursive \
+  --rule 'rule t { strings: $a = "scanner" condition: $a }'
 ```
 
-#### YAML Output
+```json
+{"total_files_scanned":2,"total_matches":1,"scan_duration_ms":71,"files_matched":1,"rules_compiled":1,
+ "rule_hits":[{"rule":"t","files":1}],"matches":[{"file_path":"./samples/note.txt", ...}],"errors":[], ...}
+```
+
+`--rule` takes a path or the rule text itself. Use `--max-files` and `--timeout` on large trees.
+
+## Package analysis
 
 ```bash
-file-scanner --format yaml /bin/ls
+file-scanner analyze-npm ./some-package          # a directory, package.json, or the .tgz from `npm pack`
+file-scanner analyze-python ./pkg-1.0-py3-none-any.whl   # .whl, .tar.gz, .zip or a source directory
+file-scanner analyze-java ./app.jar              # JAR/WAR/EAR/APK/AAR or a class file
 ```
 
-## Advanced Analysis Options
+Each prints a JSON report. The analysis is offline: the scanner does not download packages or contact
+a registry. Vulnerability data is a built-in list that covers only a small set of well-known packages.
+A wrong input gives a message that says what to pass, for example:
 
-### String Extraction
+```console
+$ file-scanner analyze-java note.txt
+Error: Not a Java archive or class file: it is neither a ZIP (JAR/WAR/EAR/AAR/APK) nor a class file ...
+```
+
+## Scanning many files
+
+The scanner takes one file per run. Loop in the shell:
 
 ```bash
-# Basic string extraction
-file-scanner --strings malware.exe
+for f in samples/*; do
+  file-scanner "$f" --format json
+done > scans.jsonl
 
-# Custom minimum length
-file-scanner --strings --min-string-len 8 malware.exe
-
-# Limit number of strings
-file-scanner --strings --max-strings 100 malware.exe
-
-# Combine with other options
-file-scanner --strings --hex-dump malware.exe
+# Several at once
+find samples -type f -print0 | xargs -0 -n1 -P4 file-scanner --format json > scans.jsonl
 ```
 
-### Hex Dump Options
+Each run prints one line of JSON with `--format json`, so the output is JSON Lines. Failed files print
+an error on stderr and do not stop the loop.
+
+## Working with the output
 
 ```bash
-# Default header dump (256 bytes)
-file-scanner --hex-dump file.bin
-
-# Custom size
-file-scanner --hex-dump --hex-dump-size 512 file.bin
-
-# Footer dump (last 256 bytes)
-file-scanner --hex-dump --hex-dump-offset=-256 file.bin
-
-# Specific offset
-file-scanner --hex-dump --hex-dump-offset=1024 --hex-dump-size 128 file.bin
+file-scanner sample.bin --format json | jq '{sha256: .hashes.sha256, size: .file_size}'
+file-scanner sample.bin --strings --format json \
+  | jq -r '.extracted_strings.interesting_strings[] | select(.category=="URL") | .value'
 ```
 
-### Signature Verification
+Field names come from the JSON itself; run a scan once and look.
+
+## MCP server
 
 ```bash
-# Verify all signatures
-file-scanner --verify-signatures signed.exe
-
-# Windows Authenticode
-file-scanner --verify-signatures setup.exe
-
-# macOS code signature
-file-scanner --verify-signatures app.dmg
-
-# GPG signature
-file-scanner --verify-signatures package.tar.gz.sig
+file-scanner mcp-stdio                           # for an MCP client that starts the process
+file-scanner mcp-http --port 3000                # loopback only by default
 ```
 
-## Advanced Examples
-
-### Malware Analysis
-
-```bash
-# Comprehensive malware scan
-file-scanner --all suspicious.exe --format json > report.json
-
-# Focus on behavioral indicators
-file-scanner --strings --hex-dump suspicious.exe | \
-  grep -E "(CreateRemoteThread|VirtualAlloc|WriteProcessMemory)"
-
-# Extract and analyze strings
-file-scanner --strings --min-string-len 10 malware.bin | \
-  jq '.strings[] | select(.category == "suspicious")'
-```
-
-### Binary Comparison
-
-```bash
-# Compare two binaries
-diff <(file-scanner --format json file1.exe) \
-     <(file-scanner --format json file2.exe)
-
-# Hash comparison
-file-scanner file1.exe file2.exe | grep SHA256
-```
-
-### Forensic Investigation
-
-```bash
-# Scan with timestamp preservation
-file-scanner --all evidence.bin --format json \
-  --output "evidence_$(date +%Y%m%d_%H%M%S).json"
-
-# Chain of custody documentation
-file-scanner evidence.bin | tee -a investigation.log
-```
-
-## Batch Processing
-
-### Using GNU Parallel
-
-```bash
-# Process multiple files in parallel
-find /samples -name "*.exe" | \
-  parallel -j 8 file-scanner --format json {} \> {.}_analysis.json
-
-# With progress bar
-find /samples -type f | \
-  parallel --bar -j 4 file-scanner --strings {} \> results/{/.}.txt
-```
-
-### Shell Loops
-
-```bash
-# Process directory of files
-for file in /path/to/samples/*; do
-  echo "Analyzing: $file"
-  file-scanner --all "$file" --format json > "${file%.exe}_report.json"
-done
-
-# With error handling
-for file in samples/*.bin; do
-  if file-scanner "$file" > "reports/$(basename "$file").txt" 2>&1; then
-    echo "✓ Processed: $file"
-  else
-    echo "✗ Failed: $file"
-  fi
-done
-```
-
-### Batch Script Example
-
-```bash
-#!/bin/bash
-# batch_scan.sh - Scan directory of samples
-
-SAMPLES_DIR="${1:-./samples}"
-OUTPUT_DIR="${2:-./reports}"
-mkdir -p "$OUTPUT_DIR"
-
-echo "Scanning files in $SAMPLES_DIR..."
-for file in "$SAMPLES_DIR"/*; do
-  if [ -f "$file" ]; then
-    basename=$(basename "$file")
-    echo "Processing: $basename"
-    file-scanner --all "$file" --format json \
-      > "$OUTPUT_DIR/${basename}.json" 2>&1
-  fi
-done
-echo "Scan complete. Reports in $OUTPUT_DIR"
-```
-
-## Integration with Other Tools
-
-### With jq for JSON Processing
-
-```bash
-# Extract specific fields
-file-scanner --format json malware.exe | \
-  jq '{name: .file_name, md5: .hashes.md5, strings: .strings.total_count}'
-
-# Filter suspicious strings
-file-scanner --strings --format json malware.exe | \
-  jq '.strings[] | select(.value | test("cmd|powershell|http"))'
-
-# Create CSV report
-file-scanner --format json *.exe | \
-  jq -r '[.file_name, .file_size, .hashes.md5] | @csv' > report.csv
-```
-
-### With grep and awk
-
-```bash
-# Find files with specific imports
-for file in *.exe; do
-  if file-scanner --strings "$file" | grep -q "VirtualAlloc"; then
-    echo "$file contains VirtualAlloc"
-  fi
-done
-
-# Extract hash values
-file-scanner file.exe | awk '/SHA256:/ {print $2}'
-```
-
-### YARA Integration
-
-```bash
-# Generate YARA rule from analysis
-file-scanner --all --format json malware.exe | \
-  python3 generate_yara.py > malware.yar
-
-# Scan with existing YARA rules
-file-scanner --strings malware.exe | \
-  yara -s rules.yar -
-```
-
-### VirusTotal Integration
-
-```bash
-# Get hash and check with VT
-MD5=$(file-scanner file.exe --format json | jq -r .hashes.md5)
-curl -s -X GET "https://www.virustotal.com/api/v3/files/$MD5" \
-  -H "x-apikey: $VT_API_KEY"
-```
-
-## Real-World Scenarios
-
-### Incident Response
-
-```bash
-# Quick triage of suspicious process
-file-scanner /proc/$(pgrep suspicious)/exe --all
-
-# Memory dump analysis
-file-scanner --strings --hex-dump memory.dmp | \
-  tee incident_$(date +%Y%m%d).log
-
-# Collect IoCs
-file-scanner --all --format json suspicious.exe | \
-  jq '.strings[] | select(.category == "url" or .category == "ip")'
-```
-
-### Security Research
-
-```bash
-# Analyze malware family
-for sample in malware_family/*.exe; do
-  file-scanner --all --format json "$sample"
-done | jq -s 'group_by(.binary_info.compiler) |
-  map({compiler: .[0].binary_info.compiler, count: length})'
-
-# Extract common strings
-file-scanner --strings family/*.exe | \
-  sort | uniq -c | sort -nr | head -20
-```
-
-### Compliance Scanning
-
-```bash
-# Verify all executables are signed
-find /usr/local/bin -type f -executable | while read file; do
-  if ! file-scanner --verify-signatures "$file" | grep -q "Valid signature"; then
-    echo "Unsigned: $file"
-  fi
-done
-
-# Generate software inventory
-find / -name "*.exe" -o -name "*.dll" 2>/dev/null | \
-  parallel -j 4 file-scanner --format json {} | \
-  jq -s '[.[] | {path: .file_path, hash: .hashes.sha256, signed: .signatures.valid}]' \
-  > software_inventory.json
-```
-
-### Development & CI/CD
-
-```bash
-# Pre-commit hook
-#!/bin/bash
-for file in $(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(exe|dll|so)$'); do
-  echo "Scanning: $file"
-  file-scanner --verify-signatures "$file" || exit 1
-done
-
-# Build verification
-file-scanner --all ./target/release/myapp --format json | \
-  jq '{size: .file_size, hash: .hashes.sha256, stripped: .binary_info.is_stripped}'
-```
-
-## Performance Tips
-
-### Large Files
-
-```bash
-# Use fast mode for quick analysis
-file-scanner --fast large_file.bin
-
-# Limit string extraction
-file-scanner --strings --max-strings 1000 large_file.bin
-
-# Skip expensive operations
-file-scanner --no-signatures large_file.bin
-```
-
-### Multiple Files
-
-```bash
-# Use parallel processing
-find . -type f | parallel -j $(nproc) file-scanner {} \> {.}.json
-
-# Batch with rate limiting
-find . -type f | parallel -j 4 --delay 0.5 file-scanner {}
-```
+Flags for both are listed in [MCP.md](MCP.md) and in the [deployment guide](../DEPLOYMENT_GUIDE.md).
 
 ## Troubleshooting
 
-### Common Issues
-
-```bash
-# Debug mode
-RUST_LOG=debug file-scanner file.exe
-
-# Verbose output
-file-scanner -vvv file.exe
-
-# Test specific feature
-file-scanner --strings --max-strings 10 test.exe
-```
-
-### Error Messages
-
-- `Permission denied`: Run with appropriate permissions or sudo
-- `File not found`: Check file path and permissions
-- `Invalid UTF-8`: File may be corrupted or use --no-strings
-- `Timeout`: Use --fast mode or increase limits
-
-## Next Steps
-
-- Learn about [MCP Integration](MCP.md) for AI tools
-- Understand the [Architecture](ARCHITECTURE.md)
-- Check [Performance Guide](PERFORMANCE.md) for optimization
-- Read the [FAQ](FAQ.md) for common questions
+- `unexpected argument '...' found`: the flag does not exist. Compare with the lists above.
+- `Error: File path is required for scanning mode`: you ran the binary with no file and no subcommand.
+- `Error: File not found`: check the path. Relative paths resolve against the current directory.
+- Slow scans on big files: scan without `--all`, and add only the sections you need.

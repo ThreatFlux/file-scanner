@@ -65,7 +65,7 @@ fn test_file_scanner_mcp_creation() {
     // Test that we can create the MCP server
     let info = mcp.get_info();
     assert_eq!(info.server_info.name, "file-scanner");
-    assert_eq!(info.server_info.version, "0.1.0");
+    assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
     assert!(info.instructions.is_some());
     assert!(info.capabilities.tools.is_some());
 }

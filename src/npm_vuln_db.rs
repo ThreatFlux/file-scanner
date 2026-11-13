@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use strsim::levenshtein;
+use std::sync::OnceLock;
+
+use crate::package_scan::{edit_distance, AdvisoryDataInfo};
 
 use crate::dependency_analysis::{KnownVulnerability, VulnerabilitySeverity};
 
@@ -170,47 +172,29 @@ pub fn create_npm_vulnerability_database() -> NpmVulnerabilityDatabase {
                 cve_id: "GHSA-2pr3-vjfc-gx2g".to_string(),
                 severity: VulnerabilitySeverity::High,
                 description: "Infinite loop causing Denial of Service".to_string(),
-                affected_versions: vec!["1.4.1".to_string(), "1.4.44-liberty".to_string()],
+                affected_versions: vec![
+                    "1.4.1".to_string(),
+                    "1.4.2".to_string(),
+                    "1.4.44-liberty-2".to_string(),
+                ],
                 fixed_in: Some("1.4.0".to_string()),
                 cvss_score: Some(7.5),
                 published_date: Some("2022-01-08".to_string()),
             },
-            affected_version_ranges: vec![VersionRange {
-                min_version: Some("1.4.1".to_string()),
-                max_version: Some("1.4.44-liberty".to_string()),
-                includes_min: true,
-                includes_max: true,
-            }],
+            affected_version_ranges: ["1.4.1", "1.4.2", "1.4.44-liberty-2"]
+                .iter()
+                .map(|v| VersionRange {
+                    min_version: Some((*v).to_string()),
+                    max_version: Some((*v).to_string()),
+                    includes_min: true,
+                    includes_max: true,
+                })
+                .collect(),
             patched_versions: vec!["1.4.0".to_string()],
             references: vec!["https://github.com/advisories/GHSA-2pr3-vjfc-gx2g".to_string()],
             disclosure_date: Some("2022-01-08".to_string()),
             exploit_available: true,
             malware_indicators: vec!["infinite loop".to_string(), "protestware".to_string()],
-        }],
-    );
-
-    // Common vulnerability patterns (not specific packages but patterns to detect)
-    vulnerabilities.insert(
-        "PATTERN-TYPOSQUATTING".to_string(),
-        vec![PackageVulnerability {
-            package_name: "PATTERN-TYPOSQUATTING".to_string(),
-            vulnerability: KnownVulnerability {
-                cve_id: "PATTERN-001".to_string(),
-                severity: VulnerabilitySeverity::High,
-                description:
-                    "Typosquatting attack pattern - packages with names similar to popular packages"
-                        .to_string(),
-                affected_versions: vec!["*".to_string()],
-                fixed_in: None,
-                cvss_score: Some(8.0),
-                published_date: None,
-            },
-            affected_version_ranges: vec![],
-            patched_versions: vec![],
-            references: vec![],
-            disclosure_date: None,
-            exploit_available: true,
-            malware_indicators: vec!["typosquatting".to_string(), "similar name".to_string()],
         }],
     );
 
@@ -280,42 +264,438 @@ pub fn create_npm_vulnerability_database() -> NpmVulnerabilityDatabase {
     }
 }
 
-/// Check if a package has known vulnerabilities
+/// Check if a package has known vulnerabilities at an exact version.
+///
+/// `version` must be a concrete version (`4.17.4`, `1.0.0-rc.1`). A range
+/// such as `^1.2.0` is not a version: use [`check_dependency_spec`].
 pub fn check_package_vulnerabilities(package_name: &str, version: &str) -> Vec<KnownVulnerability> {
-    let db = create_npm_vulnerability_database();
-    let mut found_vulnerabilities = vec![];
-
-    if let Some(package_vulns) = db.vulnerabilities.get(package_name) {
-        for vuln in package_vulns {
-            if is_version_affected(version, &vuln.affected_version_ranges) {
-                found_vulnerabilities.push(vuln.vulnerability.clone());
-            }
-        }
+    let Some(parsed) = SemVer::parse(version) else {
+        return vec![];
+    };
+    let mut found: Vec<KnownVulnerability> = advisories_for(package_name)
+        .into_iter()
+        .filter(|vuln| {
+            vuln.affected_version_ranges
+                .iter()
+                .any(|r| range_contains(r, &parsed))
+        })
+        .map(|vuln| vuln.vulnerability)
+        .collect();
+    let lower = package_name.to_ascii_lowercase();
+    let normalized = parsed.to_string();
+    if found.is_empty()
+        && get_known_malicious_versions()
+            .iter()
+            .any(|(n, v)| *n == lower && *v == normalized)
+    {
+        found.push(KnownVulnerability {
+            cve_id: "KNOWN-COMPROMISED-RELEASE".to_string(),
+            severity: VulnerabilitySeverity::Critical,
+            description: format!(
+                "{package_name} {version} is a release that was published with malicious code (hijacked or trojaned). Do not install it."
+            ),
+            affected_versions: vec![version.to_string()],
+            fixed_in: None,
+            cvss_score: None,
+            published_date: None,
+        });
     }
-
-    found_vulnerabilities
+    found
 }
 
-/// Check if a version is within the affected ranges
-fn is_version_affected(version: &str, ranges: &[VersionRange]) -> bool {
-    // Simple version check - in production, use a proper semver library
-    for range in ranges {
-        // If specific versions are listed in affected_versions, check exact match
-        if let (Some(min), Some(max)) = (&range.min_version, &range.max_version) {
-            if min == max && version == min {
-                return true;
-            }
-        }
+fn advisories_for(package_name: &str) -> Vec<PackageVulnerability> {
+    static DB: OnceLock<NpmVulnerabilityDatabase> = OnceLock::new();
+    DB.get_or_init(create_npm_vulnerability_database)
+        .vulnerabilities
+        .get(&package_name.to_ascii_lowercase())
+        .cloned()
+        .unwrap_or_default()
+}
 
-        // TODO: Implement proper semver range checking
-        // For now, do simple string comparison
-        if version.contains('-') || version.contains('+') {
-            // Pre-release or build metadata versions need special handling
-            return true; // Conservative approach
+/// What the offline table says about one dependency declaration.
+#[derive(Debug, Clone, Default)]
+pub struct SpecCheck {
+    /// Advisories that apply to the exact version (declared or resolved).
+    pub vulnerabilities: Vec<KnownVulnerability>,
+    /// Advisories whose affected range contains the lowest version the
+    /// declared range admits. The installed version may be newer and
+    /// unaffected; a lock file settles it.
+    pub range_floor_matches: Vec<KnownVulnerability>,
+    /// The exact version the check used, if there was one.
+    pub version_used: Option<String>,
+}
+
+/// Check a `package.json` dependency declaration.
+///
+/// `resolved` is the version a lock file pins, when there is one; it wins over
+/// the declared spec. Otherwise an exact spec (`1.2.3`, `=1.2.3`) is checked
+/// as that version, and a range is checked at its lowest admitted version and
+/// reported separately in [`SpecCheck::range_floor_matches`]. Git, file, URL,
+/// tag and alias specs cannot be judged and give an empty result.
+pub fn check_dependency_spec(name: &str, spec: &str, resolved: Option<&str>) -> SpecCheck {
+    let mut check = check_dependency_spec_version(name, spec, resolved);
+    if let Some(entry) = known_malicious_package_entry(name) {
+        check.vulnerabilities.push(entry);
+    }
+    check
+}
+
+/// An entry for a package that is malicious at every version, whatever the
+/// declared range or source.
+fn known_malicious_package_entry(package_name: &str) -> Option<KnownVulnerability> {
+    let lower = package_name.trim().to_ascii_lowercase();
+    get_known_malicious_packages()
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(&lower))
+        .then(|| KnownVulnerability {
+            cve_id: "KNOWN-MALICIOUS-PACKAGE".to_string(),
+            severity: VulnerabilitySeverity::Critical,
+            description: format!(
+                "{package_name} is on the list of packages that are malicious at every version (typosquat, trojan or hijack). Do not install it. Look it up: https://osv.dev/list?q={lower}&ecosystem=npm"
+            ),
+            affected_versions: vec!["*".to_string()],
+            fixed_in: None,
+            cvss_score: None,
+            published_date: None,
+        })
+}
+
+fn check_dependency_spec_version(name: &str, spec: &str, resolved: Option<&str>) -> SpecCheck {
+    if let Some(version) = resolved.and_then(SemVer::parse) {
+        return SpecCheck {
+            vulnerabilities: check_package_vulnerabilities(name, &version.to_string()),
+            range_floor_matches: vec![],
+            version_used: Some(version.to_string()),
+        };
+    }
+    match classify_spec(spec) {
+        SpecKind::Exact(version) => SpecCheck {
+            vulnerabilities: check_package_vulnerabilities(name, &version.to_string()),
+            range_floor_matches: vec![],
+            version_used: Some(version.to_string()),
+        },
+        SpecKind::Range { floor } => SpecCheck {
+            vulnerabilities: vec![],
+            range_floor_matches: check_package_vulnerabilities(name, &floor.to_string()),
+            version_used: None,
+        },
+        SpecKind::Unknown => SpecCheck::default(),
+    }
+}
+
+/// What a dependency spec pins down.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SpecKind {
+    /// One exact version.
+    Exact(SemVer),
+    /// A range; `floor` is the lowest version it admits.
+    Range {
+        /// Lowest admitted version.
+        floor: SemVer,
+    },
+    /// A tag, URL, git or file spec, or an unparseable string.
+    Unknown,
+}
+
+/// Classify an npm dependency spec.
+pub fn classify_spec(spec: &str) -> SpecKind {
+    let spec = spec.trim();
+    if spec.is_empty() || spec == "*" || spec.eq_ignore_ascii_case("latest") {
+        return SpecKind::Range {
+            floor: SemVer::new(0, 0, 0),
+        };
+    }
+    if spec.contains("://")
+        || spec.starts_with("git")
+        || spec.starts_with("file:")
+        || spec.starts_with("link:")
+        || spec.starts_with("npm:")
+        || spec.starts_with("github:")
+        || spec.starts_with("workspace:")
+        || (spec.contains('/') && !spec.contains(' '))
+    {
+        return SpecKind::Unknown;
+    }
+    let bare = spec.strip_prefix('=').unwrap_or(spec).trim();
+    let bare = bare.strip_prefix('v').unwrap_or(bare);
+    if let Some(version) = SemVer::parse(bare) {
+        return SpecKind::Exact(version);
+    }
+    match range_floor(spec) {
+        Some(floor) => SpecKind::Range { floor },
+        None => SpecKind::Unknown,
+    }
+}
+
+/// Lowest version a semver range admits (an approximation good enough to ask
+/// "could this range install an affected version"). Handles `^`, `~`, `>=`,
+/// `>`, `<`, `<=`, `=`, x-ranges, hyphen ranges and `||`.
+pub fn range_floor(range: &str) -> Option<SemVer> {
+    let mut best: Option<SemVer> = None;
+    for set in range.split("||") {
+        let tokens: Vec<&str> = set.split_whitespace().collect();
+        if tokens.is_empty() {
+            return Some(SemVer::new(0, 0, 0));
+        }
+        let mut floor = SemVer::new(0, 0, 0);
+        let mut understood = false;
+        let mut i = 0;
+        while i < tokens.len() {
+            let token = tokens[i];
+            if i + 2 < tokens.len() && tokens[i + 1] == "-" {
+                // hyphen range "1.2.3 - 2.3.4"
+                if let Some(low) = parse_partial(token) {
+                    floor = floor.max(low);
+                    understood = true;
+                }
+                i += 3;
+                continue;
+            }
+            let (op, rest) = split_operator(token);
+            // "> 1.2.3" written with a space
+            let (rest, advance) = if rest.is_empty() && i + 1 < tokens.len() {
+                (tokens[i + 1], 2)
+            } else {
+                (rest, 1)
+            };
+            if let Some(version) = parse_partial(rest) {
+                understood = true;
+                match op {
+                    "<" | "<=" => {}
+                    ">" => {
+                        let mut v = version;
+                        v.patch = v.patch.saturating_add(1);
+                        v.pre.clear();
+                        floor = floor.max(v);
+                    }
+                    _ => floor = floor.max(version),
+                }
+            }
+            i += advance;
+        }
+        if !understood {
+            return None;
+        }
+        best = Some(best.map_or(floor.clone(), |b| b.min(floor)));
+    }
+    best
+}
+
+fn split_operator(token: &str) -> (&str, &str) {
+    for op in [">=", "<=", ">", "<", "=", "^", "~"] {
+        if let Some(rest) = token.strip_prefix(op) {
+            return (op, rest.trim_start_matches('v'));
+        }
+    }
+    ("", token.trim_start_matches('v'))
+}
+
+/// `1`, `1.2`, `1.x`, `1.2.*`, `1.2.3-rc.1` as the lowest full version.
+fn parse_partial(text: &str) -> Option<SemVer> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if let Some(version) = SemVer::parse(text) {
+        return Some(version);
+    }
+    let mut parts = [0u64; 3];
+    let mut seen = 0;
+    for (i, part) in text.split('.').enumerate() {
+        if i > 2 {
+            return None;
+        }
+        if matches!(part, "x" | "X" | "*") {
+            break;
+        }
+        parts[i] = part.parse().ok()?;
+        seen += 1;
+    }
+    if seen == 0 && !matches!(text.chars().next(), Some('x' | 'X' | '*')) {
+        return None;
+    }
+    Some(SemVer::new(parts[0], parts[1], parts[2]))
+}
+
+fn range_contains(range: &VersionRange, version: &SemVer) -> bool {
+    if let Some(min) = range.min_version.as_deref() {
+        let Some(min) = SemVer::parse(min) else {
+            return false;
+        };
+        let ok = if range.includes_min {
+            *version >= min
+        } else {
+            *version > min
+        };
+        if !ok {
+            return false;
+        }
+    }
+    if let Some(max) = range.max_version.as_deref() {
+        let Some(max) = SemVer::parse(max) else {
+            return false;
+        };
+        let ok = if range.includes_max {
+            *version <= max
+        } else {
+            *version < max
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// A semantic version (<https://semver.org>) with its precedence order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemVer {
+    /// Major.
+    pub major: u64,
+    /// Minor.
+    pub minor: u64,
+    /// Patch.
+    pub patch: u64,
+    /// Pre-release identifiers, empty for a release.
+    pub pre: Vec<PreId>,
+}
+
+/// One dot-separated pre-release identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreId {
+    /// Numeric identifiers compare as numbers and sort below alphanumeric ones.
+    Num(u64),
+    /// Alphanumeric identifiers compare in ASCII order.
+    Alpha(String),
+}
+
+impl PartialOrd for PreId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PreId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Num(a), Self::Num(b)) => a.cmp(b),
+            (Self::Num(_), Self::Alpha(_)) => std::cmp::Ordering::Less,
+            (Self::Alpha(_), Self::Num(_)) => std::cmp::Ordering::Greater,
+            (Self::Alpha(a), Self::Alpha(b)) => a.cmp(b),
+        }
+    }
+}
+
+impl SemVer {
+    /// A release version.
+    pub const fn new(major: u64, minor: u64, patch: u64) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+            pre: Vec::new(),
         }
     }
 
-    false
+    /// Parse `1.2.3`, `v1.2.3`, `1.2.3-rc.1`, `1.2.3+build` (build metadata is
+    /// ignored). Anything that is not a full three-part version gives `None`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let text = text.strip_prefix('v').unwrap_or(text);
+        let text = text.split('+').next()?;
+        let (core, pre) = match text.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (text, None),
+        };
+        let mut numbers = core.split('.');
+        let major = numbers.next()?.parse().ok()?;
+        let minor = numbers.next()?.parse().ok()?;
+        let patch = numbers.next()?.parse().ok()?;
+        if numbers.next().is_some() {
+            return None;
+        }
+        let pre = match pre {
+            None => Vec::new(),
+            Some(pre) => {
+                if pre.is_empty() {
+                    return None;
+                }
+                pre.split('.')
+                    .map(|id| {
+                        id.parse::<u64>()
+                            .map_or_else(|_| PreId::Alpha(id.to_string()), PreId::Num)
+                    })
+                    .collect()
+            }
+        };
+        Some(Self {
+            major,
+            minor,
+            patch,
+            pre,
+        })
+    }
+}
+
+impl std::fmt::Display for SemVer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        if !self.pre.is_empty() {
+            let ids: Vec<String> = self
+                .pre
+                .iter()
+                .map(|id| match id {
+                    PreId::Num(n) => n.to_string(),
+                    PreId::Alpha(a) => a.clone(),
+                })
+                .collect();
+            write!(f, "-{}", ids.join("."))?;
+        }
+        Ok(())
+    }
+}
+
+impl PartialOrd for SemVer {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SemVer {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        (self.major, self.minor, self.patch)
+            .cmp(&(other.major, other.minor, other.patch))
+            .then_with(|| match (self.pre.is_empty(), other.pre.is_empty()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Greater,
+                (false, true) => Ordering::Less,
+                (false, false) => self.pre.cmp(&other.pre),
+            })
+    }
+}
+
+/// Where the advisory data behind [`check_package_vulnerabilities`] comes from.
+pub fn advisory_data_info() -> AdvisoryDataInfo {
+    let db = create_npm_vulnerability_database();
+    let advisory_count = db.vulnerabilities.values().map(Vec::len).sum();
+    let newest = db
+        .vulnerabilities
+        .values()
+        .flatten()
+        .filter_map(|v| v.vulnerability.published_date.clone())
+        .max()
+        .unwrap_or_default();
+    AdvisoryDataInfo {
+        source: "small built-in table compiled into file-scanner; nothing is fetched".to_string(),
+        last_updated: db.last_updated,
+        newest_advisory: newest,
+        package_count: db.vulnerabilities.len(),
+        advisory_count,
+        offline: true,
+        coverage_note: "An empty vulnerability list means the package is not in this table, not that it has no known vulnerabilities. Run `npm audit` or query OSV for full coverage."
+            .to_string(),
+    }
 }
 
 /// Comprehensive malicious patterns database with real-world threat intelligence
@@ -327,7 +707,7 @@ pub fn get_malicious_patterns() -> Vec<MaliciousPackagePattern> {
             description: "Package downloads and executes external code during installation"
                 .to_string(),
             indicators: vec![
-                "curl.*http.*|.*exec".to_string(),
+                r"curl.*http.*\|.*exec".to_string(),
                 "wget.*http.*exec".to_string(),
                 "fetch.*http.*eval".to_string(),
                 "postinstall.*download".to_string(),
@@ -460,9 +840,9 @@ pub fn get_malicious_patterns() -> Vec<MaliciousPackagePattern> {
             indicators: vec![
                 "\\.ssh/id_rsa".to_string(),
                 "\\.aws/credentials".to_string(),
-                "\\.npmrc".to_string(),
-                "\\.env".to_string(),
-                "config\\.json".to_string(),
+                "(^|[\\s'\"/=])\\.npmrc\\b".to_string(),
+                // A dot-env file named on its own, not `tsconfig.json` or `process.env`.
+                "(^|[\\s'\"/=])\\.env(\\s|$|['\"])".to_string(),
                 "/etc/passwd".to_string(),
                 "/etc/shadow".to_string(),
                 "readdir.*recursive".to_string(),
@@ -682,14 +1062,15 @@ pub struct MaliciousPackagePattern {
     pub severity: String,
 }
 
-/// Known malicious npm packages list (for quick lookup)
+/// Names of packages that are malicious at every version.
+///
+/// Entries are bare names. Legitimate packages never belong here (an entry labels
+/// the package Critical); a compromised release of a legitimate package goes in
+/// [`get_known_malicious_versions`] instead.
 pub fn get_known_malicious_packages() -> Vec<&'static str> {
     vec![
         // Known malicious packages
         "flatmap-stream",
-        "event-stream@3.3.6",
-        "eslint-scope@3.7.2",
-        "bootstrap-sass@3.3.7",
         "crossenv",
         "cross-env.js",
         "d3.js",
@@ -698,15 +1079,12 @@ pub fn get_known_malicious_packages() -> Vec<&'static str> {
         "gruntcli",
         "http-proxy.js",
         "jquery.js",
-        "mariadb",
         "mongose",
         "mssql.js",
         "mssql-node",
         "node-fabric",
-        "node-opencv",
         "node-opensl",
         "node-openssl",
-        "node-sqlite",
         "node-tkinter",
         "nodecaffe",
         "nodefabric",
@@ -719,25 +1097,9 @@ pub fn get_known_malicious_packages() -> Vec<&'static str> {
         "openssl.js",
         "proxy.js",
         "shadowsock",
-        "smb",
         "sqlite.js",
         "sqliter",
-        "sqlserver",
-        "tkinter",
         // Recent supply chain attacks (2021-2024)
-        "node-ipc@9.2.2",
-        "node-ipc@10.1.1",
-        "node-ipc@10.1.2",
-        "colors@1.4.1",
-        "colors@1.4.2",
-        "faker@6.6.6",
-        "ua-parser-js@0.7.29",
-        "ua-parser-js@0.8.0",
-        "ua-parser-js@1.0.0",
-        "coa@2.0.3",
-        "coa@2.0.4",
-        "rc@1.2.9",
-        "rc@1.3.0",
         // Cryptocurrency miners
         "electron-native-notify",
         "getcookies",
@@ -772,20 +1134,15 @@ pub fn get_known_malicious_packages() -> Vec<&'static str> {
         "internal-auth",
         "dev-tools-internal",
         // Typosquatting attempts (popular packages)
-        "reakt",    // react
-        "reactt",   // react
-        "react-js", // react
-        "reactjs",  // react
-        "babelcli", // babel-cli
-        "babel-preset-es2015",
-        "babel-preset-es2016",
-        "babel-preset-es2017",
+        "reakt",               // react
+        "reactt",              // react
+        "react-js",            // react
+        "babelcli",            // babel-cli
         "expresss",            // express
         "expres",              // express
         "express-js",          // express
         "lodaash",             // lodash
         "lod4sh",              // lodash
-        "lo-dash",             // lodash
         "lodash-js",           // lodash
         "axiooss",             // axios
         "axios-js",            // axios
@@ -797,7 +1154,6 @@ pub fn get_known_malicious_packages() -> Vec<&'static str> {
         "es-lint",             // eslint
         "typescriptt",         // typescript
         "type-script",         // typescript
-        "vuejs",               // vue
         "vue-js",              // vue
         "vue2",                // vue
         "angularr",            // angular
@@ -809,7 +1165,6 @@ pub fn get_known_malicious_packages() -> Vec<&'static str> {
         "underscore-js",       // underscore
         "backbonejs",          // backbone
         "backbone-js",         // backbone
-        "requirejs",           // require
         "require-js",          // require
         "gruntjs",             // grunt
         "grunt-js",            // grunt
@@ -817,7 +1172,6 @@ pub fn get_known_malicious_packages() -> Vec<&'static str> {
         "gulp-js",             // gulp
         "bowerr",              // bower
         "bower-js",            // bower
-        "yarnpkg",             // yarn
         "yarn-js",             // yarn
         "npm-js",              // npm
         "npmjs",               // npm
@@ -828,56 +1182,86 @@ pub fn get_known_malicious_packages() -> Vec<&'static str> {
         "prettier-js",         // prettier
         "eslint-js",           // eslint
         "webpack-cli-js",      // webpack-cli
-        "babel-preset-react",
-        "babel-preset-stage-0",
-        "font-awesome",
-        "react-dev-utils",
-        "react-scripts",
-        "vue-cli",
-        "webpack-dev-server",
     ]
 }
 
-/// Enhanced typosquatting detection using Levenshtein distance and pattern analysis
+/// Compromised releases of otherwise legitimate packages: `(name, version)`.
+pub fn get_known_malicious_versions() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("event-stream", "3.3.6"),
+        ("eslint-scope", "3.7.2"),
+        ("node-ipc", "9.2.2"),
+        ("node-ipc", "10.1.1"),
+        ("node-ipc", "10.1.2"),
+        ("colors", "1.4.1"),
+        ("colors", "1.4.2"),
+        ("faker", "6.6.6"),
+        ("ua-parser-js", "0.7.29"),
+        ("ua-parser-js", "0.8.0"),
+        ("ua-parser-js", "1.0.0"),
+        ("coa", "2.0.3"),
+        ("coa", "2.0.4"),
+        ("rc", "1.2.9"),
+        ("rc", "1.3.0"),
+    ]
+}
+
+/// Whether `name@version` is a release the built-in table marks as malicious
+/// (hijacked or trojaned). `version` is normalised first (`=1.2.3`, `v1.2.3`).
+pub fn is_known_malicious_release(name: &str, version: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    let wanted = SemVer::parse(version.trim().trim_start_matches(['=', 'v']))
+        .map_or_else(|| version.trim().to_string(), |v| v.to_string());
+    get_known_malicious_versions()
+        .iter()
+        .any(|(n, v)| *n == lower && *v == wanted)
+}
+
+/// Typosquatting check against the popular-package list.
+///
+/// The name is lower-cased first. A name that is itself on the list is never
+/// reported (so `express` is not a typosquat of `cypress`), and neither is a
+/// scoped name. Names within edit distance 1 (a transposition counts as 1) are
+/// reported; distance 2 only when both names have at least eight characters.
 pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>> {
+    let name = package_name.trim().to_ascii_lowercase();
+    // npm names are at most 214 characters: anything longer is not compared.
+    if name.is_empty() || name.starts_with('@') || name.len() > 214 {
+        return None;
+    }
+    // Real projects whose names sit one edit away from another popular package.
+    if matches!(name.as_str(), "pathe") {
+        return None;
+    }
     let popular_packages = get_top_npm_packages();
+    if popular_packages.contains(&name.as_str()) {
+        return None;
+    }
     let mut similar_packages = vec![];
 
     for popular in &popular_packages {
-        let distance = levenshtein(package_name, popular);
-
-        // More sophisticated similarity checking
-        if distance > 0 && distance <= 2 {
-            similar_packages.push(format!("{popular} (distance: {distance})"));
-        }
-
-        // Character substitution patterns
-        if check_character_substitution(package_name, popular) {
-            similar_packages.push(format!("{popular} (character substitution)"));
-        }
-
-        // Keyboard proximity typos
-        if check_keyboard_proximity(package_name, popular) {
-            similar_packages.push(format!("{popular} (keyboard typo)"));
-        }
-
-        // Visual similarity (0/o, 1/l, etc.)
-        if check_visual_similarity(package_name, popular) {
-            similar_packages.push(format!("{popular} (visual confusion)"));
+        if name.len() >= 4 && popular.len() >= 4 && name.len().abs_diff(popular.len()) <= 2 {
+            let distance = edit_distance(&name, popular);
+            let allowed = if name.len().min(popular.len()) >= 8 {
+                2
+            } else {
+                1
+            };
+            if distance > 0 && distance <= allowed {
+                similar_packages.push(format!("{popular} (distance: {distance})"));
+            }
         }
 
         // Common typosquatting patterns
-        if package_name.starts_with(popular) && package_name.len() > popular.len() {
-            let suffix = &package_name[popular.len()..];
+        if name.starts_with(popular) && name.len() > popular.len() {
+            let suffix = &name[popular.len()..];
             if matches!(
                 suffix,
                 "-dev"
                     | "-test"
-                    | "js"
                     | ".js"
                     | "-js"
                     | "2"
-                    | "-cli"
                     | "-official"
                     | "-latest"
                     | "-new"
@@ -885,11 +1269,8 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
                     | "-fixed"
                     | "-secure"
                     | "-safe"
-                    | "-utils"
                     | "-tool"
                     | "-lib"
-                    | "-core"
-                    | "-api"
                     | "1"
                     | "3"
                     | "4"
@@ -900,8 +1281,8 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
         }
 
         // Prefix patterns
-        if package_name.ends_with(popular) && package_name.len() > popular.len() {
-            let prefix = &package_name[..package_name.len() - popular.len()];
+        if name.ends_with(popular) && name.len() > popular.len() {
+            let prefix = &name[..name.len() - popular.len()];
             if matches!(
                 prefix,
                 "new-"
@@ -914,12 +1295,6 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
                     | "original-"
                     | "better-"
                     | "super-"
-                    | "fast-"
-                    | "node-"
-                    | "npm-"
-                    | "js-"
-                    | "lib-"
-                    | "core-"
             ) {
                 similar_packages.push(format!("{popular} (suspicious prefix: {prefix})"));
             }
@@ -940,6 +1315,19 @@ pub fn check_typosquatting_similarity(package_name: &str) -> Option<Vec<String>>
 /// Get top 100+ most popular npm packages for typosquatting detection
 fn get_top_npm_packages() -> Vec<&'static str> {
     vec![
+        "preact",
+        "svelte",
+        "next",
+        "zod",
+        "js-yaml",
+        "core-js",
+        "lodash-es",
+        "express-session",
+        "ws",
+        "ms",
+        "semver",
+        "vitest",
+        "tslib",
         // Top 50 most downloaded packages
         "react",
         "lodash",
@@ -1128,156 +1516,4 @@ fn get_top_npm_packages() -> Vec<&'static str> {
         "xss",
         "dompurify",
     ]
-}
-
-/// Check for character substitution patterns (common typos)
-fn check_character_substitution(name1: &str, name2: &str) -> bool {
-    if name1.len() != name2.len() {
-        return false;
-    }
-
-    let chars1: Vec<char> = name1.chars().collect();
-    let chars2: Vec<char> = name2.chars().collect();
-    let mut differences = 0;
-
-    for (c1, c2) in chars1.iter().zip(chars2.iter()) {
-        if c1 != c2 {
-            differences += 1;
-            if differences > 1 {
-                return false;
-            }
-        }
-    }
-
-    differences == 1
-}
-
-/// Check for keyboard proximity errors
-fn check_keyboard_proximity(name1: &str, name2: &str) -> bool {
-    if name1.len() != name2.len() {
-        return false;
-    }
-
-    let adjacent_keys = get_adjacent_keys();
-    let chars1: Vec<char> = name1.chars().collect();
-    let chars2: Vec<char> = name2.chars().collect();
-    let mut proximity_errors = 0;
-
-    for (c1, c2) in chars1.iter().zip(chars2.iter()) {
-        if c1 != c2 {
-            if let Some(adjacent) = adjacent_keys.get(c1) {
-                if adjacent.contains(c2) {
-                    proximity_errors += 1;
-                    if proximity_errors > 1 {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-    }
-
-    proximity_errors == 1
-}
-
-/// Check for visual similarity (confusing characters)
-fn check_visual_similarity(name1: &str, name2: &str) -> bool {
-    if name1.len() != name2.len() {
-        return false;
-    }
-
-    let visual_confusions = get_visual_confusions();
-    let chars1: Vec<char> = name1.chars().collect();
-    let chars2: Vec<char> = name2.chars().collect();
-    let mut visual_errors = 0;
-
-    for (c1, c2) in chars1.iter().zip(chars2.iter()) {
-        if c1 != c2 {
-            if let Some(similar) = visual_confusions.get(c1) {
-                if similar.contains(c2) {
-                    visual_errors += 1;
-                    if visual_errors > 1 {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            } else {
-                return false;
-            }
-        }
-    }
-
-    visual_errors == 1
-}
-
-/// Get QWERTY keyboard adjacent keys mapping
-fn get_adjacent_keys() -> HashMap<char, Vec<char>> {
-    let mut adjacent = HashMap::new();
-
-    adjacent.insert('q', vec!['w', 'a', 's']);
-    adjacent.insert('w', vec!['q', 'e', 'a', 's', 'd']);
-    adjacent.insert('e', vec!['w', 'r', 's', 'd', 'f']);
-    adjacent.insert('r', vec!['e', 't', 'd', 'f', 'g']);
-    adjacent.insert('t', vec!['r', 'y', 'f', 'g', 'h']);
-    adjacent.insert('y', vec!['t', 'u', 'g', 'h', 'j']);
-    adjacent.insert('u', vec!['y', 'i', 'h', 'j', 'k']);
-    adjacent.insert('i', vec!['u', 'o', 'j', 'k', 'l']);
-    adjacent.insert('o', vec!['i', 'p', 'k', 'l']);
-    adjacent.insert('p', vec!['o', 'l']);
-
-    adjacent.insert('a', vec!['q', 'w', 's', 'z', 'x']);
-    adjacent.insert('s', vec!['q', 'w', 'e', 'a', 'd', 'z', 'x', 'c']);
-    adjacent.insert('d', vec!['w', 'e', 'r', 's', 'f', 'x', 'c', 'v']);
-    adjacent.insert('f', vec!['e', 'r', 't', 'd', 'g', 'c', 'v', 'b']);
-    adjacent.insert('g', vec!['r', 't', 'y', 'f', 'h', 'v', 'b', 'n']);
-    adjacent.insert('h', vec!['t', 'y', 'u', 'g', 'j', 'b', 'n', 'm']);
-    adjacent.insert('j', vec!['y', 'u', 'i', 'h', 'k', 'n', 'm']);
-    adjacent.insert('k', vec!['u', 'i', 'o', 'j', 'l', 'm']);
-    adjacent.insert('l', vec!['i', 'o', 'p', 'k']);
-
-    adjacent.insert('z', vec!['a', 's', 'x']);
-    adjacent.insert('x', vec!['a', 's', 'd', 'z', 'c']);
-    adjacent.insert('c', vec!['s', 'd', 'f', 'x', 'v']);
-    adjacent.insert('v', vec!['d', 'f', 'g', 'c', 'b']);
-    adjacent.insert('b', vec!['f', 'g', 'h', 'v', 'n']);
-    adjacent.insert('n', vec!['g', 'h', 'j', 'b', 'm']);
-    adjacent.insert('m', vec!['h', 'j', 'k', 'n']);
-
-    adjacent
-}
-
-/// Get visually confusing character mappings
-fn get_visual_confusions() -> HashMap<char, Vec<char>> {
-    let mut confusions = HashMap::new();
-
-    confusions.insert('0', vec!['o', 'O']);
-    confusions.insert('o', vec!['0', 'O']);
-    confusions.insert('O', vec!['0', 'o']);
-
-    confusions.insert('1', vec!['l', 'I', '|']);
-    confusions.insert('l', vec!['1', 'I', '|']);
-    confusions.insert('I', vec!['1', 'l', '|']);
-    confusions.insert('|', vec!['1', 'l', 'I']);
-
-    confusions.insert('5', vec!['s', 'S']);
-    confusions.insert('s', vec!['5', 'S']);
-    confusions.insert('S', vec!['5', 's']);
-
-    confusions.insert('6', vec!['g', 'G']);
-    confusions.insert('g', vec!['6', 'G']);
-    confusions.insert('G', vec!['6', 'g']);
-
-    confusions.insert('8', vec!['b', 'B']);
-    confusions.insert('b', vec!['8', 'B']);
-    confusions.insert('B', vec!['8', 'b']);
-
-    confusions.insert('2', vec!['z', 'Z']);
-    confusions.insert('z', vec!['2', 'Z']);
-    confusions.insert('Z', vec!['2', 'z']);
-
-    confusions
 }

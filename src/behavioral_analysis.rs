@@ -18,12 +18,39 @@ pub struct BehavioralAnalysis {
     pub evasion_score: f32,
     pub suspicious_behaviors: Vec<SuspiciousBehavior>,
     pub recommendations: Vec<String>,
+    /// How much of the file's strings the string-based detectors saw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub string_coverage: Option<StringCoverage>,
+}
+
+/// A string a detector matched, and where it sits in the file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StringEvidence {
+    /// The string (first 160 characters).
+    pub value: String,
+    /// Offset of its first occurrence in the file, when the file could be searched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+}
+
+/// How much of a file the string-based detectors examined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StringCoverage {
+    /// Distinct strings examined (ASCII and UTF-16).
+    pub strings_examined: usize,
+    pub bytes_examined: u64,
+    pub file_size: u64,
+    /// False when the file or its strings exceeded the examination bounds.
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AntiAnalysisTechnique {
     pub technique_type: AntiAnalysisType,
     pub indicators: Vec<String>,
+    /// The strings that matched, with offsets (first 10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<StringEvidence>,
     pub confidence: f32,
     pub description: String,
 }
@@ -45,6 +72,9 @@ pub enum AntiAnalysisType {
 pub struct PersistenceMechanism {
     pub mechanism_type: PersistenceType,
     pub target_locations: Vec<String>,
+    /// The strings that matched, with offsets (first 10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<StringEvidence>,
     pub severity: Severity,
     pub description: String,
 }
@@ -67,6 +97,9 @@ pub enum PersistenceType {
 pub struct NetworkPattern {
     pub pattern_type: NetworkPatternType,
     pub indicators: Vec<String>,
+    /// The URLs, addresses and other strings that matched, with offsets (first 10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<StringEvidence>,
     pub protocols: Vec<String>,
     pub ports: Vec<u16>,
     pub suspicious_level: SuspicionLevel,
@@ -158,18 +191,53 @@ pub enum Severity {
     Critical,
 }
 
+/// Most file bytes read to find strings.
+const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+/// Most string bytes kept for the detectors.
+const MAX_CORPUS_STRING_BYTES: usize = 32 * 1024 * 1024;
+/// Most distinct strings kept for the detectors.
+const MAX_CORPUS_STRINGS: usize = 2_000_000;
+/// Shortest string examined.
+const MIN_STRING_LEN: usize = 4;
+/// Pieces of evidence kept per finding.
+const MAX_EVIDENCE: usize = 10;
+/// Longest evidence string shown.
+const MAX_EVIDENCE_CHARS: usize = 160;
+
+/// Run the behavioral detectors.
+///
+/// The strings the caller passes are capped (`extract_strings` keeps the
+/// first 1,000 of each kind), so when `path` is a readable file its strings
+/// are extracted again here, all of them up to a byte bound, and merged with
+/// the ones passed in. What the detectors saw is reported in
+/// `string_coverage`.
 pub fn analyze_behavior(
-    _path: &Path,
+    path: &Path,
     strings: Option<&ExtractedStrings>,
     symbols: Option<&SymbolTable>,
     disassembly: Option<&DisassemblyResult>,
 ) -> Result<BehavioralAnalysis> {
-    let anti_analysis = detect_anti_analysis(strings, symbols, disassembly);
-    let persistence = detect_persistence_mechanisms(strings, symbols);
-    let network_behavior = detect_network_patterns(strings, symbols);
+    let corpus = build_corpus(path, strings);
+    let strings = corpus.strings.as_ref();
+
+    let mut anti_analysis = detect_anti_analysis(strings, symbols, disassembly);
+    let mut persistence = detect_persistence_mechanisms(strings, symbols);
+    let mut network_behavior = detect_network_patterns(strings, symbols);
     let file_operations = detect_file_operations(strings, symbols);
     let registry_operations = detect_registry_operations(strings);
     let process_operations = detect_process_operations(strings, symbols);
+
+    if let Some(bytes) = &corpus.file_bytes {
+        for technique in &mut anti_analysis {
+            locate_evidence(&mut technique.evidence, bytes);
+        }
+        for mechanism in &mut persistence {
+            locate_evidence(&mut mechanism.evidence, bytes);
+        }
+        for pattern in &mut network_behavior {
+            locate_evidence(&mut pattern.evidence, bytes);
+        }
+    }
 
     let suspicious_behaviors = identify_suspicious_behaviors(
         &anti_analysis,
@@ -198,7 +266,260 @@ pub fn analyze_behavior(
         evasion_score,
         suspicious_behaviors,
         recommendations,
+        string_coverage: corpus.coverage,
     })
+}
+
+/// Every string the detectors look at.
+struct Corpus {
+    strings: Option<ExtractedStrings>,
+    coverage: Option<StringCoverage>,
+    /// The file's bytes (up to the read bound), kept to find offsets.
+    file_bytes: Option<Vec<u8>>,
+}
+
+fn build_corpus(path: &Path, provided: Option<&ExtractedStrings>) -> Corpus {
+    build_corpus_bounded(
+        path,
+        provided,
+        MAX_SCAN_BYTES,
+        MAX_CORPUS_STRING_BYTES,
+        MAX_CORPUS_STRINGS,
+    )
+}
+
+fn build_corpus_bounded(
+    path: &Path,
+    provided: Option<&ExtractedStrings>,
+    max_scan_bytes: u64,
+    max_string_bytes: usize,
+    max_strings: usize,
+) -> Corpus {
+    use regex::bytes::Regex;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::io::Read;
+
+    let mut ascii: Vec<String> = Vec::new();
+    let mut unicode: Vec<String> = Vec::new();
+    let mut seen: HashSet<u64> = HashSet::new();
+    let mut string_bytes = 0usize;
+    let mut bounded = false;
+
+    let fingerprint = |kind: u8, text: &str| {
+        let mut hasher = DefaultHasher::new();
+        kind.hash(&mut hasher);
+        text.hash(&mut hasher);
+        hasher.finish()
+    };
+
+    if let Some(provided) = provided {
+        for text in &provided.ascii_strings {
+            if seen.insert(fingerprint(0, text)) {
+                string_bytes += text.len();
+                ascii.push(text.clone());
+            }
+        }
+        for text in &provided.unicode_strings {
+            if seen.insert(fingerprint(1, text)) {
+                string_bytes += text.len();
+                unicode.push(text.clone());
+            }
+        }
+    }
+
+    // Read the file (bounded) and extract all of its strings.
+    let mut file_bytes = None;
+    let mut file_size = 0u64;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        if metadata.is_file() {
+            file_size = metadata.len();
+            let mut buffer = Vec::new();
+            let read = std::fs::File::open(path)
+                .and_then(|file| file.take(max_scan_bytes).read_to_end(&mut buffer));
+            if read.is_ok() {
+                bounded = file_size > max_scan_bytes;
+                let ascii_regex = Regex::new(&format!(r"[\x20-\x7E]{{{MIN_STRING_LEN},}}")).ok();
+                let utf16_regex =
+                    Regex::new(&format!(r"(?:[\x20-\x7E]\x00){{{MIN_STRING_LEN},}}")).ok();
+                if let Some(regex) = &ascii_regex {
+                    for found in regex.find_iter(&buffer) {
+                        let Ok(text) = std::str::from_utf8(found.as_bytes()) else {
+                            continue;
+                        };
+                        if string_bytes >= max_string_bytes
+                            || ascii.len() + unicode.len() >= max_strings
+                        {
+                            bounded = true;
+                            break;
+                        }
+                        if seen.insert(fingerprint(0, text)) {
+                            string_bytes += text.len();
+                            ascii.push(text.to_string());
+                        }
+                    }
+                }
+                if let Some(regex) = &utf16_regex {
+                    for found in regex.find_iter(&buffer) {
+                        if string_bytes >= max_string_bytes
+                            || ascii.len() + unicode.len() >= max_strings
+                        {
+                            bounded = true;
+                            break;
+                        }
+                        let text: String = found
+                            .as_bytes()
+                            .iter()
+                            .step_by(2)
+                            .map(|&byte| char::from(byte))
+                            .collect();
+                        if seen.insert(fingerprint(1, &text)) {
+                            string_bytes += text.len();
+                            unicode.push(text);
+                        }
+                    }
+                }
+                file_bytes = Some(buffer);
+            }
+        }
+    }
+
+    if provided.is_none() && file_bytes.is_none() {
+        return Corpus {
+            strings: None,
+            coverage: None,
+            file_bytes: None,
+        };
+    }
+
+    let coverage = StringCoverage {
+        strings_examined: ascii.len() + unicode.len(),
+        bytes_examined: file_bytes.as_ref().map_or(0, |b| b.len() as u64),
+        file_size,
+        complete: !bounded,
+    };
+    Corpus {
+        strings: Some(ExtractedStrings {
+            total_count: ascii.len() + unicode.len(),
+            unique_count: ascii.len() + unicode.len(),
+            ascii_strings: ascii,
+            unicode_strings: unicode,
+            interesting_strings: Vec::new(),
+        }),
+        coverage: Some(coverage),
+        file_bytes,
+    }
+}
+
+/// Fill in each piece of evidence's offset: where its string first occurs in
+/// the file, as ASCII or as UTF-16LE.
+fn locate_evidence(evidence: &mut [StringEvidence], file: &[u8]) {
+    use regex::bytes::Regex;
+    for item in evidence.iter_mut() {
+        let literal = regex::escape(&item.value);
+        let ascii = Regex::new(&format!("(?-u:{literal})"))
+            .ok()
+            .and_then(|regex| regex.find(file).map(|found| found.start()));
+        let position = ascii.or_else(|| {
+            let wide: String = item
+                .value
+                .bytes()
+                .map(|b| format!(r"\x{b:02X}\x00"))
+                .collect();
+            Regex::new(&format!("(?-u:{wide})"))
+                .ok()
+                .and_then(|regex| regex.find(file).map(|found| found.start()))
+        });
+        item.offset = position.map(|p| p as u64);
+    }
+}
+
+/// Add the string that matched to a finding's evidence (distinct, capped).
+/// A string longer than the display limit (compilers pack a Go or Rust
+/// binary's literals into one giant run) is shown as a window around `needle`.
+fn push_evidence(evidence: &mut Vec<StringEvidence>, hit: &str, needle: &str) {
+    if evidence.len() >= MAX_EVIDENCE {
+        return;
+    }
+    let value = evidence_window(hit, hit.find(needle).unwrap_or(0), needle.len());
+    if evidence.iter().any(|e| e.value == value) {
+        return;
+    }
+    // Several needles in one giant run give windows of the same text; keep
+    // the first and skip a window that overlaps one already kept.
+    if hit.chars().count() > MAX_EVIDENCE_CHARS {
+        if let Some(start) = hit.find(&value) {
+            let end = start + value.len();
+            let overlaps = evidence.iter().any(|e| {
+                hit.find(&e.value)
+                    .is_some_and(|s| s < end && start < s + e.value.len())
+            });
+            if overlaps {
+                return;
+            }
+        }
+    }
+    evidence.push(StringEvidence {
+        value,
+        offset: None,
+    });
+}
+
+/// At most `MAX_EVIDENCE_CHARS` characters of `text`, centred on the
+/// `len` bytes at byte offset `at` when the text is longer.
+fn evidence_window(text: &str, at: usize, len: usize) -> String {
+    let total = text.chars().count();
+    if total <= MAX_EVIDENCE_CHARS {
+        return text.to_string();
+    }
+    let hit_start = text[..at.min(text.len())].chars().count();
+    let hit_chars = text
+        .get(at..(at + len).min(text.len()))
+        .map_or(0, |t| t.chars().count());
+    let spare = MAX_EVIDENCE_CHARS.saturating_sub(hit_chars) / 2;
+    let start = hit_start.saturating_sub(spare);
+    text.chars().skip(start).take(MAX_EVIDENCE_CHARS).collect()
+}
+
+/// Whether `text` holds `needle`. A short alphanumeric needle ("Xen", "GET",
+/// "PEB") must stand alone, not sit inside a longer word, or it would match
+/// ordinary text in any large binary.
+fn has_indicator(text: &str, needle: &str) -> bool {
+    let standalone = needle.len() <= 6 && needle.bytes().all(|b| b.is_ascii_alphanumeric());
+    if !standalone {
+        return text.contains(needle);
+    }
+    let bytes = text.as_bytes();
+    text.match_indices(needle).any(|(start, found)| {
+        let before = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let end = start + found.len();
+        let after = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        before && after
+    })
+}
+
+/// The first string holding `needle`: ASCII strings, then (when
+/// `include_unicode`) UTF-16 ones.
+fn first_containing<'a>(
+    strings: &'a ExtractedStrings,
+    needle: &str,
+    include_unicode: bool,
+) -> Option<&'a str> {
+    strings
+        .ascii_strings
+        .iter()
+        .find(|s| has_indicator(s, needle))
+        .or_else(|| {
+            if include_unicode {
+                strings
+                    .unicode_strings
+                    .iter()
+                    .find(|s| has_indicator(s, needle))
+            } else {
+                None
+            }
+        })
+        .map(String::as_str)
 }
 
 fn detect_anti_analysis(
@@ -225,17 +546,14 @@ fn detect_anti_analysis(
     ];
 
     let mut found_indicators = Vec::new();
+    let mut debug_evidence = Vec::new();
 
     // Check strings
     if let Some(strings) = strings {
         for (indicator, _desc) in &debug_indicators {
-            if strings.ascii_strings.iter().any(|s| s.contains(indicator))
-                || strings
-                    .unicode_strings
-                    .iter()
-                    .any(|s| s.contains(indicator))
-            {
+            if let Some(hit) = first_containing(strings, indicator, true) {
                 found_indicators.push(indicator.to_string());
+                push_evidence(&mut debug_evidence, hit, indicator);
             }
         }
     }
@@ -251,8 +569,15 @@ fn detect_anti_analysis(
         }
     }
 
-    if !found_indicators.is_empty() {
+    // Timing and PEB words alone turn up in ordinary programs: one of them is
+    // not a debugger check, a real anti-debug API (or two weak signs) is.
+    const WEAK_DEBUG: [&str; 4] = ["PEB", "RDTSC", "GetTickCount", "QueryPerformanceCounter"];
+    let strong_debug = found_indicators
+        .iter()
+        .any(|i| !WEAK_DEBUG.contains(&i.as_str()));
+    if strong_debug || found_indicators.len() >= 2 {
         techniques.push(AntiAnalysisTechnique {
+            evidence: debug_evidence,
             technique_type: AntiAnalysisType::AntiDebug,
             indicators: found_indicators,
             confidence: 0.85,
@@ -281,22 +606,20 @@ fn detect_anti_analysis(
     ];
 
     let mut vm_found = Vec::new();
+    let mut vm_evidence = Vec::new();
 
     if let Some(strings) = strings {
         for (indicator, _) in &vm_indicators {
-            if strings.ascii_strings.iter().any(|s| s.contains(indicator))
-                || strings
-                    .unicode_strings
-                    .iter()
-                    .any(|s| s.contains(indicator))
-            {
+            if let Some(hit) = first_containing(strings, indicator, true) {
                 vm_found.push(indicator.to_string());
+                push_evidence(&mut vm_evidence, hit, indicator);
             }
         }
     }
 
     if !vm_found.is_empty() {
         techniques.push(AntiAnalysisTechnique {
+            evidence: vm_evidence,
             technique_type: AntiAnalysisType::AntiVM,
             indicators: vm_found,
             confidence: 0.80,
@@ -325,17 +648,20 @@ fn detect_anti_analysis(
     ];
 
     let mut sandbox_found = Vec::new();
+    let mut sandbox_evidence = Vec::new();
 
     if let Some(strings) = strings {
         for (indicator, _) in &sandbox_indicators {
-            if strings.ascii_strings.iter().any(|s| s.contains(indicator)) {
+            if let Some(hit) = first_containing(strings, indicator, false) {
                 sandbox_found.push(indicator.to_string());
+                push_evidence(&mut sandbox_evidence, hit, indicator);
             }
         }
     }
 
     if sandbox_found.len() >= 3 {
         techniques.push(AntiAnalysisTechnique {
+            evidence: sandbox_evidence,
             technique_type: AntiAnalysisType::AntiSandbox,
             indicators: sandbox_found,
             confidence: 0.75,
@@ -360,6 +686,7 @@ fn detect_anti_analysis(
                 .map(|(_, desc)| desc)
             {
                 techniques.push(AntiAnalysisTechnique {
+                    evidence: Vec::new(),
                     technique_type: AntiAnalysisType::Obfuscation,
                     indicators: vec![format!("{:?}", pattern.pattern_type)],
                     confidence: 0.70,
@@ -424,10 +751,11 @@ fn detect_persistence_mechanisms(
 
     if let Some(strings) = strings {
         for (key, pers_type, desc) in registry_persistence {
-            if strings.ascii_strings.iter().any(|s| s.contains(key))
-                || strings.unicode_strings.iter().any(|s| s.contains(key))
-            {
+            if let Some(hit) = first_containing(strings, key, true) {
+                let mut evidence = Vec::new();
+                push_evidence(&mut evidence, hit, key);
                 mechanisms.push(PersistenceMechanism {
+                    evidence,
                     mechanism_type: pers_type,
                     target_locations: vec![key.to_string()],
                     severity: Severity::High,
@@ -458,6 +786,7 @@ fn detect_persistence_mechanisms(
 
     if service_indicators.len() >= 2 {
         mechanisms.push(PersistenceMechanism {
+            evidence: Vec::new(),
             mechanism_type: PersistenceType::ServiceInstallation,
             target_locations: service_indicators,
             severity: Severity::High,
@@ -476,14 +805,17 @@ fn detect_persistence_mechanisms(
 
     if let Some(strings) = strings {
         let mut found_tasks = Vec::new();
+        let mut task_evidence = Vec::new();
         for (indicator, _) in &task_indicators {
-            if strings.ascii_strings.iter().any(|s| s.contains(indicator)) {
+            if let Some(hit) = first_containing(strings, indicator, false) {
                 found_tasks.push(indicator.to_string());
+                push_evidence(&mut task_evidence, hit, indicator);
             }
         }
 
         if !found_tasks.is_empty() {
             mechanisms.push(PersistenceMechanism {
+                evidence: task_evidence,
                 mechanism_type: PersistenceType::ScheduledTasks,
                 target_locations: found_tasks,
                 severity: Severity::Medium,
@@ -503,17 +835,20 @@ fn detect_persistence_mechanisms(
     ];
 
     let mut dll_indicators = Vec::new();
+    let mut dll_evidence = Vec::new();
 
     if let Some(strings) = strings {
         for (indicator, _) in &dll_hijack_indicators {
-            if strings.ascii_strings.iter().any(|s| s.contains(indicator)) {
+            if let Some(hit) = first_containing(strings, indicator, false) {
                 dll_indicators.push(indicator.to_string());
+                push_evidence(&mut dll_evidence, hit, indicator);
             }
         }
     }
 
     if dll_indicators.len() >= 3 {
         mechanisms.push(PersistenceMechanism {
+            evidence: dll_evidence,
             mechanism_type: PersistenceType::DLLHijacking,
             target_locations: dll_indicators,
             severity: Severity::High,
@@ -522,6 +857,34 @@ fn detect_persistence_mechanisms(
     }
 
     mechanisms
+}
+
+fn onion_address_regex() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)\b[a-z2-7]{16}(?:[a-z2-7]{40})?\.onion\b")
+            .expect("onion address pattern")
+    });
+    &RE
+}
+
+fn ip_regex() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"\b(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b",
+        )
+        .expect("IP address pattern")
+    });
+    &RE
+}
+
+fn ip_url_regex() -> &'static regex::Regex {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)\b(?:https?|wss?|ftp|tcp)://(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b",
+        )
+        .expect("IP URL pattern")
+    });
+    &RE
 }
 
 fn detect_network_patterns(
@@ -549,59 +912,94 @@ fn detect_network_patterns(
     ];
 
     let mut found_cc = Vec::new();
+    let mut cc_evidence = Vec::new();
     let mut protocols = HashSet::new();
+    let mut schemes = 0usize;
+    let mut markers = 0usize;
+    let mut strong = false;
 
     if let Some(strings) = strings {
         for (indicator, _) in &cc_indicators {
-            if strings.ascii_strings.iter().any(|s| s.contains(indicator)) {
+            if let Some(hit) = first_containing(strings, indicator, false) {
                 found_cc.push(indicator.to_string());
+                push_evidence(&mut cc_evidence, hit, indicator);
 
                 // Extract protocol
                 if indicator.ends_with("://") {
                     protocols.insert(indicator.trim_end_matches("://").to_string());
+                    schemes += 1;
+                }
+                match *indicator {
+                    "tor2web" => strong = true,
+                    "user-agent" | "POST" | "GET" | "Content-Type" | "application/json"
+                    | "base64" => markers += 1,
+                    _ => {}
                 }
             }
         }
 
-        // Look for IP addresses
-        let ip_pattern = regex::Regex::new(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b").unwrap();
+        // A URL whose host is a raw IP address is how implants usually name
+        // their server; an IP address on its own is only a string.
+        let ip_url = ip_url_regex();
+        let ip_literal = ip_regex();
+        let mut raw_ip_url = false;
+        let mut ip_seen = false;
         for s in &strings.ascii_strings {
-            if ip_pattern.is_match(s) {
-                found_cc.push("IP address found".to_string());
+            if !raw_ip_url {
+                if let Some(found) = ip_url.find(s) {
+                    raw_ip_url = true;
+                    push_evidence(&mut cc_evidence, s, found.as_str());
+                }
+            }
+            if !ip_seen {
+                if let Some(found) = ip_literal.find(s) {
+                    ip_seen = true;
+                    push_evidence(&mut cc_evidence, s, found.as_str());
+                }
+            }
+            if raw_ip_url && ip_seen {
                 break;
             }
         }
-
-        // Look for domains
-        let domain_pattern = regex::Regex::new(r"\b[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\b").unwrap();
-        let mut domain_count = 0;
-        for s in &strings.ascii_strings {
-            if domain_pattern.is_match(s)
-                && s.contains('.')
-                && !s.ends_with(".dll")
-                && !s.ends_with(".exe")
-            {
-                domain_count += 1;
-                if domain_count >= 3 {
-                    found_cc.push("Multiple domains found".to_string());
-                    break;
-                }
-            }
+        if ip_seen || raw_ip_url {
+            found_cc.push("IP address found".to_string());
         }
-    }
+        if raw_ip_url {
+            found_cc.push("URL with a raw IP address".to_string());
+            strong = true;
+        }
+        // The bare text ".onion" sits in the networking libraries of ordinary
+        // programs; a complete onion address is a destination.
+        let onion = onion_address_regex();
+        if let Some((s, found)) = strings
+            .ascii_strings
+            .iter()
+            .find_map(|s| onion.find(s).map(|found| (s, found)))
+        {
+            strong = true;
+            push_evidence(&mut cc_evidence, s, found.as_str());
+        }
 
-    if !found_cc.is_empty() {
-        patterns.push(NetworkPattern {
-            pattern_type: NetworkPatternType::CommandAndControl,
-            indicators: found_cc,
-            protocols: protocols.clone().into_iter().collect(),
-            ports: vec![],
-            suspicious_level: if protocols.contains("https") || protocols.contains("wss") {
-                SuspicionLevel::High
-            } else {
-                SuspicionLevel::Medium
-            },
-        });
+        // Command-and-control needs more than a URL scheme: ordinary programs
+        // carry "https://" in their help text. The level says how much more.
+        let level = if strong && (markers >= 1 || raw_ip_url) {
+            SuspicionLevel::High
+        } else if strong || (schemes >= 1 && markers >= 2) {
+            SuspicionLevel::Medium
+        } else {
+            SuspicionLevel::Low
+        };
+
+        if !found_cc.is_empty() {
+            patterns.push(NetworkPattern {
+                evidence: cc_evidence,
+                pattern_type: NetworkPatternType::CommandAndControl,
+                indicators: found_cc,
+                protocols: protocols.clone().into_iter().collect(),
+                ports: vec![],
+                suspicious_level: level,
+            });
+        }
     }
 
     // Network APIs
@@ -668,6 +1066,7 @@ fn detect_network_patterns(
         };
 
         patterns.push(NetworkPattern {
+            evidence: Vec::new(),
             pattern_type: NetworkPatternType::DataExfiltration,
             indicators: found_apis,
             protocols: vec!["TCP".to_string()],
@@ -687,22 +1086,37 @@ fn detect_network_patterns(
     ];
 
     let mut tor_found = Vec::new();
+    let mut tor_evidence = Vec::new();
 
     if let Some(strings) = strings {
         for (indicator, _) in &tor_indicators {
-            if strings.ascii_strings.iter().any(|s| s.contains(indicator)) {
+            if let Some(hit) = first_containing(strings, indicator, false) {
                 tor_found.push(indicator.to_string());
+                push_evidence(&mut tor_evidence, hit, indicator);
             }
         }
     }
 
+    let onion_address = strings.is_some_and(|strings| {
+        strings
+            .ascii_strings
+            .iter()
+            .any(|s| onion_address_regex().is_match(s))
+    });
+    let tor_high = tor_found.len() >= 2 || onion_address;
     if !tor_found.is_empty() {
         patterns.push(NetworkPattern {
+            evidence: tor_evidence,
             pattern_type: NetworkPatternType::TorUsage,
             indicators: tor_found,
             protocols: vec!["Tor".to_string()],
             ports: vec![9050, 9051],
-            suspicious_level: SuspicionLevel::High,
+            // The bare text ".onion" alone is in ordinary networking code.
+            suspicious_level: if tor_high {
+                SuspicionLevel::High
+            } else {
+                SuspicionLevel::Medium
+            },
         });
     }
 
@@ -1100,7 +1514,11 @@ fn identify_suspicious_behaviors(
     }
 
     // Check for data theft
-    let has_network = !network.is_empty();
+    // A pattern rated Low (a URL or an IP address in the strings) is a
+    // finding to look at, not network capability.
+    let has_network = network
+        .iter()
+        .any(|n| !matches!(n.suspicious_level, SuspicionLevel::Low));
     let has_file_access = file_ops
         .iter()
         .any(|op| matches!(op.operation_type, FileOpType::FileCopying));
@@ -1123,9 +1541,10 @@ fn identify_suspicious_behaviors(
     }
 
     // Check for backdoor
-    let has_cc = network
-        .iter()
-        .any(|n| matches!(n.pattern_type, NetworkPatternType::CommandAndControl));
+    let has_cc = network.iter().any(|n| {
+        matches!(n.pattern_type, NetworkPatternType::CommandAndControl)
+            && !matches!(n.suspicious_level, SuspicionLevel::Low)
+    });
     let has_persistence_mech = !persistence.is_empty();
     let has_remote_exec = process_ops
         .iter()
@@ -1291,10 +1710,21 @@ fn generate_behavioral_recommendations(
     for pattern in network {
         match pattern.pattern_type {
             NetworkPatternType::CommandAndControl => {
-                recommendations.push(
-                    "C&C communication detected. Monitor network traffic closely.".to_string(),
-                );
-                recommendations.push("Block identified C&C servers at firewall.".to_string());
+                // Low means ordinary strings (a URL in help text): nothing to act on.
+                if !matches!(pattern.suspicious_level, SuspicionLevel::Low) {
+                    recommendations.push(
+                        "Possible C&C communication strings found. Check the evidence under \
+                         network_behavior and monitor traffic to those hosts."
+                            .to_string(),
+                    );
+                    if !pattern.evidence.is_empty() {
+                        recommendations.push(
+                            "Verify the hosts in that evidence before blocking them at the \
+                             firewall."
+                                .to_string(),
+                        );
+                    }
+                }
             }
             NetworkPatternType::TorUsage => {
                 recommendations
@@ -1348,6 +1778,26 @@ fn generate_behavioral_recommendations(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn overlapping_evidence_windows_of_one_long_run_are_listed_once() {
+        let run = format!(
+            "{}ptrace{}IsDebuggerPresent{}",
+            "a".repeat(300),
+            "b".repeat(40),
+            "c".repeat(300)
+        );
+        let mut evidence = Vec::new();
+        push_evidence(&mut evidence, &run, "ptrace");
+        push_evidence(&mut evidence, &run, "IsDebuggerPresent");
+        assert_eq!(evidence.len(), 1, "{evidence:?}");
+        // A window far from the first is kept.
+        let far = format!("ptrace{}IsDebuggerPresent", "x".repeat(2000));
+        let mut evidence = Vec::new();
+        push_evidence(&mut evidence, &far, "ptrace");
+        push_evidence(&mut evidence, &far, "IsDebuggerPresent");
+        assert_eq!(evidence.len(), 2);
+    }
+
     use super::*;
     use crate::disassembly::{
         ControlFlowSummary, InstructionAnalysis, OutputFormats, PatternType,
@@ -1487,6 +1937,7 @@ mod tests {
     #[test]
     fn test_evasion_score_calculation() {
         let anti_analysis = vec![AntiAnalysisTechnique {
+            evidence: Vec::new(),
             technique_type: AntiAnalysisType::AntiDebug,
             indicators: vec!["IsDebuggerPresent".to_string()],
             confidence: 0.9,
@@ -1503,12 +1954,14 @@ mod tests {
     fn test_evasion_score_with_critical_behaviors() {
         let anti_analysis = vec![
             AntiAnalysisTechnique {
+                evidence: Vec::new(),
                 technique_type: AntiAnalysisType::ProcessHollowing,
                 indicators: vec!["NtUnmapViewOfSection".to_string()],
                 confidence: 1.0,
                 description: "Process hollowing".to_string(),
             },
             AntiAnalysisTechnique {
+                evidence: Vec::new(),
                 technique_type: AntiAnalysisType::Obfuscation,
                 indicators: vec!["Self-modifying code".to_string()],
                 confidence: 0.8,
@@ -1540,6 +1993,7 @@ mod tests {
     fn test_evasion_score_caps_at_100() {
         let anti_analysis = vec![
             AntiAnalysisTechnique {
+                evidence: Vec::new(),
                 technique_type: AntiAnalysisType::ProcessHollowing,
                 indicators: vec!["test".to_string()],
                 confidence: 1.0,
@@ -2110,6 +2564,7 @@ mod tests {
     fn test_identify_suspicious_behaviors_rootkit() {
         let anti_analysis = vec![];
         let persistence = vec![PersistenceMechanism {
+            evidence: Vec::new(),
             mechanism_type: PersistenceType::ServiceInstallation,
             target_locations: vec!["CreateService".to_string()],
             severity: Severity::High,
@@ -2142,12 +2597,14 @@ mod tests {
     fn test_identify_suspicious_behaviors_backdoor() {
         let anti_analysis = vec![];
         let persistence = vec![PersistenceMechanism {
+            evidence: Vec::new(),
             mechanism_type: PersistenceType::RegistryKeys,
             target_locations: vec!["Run key".to_string()],
             severity: Severity::High,
             description: "Registry persistence".to_string(),
         }];
         let network = vec![NetworkPattern {
+            evidence: Vec::new(),
             pattern_type: NetworkPatternType::CommandAndControl,
             indicators: vec!["http://evil.com".to_string()],
             protocols: vec!["HTTP".to_string()],
@@ -2182,6 +2639,7 @@ mod tests {
         let anti_analysis = vec![];
         let persistence = vec![];
         let network = vec![NetworkPattern {
+            evidence: Vec::new(),
             pattern_type: NetworkPatternType::DataExfiltration,
             indicators: vec!["send".to_string()],
             protocols: vec!["TCP".to_string()],
@@ -2215,6 +2673,7 @@ mod tests {
         let anti_analysis = vec![];
         let persistence = vec![];
         let network = vec![NetworkPattern {
+            evidence: Vec::new(),
             pattern_type: NetworkPatternType::DataExfiltration,
             indicators: vec!["URLDownloadToFile".to_string()],
             protocols: vec!["HTTP".to_string()],
@@ -2251,6 +2710,7 @@ mod tests {
     #[test]
     fn test_generate_behavioral_recommendations_high_evasion() {
         let anti_analysis = vec![AntiAnalysisTechnique {
+            evidence: Vec::new(),
             technique_type: AntiAnalysisType::ProcessHollowing,
             indicators: vec!["hollowing".to_string()],
             confidence: 1.0,
@@ -2284,6 +2744,7 @@ mod tests {
     #[test]
     fn test_generate_behavioral_recommendations_medium_evasion() {
         let anti_analysis = vec![AntiAnalysisTechnique {
+            evidence: Vec::new(),
             technique_type: AntiAnalysisType::AntiDebug,
             indicators: vec!["debug".to_string()],
             confidence: 0.8,
@@ -2315,12 +2776,14 @@ mod tests {
         let anti_analysis = vec![];
         let persistence = vec![
             PersistenceMechanism {
+                evidence: Vec::new(),
                 mechanism_type: PersistenceType::RegistryKeys,
                 target_locations: vec!["Run".to_string()],
                 severity: Severity::High,
                 description: "Registry persistence".to_string(),
             },
             PersistenceMechanism {
+                evidence: Vec::new(),
                 mechanism_type: PersistenceType::ServiceInstallation,
                 target_locations: vec!["Service".to_string()],
                 severity: Severity::High,
@@ -2350,6 +2813,10 @@ mod tests {
         let persistence = vec![];
         let network = vec![
             NetworkPattern {
+                evidence: vec![StringEvidence {
+                    value: "https://c2.evil.com/beacon".to_string(),
+                    offset: Some(1024),
+                }],
                 pattern_type: NetworkPatternType::CommandAndControl,
                 indicators: vec!["c2.evil.com".to_string()],
                 protocols: vec!["HTTPS".to_string()],
@@ -2357,6 +2824,7 @@ mod tests {
                 suspicious_level: SuspicionLevel::High,
             },
             NetworkPattern {
+                evidence: Vec::new(),
                 pattern_type: NetworkPatternType::TorUsage,
                 indicators: vec![".onion".to_string()],
                 protocols: vec!["Tor".to_string()],
@@ -2431,19 +2899,23 @@ mod tests {
     #[test]
     fn test_data_structure_serialization() {
         let analysis = BehavioralAnalysis {
+            string_coverage: None,
             anti_analysis: vec![AntiAnalysisTechnique {
+                evidence: Vec::new(),
                 technique_type: AntiAnalysisType::AntiDebug,
                 indicators: vec!["test".to_string()],
                 confidence: 0.8,
                 description: "Test technique".to_string(),
             }],
             persistence: vec![PersistenceMechanism {
+                evidence: Vec::new(),
                 mechanism_type: PersistenceType::RegistryKeys,
                 target_locations: vec!["test_key".to_string()],
                 severity: Severity::High,
                 description: "Test persistence".to_string(),
             }],
             network_behavior: vec![NetworkPattern {
+                evidence: Vec::new(),
                 pattern_type: NetworkPatternType::CommandAndControl,
                 indicators: vec!["test_indicator".to_string()],
                 protocols: vec!["HTTP".to_string()],
@@ -2507,6 +2979,7 @@ mod tests {
 
         for anti_type in anti_types {
             let technique = AntiAnalysisTechnique {
+                evidence: Vec::new(),
                 technique_type: anti_type,
                 indicators: vec!["test".to_string()],
                 confidence: 0.8,
@@ -2531,6 +3004,7 @@ mod tests {
 
         for pers_type in persistence_types {
             let mechanism = PersistenceMechanism {
+                evidence: Vec::new(),
                 mechanism_type: pers_type,
                 target_locations: vec!["test".to_string()],
                 severity: Severity::Medium,
@@ -2553,6 +3027,7 @@ mod tests {
 
         for net_type in network_types {
             let pattern = NetworkPattern {
+                evidence: Vec::new(),
                 pattern_type: net_type,
                 indicators: vec!["test".to_string()],
                 protocols: vec!["TCP".to_string()],
@@ -2580,5 +3055,275 @@ mod tests {
         process_ops.insert(ProcessOpType::ProcessInjection);
         process_ops.insert(ProcessOpType::ProcessCreation); // Duplicate
         assert_eq!(process_ops.len(), 2);
+    }
+
+    // ---- all strings, evidence and the C&C rating
+
+    fn file_with(lines: &[String]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.bin");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        (dir, path)
+    }
+
+    fn filler(count: usize) -> Vec<String> {
+        (0..count)
+            .map(|i| format!("filler_line_number_{i:05}"))
+            .collect()
+    }
+
+    fn capped(lines: &[String]) -> ExtractedStrings {
+        // What `extract_strings` hands over: the first 1,000 only.
+        ExtractedStrings {
+            total_count: lines.len(),
+            unique_count: lines.len(),
+            ascii_strings: lines.iter().take(1000).cloned().collect(),
+            unicode_strings: vec![],
+            interesting_strings: vec![],
+        }
+    }
+
+    #[test]
+    fn indicators_after_the_first_thousand_strings_are_found() {
+        let indicators = [
+            "IsDebuggerPresent",
+            "VBoxService",
+            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "schtasks /create",
+        ];
+        let mut early = indicators
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        early.extend(filler(1100));
+        let mut late = filler(1100);
+        late.extend(indicators.iter().map(ToString::to_string));
+
+        let (_d1, early_path) = file_with(&early);
+        let (_d2, late_path) = file_with(&late);
+        let early_result =
+            analyze_behavior(&early_path, Some(&capped(&early)), None, None).unwrap();
+        let late_result = analyze_behavior(&late_path, Some(&capped(&late)), None, None).unwrap();
+
+        for result in [&early_result, &late_result] {
+            assert!(
+                result
+                    .anti_analysis
+                    .iter()
+                    .any(|t| matches!(t.technique_type, AntiAnalysisType::AntiDebug)),
+                "{result:?}"
+            );
+            assert!(result
+                .anti_analysis
+                .iter()
+                .any(|t| matches!(t.technique_type, AntiAnalysisType::AntiVM)));
+            assert!(result
+                .persistence
+                .iter()
+                .any(|p| matches!(p.mechanism_type, PersistenceType::RegistryKeys)));
+            assert!(result
+                .persistence
+                .iter()
+                .any(|p| matches!(p.mechanism_type, PersistenceType::ScheduledTasks)));
+        }
+        assert_eq!(early_result.evasion_score, late_result.evasion_score);
+        assert!(late_result.evasion_score > 0.0);
+        let coverage = late_result.string_coverage.as_ref().unwrap();
+        assert!(coverage.strings_examined >= 1104);
+        assert!(coverage.complete);
+    }
+
+    #[test]
+    fn evidence_names_the_matching_string_and_its_offset() {
+        let mut lines = filler(1100);
+        lines.push("call IsDebuggerPresent now".to_string());
+        let (_dir, path) = file_with(&lines);
+        let expected = std::fs::read(&path)
+            .unwrap()
+            .windows(17)
+            .position(|w| w == b"IsDebuggerPresent")
+            .unwrap() as u64;
+        // Even with no strings passed in, the file is searched.
+        let result = analyze_behavior(&path, None, None, None).unwrap();
+        let technique = result
+            .anti_analysis
+            .iter()
+            .find(|t| matches!(t.technique_type, AntiAnalysisType::AntiDebug))
+            .unwrap();
+        assert_eq!(technique.evidence[0].value, "call IsDebuggerPresent now");
+        // The offset is where the string starts, 5 bytes before the keyword.
+        assert_eq!(technique.evidence[0].offset, Some(expected - 5));
+    }
+
+    #[test]
+    fn ordinary_urls_are_not_high_suspicion_command_and_control() {
+        let lines = vec![
+            "Report bugs to https://www.gnu.org/software/coreutils/".to_string(),
+            "License GPLv3+: https://gnu.org/licenses/gpl.html".to_string(),
+            "see http://www.gnu.org/software/coreutils/ for help".to_string(),
+        ];
+        let (_dir, path) = file_with(&lines);
+        let result = analyze_behavior(&path, None, None, None).unwrap();
+        let cc = result
+            .network_behavior
+            .iter()
+            .find(|n| matches!(n.pattern_type, NetworkPatternType::CommandAndControl))
+            .unwrap();
+        assert!(matches!(cc.suspicious_level, SuspicionLevel::Low), "{cc:?}");
+        // The evidence is the URLs themselves, with offsets.
+        assert!(cc.evidence.iter().any(|e| e.value.contains("www.gnu.org")));
+        assert!(cc.evidence.iter().all(|e| e.offset.is_some()), "{cc:?}");
+        assert!(
+            !result.recommendations.iter().any(|r| r.contains("C&C")),
+            "{:?}",
+            result.recommendations
+        );
+        assert!(!result
+            .suspicious_behaviors
+            .iter()
+            .any(|b| b.behavior_type == "Backdoor" || b.behavior_type == "DataTheft"));
+    }
+
+    #[test]
+    fn a_raw_ip_url_with_http_markers_is_rated_high_with_the_url_as_evidence() {
+        let lines = vec![
+            "POST /gate.php HTTP/1.1".to_string(),
+            "user-agent: Mozilla/4.0".to_string(),
+            "http://203.0.113.45:8080/gate.php".to_string(),
+        ];
+        let (_dir, path) = file_with(&lines);
+        let result = analyze_behavior(&path, None, None, None).unwrap();
+        let cc = result
+            .network_behavior
+            .iter()
+            .find(|n| matches!(n.pattern_type, NetworkPatternType::CommandAndControl))
+            .unwrap();
+        assert!(
+            matches!(cc.suspicious_level, SuspicionLevel::High),
+            "{cc:?}"
+        );
+        assert!(cc
+            .evidence
+            .iter()
+            .any(|e| e.value == "http://203.0.113.45:8080/gate.php" && e.offset.is_some()));
+        assert!(result.recommendations.iter().any(|r| r.contains("C&C")));
+    }
+
+    #[test]
+    fn short_words_inside_longer_words_are_not_indicators() {
+        let lines = vec![
+            "Xenial Xerus release notes".to_string(),
+            "GETTING started with the sample documents".to_string(),
+            "GetTickCount".to_string(),
+        ];
+        let (_dir, path) = file_with(&lines);
+        let result = analyze_behavior(&path, None, None, None).unwrap();
+        assert!(
+            result.anti_analysis.is_empty(),
+            "{:?}",
+            result.anti_analysis
+        );
+    }
+
+    #[test]
+    fn the_corpus_bounds_make_coverage_incomplete() {
+        let (_dir, path) = file_with(&[
+            "first_string_here".to_string(),
+            "second_string_here".to_string(),
+            "third_string_here".to_string(),
+        ]);
+        let size = std::fs::metadata(&path).unwrap().len();
+        // Read bound below the file size.
+        let corpus = build_corpus_bounded(&path, None, size / 2, usize::MAX, usize::MAX);
+        let coverage = corpus.coverage.unwrap();
+        assert!(!coverage.complete, "{coverage:?}");
+        assert_eq!(coverage.file_size, size);
+        // String-byte bound.
+        let coverage = build_corpus_bounded(&path, None, size, 10, usize::MAX)
+            .coverage
+            .unwrap();
+        assert!(!coverage.complete && coverage.strings_examined < 3);
+        // String-count bound.
+        let coverage = build_corpus_bounded(&path, None, size, usize::MAX, 1)
+            .coverage
+            .unwrap();
+        assert!(!coverage.complete && coverage.strings_examined == 1);
+        // Generous bounds: complete.
+        let coverage = build_corpus_bounded(&path, None, size, usize::MAX, usize::MAX)
+            .coverage
+            .unwrap();
+        assert!(coverage.complete);
+    }
+
+    #[test]
+    fn a_file_over_the_read_bound_is_reported_as_incomplete_or_complete() {
+        let (_dir, path) = file_with(&["IsDebuggerPresent".to_string()]);
+        let result = analyze_behavior(&path, None, None, None).unwrap();
+        let coverage = result.string_coverage.unwrap();
+        assert!(coverage.complete);
+        assert_eq!(coverage.file_size, 17);
+        // A path that is not a file leaves the passed strings as the only input.
+        let result = analyze_behavior(
+            std::path::Path::new("/nonexistent/file"),
+            Some(&create_test_strings()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(result.string_coverage.is_some());
+        assert!(!result.anti_analysis.is_empty());
+    }
+
+    #[test]
+    fn a_giant_packed_string_is_shown_as_a_window_around_the_match() {
+        // Go and Rust binaries keep their literals in one long run.
+        let packed = format!(
+            "{}https://example.org/path{}",
+            "a".repeat(5000),
+            "b".repeat(5000)
+        );
+        let (_dir, path) = file_with(std::slice::from_ref(&packed));
+        let result = analyze_behavior(&path, None, None, None).unwrap();
+        let cc = result
+            .network_behavior
+            .iter()
+            .find(|n| matches!(n.pattern_type, NetworkPatternType::CommandAndControl))
+            .unwrap();
+        let shown = &cc.evidence[0];
+        assert!(
+            shown.value.chars().count() <= MAX_EVIDENCE_CHARS,
+            "{}",
+            shown.value.len()
+        );
+        assert!(shown.value.contains("https://"), "{}", shown.value);
+        let in_file = std::fs::read(&path).unwrap();
+        let at = shown.offset.unwrap() as usize;
+        assert_eq!(&in_file[at..at + shown.value.len()], shown.value.as_bytes());
+    }
+
+    #[test]
+    fn the_bare_text_onion_is_not_command_and_control_but_an_address_is() {
+        let (_d1, bare) = file_with(&["resolving .onion names is not supported".to_string()]);
+        let result = analyze_behavior(&bare, None, None, None).unwrap();
+        assert!(
+            result.network_behavior.iter().all(|n| matches!(
+                n.suspicious_level,
+                SuspicionLevel::Low | SuspicionLevel::Medium
+            )),
+            "{:?}",
+            result.network_behavior
+        );
+        let (_d2, address) =
+            file_with(&["http://expyuzz4wqqyqhjn.onion/gate user-agent".to_string()]);
+        let result = analyze_behavior(&address, None, None, None).unwrap();
+        let cc = result
+            .network_behavior
+            .iter()
+            .find(|n| matches!(n.pattern_type, NetworkPatternType::CommandAndControl))
+            .unwrap();
+        assert!(
+            matches!(cc.suspicious_level, SuspicionLevel::High),
+            "{cc:?}"
+        );
     }
 }

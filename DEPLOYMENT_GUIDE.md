@@ -1,1401 +1,409 @@
 # Deployment Guide
 
-This guide provides comprehensive instructions for deploying the File Scanner and ThreatFlux libraries in production environments.
+This guide covers running `file-scanner` as a service: the MCP server over HTTP, and the container image.
+For one user on one machine, use `mcp-stdio` from the MCP client instead (see [docs/MCP.md](docs/MCP.md)).
+It needs no network port.
 
-## 📋 Table of Contents
+## What the server does and does not protect
 
-- [Overview](#overview)
-- [Prerequisites](#prerequisites)
-- [Deployment Options](#deployment-options)
-- [Container Deployment](#container-deployment)
-- [Kubernetes Deployment](#kubernetes-deployment)
-- [Cloud Platform Deployment](#cloud-platform-deployment)
-- [Configuration Management](#configuration-management)
-- [Monitoring & Observability](#monitoring--observability)
-- [Backup & Recovery](#backup--recovery)
-- [Scaling Strategies](#scaling-strategies)
-- [Security Considerations](#security-considerations)
-- [Troubleshooting](#troubleshooting)
+The server reads files and returns what it finds in them. Whoever can call it can read every file
+the server's user can read, unless you narrow that with `--allow-root`.
 
-## 🎯 Overview
+What exists:
 
-The File Scanner can be deployed in various configurations:
+- Loopback bind by default (`--host 127.0.0.1`).
+- A `Host` header allow-list and an `Origin` allow-list (`--allowed-host`, `--allowed-origin`).
+- An optional bearer token (`--auth-token` or `FILE_SCANNER_AUTH_TOKEN`) on every route except `/health`.
+- A path scope (`--allow-root`, repeatable, or `FILE_SCANNER_ALLOWED_ROOTS`): every tool path must
+  resolve, symlinks and `..` included, to a place under one of the roots. The cache and string tools and routes
+  also show only entries of files inside a root. Counts and sizes (`cache_status` `stats`, `/cache/stats`, string
+  totals) stay global.
+- A limit of 16 concurrent REST requests and a 120 second REST timeout.
 
-- **Standalone Binary**: Direct deployment on virtual machines or bare metal
-- **Container**: Docker containers for portable deployment
-- **Kubernetes**: Orchestrated deployment with auto-scaling and service discovery
-- **Cloud Functions**: Serverless deployment for event-driven analysis
-- **Microservices**: Individual ThreatFlux libraries as separate services
+What does not exist, and belongs in the layer in front of the server:
 
-### Deployment Architecture
+- TLS. The server speaks plain HTTP. Terminate TLS in a reverse proxy or the platform load balancer.
+- Rate limiting. Put it in the reverse proxy.
+- Per-user accounts or API keys. There is one shared bearer token.
+- A configuration file. Everything is a command-line flag or one of the environment variables below.
+- `/ready` and `/metrics` routes. Use `/health` for liveness and readiness.
 
-```mermaid
-graph TB
-    subgraph "Load Balancer"
-        LB[Load Balancer]
-    end
-    
-    subgraph "Application Tier"
-        APP1[File Scanner 1]
-        APP2[File Scanner 2]
-        APP3[File Scanner 3]
-    end
-    
-    subgraph "Cache Tier"
-        REDIS[Redis Cluster]
-        CACHE[File Cache]
-    end
-    
-    subgraph "Storage Tier"
-        S3[Object Storage]
-        DB[(PostgreSQL)]
-        LOGS[(Log Storage)]
-    end
-    
-    subgraph "Monitoring"
-        PROM[Prometheus]
-        GRAF[Grafana]
-        ALERT[AlertManager]
-    end
-    
-    LB --> APP1
-    LB --> APP2
-    LB --> APP3
-    
-    APP1 --> REDIS
-    APP2 --> REDIS
-    APP3 --> REDIS
-    
-    APP1 --> CACHE
-    APP2 --> CACHE
-    APP3 --> CACHE
-    
-    APP1 --> S3
-    APP2 --> S3
-    APP3 --> S3
-    
-    APP1 --> DB
-    APP2 --> DB
-    APP3 --> DB
-    
-    APP1 --> LOGS
-    APP2 --> LOGS
-    APP3 --> LOGS
-    
-    PROM --> APP1
-    PROM --> APP2
-    PROM --> APP3
-    GRAF --> PROM
-    ALERT --> PROM
+## Command-line reference
+
+`file-scanner mcp-http` (`mcp-sse` is a deprecated alias that starts the same server):
+
+```text
+  -p, --port <PORT>              Port to listen on (0 picks a free one) [default: 3000]
+      --host <HOST>              Address to bind [default: 127.0.0.1]
+      --allowed-host <HOST>      Extra Host header value to accept (`name` or `name:port`); repeatable
+      --allowed-origin <ORIGIN>  Extra browser Origin to accept (`scheme://host[:port|:*]`); repeatable
+      --auth-token <TOKEN>       Bearer token every request except /health must present
+      --allow-root <DIR>         Directory the tools may read; repeatable
+      --cache-dir <DIR>          Directory for cached results (private, mode 0700)
+      --no-cache                 Turn result caching off
 ```
 
-## 📋 Prerequisites
+`file-scanner mcp-stdio` takes `--allow-root`, `--cache-dir` and `--no-cache`.
 
-### System Requirements
+Environment variables the binary reads:
 
-#### Minimum Requirements
-- **CPU**: 2 cores, 2.4 GHz
-- **Memory**: 4 GB RAM
-- **Storage**: 20 GB available disk space
-- **Network**: 100 Mbps connection
-- **OS**: Linux (Ubuntu 20.04+, CentOS 8+, RHEL 8+)
+| Variable | Effect |
+|----------|--------|
+| `FILE_SCANNER_AUTH_TOKEN` | Same as `--auth-token`. Prefer it: command lines are visible to other users. |
+| `FILE_SCANNER_ALLOWED_ROOTS` | `:`-separated directories; used when no `--allow-root` is given. |
+| `FILE_SCANNER_CACHE_DIR` | Same as `--cache-dir`. |
+| `FILE_SCANNER_SECTION_CACHE_MB` | In-memory budget of the section cache, in MiB (default 256). |
+| `FILE_SCANNER_CACHE_DISK_MB` | On-disk cache budget, in MiB. |
+| `XDG_CACHE_HOME`, `HOME` | Choose the default cache directory (below). |
 
-#### Recommended Requirements
-- **CPU**: 8 cores, 3.0 GHz
-- **Memory**: 16 GB RAM
-- **Storage**: 100 GB SSD
-- **Network**: 1 Gbps connection
-- **OS**: Linux with container runtime
+No other variable has an effect. `RUST_LOG` does nothing: the server has no logger. It prints a startup
+banner and one line per refused request on stderr.
 
-#### High-Performance Requirements
-- **CPU**: 16+ cores, 3.5 GHz
-- **Memory**: 64 GB RAM
-- **Storage**: 500 GB NVMe SSD
-- **Network**: 10 Gbps connection
-- **Additional**: GPU for ML workloads (optional)
+The default cache directory is `$XDG_CACHE_HOME/file-scanner`, else `~/Library/Caches/file-scanner`
+on macOS or `~/.cache/file-scanner` elsewhere, else a per-user directory under the system temp directory.
 
-### Software Dependencies
+## Run it on a host
+
+Local use, loopback only:
 
 ```bash
-# Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install -y \
-    curl \
-    wget \
-    git \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    ca-certificates
-
-# RHEL/CentOS
-sudo yum update -y
-sudo yum install -y \
-    curl \
-    wget \
-    git \
-    gcc \
-    openssl-devel \
-    ca-certificates
+file-scanner mcp-http --port 3000 --allow-root /srv/samples
 ```
 
-### Rust Installation
+Real startup output (shortened):
 
-```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-
-# Verify installation
-rustc --version
-cargo --version
+```text
+file-scanner 0.3.12 MCP HTTP server listening on http://127.0.0.1:3000/mcp
+  REST helpers on the same address: /health, /api/info, /tools/list, /tools/call, /cache/*, /strings/*, ...
+  Host allow-list: localhost, 127.0.0.1, ::1
+  Origin check: loopback origins; no CORS wildcard
+  Bearer token: not set
+  File access: limited to /srv/samples
 ```
 
-## 🚀 Deployment Options
-
-### Option 1: Standalone Binary
-
-#### Build for Production
+To let other machines connect, bind a non-loopback address and set all three protections:
 
 ```bash
-# Clone the repository
-git clone https://github.com/ThreatFlux/file-scanner.git
-cd file-scanner
-
-# Build optimized release
-cargo build --release --workspace
-
-# Verify build
-./target/release/file-scanner --version
+export FILE_SCANNER_AUTH_TOKEN="$(openssl rand -hex 32)"
+file-scanner mcp-http --host 0.0.0.0 --port 3000 \
+  --allow-root /srv/samples \
+  --allowed-host scanner.internal:3000
 ```
 
-#### Installation
+If you bind `0.0.0.0` without a token, the server prints a warning and still starts. If you do not
+add `--allowed-host`, remote clients get `403` because their `Host` header is not on the list.
+
+How `--allowed-host` matches (checked against a running server): `localhost`, `127.0.0.1` and `::1` are
+always accepted on any port. A bare name such as `scanner.example.com` matches that name on any port. A
+`name:port` entry matches only that exact name and port. A name that is not listed gets `403`. Repeat the
+flag for every name clients use (`file-scanner`, `file-scanner.default.svc`, and so on); a short name does
+not match its fully qualified form.
+
+Check it from a second terminal in which the same token is exported. The server holds the first terminal, so
+print the token there with `echo "$FILE_SCANNER_AUTH_TOKEN"` before you start it:
 
 ```bash
-# Install binary
-sudo cp target/release/file-scanner /usr/local/bin/
-sudo chmod +x /usr/local/bin/file-scanner
+curl -s http://127.0.0.1:3000/health
+# {"status":"ok","service":"file-scanner-mcp","version":"0.3.12","transports":["streamable-http"]}
 
-# Create service user
-sudo useradd -r -s /bin/false threatflux
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/tools/list
+# 401   (when a token is set and none is sent)
 
-# Create directories
-sudo mkdir -p /etc/threatflux
-sudo mkdir -p /var/log/threatflux
-sudo mkdir -p /var/cache/threatflux
-
-# Set permissions
-sudo chown -R threatflux:threatflux /var/log/threatflux
-sudo chown -R threatflux:threatflux /var/cache/threatflux
+curl -s -X POST http://127.0.0.1:3000/tools/list \
+  -H "Authorization: Bearer $FILE_SCANNER_AUTH_TOKEN" |
+  python3 -c 'import sys,json; print(len(json.load(sys.stdin)["result"]["tools"]))'
+# 17
 ```
 
-#### Systemd Service
+`/tools/list` is one of the REST helper routes. The MCP endpoint itself, `/mcp`, is for MCP clients: it
+needs an `Accept: application/json, text/event-stream` header (without it the answer is `406`). Clients that
+use sessions (revisions before 2026-07-28) also need an initialized session. A 2026-07-28 request is stateless and
+needs no session, but it must carry the `MCP-Protocol-Version`, `Mcp-Method` and (for `tools/call`) `Mcp-Name`
+headers; see [docs/MCP.md](docs/MCP.md#protocol-revisions).
+
+A client sends `Authorization: Bearer <token>` on every request. Stop the server with Ctrl-C or SIGTERM.
+
+### systemd
+
+Create the user and the token file first:
 
 ```bash
-# Create service file
-sudo tee /etc/systemd/system/threatflux.service << EOF
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin file-scanner
+echo "FILE_SCANNER_AUTH_TOKEN=$(openssl rand -hex 32)" | sudo install -m 600 /dev/stdin /etc/file-scanner.env
+```
+
+The unit file, `/etc/systemd/system/file-scanner.service`:
+
+```ini
 [Unit]
-Description=ThreatFlux File Scanner
+Description=file-scanner MCP server
 After=network.target
-Wants=network.target
 
 [Service]
-Type=exec
-User=threatflux
-Group=threatflux
-ExecStart=/usr/local/bin/file-scanner mcp-http --port 8080
-Restart=always
-RestartSec=5
-Environment=RUST_LOG=info
-Environment=THREATFLUX_CACHE_DIR=/var/cache/threatflux
-Environment=THREATFLUX_LOG_DIR=/var/log/threatflux
-
-# Security settings
+User=file-scanner
+EnvironmentFile=/etc/file-scanner.env
+ExecStart=/usr/local/bin/file-scanner mcp-http --port 3000 --allow-root /srv/samples
+Restart=on-failure
 NoNewPrivileges=true
-PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/cache/threatflux /var/log/threatflux
-
-# Resource limits
-LimitNOFILE=65536
-LimitNPROC=4096
+PrivateTmp=true
+CacheDirectory=file-scanner
+Environment=FILE_SCANNER_CACHE_DIR=/var/cache/file-scanner
+ReadOnlyPaths=/srv/samples
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
-# Enable and start service
-sudo systemctl daemon-reload
-sudo systemctl enable threatflux
-sudo systemctl start threatflux
-sudo systemctl status threatflux
 ```
 
-### Option 2: Container Deployment
+`/etc/file-scanner.env` holds one line, `FILE_SCANNER_AUTH_TOKEN=...`, readable by root only. This unit
+binds loopback; put the reverse proxy on the same host. This unit was not run for this guide. Servers that point at
+the same `FILE_SCANNER_CACHE_DIR` share one analysis history; a server with `--allow-root` lists only the entries of
+files inside its roots.
 
-The published image (`ghcr.io/threatflux/file-scanner`, built from the repository
-`Dockerfile`) runs on distroless Debian 13 as a nonroot user with no shell. The
-Debian slim Dockerfile below is an alternative for deployments that need a shell
-and an HTTP health check; it is not the published runtime.
+### Reverse proxy
 
-#### Dockerfile
+Put TLS and rate limiting here. Forward the original `Host` header (or add the proxy's public name with
+`--allowed-host`) and do not buffer `/mcp`, because responses can be streamed. A minimal nginx
+configuration (the `limit_req_zone` line belongs in the `http` block; nginx rejects `limit_req` without it):
 
-```dockerfile
-# Multi-stage build for optimization
-FROM rust:1.99.1-trixie AS builder
+```nginx
+limit_req_zone $binary_remote_addr zone=scanner:10m rate=5r/s;
 
-WORKDIR /app
-
-# Copy manifests
-COPY Cargo.toml Cargo.lock ./
-COPY threatflux-*/Cargo.toml ./threatflux-*/
-
-# Copy source code
-COPY src/ ./src/
-COPY threatflux-*/ ./threatflux-*/
-
-# Build for release
-RUN cargo build --release --workspace
-
-# Runtime image
-FROM debian:trixie-slim
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libssl3t64 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create user
-RUN groupadd -r threatflux && useradd -r -g threatflux threatflux
-
-# Create directories
-RUN mkdir -p /var/cache/threatflux /var/log/threatflux && \
-    chown -R threatflux:threatflux /var/cache/threatflux /var/log/threatflux
-
-# Copy binary
-COPY --from=builder /app/target/release/file-scanner /usr/local/bin/
-
-# Set permissions
-RUN chmod +x /usr/local/bin/file-scanner
-
-# Switch to non-root user
-USER threatflux
-
-# Expose port
-EXPOSE 8080
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
-
-# Default command
-CMD ["file-scanner", "mcp-http", "--port", "8080"]
+location /mcp {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 300s;
+    limit_req zone=scanner burst=10;
+}
 ```
 
-#### Docker Compose
+Start the server with `--allowed-host scanner.example.com` to match. This snippet was not run.
 
-```yaml
-version: '3.8'
+## Container image
 
-services:
-  threatflux:
-    build: .
-    ports:
-      - "8080:8080"
-    environment:
-      - RUST_LOG=info
-      - THREATFLUX_CACHE_SIZE=100000
-      - THREATFLUX_WORKERS=4
-    volumes:
-      - threatflux_cache:/var/cache/threatflux
-      - threatflux_logs:/var/log/threatflux
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 8G
-        reservations:
-          cpus: '2'
-          memory: 4G
+The image is published at `ghcr.io/threatflux/file-scanner`. The runtime stage is Chainguard
+`glibc-dynamic` (Wolfi): it runs as uid 65532, with no shell and no package manager. The working directory
+is `/data`. The entrypoint is `tini -- file-scanner` and there is no default command, so you always pass
+arguments: a file path, a subcommand, or `--help`.
 
-  redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1'
-          memory: 1G
+The container sees only what you mount. Tool calls name paths inside the container, so mount the files
+and pass the same path in the tool call. Mount read-only (`:ro`).
 
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/nginx/ssl:ro
-    depends_on:
-      - threatflux
-    restart: unless-stopped
-
-volumes:
-  threatflux_cache:
-    driver: local
-  threatflux_logs:
-    driver: local
-  redis_data:
-    driver: local
-```
-
-#### Build and Deploy
+Scan one file:
 
 ```bash
-# Build image
-docker build -t threatflux/file-scanner:latest .
-
-# Run with Docker Compose
-docker-compose up -d
-
-# Check status
-docker-compose ps
-docker-compose logs threatflux
+docker run --rm -v "$PWD:/data:ro" ghcr.io/threatflux/file-scanner /data/sample.bin --format json
 ```
 
-## ☸️ Kubernetes Deployment
+MCP over stdio for a client on the same machine. Keep the host path identical inside the container, so
+the client can pass the paths it already has:
 
-### Namespace and RBAC
-
-```yaml
-# namespace.yaml
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: threatflux
-  labels:
-    name: threatflux
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: threatflux-sa
-  namespace: threatflux
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  namespace: threatflux
-  name: threatflux-role
-rules:
-- apiGroups: [""]
-  resources: ["configmaps", "secrets"]
-  verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: threatflux-rolebinding
-  namespace: threatflux
-subjects:
-- kind: ServiceAccount
-  name: threatflux-sa
-  namespace: threatflux
-roleRef:
-  kind: Role
-  name: threatflux-role
-  apiGroup: rbac.authorization.k8s.io
+```bash
+docker run -i --rm -v "$PWD:$PWD:ro" -w "$PWD" ghcr.io/threatflux/file-scanner mcp-stdio --allow-root "$PWD"
 ```
 
-### ConfigMap and Secrets
+Claude Code:
 
-```yaml
-# configmap.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: threatflux-config
-  namespace: threatflux
-data:
-  RUST_LOG: "info"
-  THREATFLUX_CACHE_SIZE: "100000"
-  THREATFLUX_WORKERS: "4"
-  THREATFLUX_MAX_FILE_SIZE: "1073741824"  # 1GB
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: threatflux-secrets
-  namespace: threatflux
-type: Opaque
-data:
-  api-key: <base64-encoded-api-key>
-  db-password: <base64-encoded-db-password>
+```bash
+claude mcp add file-scanner -- docker run -i --rm -v "$PWD:$PWD:ro" -w "$PWD" \
+  ghcr.io/threatflux/file-scanner mcp-stdio --allow-root "$PWD"
 ```
 
-### Deployment
+MCP over HTTP, published on loopback only, with a token and a read-only mount:
+
+```bash
+export FILE_SCANNER_AUTH_TOKEN="$(openssl rand -hex 32)"
+docker run -d --name file-scanner --rm -p 127.0.0.1:3000:3000 \
+  -e FILE_SCANNER_AUTH_TOKEN \
+  -v /srv/samples:/data:ro \
+  ghcr.io/threatflux/file-scanner \
+  mcp-http --host 0.0.0.0 --port 3000 --allow-root /data
+```
+
+`-e FILE_SCANNER_AUTH_TOKEN` with no value passes the variable from your shell, so the container and your
+client use the same token. The container runs detached; check it from the same shell, and end it with
+`docker stop file-scanner`:
+
+```bash
+curl -s http://127.0.0.1:3000/health
+curl -s -X POST http://127.0.0.1:3000/tools/list \
+  -H "Authorization: Bearer $FILE_SCANNER_AUTH_TOKEN" | head -c 200
+```
+
+Inside the container the server must bind `0.0.0.0` so that Docker can forward to it. Publishing the
+port on `127.0.0.1` on the host is what keeps it private. Clients that connect as `localhost` or
+`127.0.0.1` are always allowed, so this command needs no `--allowed-host`; for any other name, add one
+`--allowed-host` for every host name clients use (see the matching rule above). Clients pass `/data/...`
+paths. To reach it from other hosts, publish on a non-loopback address and add the proxy in front of it as
+above.
+
+Notes:
+
+- The container runs as uid 65532. Files you mount must be readable by that user. If they are not
+  world-readable, run as yourself with `--user "$(id -u):$(id -g)"` (add `--cache-dir` under `/tmp`, as
+  below, because that user cannot write to the image's own directories).
+- The cache directory should be writable. If it is not, the server prints "cache directory ... is not
+  usable" on stderr and keeps results in memory only. With `docker run --read-only`, add `--tmpfs /tmp` and
+  `--cache-dir /tmp/file-scanner-cache` to keep the on-disk cache.
+- The image's `HEALTHCHECK` runs `file-scanner --help`, which only proves that the binary starts. For
+  the HTTP server, probe `GET /health`.
+- Build it yourself with `docker build -t file-scanner .`.
+
+The untagged image is `latest`. At the time of writing, the published image is the 0.3.12 release, which
+does not have `--allow-root`, `--host`, `--allowed-host` or token support: these commands need the image
+from the release that follows it, or one you build yourself with `docker build -t file-scanner .` (then
+use `file-scanner` in place of `ghcr.io/threatflux/file-scanner`).
+The `docker run` commands above are written from the Dockerfile's `ENTRYPOINT` and `WORKDIR`. They were
+not run against a built image when this guide was written; the same arguments were run against the
+native binary.
+
+## Kubernetes
+
+The image has no default command, so set `args`. A Deployment that serves HTTP with a token from a
+Secret, a read-only volume of files, and a writable `/tmp`. The manifest refers to a Secret named
+`file-scanner` with the key `token`, a PersistentVolumeClaim named `samples`, and a Service named
+`file-scanner`. Create the Secret first:
+
+```bash
+kubectl create secret generic file-scanner --from-literal=token="$(openssl rand -hex 32)"
+```
+
+To read the token back for a client, run
+`kubectl get secret file-scanner -o jsonpath='{.data.token}' | base64 -d`.
+
+The image is `:latest`, which at the time of writing is the 0.3.12 release. It does not have `--allow-root`,
+`--host`, `--allowed-host` or token support, so this manifest needs an image from a later release or one you
+build yourself.
 
 ```yaml
-# deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: threatflux-deployment
-  namespace: threatflux
-  labels:
-    app: threatflux
+  name: file-scanner
 spec:
-  replicas: 3
+  replicas: 1
   selector:
-    matchLabels:
-      app: threatflux
+    matchLabels: { app: file-scanner }
   template:
     metadata:
-      labels:
-        app: threatflux
+      labels: { app: file-scanner }
     spec:
-      serviceAccountName: threatflux-sa
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+        runAsUser: 65532
       containers:
-      - name: threatflux
-        image: threatflux/file-scanner:latest
-        imagePullPolicy: Always
-        ports:
-        - containerPort: 8080
-          name: http
-        env:
-        - name: RUST_LOG
-          valueFrom:
-            configMapKeyRef:
-              name: threatflux-config
-              key: RUST_LOG
-        - name: THREATFLUX_CACHE_SIZE
-          valueFrom:
-            configMapKeyRef:
-              name: threatflux-config
-              key: THREATFLUX_CACHE_SIZE
-        - name: API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: threatflux-secrets
-              key: api-key
-        resources:
-          requests:
-            memory: "2Gi"
-            cpu: "1000m"
-          limits:
-            memory: "8Gi"
-            cpu: "4000m"
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: http
-          initialDelaySeconds: 30
-          periodSeconds: 30
-          timeoutSeconds: 5
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /ready
-            port: http
-          initialDelaySeconds: 5
-          periodSeconds: 10
-          timeoutSeconds: 3
-          failureThreshold: 3
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities:
-            drop:
-            - ALL
-        volumeMounts:
-        - name: cache-volume
-          mountPath: /var/cache/threatflux
-        - name: tmp-volume
-          mountPath: /tmp
+        - name: file-scanner
+          image: ghcr.io/threatflux/file-scanner:latest
+          args:
+            - mcp-http
+            - --host=0.0.0.0
+            - --port=8080
+            - --allow-root=/data
+            - --allowed-host=file-scanner
+            - --allowed-host=file-scanner.default.svc
+            - --cache-dir=/tmp/file-scanner-cache
+          env:
+            - name: FILE_SCANNER_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef: { name: file-scanner, key: token }
+          ports:
+            - containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+              httpHeaders: [{ name: Host, value: localhost }]
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+              httpHeaders: [{ name: Host, value: localhost }]
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: samples, mountPath: /data, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
       volumes:
-      - name: cache-volume
-        persistentVolumeClaim:
-          claimName: threatflux-cache-pvc
-      - name: tmp-volume
-        emptyDir: {}
+        - name: samples
+          persistentVolumeClaim: { claimName: samples }
+        - name: tmp
+          emptyDir: {}
 ```
 
-### Service and Ingress
+`/health` is behind the Host allow-list too. A kubelet probe sends the pod IP as `Host`, which is not on
+the list and gets `403`, so the probes above set `Host: localhost`, which is always allowed. Without that
+header the pod is restarted and never becomes ready. List every name clients use for the Service: the
+short name and the `.default.svc.cluster.local` form are different entries.
+
+Expose it with a ClusterIP Service named `file-scanner`, added to the same file after a line containing `---`:
 
 ```yaml
-# service.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: threatflux-service
-  namespace: threatflux
-  labels:
-    app: threatflux
-spec:
-  selector:
-    app: threatflux
-  ports:
-  - name: http
-    port: 80
-    targetPort: 8080
-    protocol: TCP
-  type: ClusterIP
 ---
-# ingress.yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: threatflux-ingress
-  namespace: threatflux
-  annotations:
-    cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    nginx.ingress.kubernetes.io/rate-limit: "100"
-    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
-spec:
-  tls:
-  - hosts:
-    - api.threatflux.com
-    secretName: threatflux-tls
-  rules:
-  - host: api.threatflux.com
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: threatflux-service
-            port:
-              number: 80
-```
-
-### Persistent Storage
-
-```yaml
-# pvc.yaml
 apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: threatflux-cache-pvc
-  namespace: threatflux
-spec:
-  accessModes:
-    - ReadWriteMany
-  resources:
-    requests:
-      storage: 100Gi
-  storageClassName: fast-ssd
-```
-
-### Horizontal Pod Autoscaler
-
-```yaml
-# hpa.yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: threatflux-hpa
-  namespace: threatflux
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: threatflux-deployment
-  minReplicas: 3
-  maxReplicas: 20
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 70
-  - type: Resource
-    resource:
-      name: memory
-      target:
-        type: Utilization
-        averageUtilization: 80
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300
-      policies:
-      - type: Percent
-        value: 10
-        periodSeconds: 60
-    scaleUp:
-      stabilizationWindowSeconds: 0
-      policies:
-      - type: Percent
-        value: 100
-        periodSeconds: 15
-      - type: Pods
-        value: 4
-        periodSeconds: 15
-      selectPolicy: Max
-```
-
-### Deploy to Kubernetes
-
-```bash
-# Apply all configurations
-kubectl apply -f namespace.yaml
-kubectl apply -f configmap.yaml
-kubectl apply -f pvc.yaml
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
-kubectl apply -f ingress.yaml
-kubectl apply -f hpa.yaml
-
-# Check deployment status
-kubectl get pods -n threatflux
-kubectl get svc -n threatflux
-kubectl get ingress -n threatflux
-
-# Check logs
-kubectl logs -f deployment/threatflux-deployment -n threatflux
-```
-
-## ☁️ Cloud Platform Deployment
-
-### AWS ECS
-
-```json
-{
-  "family": "threatflux-task",
-  "networkMode": "awsvpc",
-  "requiresCompatibilities": ["FARGATE"],
-  "cpu": "2048",
-  "memory": "8192",
-  "executionRoleArn": "arn:aws:iam::ACCOUNT:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::ACCOUNT:role/threatfluxTaskRole",
-  "containerDefinitions": [
-    {
-      "name": "threatflux",
-      "image": "threatflux/file-scanner:latest",
-      "portMappings": [
-        {
-          "containerPort": 8080,
-          "protocol": "tcp"
-        }
-      ],
-      "environment": [
-        {
-          "name": "RUST_LOG",
-          "value": "info"
-        },
-        {
-          "name": "THREATFLUX_CACHE_SIZE",
-          "value": "100000"
-        }
-      ],
-      "secrets": [
-        {
-          "name": "API_KEY",
-          "valueFrom": "arn:aws:ssm:region:account:parameter/threatflux/api-key"
-        }
-      ],
-      "logConfiguration": {
-        "logDriver": "awslogs",
-        "options": {
-          "awslogs-group": "/ecs/threatflux",
-          "awslogs-region": "us-east-1",
-          "awslogs-stream-prefix": "ecs"
-        }
-      },
-      "healthCheck": {
-        "command": [
-          "CMD-SHELL",
-          "curl -f http://localhost:8080/health || exit 1"
-        ],
-        "interval": 30,
-        "timeout": 5,
-        "retries": 3,
-        "startPeriod": 60
-      }
-    }
-  ]
-}
-```
-
-### AWS Lambda (Serverless)
-
-```rust
-// src/lambda.rs
-use lambda_runtime::{service_fn, Error, LambdaEvent};
-use serde::{Deserialize, Serialize};
-use threatflux_hashing::calculate_all_hashes;
-
-#[derive(Deserialize)]
-struct Request {
-    file_url: String,
-}
-
-#[derive(Serialize)]
-struct Response {
-    hashes: HashMap<String, String>,
-}
-
-async fn function_handler(event: LambdaEvent<Request>) -> Result<Response, Error> {
-    // Download file from S3
-    let file_content = download_from_s3(&event.payload.file_url).await?;
-    
-    // Perform analysis
-    let hashes = calculate_all_hashes(&file_content).await?;
-    
-    Ok(Response {
-        hashes: HashMap::from([
-            ("md5".to_string(), hashes.md5),
-            ("sha256".to_string(), hashes.sha256),
-            ("blake3".to_string(), hashes.blake3),
-        ]),
-    })
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Error> {
-    lambda_runtime::run(service_fn(function_handler)).await
-}
-```
-
-### Google Cloud Run
-
-```yaml
-# service.yaml
-apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: threatflux-service
-  annotations:
-    run.googleapis.com/ingress: all
+  name: file-scanner
 spec:
-  template:
-    metadata:
-      annotations:
-        autoscaling.knative.dev/minScale: "1"
-        autoscaling.knative.dev/maxScale: "100"
-        run.googleapis.com/cpu-throttling: "false"
-        run.googleapis.com/execution-environment: gen2
-    spec:
-      containerConcurrency: 10
-      containers:
-      - image: gcr.io/PROJECT-ID/threatflux:latest
-        ports:
-        - containerPort: 8080
-        env:
-        - name: RUST_LOG
-          value: "info"
-        - name: THREATFLUX_CACHE_SIZE
-          value: "100000"
-        resources:
-          limits:
-            cpu: "4"
-            memory: "8Gi"
-        livenessProbe:
-          httpGet:
-            path: /health
-        startupProbe:
-          httpGet:
-            path: /ready
-          initialDelaySeconds: 10
-          periodSeconds: 5
-          failureThreshold: 10
+  selector: { app: file-scanner }
+  ports:
+    - port: 8080
+      targetPort: 8080
 ```
 
-## ⚙️ Configuration Management
+If you add an Ingress, terminate TLS and rate-limit there, and add its
+public name with another `--allowed-host`. Do not expose the Service to the internet without the token.
+This manifest was not applied to a cluster for this guide. Use one replica: the cache and the string
+index live in the process, and MCP sessions are held by the process that opened them.
 
-### Environment Variables
+## MCP registry file
+
+`server.json` at the repository root describes the server for the MCP registry. It cannot be published as it
+stands. These must be true first:
+
+- The three version strings (`version`, the cargo package `version` and the tag in the OCI `identifier`) say
+  0.3.12 and nothing in the release automation updates them. Set them by hand to a release that has these
+  features, in the same change that bumps `Cargo.toml`. Because 0.3.12 does not accept `--allow-root`, the file
+  passes only `mcp-stdio`; add `--allow-root` back to the arguments once the versions name a release that has it.
+- `README.md` must contain an `mcp-name: io.github.threatflux/file-scanner` line, which the registry is expected
+  to use to check ownership of the cargo package.
+- The OCI image must carry the `io.modelcontextprotocol.server.name` label. The Dockerfile now sets it, but the
+  0.3.12 image does not have it.
+- Not confirmed: whether the registry accepts `registryType` `cargo`, and whether it accepts the lower-case
+  `io.github.threatflux` namespace. Check both when publishing.
+
+The file was checked by hand against the registry schema, not validated online.
+
+## Building a custom image
+
+The repository `Dockerfile` is the supported build. It needs the whole repository, because Cargo
+patches three crates from `vendor/`, so a Dockerfile that copies only `Cargo.toml`, `Cargo.lock` and
+`src/` cannot resolve its dependencies.
+
+## Checking a deployment
+
+`scripts/mcp-smoke.py` runs a real MCP handshake against a local binary: initialize, the initialized
+notification, `tools/list`, an overview call and a cached drill-down.
 
 ```bash
-# Core Configuration
-export RUST_LOG=info
-export RUST_BACKTRACE=1
-
-# ThreatFlux Configuration
-export THREATFLUX_CACHE_DIR=/var/cache/threatflux
-export THREATFLUX_CACHE_SIZE=100000
-export THREATFLUX_WORKERS=4
-export THREATFLUX_MAX_FILE_SIZE=1073741824  # 1GB
-
-# Library-specific Configuration
-export THREATFLUX_HASHING_BUFFER_SIZE=65536
-export THREATFLUX_STRINGS_MAX_LENGTH=10000
-export THREATFLUX_BINARY_TIMEOUT=300
-
-# Security Configuration
-export THREATFLUX_API_KEY_FILE=/etc/threatflux/api-key
-export THREATFLUX_TLS_CERT=/etc/threatflux/tls.crt
-export THREATFLUX_TLS_KEY=/etc/threatflux/tls.key
-
-# Database Configuration
-export DATABASE_URL=postgresql://user:pass@host:5432/threatflux
-export REDIS_URL=redis://localhost:6379
-
-# Monitoring Configuration
-export PROMETHEUS_ENDPOINT=http://prometheus:9090
-export JAEGER_ENDPOINT=http://jaeger:14268/api/traces
+python3 scripts/mcp-smoke.py target/release/file-scanner
+# MCP handshake, tools/list (17 tools), analyze_file overview and cached query_analysis passed
 ```
 
-### Configuration File
-
-```yaml
-# /etc/threatflux/config.yaml
-server:
-  host: "0.0.0.0"
-  port: 8080
-  workers: 4
-  max_connections: 1000
-  timeout: 300s
-
-cache:
-  backend: "filesystem"
-  directory: "/var/cache/threatflux"
-  max_size: 100000
-  eviction_policy: "lru"
-  ttl: 3600s
-
-libraries:
-  hashing:
-    buffer_size: 65536
-    algorithms:
-      blake3: true
-      sha256: true
-      sha512: false
-      md5: false
-    
-  strings:
-    min_length: 4
-    max_strings: 10000
-    max_file_size: 104857600  # 100MB
-    
-  binary:
-    timeout: 300s
-    max_sections: 1000
-    use_memory_mapping: true
-
-security:
-  api_key_file: "/etc/threatflux/api-key"
-  rate_limit: 100
-  rate_window: "1m"
-  max_file_size: 1073741824  # 1GB
-
-logging:
-  level: "info"
-  format: "json"
-  output: "/var/log/threatflux/app.log"
-  rotation: "daily"
-  max_files: 30
-
-monitoring:
-  metrics_enabled: true
-  metrics_port: 9090
-  tracing_enabled: true
-  jaeger_endpoint: "http://jaeger:14268/api/traces"
-```
-
-## 📊 Monitoring & Observability
-
-### Prometheus Metrics
-
-```rust
-// src/metrics.rs
-use prometheus::{
-    Counter, Histogram, Gauge, Registry,
-    register_counter, register_histogram, register_gauge,
-};
-
-lazy_static! {
-    pub static ref ANALYSIS_REQUESTS_TOTAL: Counter = register_counter!(
-        "threatflux_analysis_requests_total",
-        "Total number of analysis requests"
-    ).unwrap();
-    
-    pub static ref ANALYSIS_DURATION_SECONDS: Histogram = register_histogram!(
-        "threatflux_analysis_duration_seconds",
-        "Time spent on file analysis"
-    ).unwrap();
-    
-    pub static ref CACHE_HIT_RATIO: Gauge = register_gauge!(
-        "threatflux_cache_hit_ratio",
-        "Cache hit ratio"
-    ).unwrap();
-    
-    pub static ref ACTIVE_ANALYSES: Gauge = register_gauge!(
-        "threatflux_active_analyses",
-        "Number of currently active analyses"
-    ).unwrap();
-}
-```
-
-### Grafana Dashboard
-
-```json
-{
-  "dashboard": {
-    "title": "ThreatFlux Monitoring",
-    "panels": [
-      {
-        "title": "Request Rate",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "rate(threatflux_analysis_requests_total[5m])",
-            "legendFormat": "Requests/sec"
-          }
-        ]
-      },
-      {
-        "title": "Response Time",
-        "type": "graph",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, rate(threatflux_analysis_duration_seconds_bucket[5m]))",
-            "legendFormat": "95th percentile"
-          },
-          {
-            "expr": "histogram_quantile(0.50, rate(threatflux_analysis_duration_seconds_bucket[5m]))",
-            "legendFormat": "50th percentile"
-          }
-        ]
-      },
-      {
-        "title": "Cache Performance",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "threatflux_cache_hit_ratio",
-            "legendFormat": "Hit Ratio"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-### Logging Configuration
-
-```yaml
-# fluent-bit.conf
-[SERVICE]
-    Flush         1
-    Log_Level     info
-    Daemon        off
-    Parsers_File  parsers.conf
-
-[INPUT]
-    Name              tail
-    Path              /var/log/threatflux/*.log
-    Parser            json
-    Tag               threatflux.*
-    Refresh_Interval  5
-
-[OUTPUT]
-    Name  es
-    Match *
-    Host  elasticsearch
-    Port  9200
-    Index threatflux-logs
-    Type  _doc
-```
-
-## 💾 Backup & Recovery
-
-### Database Backup
-
-```bash
-#!/bin/bash
-# backup.sh
-
-BACKUP_DIR="/var/backups/threatflux"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-
-# PostgreSQL backup
-pg_dump -h $DB_HOST -U $DB_USER threatflux > \
-    "$BACKUP_DIR/db_backup_$TIMESTAMP.sql"
-
-# Redis backup
-redis-cli --rdb "$BACKUP_DIR/redis_backup_$TIMESTAMP.rdb"
-
-# Cache directory backup
-tar -czf "$BACKUP_DIR/cache_backup_$TIMESTAMP.tar.gz" \
-    /var/cache/threatflux
-
-# Upload to S3
-aws s3 cp "$BACKUP_DIR/" "s3://threatflux-backups/$(date +%Y/%m/%d)/" \
-    --recursive --exclude "*" --include "*$TIMESTAMP*"
-
-# Cleanup old backups (keep 30 days)
-find "$BACKUP_DIR" -name "*.sql" -mtime +30 -delete
-find "$BACKUP_DIR" -name "*.rdb" -mtime +30 -delete
-find "$BACKUP_DIR" -name "*.tar.gz" -mtime +30 -delete
-```
-
-### Disaster Recovery
-
-```yaml
-# disaster-recovery.yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: threatflux-restore
-spec:
-  template:
-    spec:
-      containers:
-      - name: restore
-        image: threatflux/backup-restore:latest
-        env:
-        - name: BACKUP_SOURCE
-          value: "s3://threatflux-backups/2024/01/15/"
-        - name: RESTORE_TARGET
-          value: "/var/lib/postgresql/data"
-        command:
-        - /bin/bash
-        - -c
-        - |
-          # Download latest backup
-          aws s3 cp $BACKUP_SOURCE/db_backup_*.sql /tmp/
-          
-          # Restore database
-          psql -h $DB_HOST -U $DB_USER -d threatflux < /tmp/db_backup_*.sql
-          
-          # Restore cache
-          aws s3 cp $BACKUP_SOURCE/cache_backup_*.tar.gz /tmp/
-          tar -xzf /tmp/cache_backup_*.tar.gz -C /
-      restartPolicy: OnFailure
-```
-
-## 📈 Scaling Strategies
-
-### Horizontal Scaling
-
-```yaml
-# hpa-advanced.yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: threatflux-hpa-advanced
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: threatflux-deployment
-  minReplicas: 5
-  maxReplicas: 100
-  metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 60
-  - type: Resource
-    resource:
-      name: memory
-      target:
-        type: Utilization
-        averageUtilization: 70
-  - type: Pods
-    pods:
-      metric:
-        name: active_analyses_per_pod
-      target:
-        type: AverageValue
-        averageValue: "10"
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 600
-      policies:
-      - type: Percent
-        value: 25
-        periodSeconds: 60
-    scaleUp:
-      stabilizationWindowSeconds: 60
-      policies:
-      - type: Percent
-        value: 50
-        periodSeconds: 30
-      - type: Pods
-        value: 10
-        periodSeconds: 30
-```
-
-### Vertical Scaling
-
-```yaml
-# vpa.yaml
-apiVersion: autoscaling.k8s.io/v1
-kind: VerticalPodAutoscaler
-metadata:
-  name: threatflux-vpa
-spec:
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: threatflux-deployment
-  updatePolicy:
-    updateMode: "Auto"
-  resourcePolicy:
-    containerPolicies:
-    - containerName: threatflux
-      minAllowed:
-        cpu: 500m
-        memory: 1Gi
-      maxAllowed:
-        cpu: 8
-        memory: 32Gi
-      controlledResources: ["cpu", "memory"]
-```
-
-### Multi-Region Deployment
-
-```yaml
-# regions.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: region-config
-data:
-  regions: |
-    - name: us-east-1
-      clusters:
-        - cluster-1
-        - cluster-2
-    - name: eu-west-1
-      clusters:
-        - cluster-3
-        - cluster-4
-    - name: ap-southeast-1
-      clusters:
-        - cluster-5
-        - cluster-6
-```
-
-## 🔒 Security Considerations
-
-### Network Security
-
-```yaml
-# network-policy.yaml
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: threatflux-network-policy
-spec:
-  podSelector:
-    matchLabels:
-      app: threatflux
-  policyTypes:
-  - Ingress
-  - Egress
-  ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          name: ingress-nginx
-    ports:
-    - protocol: TCP
-      port: 8080
-  egress:
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          name: kube-system
-  - to: []
-    ports:
-    - protocol: TCP
-      port: 443  # HTTPS
-    - protocol: TCP
-      port: 53   # DNS
-    - protocol: UDP
-      port: 53   # DNS
-```
-
-### Pod Security Policy
-
-```yaml
-# psp.yaml
-apiVersion: policy/v1beta1
-kind: PodSecurityPolicy
-metadata:
-  name: threatflux-psp
-spec:
-  privileged: false
-  allowPrivilegeEscalation: false
-  requiredDropCapabilities:
-    - ALL
-  volumes:
-    - 'configMap'
-    - 'emptyDir'
-    - 'projected'
-    - 'secret'
-    - 'downwardAPI'
-    - 'persistentVolumeClaim'
-  hostNetwork: false
-  hostIPC: false
-  hostPID: false
-  runAsUser:
-    rule: 'MustRunAsNonRoot'
-  seLinux:
-    rule: 'RunAsAny'
-  fsGroup:
-    rule: 'RunAsAny'
-```
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-#### High Memory Usage
-
-```bash
-# Check memory usage
-kubectl top pods -n threatflux
-
-# Analyze memory allocation
-kubectl exec -it <pod-name> -n threatflux -- \
-    ps aux --sort=-%mem | head -10
-
-# Check for memory leaks
-kubectl logs <pod-name> -n threatflux | grep "memory"
-```
-
-**Solutions:**
-- Adjust `max_file_size` configuration
-- Increase memory limits
-- Enable memory profiling
-- Check for stuck analyses
-
-#### High CPU Usage
-
-```bash
-# Check CPU usage
-kubectl top pods -n threatflux
-
-# Profile CPU usage
-kubectl exec -it <pod-name> -n threatflux -- \
-    top -p $(pgrep file-scanner)
-```
-
-**Solutions:**
-- Reduce concurrent analyses
-- Optimize analysis algorithms
-- Scale horizontally
-- Check for infinite loops
-
-#### Cache Issues
-
-```bash
-# Check cache hit ratio
-curl http://localhost:8080/cache/stats
-
-# Clear cache if corrupted
-curl -X POST http://localhost:8080/cache/clear
-```
-
-**Solutions:**
-- Verify cache backend connectivity
-- Check disk space for filesystem cache
-- Validate cache configuration
-- Monitor cache performance metrics
-
-### Diagnostic Commands
-
-```bash
-# Check application health
-curl http://localhost:8080/health
-
-# Get application metrics
-curl http://localhost:8080/metrics
-
-# Check configuration
-kubectl get configmap threatflux-config -o yaml
-
-# Check secrets
-kubectl get secret threatflux-secrets -o yaml
-
-# Check logs
-kubectl logs -f deployment/threatflux-deployment -n threatflux
-
-# Check events
-kubectl get events -n threatflux --sort-by='.lastTimestamp'
-
-# Check resource usage
-kubectl describe pod <pod-name> -n threatflux
-```
-
-### Performance Troubleshooting
-
-```bash
-# Profile application
-kubectl exec -it <pod-name> -n threatflux -- \
-    perf record -g ./file-scanner analyze test-file.bin
-
-# Memory profiling
-kubectl exec -it <pod-name> -n threatflux -- \
-    valgrind --tool=massif ./file-scanner analyze test-file.bin
-
-# Network troubleshooting
-kubectl exec -it <pod-name> -n threatflux -- \
-    netstat -tuln
-
-# Disk I/O analysis
-kubectl exec -it <pod-name> -n threatflux -- \
-    iostat -x 1
-```
-
-## 📋 Deployment Checklist
-
-### Pre-Deployment
-- [ ] Review system requirements
-- [ ] Verify network connectivity
-- [ ] Install dependencies
-- [ ] Configure storage
-- [ ] Set up monitoring
-- [ ] Review security settings
-- [ ] Prepare backup strategy
-
-### Deployment
-- [ ] Build application
-- [ ] Create container images
-- [ ] Deploy infrastructure
-- [ ] Apply configurations
-- [ ] Start services
-- [ ] Verify health checks
-- [ ] Test functionality
-
-### Post-Deployment
-- [ ] Monitor performance
-- [ ] Check logs for errors
-- [ ] Verify metrics collection
-- [ ] Test backup procedures
-- [ ] Document configuration
-- [ ] Train operations team
-- [ ] Set up alerting
-
-### Maintenance
-- [ ] Regular security updates
-- [ ] Performance optimization
-- [ ] Capacity planning
-- [ ] Backup verification
-- [ ] Disaster recovery testing
-- [ ] Documentation updates
-
-This deployment guide provides comprehensive instructions for various deployment scenarios. Choose the approach that best fits your infrastructure and requirements. Always test deployments in a staging environment before deploying to production.
+It starts the binary itself over stdio, so it does not test a container or the HTTP server. For those,
+call `/health` and `POST /tools/list` with your token, as shown above.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---------|-------|
+| `403` from a remote client | The client's `Host` is not allowed. Add `--allowed-host name[:port]`. |
+| `401` | A token is set and the request has no `Authorization: Bearer ...` header. |
+| Path is outside the directories the server may read | Not under any `--allow-root`. Pass a path under one. |
+| Tool says the file does not exist | In a container, the file is not mounted at that path. |
+| stderr: cache directory "is not usable" | Not writable; results stay in memory. Fix `--cache-dir`. |
+| Port already in use | Pick another port, or `--port 0` and read the port from the startup banner. |

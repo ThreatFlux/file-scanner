@@ -161,3 +161,277 @@ fn validates_query_bounds_and_preserves_legacy_count_width() {
     assert!(tracker.get_related_strings(&oversized, 10).is_empty());
     assert_eq!(legacy_count(u64::MAX), usize::MAX);
 }
+
+#[test]
+fn tracking_the_same_batch_twice_counts_it_once() {
+    // A repeated tool call on an unchanged file must not double the counts.
+    let tracker = StringTracker::new();
+    let strings = vec![
+        "hello world string".to_string(),
+        "another one here".to_string(),
+    ];
+    tracker
+        .track_strings_from_results(&strings, "/f", "h1", "analyze_file")
+        .unwrap();
+    tracker
+        .track_strings_from_results(&strings, "/f", "h1", "analyze_file")
+        .unwrap();
+    assert_eq!(
+        tracker
+            .get_string_details("hello world string")
+            .unwrap()
+            .total_occurrences,
+        1
+    );
+    // Another file with the same strings is a different batch.
+    tracker
+        .track_strings_from_results(&strings, "/g", "h2", "analyze_file")
+        .unwrap();
+    assert_eq!(
+        tracker
+            .get_string_details("hello world string")
+            .unwrap()
+            .total_occurrences,
+        2
+    );
+}
+
+#[test]
+fn records_offsets_once_per_batch_key_and_clear_forgets_everything() {
+    let tracker = StringTracker::new();
+    let items = vec![("beacon string value".to_string(), 4096usize)];
+    let first = tracker.track_strings_at(|| items.clone(), "/f", "h1", "search_strings", "min=4");
+    assert_eq!((first.tracked, first.already_indexed), (1, false));
+    let again = tracker.track_strings_at(
+        || panic!("an indexed batch is not built again"),
+        "/f",
+        "h1",
+        "search_strings",
+        "min=4",
+    );
+    assert!(again.already_indexed);
+    let entry = tracker.get_string_details("beacon string value").unwrap();
+    assert!(matches!(
+        entry.occurrences[0].context,
+        StringContext::FileString { offset: Some(4096) }
+    ));
+    // A different option set is a new batch.
+    assert!(
+        !tracker
+            .track_strings_at(|| items.clone(), "/f", "h1", "search_strings", "min=8")
+            .already_indexed
+    );
+
+    tracker.clear();
+    assert!(tracker.get_string_details("beacon string value").is_none());
+    assert_eq!(tracker.get_statistics(None).total_unique_strings, 0);
+    // After a clear the same batch can be indexed again.
+    assert!(
+        !tracker
+            .track_strings_at(|| items.clone(), "/f", "h1", "search_strings", "min=4")
+            .already_indexed
+    );
+}
+
+#[test]
+fn filtered_search_matches_values_then_applies_the_entry_filter() {
+    let tracker = StringTracker::new();
+    let items: Vec<(String, usize)> = [
+        "http://evil.example.com/x",
+        "plain words only here",
+        "cmd.exe /c whoami",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, s)| ((*s).to_string(), i * 100))
+    .collect();
+    tracker.track_strings_at(|| items.clone(), "/f", "h", "t", "k");
+    let all = tracker.search_filtered(Some("EVIL"), None, 10, &|_| true);
+    assert_eq!(all.len(), 1, "case-insensitive substring");
+    let pattern = regex::Regex::new("^plain").unwrap();
+    assert_eq!(
+        tracker
+            .search_filtered(None, Some(&pattern), 10, &|_| true)
+            .len(),
+        1
+    );
+    let suspicious = tracker.search_filtered(None, None, 10, &|e| e.is_suspicious);
+    assert!(suspicious.iter().any(|e| e.value.contains("cmd.exe")));
+    assert!(!suspicious.iter().any(|e| e.value.starts_with("plain")));
+    assert_eq!(
+        tracker.search_filtered(None, None, 1, &|_| true).len(),
+        1,
+        "limit"
+    );
+}
+
+#[test]
+fn a_filtered_search_inspects_every_tracked_value() {
+    let tracker = StringTracker::new();
+    // More values than any candidate cap, the only match sorting last.
+    let items: Vec<(String, usize)> = (0..30_000)
+        .map(|n| (format!("aaaa plain value {n:06}"), n))
+        .chain(std::iter::once((
+            "http://late.example.com/x".to_string(),
+            99,
+        )))
+        .collect();
+    tracker.track_strings_at(|| items, "/f", "h", "search_strings", "min=4");
+    let urls = tracker.search_filtered(None, None, 10, &|entry| entry.categories.contains("url"));
+    assert_eq!(urls.len(), 1, "{urls:?}");
+    assert_eq!(urls[0].value, "http://late.example.com/x");
+}
+
+#[test]
+fn classify_does_not_depend_on_the_session_tracker_and_records_nothing() {
+    let tracker = StringTracker::new();
+    let entry = tracker.classify("http://evil.example.com/x").unwrap();
+    assert!(entry.categories.contains("url"), "{:?}", entry.categories);
+    assert_eq!(tracker.get_statistics(None).total_unique_strings, 0);
+    assert!(tracker
+        .get_string_details("http://evil.example.com/x")
+        .is_none());
+}
+
+#[test]
+fn two_paths_with_the_same_content_are_both_recorded() {
+    let tracker = StringTracker::new();
+    let items = vec![("shared string value".to_string(), 7usize)];
+    for path in ["/copy_a", "/copy_b"] {
+        let report =
+            tracker.track_strings_at(|| items.clone(), path, "same", "search_strings", "min=4");
+        assert!(!report.already_indexed, "{path}");
+    }
+    let entry = tracker.get_string_details("shared string value").unwrap();
+    assert_eq!(entry.unique_files.len(), 2);
+    assert_eq!(entry.total_occurrences, 2);
+}
+
+#[test]
+fn a_file_through_two_routes_counts_each_string_once_and_the_offset_scan_wins() {
+    let tracker = StringTracker::new();
+    let strings = vec!["msftupdater.com".to_string()];
+    tracker
+        .track_strings_from_results(&strings, "/f", "h", "analyze_file")
+        .unwrap();
+    // The scan with offsets adds what analyze_file did not have, and replaces
+    // what it had without an offset.
+    let report = tracker.track_strings_at(
+        || {
+            vec![
+                ("msftupdater.com".to_string(), 12),
+                ("only in the scan".to_string(), 40),
+            ]
+        },
+        "/f",
+        "h",
+        "search_strings",
+        "min=4",
+    );
+    assert_eq!(report.tracked, 2);
+    let entry = tracker.get_string_details("msftupdater.com").unwrap();
+    assert_eq!(entry.total_occurrences, 1);
+    assert!(matches!(
+        entry.occurrences[0].context,
+        StringContext::FileString { offset: Some(12) }
+    ));
+    assert_eq!(
+        tracker
+            .get_string_details("only in the scan")
+            .unwrap()
+            .total_occurrences,
+        1
+    );
+    assert_eq!(tracker.get_statistics(None).total_occurrences, 2);
+
+    // The other order gives the same counts, and a repeat of analyze_file
+    // adds nothing.
+    let other = StringTracker::new();
+    other.track_strings_at(
+        || vec![("msftupdater.com".to_string(), 12)],
+        "/f",
+        "h",
+        "search_strings",
+        "min=4",
+    );
+    other
+        .track_strings_from_results(&strings, "/f", "h", "analyze_file")
+        .unwrap();
+    let entry = other.get_string_details("msftupdater.com").unwrap();
+    assert_eq!(entry.total_occurrences, 1);
+    assert!(matches!(
+        entry.occurrences[0].context,
+        StringContext::FileString { offset: Some(12) }
+    ));
+}
+
+#[test]
+fn string_search_after_analyze_file_still_indexes_every_string_with_offsets() {
+    let tracker = StringTracker::new();
+    let few: Vec<String> = (0..10).map(|n| format!("analyze string {n:03}")).collect();
+    tracker
+        .track_strings_from_results(&few, "/f", "h", "analyze_file")
+        .unwrap();
+    let all: Vec<(String, usize)> = (0..500)
+        .map(|n| (format!("analyze string {n:03}"), n * 64))
+        .collect();
+    let report = tracker.track_strings_at(|| all.clone(), "/f", "h", "search_strings", "min=4");
+    assert_eq!(report.tracked, 500);
+    let late = tracker.get_string_details("analyze string 400").unwrap();
+    assert!(matches!(
+        late.occurrences[0].context,
+        StringContext::FileString {
+            offset: Some(25600)
+        }
+    ));
+    assert_eq!(tracker.get_statistics(None).total_occurrences, 500);
+}
+
+#[test]
+fn the_same_file_with_two_min_lengths_counts_once() {
+    let tracker = StringTracker::new();
+    let items = vec![
+        ("/usr/lib/dyld".to_string(), 17828usize),
+        ("/usr/lib/dyld".to_string(), 66956),
+    ];
+    tracker.track_strings_at(|| items.clone(), "/f", "h", "search_strings", "min=4");
+    let report = tracker.track_strings_at(|| items.clone(), "/f", "h", "search_strings", "min=8");
+    assert_eq!((report.tracked, report.already_indexed), (0, false));
+    let entry = tracker.get_string_details("/usr/lib/dyld").unwrap();
+    assert_eq!(entry.total_occurrences, 2);
+    assert_eq!(entry.occurrences.len(), 2);
+}
+
+#[test]
+fn values_with_prefix_lists_matches_in_order() {
+    let tracker = StringTracker::new();
+    let items = vec![
+        ("alpha one".to_string(), 1usize),
+        ("alpha two".to_string(), 2),
+        ("beta".to_string(), 3),
+    ];
+    tracker.track_strings_at(|| items, "/f", "h", "t", "k");
+    assert_eq!(
+        tracker.values_with_prefix("alpha", 5),
+        vec!["alpha one".to_string(), "alpha two".to_string()]
+    );
+    assert_eq!(tracker.values_with_prefix("alpha", 1).len(), 1);
+    assert!(tracker.values_with_prefix("gamma", 5).is_empty());
+}
+
+#[test]
+fn a_full_tracker_reports_the_skipped_count_on_every_call() {
+    let tracker = StringTracker::new();
+    let filler: Vec<(String, usize)> = (0..StringTracker::CAPACITY)
+        .map(|n| (format!("filler value {n:07}"), n))
+        .collect();
+    let first = tracker.track_strings_at(|| filler, "/big", "hb", "search_strings", "min=4");
+    assert_eq!(first.skipped, 0);
+    assert!(tracker.is_full());
+    let items = vec![("one more value".to_string(), 1usize)];
+    let first = tracker.track_strings_at(|| items.clone(), "/f", "h", "search_strings", "min=4");
+    assert_eq!(first.skipped, 1);
+    let again = tracker.track_strings_at(|| items.clone(), "/f", "h", "search_strings", "min=4");
+    assert!(again.already_indexed);
+    assert_eq!(again.skipped, 1, "the repeat still says values are missing");
+}

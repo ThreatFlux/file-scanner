@@ -246,9 +246,9 @@ python_requires = >=3.7
 
     // Check dependencies
     assert_eq!(analysis.dependencies.install_requires.len(), 2);
-    // Note: setup_requires and tests_require are not currently parsed from setup.py
-    assert_eq!(analysis.dependencies.setup_requires.len(), 0);
-    assert_eq!(analysis.dependencies.tests_require.len(), 0);
+    // setup_requires and tests_require are read from the setup() call
+    assert_eq!(analysis.dependencies.setup_requires.len(), 1);
+    assert_eq!(analysis.dependencies.tests_require.len(), 1);
 
     Ok(())
 }
@@ -529,6 +529,9 @@ import requests
 import socket
 
 from setuptools import setup
+import urllib.request
+import requests
+import socket
 
 # Suspicious network access
 urllib.request.urlopen('http://suspicious.com/data')
@@ -563,7 +566,7 @@ setup(
         .map(|s| s.module_name.as_str())
         .collect();
 
-    // The dangerous imports list matches "urllib" which will detect "urllib.request"
+    // Imports of network modules by setup.py are listed
     assert!(suspicious_modules.contains(&"urllib"));
     assert!(suspicious_modules.contains(&"socket"));
 
@@ -691,13 +694,18 @@ setup(name='backdoor-test', version='1.0.0')
 
     assert!(!analysis.security_analysis.backdoor_indicators.is_empty());
 
-    // Check for process execution indicators (current implementation detects generic process execution)
-    let has_process_exec = analysis
+    // The reverse shell and the socket redirected to stdio are named by rule
+    let has_reverse_shell = analysis
         .security_analysis
         .backdoor_indicators
         .iter()
-        .any(|b| b.indicator_type.contains("Process execution"));
-    assert!(has_process_exec);
+        .any(|b| b.indicator_type.contains("Reverse shell"));
+    assert!(has_reverse_shell);
+    assert!(analysis
+        .security_analysis
+        .backdoor_indicators
+        .iter()
+        .any(|b| b.indicator_type.contains("Socket redirected")));
 
     Ok(())
 }
@@ -846,9 +854,9 @@ setup(
     // Check extras - current implementation doesn't parse extras from setup.py
     assert_eq!(analysis.dependencies.extras_require.len(), 0);
 
-    // Check setup and test requirements - current implementation doesn't parse these from setup.py
-    assert_eq!(analysis.dependencies.setup_requires.len(), 0);
-    assert_eq!(analysis.dependencies.tests_require.len(), 0);
+    // Check setup and test requirements, read from the setup() call
+    assert_eq!(analysis.dependencies.setup_requires.len(), 2);
+    assert_eq!(analysis.dependencies.tests_require.len(), 3);
 
     Ok(())
 }

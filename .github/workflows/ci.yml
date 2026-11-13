@@ -548,7 +548,7 @@ jobs:
         run: |
           cargo build --release --all-features --locked
 
-      - name: Test MCP initialize, tools and controlled analysis
+      - name: MCP handshake smoke test (initialize, 17 tools, overview, cached drill-down)
         run: |
           python3 scripts/mcp-smoke.py target/release/file-scanner
   docker-build:

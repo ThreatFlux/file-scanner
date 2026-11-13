@@ -163,8 +163,16 @@ impl FileMetadata {
                 match &buffer[..] {
                     b if b.starts_with(b"\x7FELF") => "application/x-elf",
                     b if b.starts_with(b"MZ") => "application/x-dosexec",
-                    b if b.starts_with(b"\xCA\xFE\xBA\xBE") => "application/x-mach-binary",
-                    b if b.starts_with(b"\xFE\xED\xFA") => "application/x-mach-binary",
+                    // CAFEBABE is a universal Mach-O or a Java class file: the
+                    // four bytes after it are an architecture count or a class version.
+                    b if crate::binary_parser::is_java_class_header(b) => "application/java-vm",
+                    b if crate::binary_parser::is_fat_macho(b)
+                        || b.starts_with(b"\xFE\xED\xFA")
+                        || b.starts_with(b"\xCF\xFA\xED\xFE")
+                        || b.starts_with(b"\xCE\xFA\xED\xFE") =>
+                    {
+                        "application/x-mach-binary"
+                    }
                     b if b.starts_with(b"#!/") => "text/x-shellscript",
                     b if b.starts_with(b"\x89PNG") => "image/png",
                     b if b.starts_with(b"\xFF\xD8\xFF") => "image/jpeg",
@@ -302,7 +310,11 @@ mod tests {
     #[test_case(b"\x7FELF\x02\x01\x01\x00", "application/x-elf"; "ELF binary")]
     #[test_case(b"MZ\x90\x00\x03\x00\x00\x00", "application/x-dosexec"; "PE binary")]
     #[test_case(b"\xCA\xFE\xBA\xBE", "application/x-mach-binary"; "Mach-O binary BE")]
-    #[test_case(b"\xFE\xED\xFA\xCE", "application/x-mach-binary"; "Mach-O binary LE")]
+    #[test_case(b"\xFE\xED\xFA\xCE", "application/x-mach-binary"; "Mach-O 32-bit big-endian")]
+    #[test_case(b"\xCF\xFA\xED\xFE", "application/x-mach-binary"; "Mach-O 64-bit little-endian")]
+    #[test_case(b"\xCE\xFA\xED\xFE", "application/x-mach-binary"; "Mach-O 32-bit little-endian")]
+    #[test_case(b"\xCA\xFE\xBA\xBE\x00\x00\x00\x03", "application/x-mach-binary"; "universal Mach-O with 3 slices")]
+    #[test_case(b"\xCA\xFE\xBA\xBE\x00\x00\x00\x37", "application/java-vm"; "Java class file version 55")]
     #[test_case(b"#!/bin/sh\n", "text/x-shellscript"; "Shell script")]
     #[test_case(b"\x89PNG\r\n\x1A\n", "image/png"; "PNG image")]
     #[test_case(b"\xFF\xD8\xFF\xE0", "image/jpeg"; "JPEG image")]

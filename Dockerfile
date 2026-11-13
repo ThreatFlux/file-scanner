@@ -18,14 +18,14 @@ ENV RUST_VERSION=1.100.0
 RUN rustup component add --toolchain 1.100.0 clippy rustfmt llvm-tools-preview && \
     rustc --version | grep -q '^rustc 1[.]100[.]0 '
 
-ARG VERSION=0.3.5
+ARG VERSION=0.3.12
 ARG BUILD_DATE=unknown
 ARG VCS_REF=unknown
 ARG BINARY_NAME=file-scanner
 ARG BINARY_PACKAGE=threatflux-file-scanner
 ARG SBOM_MANIFEST_PATH=Cargo.toml
 ARG OCI_IMAGE_TITLE="File Scanner"
-ARG OCI_IMAGE_DESCRIPTION="Comprehensive native file scanner with MCP server support"
+ARG OCI_IMAGE_DESCRIPTION="Static file analysis CLI and MCP server"
 ARG OCI_IMAGE_VENDOR=ThreatFlux
 ARG OCI_IMAGE_SOURCE=https://github.com/ThreatFlux/file-scanner
 
@@ -84,11 +84,11 @@ RUN mkdir -p /home/builder/out/bin /home/builder/out/doc /home/builder/runtime-s
 # Wolfi glibc 2.44, nonroot uid/gid 65532; amd64/arm64 multi-arch index digest
 FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:cb7aa4681bef604e99ad3fb6fb365330a3ca24fcee56df0b60b27ac4983409eb AS runtime
 
-ARG VERSION=0.3.5
+ARG VERSION=0.3.12
 ARG BUILD_DATE=unknown
 ARG VCS_REF=unknown
 ARG OCI_IMAGE_TITLE="File Scanner"
-ARG OCI_IMAGE_DESCRIPTION="Comprehensive native file scanner with MCP server support"
+ARG OCI_IMAGE_DESCRIPTION="Static file analysis CLI and MCP server"
 ARG OCI_IMAGE_VENDOR=ThreatFlux
 ARG OCI_IMAGE_SOURCE=https://github.com/ThreatFlux/file-scanner
 
@@ -101,7 +101,8 @@ LABEL org.opencontainers.image.title="${OCI_IMAGE_TITLE}" \
       org.opencontainers.image.source="${OCI_IMAGE_SOURCE}" \
       org.opencontainers.image.authors="Wyatt Roersma <wyattroersma@gmail.com>" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.documentation="https://github.com/ThreatFlux/file-scanner/blob/main/README.md"
+      org.opencontainers.image.documentation="https://github.com/ThreatFlux/file-scanner/blob/main/README.md" \
+      io.modelcontextprotocol.server.name="io.github.threatflux/file-scanner"
 
 COPY --from=builder /usr/bin/tini /usr/bin/tini
 
@@ -114,11 +115,20 @@ COPY --from=builder --chown=65532:65532 /home/builder/runtime-skel/data /data
 USER 65532:65532
 WORKDIR /data
 
-# Exec form (the runtime has no shell); a nonzero exit means unhealthy.
+# Exec form (the runtime has no shell); a nonzero exit means unhealthy. This only proves that the
+# binary starts. For the HTTP server, probe GET /health on the published port instead.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD ["/usr/local/bin/file-scanner", "--help"]
 
-# Arguments go straight to the scanner: `docker run <image> /data/file --format json`.
+# Arguments go straight to the scanner, and there is no default command, so always pass some:
+#   scan a file:  docker run --rm -v "$PWD:/data:ro" <image> /data/file --format json
+#   MCP, stdio:   docker run -i --rm -v "$PWD:$PWD:ro" -w "$PWD" <image> mcp-stdio --allow-root "$PWD"
+#   MCP, HTTP:    docker run --rm -p 127.0.0.1:3000:3000 -v DIR:/data:ro <image> \
+#                   mcp-http --host 0.0.0.0 --allow-root /data \
+#                   (set FILE_SCANNER_AUTH_TOKEN with -e)
+# (These need an image newer than 0.3.12.) Tool calls name paths inside the container, so only mounted files can be analyzed.
+# The HTTP server must bind 0.0.0.0 here for Docker to reach it; publish the port on 127.0.0.1.
+# See DEPLOYMENT_GUIDE.md.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/file-scanner"]
 
 EXPOSE 3000

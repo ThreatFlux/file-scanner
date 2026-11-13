@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A comprehensive native file scanner written in Rust that provides detailed metadata, hash calculations,
+A native file scanner written in Rust that provides detailed metadata, hash calculations,
 string extraction, binary analysis, hex dumping, and digital signature verification. Built using Rust 1.100.0
 with modern async capabilities and multiple output formats.
 
@@ -10,20 +10,22 @@ with modern async capabilities and multiple output formats.
 
 - **File Metadata Extraction**: Complete file system metadata including timestamps, permissions, ownership
 - **Cryptographic Hashing**: MD5, SHA256, SHA512, and BLAKE3 hash calculations with async processing
-- **String Analysis**: ASCII and Unicode string extraction with intelligent pattern matching
+- **String Analysis**: ASCII and Unicode string extraction
 - **Binary Format Analysis**: PE/ELF/Mach-O parsing with compiler detection and section analysis
 - **Digital Signature Verification**: Support for Authenticode, GPG, and macOS code signatures
 - **Hex Dumping**: Flexible hex dump capabilities for headers, footers, or custom offsets
 - **Multiple Output Formats**: JSON, YAML, and pretty-printed JSON support
-- **Performance Optimized**: Concurrent hash calculation and efficient memory usage
-- **MCP Server Support**: Model Context Protocol server with STDIO, HTTP, and SSE transports
-- **Analysis Caching**: Automatic caching of analysis results with persistence for improved performance
-- **String Tracking & Statistics**: Advanced string analysis with usage statistics, categorization,
-  and filtering
-- **NPM Package Analysis**: Comprehensive security analysis of npm packages including vulnerability
-  detection, malicious code patterns, typosquatting detection, and supply chain risk assessment
-- **Python Package Analysis**: Security analysis of Python packages (wheel, tar.gz, zip) with vulnerability
-  detection, setup.py risk assessment, typosquatting detection, and malicious pattern identification
+- **MCP Server Support**: Model Context Protocol server with 17 tools over stdio and Streamable HTTP (see
+  `docs/MCP.md`)
+- **Analysis Caching**: Section results are cached by file SHA-256 (memory and a per-user directory on disk) so
+  drill-down calls are fast
+- **String Tracking**: Strings from analyzed files are indexed with offsets, categories and entropy for
+  `search_strings` and `string_details`
+- **NPM Package Analysis**: Offline security analysis of npm packages: source patterns, install scripts,
+  typosquatting and a small built-in advisory table
+- **Python Package Analysis**: The same for Python packages (wheel, sdist, zip, directories), including setup.py
+  checks
+- **Other Formats**: PDF and Office macro triage, scripts, archives (zip, tar, RAR, 7z) and Java archives
 
 ## Build and Test Commands
 
@@ -44,49 +46,70 @@ cargo build --release
 
 # Hex dump examples
 ./target/release/file-scanner /bin/ls --hex-dump --hex-dump-size 256
-./target/release/file-scanner /bin/ls --hex-dump --hex-dump-offset=-128  # footer dump
+./target/release/file-scanner /bin/ls --hex-dump --hex-dump-offset=-128 --hex-dump-size=128  # last 128 bytes
 
 # String extraction
 ./target/release/file-scanner /bin/ls --strings --min-string-len 8
 
-# MCP Server Modes
-./target/release/file-scanner mcp-stdio              # STDIO transport
-./target/release/file-scanner mcp-http --port 3000   # HTTP transport
-./target/release/file-scanner mcp-sse --port 3000    # SSE transport
+# MCP server modes
+./target/release/file-scanner mcp-stdio                       # stdio transport
+./target/release/file-scanner mcp-stdio --allow-root /path    # confine tools to a directory
+./target/release/file-scanner mcp-http --port 3000            # Streamable HTTP at /mcp, binds 127.0.0.1
+./target/release/file-scanner mcp-http --port 0               # let the system pick a port (see the banner)
+# mcp-sse is a deprecated alias of mcp-http
 
-# Test MCP server with inspector (FIXED - now working!)
-npx @modelcontextprotocol/inspector ./target/release/file-scanner mcp-stdio
-npx @modelcontextprotocol/inspector http://localhost:3000/mcp
-npx @modelcontextprotocol/inspector http://localhost:3000/sse
+# Call the server by hand: one JSON object per line on stdin (see docs/MCP.md "Testing by hand")
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"ping"}' | ./target/release/file-scanner mcp-stdio 2>/dev/null
 
-# CLI testing mode for individual tools
-npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner \
-  mcp-stdio --method tools/list
-npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner \
-  mcp-stdio --method tools/call --tool-name get_file_metadata \
-  --tool-arg file_path=/bin/ls
+# Smoke test of a built binary (initialize, tools/list, a tool call)
+python3 scripts/mcp-smoke.py ./target/release/file-scanner
 ```
 
 ## Project Structure
 
 ```text
 src/
-├── main.rs              # CLI interface and main application logic
-├── metadata.rs          # File metadata extraction and core data structures
-├── hash.rs              # Cryptographic hash calculations (async)
-├── strings.rs           # String extraction and pattern matching
-├── binary_parser.rs     # PE/ELF/Mach-O binary format parsing
-├── signature.rs         # Digital signature verification
-├── hexdump.rs           # Hex dump generation and formatting
-├── cache.rs             # Analysis cache with persistence support
-├── string_tracker.rs    # String tracking and statistics engine
-├── npm_analysis.rs      # NPM package security analysis
-├── npm_vuln_db.rs       # NPM vulnerability database and patterns
-├── python_analysis.rs   # Python package security analysis
-├── python_vuln_db.rs    # Python vulnerability database and patterns
-├── mcp_server.rs        # MCP server implementation with file scanner tools
-└── mcp_transport.rs     # MCP transport implementations (STDIO, HTTP, SSE)
+├── main.rs                  # CLI (clap) and the MCP subcommands
+├── lib.rs                   # Library entry point (imported as file_scanner)
+├── metadata.rs              # File metadata extraction and core data structures
+├── hash.rs                  # Cryptographic hash calculations (async)
+├── strings.rs               # String extraction and categorization
+├── binary_parser.rs         # PE/ELF/Mach-O parsing
+├── signature.rs             # Digital signature checks
+├── hexdump.rs               # Hex dump generation
+├── disassembly.rs, control_flow.rs, call_graph.rs, taint_tracking.rs, vulnerability_detection.rs,
+│   code_metrics.rs, function_analysis.rs, dependency_analysis.rs, entropy_analysis.rs,
+│   behavioral_analysis.rs, threat_detection.rs   # analyses behind the analyze_file sections
+├── pdf_analysis.rs, ole_vba_analysis.rs, script_analysis.rs        # analyze_document, analyze_script
+├── archive_analysis.rs, tar_analysis.rs, rar_analysis.rs, sevenz_analysis.rs   # inspect_archive
+├── java_analysis.rs         # analyze_java_file (class files, archives, Android manifests)
+├── package_scan.rs          # Shared loader and source scanner of the npm and Python analyzers
+├── npm_analysis.rs, npm_vuln_db.rs               # analyze_npm_package, advisory and malicious-name tables
+├── python_analysis.rs, python_vuln_db.rs         # analyze_python_package, advisory and malicious-name tables
+├── cache.rs                 # Analysis history cache (per-hash files, bounded, LRU)
+├── string_tracker_compat.rs # String tracker over the threatflux-string-analysis library
+├── mcp_server.rs            # FileScannerMcp handler, request types, ServerHandler impl
+├── mcp_server/
+│   ├── output.rs            # Compact JSON, the max_output_bytes budget, paging helper (page, PageArgs)
+│   ├── paths.rs             # ~ expansion, --allow-root policy, file-kind checks
+│   ├── state.rs             # ServerState: caches, string tracker, section cache, concurrency limit
+│   ├── tools_analyze.rs     # analyze_file, query_analysis, disassemble, read_hex, compare_files,
+│   │                        #   llm_analyze_file (helpers in tools_analyze/)
+│   ├── tools_documents.rs   # analyze_document, analyze_script
+│   ├── tools_formats.rs     # inspect_archive
+│   ├── tools_java.rs        # analyze_java_file
+│   ├── tools_packages.rs    # analyze_npm_package, analyze_python_package
+│   ├── tools_services.rs    # search_strings, string_details, cache_status, cache_clear
+│   └── tools_yara.rs        # yara_scan_file
+├── mcp_transport.rs         # Starts the server on stdio or HTTP (the SDK serves the protocol)
+└── mcp_transport/
+    ├── http.rs              # axum app: /mcp, Host and Origin checks, bearer token, CORS, shutdown
+    └── rest.rs              # REST helper routes (/health, /tools/*, /cache/*, /strings/*, OpenAPI)
 ```
+
+The old hand-written JSON-RPC dispatcher, the uncompiled `src/mcp/` tree and the `string_tracker.rs` file are gone.
+Add a tool by writing a `#[tool]` method in the matching `tools_*.rs` file; the SDK builds the tools/list entry and
+input schema from the request struct, and the REST `/tools/*` routes use the same definitions.
 
 ## Dependencies
 
@@ -94,10 +117,11 @@ src/
 - **Hashing**: `sha2`, `md-5`, `blake3`
 - **Binary Parsing**: `goblin`, `object`
 - **String Processing**: `regex`, `encoding_rs`
-- **Serialization**: `serde`, `serde_json`, `serde_yaml`
+- **Serialization**: `serde`, `serde_json`, `serde_yaml` (a source alias of `serde-saphyr`)
 - **System Info**: `chrono`, `filetime`
-- **MCP**: `rmcp` (Model Context Protocol SDK), `schemars`
-- **HTTP Server**: `axum`, `tower`, `hyper`
+- **MCP**: `rmcp` (Model Context Protocol SDK, serves stdio and Streamable HTTP), `schemars`
+- **YARA**: `yara-x`
+- **HTTP Server**: `axum`, `tower-http` (CORS), `tokio-util`
 
 ## Testing Examples
 
@@ -105,11 +129,11 @@ The scanner has been tested on various file types:
 
 1. **ELF Binaries** (`/bin/ls`): Successfully extracts metadata, hashes, binary info, and strings
 2. **Text Files** (`/etc/passwd`): Proper MIME type detection and hex dumping
-3. **Self-Analysis**: Can analyze its own binary for comprehensive testing
+3. **Self-Analysis**: Can analyze its own binary for testing
 
 ### Test Program Suite
 
-The project includes comprehensive test programs in 9 compiled languages to validate detection
+The project includes test programs in 7 compiled languages to validate detection
 capabilities:
 
 - **C** (`c_advanced_binary`): Buffer overflows, format strings, anti-debugging
@@ -135,7 +159,6 @@ All test binaries simulate malicious behaviors including:
 - Built with the project Rust 1.100.0 toolchain
 - Uses async processing for hash calculations to improve performance on large files
 - Modular design allows easy extension for new file formats or analysis types
-- Comprehensive error handling with descriptive messages
 - Memory-efficient processing with configurable limits for large files
 
 ## Common Use Cases
@@ -176,632 +199,190 @@ All test binaries simulate malicious behaviors including:
 
 ## MCP Server Integration
 
-The file-scanner can run as an MCP (Model Context Protocol) server, exposing its capabilities as tools for
-AI assistants. **The MCP server is now fully functional and tested with comprehensive OpenAPI 3.0
-documentation!**
+The file-scanner runs as an MCP server. The full guide is `docs/MCP.md`; this section is the short version for
+working on the code.
 
-### Available MCP Tools
+### Transports
 
-The file scanner provides three powerful tools through the MCP interface:
+- `mcp-stdio`: JSON-RPC over stdin and stdout, one message per line. Only JSON-RPC goes to stdout; the banner goes to
+  stderr.
+- `mcp-http`: Streamable HTTP at `/mcp` (rmcp SDK) plus REST helper routes. Binds `127.0.0.1` by default; checks the
+  `Host` and `Origin` headers; `--auth-token` (or `FILE_SCANNER_AUTH_TOKEN`) requires a bearer token on every route
+  except `/health`; no CORS wildcard. Options: `--port`, `--host`, `--allowed-host`, `--allowed-origin`.
+- `mcp-sse`: deprecated alias of `mcp-http`. The SSE transport and `/sse` route no longer exist.
+- All three take `--allow-root <dir>` (repeatable; `FILE_SCANNER_ALLOWED_ROOTS`, `:`-separated), `--cache-dir`
+  (`FILE_SCANNER_CACHE_DIR`) and `--no-cache`.
+- Protocol revisions 2024-11-05 through 2026-07-28 are negotiated by the SDK.
 
-#### 1. `analyze_file` - Comprehensive Analysis Tool
+### Tools (17)
 
-A unified tool that allows you to specify exactly which analyses to perform using boolean flags:
+| Group | Tools |
+| --- | --- |
+| Overview and drill-down | `analyze_file`, `query_analysis`, `disassemble`, `read_hex`, `compare_files` |
+| Strings | `search_strings`, `string_details` |
+| By file kind | `analyze_document`, `analyze_script`, `inspect_archive`, `analyze_java_file` |
+| Packages | `analyze_npm_package`, `analyze_python_package` |
+| Detection | `llm_analyze_file`, `yara_scan_file` |
+| Cache | `cache_status`, `cache_clear` (the only destructive tool) |
 
-**Tool Name:** `analyze_file`
+Design rules every tool follows:
 
-**Parameters:**
+- A bare `analyze_file` call returns a small overview and `next_steps`; sections are computed on request, cached by
+  SHA-256 and returned as summaries; `query_analysis` pages the items. `all: true` runs everything once and still
+  returns summaries only.
+- Every tool takes `max_output_bytes` (default 80,000, ceiling 400,000). Output is compact JSON; anything cut is
+  named in the answer: a cut page has `hint` and `next_offset`, a cut `disassemble` listing has `note` and
+  `next_address`, section summaries reduced to counts have `note`, and `compare_files` and `llm_analyze_file` list
+  the cut under `truncated`. Lists page with `offset` and `limit`; most answers carry `total`, `returned` and
+  `next_offset`, with per-tool field names (see `docs/MCP.md`, Paging).
+- `next_steps` entries, in every tool that has them, are `{tool, arguments, gives}` objects (no `why`, no plain
+  strings); advice that is not a call goes in `hint` or `summary.notes`. The overview offers only steps that work:
+  `analyze_script` for shell, PowerShell, JavaScript, Python, batch and VBScript (decided by the shebang, then the
+  extension; no step for Perl, Ruby, PHP, Lua or AWK), no `inspect_archive` when `format_details.archive.error` is set,
+  and both package steps for a `.tar.gz` and a `.tgz`. Under a small `max_output_bytes` a step is kept whole or
+  dropped (the overview lists the drop as `truncated.cut` path `/next_steps`; an `analyze_file` answer reduced to
+  counts says so only in `note`); the top-level `file_path`, `package_path` or `path` echo is shortened only as a last
+  resort. Section answers spell a slice `arm64-subtype-12`, like the overview.
+- Answers that can come from the cache carry `cache: hit | miss` (`partial` for a section set that was partly
+  stored, and for `disassemble` code outside the stored window).
+- Input schemas reject unknown fields. Failures are tool errors (`isError: true`) whose message names the fix.
+- All tools are read-only except `cache_clear`. Nothing is executed.
 
-- `file_path` (required): Path to the file to analyze
-- `all`: Enable all analysis options (overrides individual flags)
-- `metadata`: Include file metadata (size, timestamps, permissions)
-- `hashes`: Calculate cryptographic hashes (MD5, SHA256, SHA512, BLAKE3)
-- `strings`: Extract ASCII and Unicode strings
-- `min_string_length`: Minimum string length (default: 4)
-- `hex_dump`: Generate hex dump
-- `hex_dump_size`: Hex dump size in bytes (default: 256, or entire file up to 100MB when 'all' is true)
-- `hex_dump_offset`: Hex dump offset from start
-- `binary_info`: Analyze binary format (PE/ELF/Mach-O)
-- `signatures`: Verify digital signatures
-- `symbols`: Analyze function symbols
-- `control_flow`: Analyze control flow
-- `vulnerabilities`: Detect vulnerabilities
-- `code_quality`: Analyze code quality metrics
-- `dependencies`: Analyze dependencies
-- `entropy`: Analyze entropy patterns
-- `disassembly`: Disassemble code
-- `threats`: Detect threats and malware
-- `behavioral`: Analyze behavioral patterns
-- `yara_indicators`: Extract YARA rule indicators
+### Cache
 
-**Example Usage:**
+- Section cache: compressed JSON in memory (256 MiB) and on disk (1 GiB), keyed by file SHA-256 and options.
+- Analysis history: one file per file hash (bounded in bytes and entries, LRU), read by `cache_status` and the REST
+  `/cache/*` routes. Every server that uses the same cache directory shares it. With `--allow-root`, `cache_status`
+  `list` and `search`, `search_strings`, `string_details`, `/cache/list`, `/cache/search` and `/strings/*` show only
+  entries of files inside a root (`/strings/related` included), and print each row's canonical path in `file_path` and
+  `tool_args`, matched by `file_path_pattern`; counts and sizes (`cache_status` `stats`, `/cache/stats`, string
+  totals) stay global.
+- The threats, enhanced_threats and package section keys carry a revision, so ratings stored by an earlier build are
+  recomputed.
+- Location: `--cache-dir`, else `FILE_SCANNER_CACHE_DIR`, else `$XDG_CACHE_HOME/file-scanner`, else
+  `~/.cache/file-scanner` (Linux) or `~/Library/Caches/file-scanner` (macOS). Mode 0700 directory, 0600 files. An
+  unusable directory degrades to memory-only with one line on stderr.
+- `FILE_SCANNER_CACHE_DISK_MB` and `FILE_SCANNER_SECTION_CACHE_MB` set the budgets. The only `FILE_SCANNER_*`
+  variables are these two plus `FILE_SCANNER_CACHE_DIR`, `FILE_SCANNER_ALLOWED_ROOTS` and `FILE_SCANNER_AUTH_TOKEN`.
 
-```json
-{
-  "file_path": "/bin/ls",
-  "metadata": true,
-  "hashes": true,
-  "strings": true,
-  "binary_info": true
-}
-```
-
-**Example with 'all' flag:**
-
-```json
-{
-  "file_path": "/bin/ls",
-  "all": true
-}
-```
-
-#### 2. `llm_analyze_file` - LLM-Optimized Analysis Tool
-
-A focused analysis tool designed specifically for LLM consumption and YARA rule generation. Returns only
-the most relevant information within a controlled token limit.
-
-**Tool Name:** `llm_analyze_file`
-
-**Key Features:**
-
-- Returns only MD5 hash (not all hash types)
-- Extracts key strings prioritized for YARA rules
-- Identifies important hex patterns and opcodes
-- Provides imports and entropy analysis
-- Generates YARA rule suggestions
-- Token-limited output (default 25K tokens)
-
-**Parameters:**
-
-- `file_path` (required): Path to the file to analyze
-- `token_limit`: Maximum response size in characters (default: 25000)
-- `min_string_length`: Minimum string length to extract (default: 6)
-- `max_strings`: Maximum number of strings to return (default: 50)
-- `max_imports`: Maximum number of imports to return (default: 30)
-- `max_opcodes`: Maximum number of opcodes to return (default: 10)
-- `hex_pattern_size`: Size of hex patterns to extract (default: 32)
-- `suggest_yara_rule`: Generate YARA rule suggestion (default: true)
-
-**Example Usage:**
-
-```json
-{
-  "file_path": "/suspicious/malware.exe",
-  "token_limit": 25000,
-  "max_strings": 30,
-  "suggest_yara_rule": true
-}
-```
-
-**Example Output:**
-
-```json
-{
-  "md5": "d41d8cd98f00b204e9800998ecf8427e",
-  "file_size": 45056,
-  "key_strings": [
-    "CreateRemoteThread",
-    "VirtualAllocEx",
-    "WriteProcessMemory",
-    "cmd.exe /c",
-    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
-  ],
-  "hex_patterns": [
-    "4D 5A 90 00 03 00 00 00 04 00 00 00 FF FF 00 00 B8 00 00 00 00 00 00 00 40 00 00 00 00 00 00 00"
-  ],
-  "imports": [
-    "kernel32.dll",
-    "ntdll.dll",
-    "advapi32.dll"
-  ],
-  "opcodes": [
-    "E8 00 00 00 00",
-    "48 8B 05 00",
-    "FF 15 00 00"
-  ],
-  "entropy": 7.8,
-  "yara_rule_suggestion": "rule suspicious_malware_exe { /* YARA rule content */ }"
-}
-```
-
-#### 3. `yara_scan_file` - Custom YARA Rule Scanner
-
-A powerful tool for scanning files or directories with custom YARA rules. Supports recursive directory scanning and concurrent file processing.
-
-**Tool Name:** `yara_scan_file`
-
-**Parameters:**
-
-- `path` (required): Path to the file or directory to scan
-- `yara_rule` (required): The YARA rule content to use for scanning
-- `recursive`: Recursively scan subdirectories (default: true)
-- `max_file_size`: Maximum file size to scan in bytes (default: 100MB)
-- `detailed_matches`: Include detailed match information (default: true)
-
-**Example Usage:**
-
-```json
-{
-  "path": "/suspicious/files",
-  "yara_rule": "rule detect_malware {\n    strings:\n        $api1 = \"VirtualAlloc\"\n        $api2 = \"WriteProcessMemory\"\n        $api3 = \"CreateRemoteThread\"\n    condition:\n        2 of them\n}",
-  "recursive": true,
-  "max_file_size": 104857600,
-  "detailed_matches": true
-}
-```
-
-**Example Output:**
-
-```json
-{
-  "total_files_scanned": 42,
-  "total_matches": 3,
-  "scan_duration_ms": 1523,
-  "matches": [
-    {
-      "file_path": "/suspicious/files/malware.exe",
-      "file_size": 65536,
-      "matches": [
-        {
-          "rule_identifier": "detect_malware",
-          "tags": [],
-          "metadata": {},
-          "strings": [
-            {
-              "identifier": "$api1",
-              "offset": 4096,
-              "length": 12,
-              "value": "VirtualAlloc"
-            },
-            {
-              "identifier": "$api3",
-              "offset": 8192,
-              "length": 18,
-              "value": "CreateRemoteThread"
-            }
-          ]
-        }
-      ]
-    }
-  ],
-  "errors": []
-}
-```
-
-**Use Cases:**
-
-- Scan entire directories for specific malware patterns
-- Hunt for IOCs across multiple files
-- Validate YARA rules against sample sets
-- Perform incident response file sweeps
-- Search for specific code patterns or strings
-
-### MCP Configuration for Claude Code
-
-**STDIO Transport (Recommended):**
-
-```json
-{
-  "mcpServers": {
-    "file-scanner": {
-      "command": "./target/release/file-scanner",
-      "args": ["mcp-stdio"]
-    }
-  }
-}
-```
-
-**HTTP Transport:**
-
-```json
-{
-  "mcpServers": {
-    "file-scanner-http": {
-      "type": "http",
-      "url": "http://localhost:3000/mcp"
-    }
-  }
-}
-```
-
-**SSE Transport:**
-
-```json
-{
-  "mcpServers": {
-    "file-scanner-sse": {
-      "type": "sse",
-      "url": "http://localhost:3000/sse"
-    }
-  }
-}
-```
-
-### MCP Testing Status
-
-✅ **FIXED**: JSON-RPC protocol compliance issues resolved
-✅ **UNIFIED**: Single `analyze_file` tool with configurable analysis options
-✅ **TESTED**: MCP Inspector CLI and UI modes working
-✅ **VERIFIED**: Tool calls return proper formatted responses
-✅ **CACHING**: Automatic result caching with persistence across sessions
-✅ **COMPLIANT**: Now under 15-tool MCP limit with comprehensive functionality
-✅ **ENHANCED**: Added `yara_scan_file` tool for custom YARA rule scanning
-
-**Known Working Commands:**
+### Client configuration
 
 ```bash
-# List all available tools
-npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner \
-  mcp-stdio --method tools/list
+claude mcp add file-scanner -- /absolute/path/to/file-scanner mcp-stdio
+claude mcp add --transport http file-scanner http://127.0.0.1:3000/mcp
+```
 
-# Test analyze_file tool with individual flags
-npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner \
-  mcp-stdio --method tools/call --tool-name analyze_file \
-  --tool-arg file_path=/bin/ls --tool-arg metadata=true --tool-arg hashes=true
+Claude Desktop, Cursor and VS Code snippets are in `docs/MCP.md`.
 
-# Test analyze_file tool with 'all' flag
-npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner \
-  mcp-stdio --method tools/call --tool-name analyze_file \
-  --tool-arg file_path=/bin/ls --tool-arg all=true
+### Testing
 
-# Test yara_scan_file tool
-npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner \
-  mcp-stdio --method tools/call --tool-name yara_scan_file \
-  --tool-arg path=/bin --tool-arg yara_rule="rule test { strings: \$a = \"ELF\" condition: \$a }"
+```bash
+# Unit and integration tests for the MCP server
+cargo test --test mcp_tools_analyze_test --test mcp_transport_stdio_test --test mcp_http_router_test
 
-# Interactive UI testing
+# Real handshake against a built binary
+python3 scripts/mcp-smoke.py ./target/debug/file-scanner
+
+# Interactive: the MCP Inspector against a stdio server
 npx @modelcontextprotocol/inspector ./target/release/file-scanner mcp-stdio
 ```
 
-### Cache Management (HTTP/SSE Transport)
-
-When running as an HTTP or SSE server, the file scanner provides cache management endpoints:
+Manual checks of a running HTTP server:
 
 ```bash
-# Start HTTP server
-./target/release/file-scanner mcp-http --port 3000
-
-# View cache statistics
-curl http://localhost:3000/cache/stats
-
-# List all cache entries
-curl http://localhost:3000/cache/list
-
-# Search cache by criteria
-curl -X POST http://localhost:3000/cache/search \
-  -H "Content-Type: application/json" \
-  -d '{"tool_name": "calculate_file_hashes"}'
-
-# Clear cache
-curl -X POST http://localhost:3000/cache/clear
+curl http://127.0.0.1:3000/health
+curl http://127.0.0.1:3000/api/info
+curl http://127.0.0.1:3000/cache/stats
+curl -X POST http://127.0.0.1:3000/cache/search -H 'Content-Type: application/json' \
+  -d '{"file_path_pattern": "/bin/ls"}'
+curl -X POST http://127.0.0.1:3000/tools/call -H 'Content-Type: application/json' \
+  -d '{"name":"read_hex","arguments":{"file_path":"/bin/ls","length":16}}'
+curl http://127.0.0.1:3000/api-docs/openapi.json
 ```
-
-**Cache Features:**
-
-- Automatic caching of all MCP tool call results
-- Persistence to disk in temp directory (`/tmp/file-scanner-cache/`)
-- SHA256-based file identification for cache hits
-- Per-file analysis history tracking
-- Execution time tracking for performance monitoring
-- Cache statistics and search capabilities
-
-### String Tracking & Analysis
-
-The file scanner includes an advanced string tracking system that analyzes and categorizes all strings
-found during file analysis:
-
-```bash
-# String statistics
-curl http://localhost:3000/strings/stats
-
-# Search for strings
-curl -X POST http://localhost:3000/strings/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "lib", "limit": 20}'
-
-# Get detailed information about a specific string
-curl -X POST http://localhost:3000/strings/details \
-  -H "Content-Type: application/json" \
-  -d '{"value": "libc.so.6"}'
-
-# Find related strings
-curl -X POST http://localhost:3000/strings/related \
-  -H "Content-Type: application/json" \
-  -d '{"value": "libc.so.6", "limit": 10}'
-
-# Advanced filtering
-curl -X POST http://localhost:3000/strings/filter \
-  -H "Content-Type: application/json" \
-  -d '{
-    "min_occurrences": 2,
-    "min_entropy": 4.0,
-    "categories": ["import", "path"],
-    "suspicious_only": true
-  }'
-```
-
-**String Tracking Features:**
-
-- Automatic categorization (URLs, paths, imports, commands, etc.)
-- Entropy calculation for detecting encoded/encrypted strings
-- Suspicious string detection using pattern matching
-- File association tracking (which files contain which strings)
-- Similarity analysis to find related strings
-- Advanced filtering by multiple criteria:
-  - Occurrence count
-  - String length
-  - Entropy level
-  - Categories
-  - File associations
-  - Suspicious indicators
-  - Regular expression patterns
-- Real-time statistics:
-  - Most common strings
-  - Category distribution
-  - Length distribution
-  - High-entropy strings
-  - Suspicious strings
-
-See `MCP_TESTING.md` for comprehensive testing instructions.
-
-### OpenAPI 3.0 Documentation
-
-The HTTP transport now includes comprehensive OpenAPI 3.0 specification support for easy API exploration
-and integration:
-
-**API Documentation Endpoints:**
-
-```bash
-# OpenAPI 3.0 JSON specification
-curl http://localhost:3000/api-docs/openapi.json
-
-# API information and endpoint listing
-curl http://localhost:3000/api/info
-
-# Health check
-curl http://localhost:3000/health
-```
-
-**OpenAPI Features:**
-
-- Complete OpenAPI 3.0 specification with schema definitions
-- Automatic generation of JSON-RPC, Cache, SSE, and other data models
-- Structured endpoint documentation for all HTTP routes
-- Schema validation for request/response bodies
-- Compatible with OpenAPI tooling and code generators
-
-**Integration Examples:**
-
-```bash
-# Generate client SDKs using OpenAPI Generator
-npx @openapitools/openapi-generator-cli generate \
-  -i http://localhost:3000/api-docs/openapi.json \
-  -g python-client \
-  -o ./python-client
-
-# Import into Postman, Insomnia, or other API tools
-# Use the OpenAPI spec URL: http://localhost:3000/api-docs/openapi.json
-
-# Generate documentation with ReDoc
-npx redoc-cli build http://localhost:3000/api-docs/openapi.json
-```
-
-The OpenAPI specification includes schemas for:
-
-- `JsonRpcRequest` / `JsonRpcResponse` / `JsonRpcError` - MCP protocol types
-- `CacheEntry` / `CacheSearchQuery` - Cache management types
-- `SseEvent` / `SseQuery` - Server-Sent Events types
-- Additional analysis and tool-specific data structures
-
-This enables seamless integration with API development tools, client SDK generation, and automated
-testing frameworks.
 
 ## NPM Package Analysis
 
-The file scanner includes comprehensive npm package security analysis capabilities to detect vulnerabilities,
-malicious code patterns, and supply chain attacks.
+Offline analysis of a local npm package (`.tgz`, directory, `package.json`, `package-lock.json`). Nothing is
+downloaded; a registry name is rejected with a message that says to run `npm pack`.
 
-### Features
+- Source scan (`package_scan.rs`): up to 400 files, 1 MiB each, 16 MiB in all, for download-and-execute (shell
+  one-liners and Node or Python download, write and run code), decoded `eval`, a decoded payload passed to a process
+  call, a download passed to `eval` or `exec`, credential and wallet access, credential files or the whole
+  environment sent over the network, exfiltration endpoints, miners, reverse shells and obfuscation, with file and
+  line evidence. The multi-line checks need the statements within 60 lines of each other (8 for the environment) and
+  skip lines over 1,000 characters. One named environment variable beside a URL or HTTP call is not a finding. A
+  run is tied to a write when it names the written variable, field or expression, shares any word, however short,
+  with the write's path argument (`tmp`, `x` or `sh` of `'/tmp/x.sh'`; not generic words such as `path`, `join` or
+  `tmpdir`), contains a whole literal of 4 or more characters from the variable that holds the path, or starts a
+  shell or interpreter on a variable or expression. A run whose first argument is a quoted literal counts
+  (`spawn('/tmp/x.sh')`, `exec('sh /tmp/x.sh')`, `subprocess.run(['/tmp/agent.bin'])`) when its text names the
+  written path; a shell or interpreter on fixed text (`spawn('node', ['scripts/build.js'])`) or a generic
+  `spawn(command, args)` is not tied to an unrelated write. Compiled TypeScript spellings (`node_https_1.default.get`,
+  `node_fs_1.default.writeFileSync`, `(0, node_child_process_1.execSync)(...)`) and Python
+  `asyncio.create_subprocess_*`, `aiohttp` and `fd, path = tempfile.mkstemp()` are read like the plain ones. The
+  `Exfiltration endpoint` rule matches out-of-band hosts only as whole host names. A package whose only High finding is
+  a decoded payload passed to process execution rates at least High. The section cache keys are `package:npm:v3` and
+  `package:python:v3`; bump them when a rating changes. See `docs/MCP.md`, `analyze_npm_package`, for the checked cases
+  and the known limits.
+- Install hooks (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) are judged by their command string
+  (for example a download piped to a shell) and also by the file they run. A file named by a hook (`node
+  scripts/setup.js`, `sh setup.sh`, `./setup.sh`, also after `&&`, `cd dir &&` or leading `NAME=value` words; an
+  extensionless path or a directory is tried with `.js`, `.cjs`, `.mjs` and `index.js`) is install-time code: its
+  High findings and any obfuscation finding in it set `install_scripts.dangerous_commands`, raise the package to at
+  least High and add a risk reason such as `an install-time script runs suspicious code: ... (preinstall runs
+  scripts/setup.js)`. The tool reads the runner from the command. A runner such as `npx`, a path that leaves the
+  package, a file reached only through `require()`, and a download in one file that is run from another are not
+  followed.
+- Risk floors: a dependency on a known malicious release is at least High; a suspected typosquat is at least Medium;
+  a tarball or zip with a `..`, absolute-path or link entry is at least High (category `unsafe-path`).
+- Typosquatting check against a popular-package list; a popular package is never a typosquat of itself.
+- Advisories: `src/npm_vuln_db.rs` holds a small table (6 packages: event-stream, ua-parser-js, node-ipc, colors,
+  lodash, minimist) matched by semver range. Every result states the table's date and size. An empty list means "not
+  in this table", not "clean".
+- Known-malicious data in `npm_vuln_db.rs`: `get_known_malicious_packages()` (names that are malicious at every
+  version; a legitimate package never belongs there) and `get_known_malicious_versions()` (compromised releases of
+  legitimate packages, such as event-stream 3.3.6 and node-ipc 10.1.1).
+- MCP: `analyze_npm_package` with `section` = `summary` (default), `findings`, `files`, `dependencies`, `scripts`.
+- Library: `file_scanner::npm_analysis::analyze_npm_package(path)`.
+- CLI: `file-scanner analyze-npm <path>`.
 
-- **Vulnerability Detection**: Checks dependencies against a built-in vulnerability database
-- **Malicious Pattern Detection**: Identifies suspicious code patterns including:
-  - Installation script hooks (preinstall/postinstall) with external downloads
-  - Obfuscated code and dynamic code execution
-  - Environment variable exfiltration
-  - Cryptocurrency mining indicators
-  - Reverse shell patterns
-  - Data exfiltration attempts
-- **Typosquatting Detection**: Identifies packages with names similar to popular packages
-- **Dependency Confusion**: Detects potential dependency confusion attacks
-- **Supply Chain Risk Assessment**: Calculates risk scores based on various security indicators
-- **Script Analysis**: Analyzes npm scripts for dangerous commands and patterns
-
-### Usage
-
-The npm analysis can be used in two ways:
-
-1. **As a library function**:
-```rust
-use file_scanner::npm_analysis::analyze_npm_package;
-use std::path::Path;
-
-let analysis = analyze_npm_package(Path::new("path/to/package"))?;
-```
-
-2. **Via MCP tool** (when available):
 ```bash
 npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner \
   mcp-stdio --method tools/call --tool-name analyze_npm_package \
-  --tool-arg package_path=/path/to/package
-```
-
-### Analysis Results
-
-The analysis provides comprehensive information including:
-
-- Package metadata (name, version, license, author)
-- Dependency analysis with vulnerability information
-- Security analysis of scripts and code patterns
-- Malicious indicators and risk scoring
-- Quality metrics (documentation, tests, CI/CD)
-
-### Built-in Vulnerability Database
-
-The scanner includes known vulnerabilities for packages like:
-- event-stream (cryptocurrency wallet theft)
-- ua-parser-js (crypto mining malware)
-- node-ipc (protestware)
-- lodash (prototype pollution)
-- minimist (prototype pollution)
-
-### Example Analysis Output
-
-```json
-{
-  "package_info": {
-    "name": "suspicious-package",
-    "version": "1.0.0"
-  },
-  "malicious_indicators": {
-    "overall_risk_score": 75.5,
-    "risk_level": "High",
-    "typosquatting_risk": {
-      "is_potential_typosquatting": true,
-      "similar_packages": ["express"]
-    }
-  },
-  "security_analysis": {
-    "has_preinstall_script": true,
-    "crypto_mining_indicators": false,
-    "supply_chain_risk_score": 40.0
-  }
-}
+  --tool-arg package_path=/absolute/path/to/package.tgz
 ```
 
 ## Python Package Analysis
 
-The file scanner includes comprehensive Python package security analysis capabilities to detect vulnerabilities,
-malicious code patterns, and supply chain attacks. Supports multiple package formats including wheel (.whl),
-source distributions (.tar.gz), zip archives, and source directories.
+The same design for Python: a local `.whl`, `.tar.gz`/`.tgz`, `.zip`, a source directory, `setup.py`,
+`pyproject.toml`, `requirements.txt` or `poetry.lock`. A PyPI name is rejected with a message that says to run
+`pip download`.
 
-### Features
-
-- **Multiple Package Format Support**:
-  - Wheel packages (.whl)
-  - Source distributions (.tar.gz)
-  - Zip archives (.zip)
-  - Source directories with setup.py/pyproject.toml
-- **Vulnerability Detection**: Checks dependencies against a built-in vulnerability database with CVEs
-- **Malicious Pattern Detection**: Identifies suspicious patterns including:
-  - Setup.py code execution during installation
-  - Obfuscated code and eval/exec usage
-  - Network backdoors and reverse shells
-  - Credential theft attempts
-  - Cryptocurrency mining
-  - File system manipulation
-- **Typosquatting Detection**: Advanced detection of packages with names similar to popular packages
-- **Dependency Confusion**: Detects internal package name patterns used in attacks
-- **Supply Chain Risk Assessment**: Comprehensive risk scoring based on multiple factors
-- **Setup Script Analysis**: Deep analysis of setup.py for dangerous operations
-- **Quality Metrics**: Assesses package quality including documentation, tests, and CI/CD
-
-### Usage
-
-The Python analysis can be used in two ways:
-
-1. **As a library function**:
-```rust
-use file_scanner::python_analysis::analyze_python_package;
-use std::path::Path;
-
-let analysis = analyze_python_package(Path::new("path/to/package.whl"))?;
-```
-
-2. **Via MCP tool**:
-```bash
-npx @modelcontextprotocol/inspector --cli ./target/release/file-scanner \
-  mcp-stdio --method tools/call --tool-name analyze_python_package \
-  --tool-arg package_path=/path/to/package.whl
-```
-
-### Analysis Results
-
-The analysis provides detailed information including:
-
-- Package metadata from multiple sources (setup.py, pyproject.toml, METADATA)
-- Comprehensive dependency analysis with vulnerability information
-- Security analysis of setup scripts and import patterns
-- Malicious indicators with detailed risk scoring
-- Maintainer information and trust scoring
-- Quality metrics for code and documentation
-
-### Built-in Vulnerability Database
-
-The scanner includes known vulnerabilities for packages like:
-- Django (multiple CVEs for various versions)
-- Flask (security header vulnerabilities)
-- requests (proxy header leakage)
-- Pillow (uncontrolled resource consumption)
-- PyYAML (arbitrary code execution)
-- NumPy (NULL pointer dereference)
-- urllib3 (cookie header leakage)
-
-### Known Malicious Packages
-
-The scanner maintains a database of known malicious packages including typosquatting attempts like:
-- colourama (typosquatting colorama)
-- python-sqlite, python-mysql (fake database packages)
-- pytorch (should be torch)
-- sklearn (should be scikit-learn)
-- beautifulsoup (should be beautifulsoup4)
-
-### Example Analysis Output
-
-```json
-{
-  "package_info": {
-    "name": "suspicious-package",
-    "version": "1.0.0",
-    "package_format": "Wheel"
-  },
-  "dependencies": {
-    "vulnerability_summary": {
-      "critical_count": 1,
-      "high_count": 2,
-      "total_count": 3
-    }
-  },
-  "security_analysis": {
-    "has_setup_script": true,
-    "supply_chain_risk_score": 65.0,
-    "suspicious_imports": [
-      {
-        "module_name": "subprocess",
-        "risk_level": "High",
-        "reason": "Process execution"
-      }
-    ]
-  },
-  "malicious_indicators": {
-    "overall_risk_score": 78.5,
-    "risk_level": "High",
-    "typosquatting_risk": {
-      "is_potential_typosquatting": true,
-      "similar_packages": ["requests"]
-    }
-  }
-}
-```
+- Source scan of the same extensions and with the same limits as the npm tool; `setup.py` is checked for install-time
+  behaviour.
+- Advisories: `src/python_vuln_db.rs` holds a small table (7 packages: Django, Flask, requests, Pillow, PyYAML, NumPy,
+  urllib3) matched with PEP 440 and normalized names. An unpinned requirement is unknown, not vulnerable.
+- Obfuscation in `setup.py` raises the package to at least High (reason `setup.py runs suspicious code at install
+  time: <rule> (line N)`). A known-malicious release is named `name==version` (for example `ctx==0.1.2`).
+- Known-malicious data in `python_vuln_db.rs`: `get_known_malicious_packages()` (malicious at every version, for
+  example colourama and python3-dateutil) and `get_known_malicious_versions()` (hijacked releases such as ctx 0.1.2
+  and some ultralytics 8.3.x). Names of legitimate packages were removed from the first list (sklearn, pytorch,
+  beautifulsoup, crypto, acquisition, yarnpkg); do not add a name there unless the package is malicious at every
+  version.
+- MCP: `analyze_python_package` takes the same arguments as the npm tool.
+- Library: `file_scanner::python_analysis::analyze_python_package(path)`.
+- CLI: `file-scanner analyze-python <path>`.
 
 ## Future Enhancement Ideas
 
-- Support for additional binary formats (Java class files, .NET assemblies)
+- Support for additional binary formats (.NET assemblies, DEX code)
 - Extended signature verification (jar signing, etc.)
 - File content classification using machine learning
 - Batch processing capabilities
 - Plugin architecture for custom analyzers
 - Enhanced MCP features (resources, prompts)
 - Ruby gem security analysis
-- Java/Maven package analysis
+- Vulnerable-library (CVE) checks for Java archives
 - Container image scanning
-# GitHub Pages configured for benchmark results
+
+GitHub Pages is configured for benchmark results.

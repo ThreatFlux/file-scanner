@@ -526,10 +526,30 @@ fn test_system_library_classification_prefers_nonempty_import_metadata() {
         },
     };
     let analysis = analyze_dependencies(Path::new("fixture"), &table, None).unwrap();
-    assert_eq!(analysis.dependencies.len(), cases.len());
-    for (dependency, (name, _, expected)) in analysis.dependencies.iter().zip(cases) {
+    // Dependencies are libraries: imports are grouped under the library that
+    // provides them, and the two glibc-tagged imports share one entry.
+    for (name, library, expected) in cases {
+        let provider = match library {
+            Some(lib) if !lib.is_empty() => lib.rsplit(['/', '\\']).next().unwrap().to_lowercase(),
+            _ if name.contains('@') => "glibc".to_string(),
+            _ => {
+                continue;
+            }
+        };
+        let dependency = analysis
+            .dependencies
+            .iter()
+            .find(|d| d.name.to_lowercase() == provider)
+            .unwrap_or_else(|| panic!("no dependency for {name} ({provider})"));
         assert_eq!(dependency.is_system_library, expected, "{name}");
-        assert_eq!(dependency.imported_functions, [name]);
+        assert!(
+            dependency.imported_functions.iter().any(|f| f == name),
+            "{name}"
+        );
     }
-    assert_eq!(analysis.dependencies[4].name, "glibc");
+    // custom_function names no provider and the path is not a binary
+    assert_eq!(analysis.unattributed_import_count, 1);
+    // 14 cases: the glibc pair merges, the two KERNEL32 spellings merge, one has no provider
+    assert_eq!(analysis.dependencies.len(), cases.len() - 3);
+    assert!(analysis.dependencies.iter().any(|d| d.name == "glibc"));
 }

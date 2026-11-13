@@ -43,569 +43,741 @@
     clippy::ignored_unit_patterns
 )]
 
-use file_scanner::mcp_transport::{JsonRpcRequest, McpTransportServer};
+//! HTTP transport tests: the SDK's Streamable HTTP service at `/mcp` next to the
+//! REST helper routes, over real loopback sockets on ephemeral ports.
+
+use std::{sync::Arc, time::Duration};
+
+use file_scanner::{
+    mcp_server::{FileScannerMcp, ServerState, StateConfig},
+    mcp_transport::{
+        http::{BoundServer, HttpConfig},
+        McpTransportServer,
+    },
+};
 use serde_json::{json, Value};
-use std::time::Duration;
+use tempfile::TempDir;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
-// Test HTTP transport server integration
-#[tokio::test]
-async fn test_http_server_startup_and_health_check() {
-    let transport = McpTransportServer::new();
-    let port = 0; // Use random available port
-
-    // Start server in background task
-    let server_handle = tokio::spawn(async move {
-        // This should bind and start serving
-        let _ = transport.run_http(port).await;
-    });
-
-    // Give server time to start
-    sleep(Duration::from_millis(100)).await;
-
-    // Since we used port 0, we can't easily test the actual endpoint
-    // But we can verify the server task started without immediate panic
-    assert!(!server_handle.is_finished());
-
-    // Cleanup
-    server_handle.abort();
+struct TestServer {
+    base: String,
+    shutdown: CancellationToken,
+    state: Arc<ServerState>,
+    _cache_dir: TempDir,
 }
 
-#[tokio::test]
-async fn test_sse_server_startup() {
-    let transport = McpTransportServer::new();
-    let port = 0; // Use random available port
-
-    // Start SSE server in background task
-    let server_handle = tokio::spawn(async move {
-        let _ = transport.run_sse(port).await;
-    });
-
-    // Give server time to start
-    sleep(Duration::from_millis(100)).await;
-
-    // Verify server task started without immediate panic
-    assert!(!server_handle.is_finished());
-
-    // Cleanup
-    server_handle.abort();
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+    }
 }
 
-#[tokio::test]
-async fn test_http_mcp_endpoint_integration() {
-    let transport = McpTransportServer::new();
-    let port = 18765; // Use specific port for testing
+async fn start() -> TestServer {
+    start_with_roots(Vec::new()).await
+}
 
-    // Start server in background
-    let server_handle = tokio::spawn(async move {
-        let _ = transport.run_http(port).await;
+async fn start_with_roots(allow_roots: Vec<std::path::PathBuf>) -> TestServer {
+    let cache_dir = TempDir::new().unwrap();
+    let state = Arc::new(ServerState::new(StateConfig {
+        cache_dir: cache_dir.path().to_path_buf(),
+        allow_roots,
+        ..StateConfig::default()
+    }));
+    state.warm_up();
+    let shutdown = CancellationToken::new();
+    let server = BoundServer::bind(
+        FileScannerMcp::with_state(Arc::clone(&state)),
+        &HttpConfig::on_port(0),
+        shutdown.clone(),
+    )
+    .await
+    .unwrap();
+    let address = server.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = server.serve().await;
     });
+    TestServer {
+        base: format!("http://{address}"),
+        shutdown,
+        state,
+        _cache_dir: cache_dir,
+    }
+}
 
-    // Give server time to fully start
-    sleep(Duration::from_millis(200)).await;
+fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .unwrap()
+}
 
-    // Test if server is actually running by attempting connection
-    let client = reqwest::Client::new();
-
-    // Test health endpoint
-    let health_result = client
-        .get(format!("http://localhost:{port}/health"))
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match health_result {
-        Ok(response) => {
-            assert_eq!(response.status(), 200);
-            let body: Value = response.json().await.expect("Should be valid JSON");
-            assert_eq!(body["status"], "ok");
-        }
-        Err(_) => {
-            // Server might not have started yet or port in use, this is ok for coverage test
-            println!("Health check failed - this is expected in test environment");
+/// The JSON-RPC message with `id` inside an SSE or JSON response body.
+fn message_with_id(body: &str, id: u64) -> Value {
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        if value["id"] == id {
+            return value;
         }
     }
+    body.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+        .find(|value| value["id"] == id)
+        .unwrap_or_else(|| panic!("no message with id {id} in: {body}"))
+}
 
-    // Test MCP initialize endpoint
-    let initialize_request = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(1)),
-        method: "initialize".to_string(),
-        params: None,
+const ACCEPT: &str = "application/json, text/event-stream";
+
+#[tokio::test]
+async fn run_http_and_the_sse_alias_start_and_keep_running() {
+    let cache_dir = TempDir::new().unwrap();
+    for alias in [false, true] {
+        let transport = McpTransportServer::with_config(StateConfig {
+            cache_dir: cache_dir.path().to_path_buf(),
+            ..StateConfig::default()
+        });
+        let handle = tokio::spawn(async move {
+            let _ = if alias {
+                transport.run_sse(HttpConfig::on_port(0)).await
+            } else {
+                transport.run_http(HttpConfig::on_port(0)).await
+            };
+        });
+        sleep(Duration::from_millis(200)).await;
+        assert!(!handle.is_finished(), "alias={alias}");
+        handle.abort();
+    }
+}
+
+#[tokio::test]
+async fn health_and_info_report_the_package_version() {
+    let server = start().await;
+    let health: Value = client()
+        .get(format!("{}/health", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+
+    let info: Value = client()
+        .get(format!("{}/api/info", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    assert!(info["endpoints"]["/mcp"].is_string());
+}
+
+#[tokio::test]
+async fn mcp_endpoint_serves_a_session_and_shares_state_with_the_rest_routes() {
+    let server = start().await;
+    let http = client();
+    let url = format!("{}/mcp", server.base);
+
+    let initialize = http
+        .post(&url)
+        .header("accept", ACCEPT)
+        .json(
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-11-25","capabilities":{},
+            "clientInfo":{"name":"http-test","version":"0"}}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(initialize.status().is_success(), "{}", initialize.status());
+    let session = initialize
+        .headers()
+        .get("mcp-session-id")
+        .expect("a session id")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body = initialize.text().await.unwrap();
+    let reply = message_with_id(&body, 1);
+    assert_eq!(reply["result"]["serverInfo"]["name"], "file-scanner");
+    assert!(reply["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("analyze_file"));
+
+    let accepted = http
+        .post(&url)
+        .header("accept", ACCEPT)
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "2025-11-25")
+        .json(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), 202);
+
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("sample.bin");
+    std::fs::write(&file, b"MZ\0http://tracked.example/path\0more text here\0").unwrap();
+    let call = http
+        .post(&url)
+        .header("accept", ACCEPT)
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "2025-11-25")
+        .json(
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"analyze_file","arguments":{"file_path":file,"hashes":true,"strings":true}}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(call.status().is_success());
+    let reply = message_with_id(&call.text().await.unwrap(), 2);
+    assert_ne!(reply["result"]["isError"], json!(true), "{reply}");
+
+    // The call made over /mcp is visible through the REST routes: same cache, same tracker.
+    let stats: Value = http
+        .get(format!("{}/cache/stats", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stats["total_entries"], 1);
+    let strings: Value = http
+        .post(format!("{}/strings/details", server.base))
+        .json(&json!({"value": "http://tracked.example/path"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(strings.get("error").is_none(), "{strings}");
+    assert!(server
+        .state
+        .string_tracker()
+        .get_string_details("http://tracked.example/path")
+        .is_some());
+}
+
+#[tokio::test]
+async fn rest_tool_routes_use_the_tool_router() {
+    let server = start().await;
+    let http = client();
+
+    let list: Value = http
+        .post(format!("{}/tools/list", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["jsonrpc"], "2.0");
+    let tools = list["result"]["tools"].as_array().unwrap();
+    for name in [
+        "analyze_file",
+        "analyze_java_file",
+        "analyze_npm_package",
+        "analyze_python_package",
+        "llm_analyze_file",
+        "yara_scan_file",
+    ] {
+        assert!(tools.iter().any(|t| t["name"] == name), "missing {name}");
+    }
+    assert!(tools
+        .iter()
+        .all(|t| t["inputSchema"]["additionalProperties"] == json!(false)));
+
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("a.bin");
+    std::fs::write(&file, b"abcdefgh ijklmnop").unwrap();
+    let response = http
+        .post(format!("{}/tools/call", server.base))
+        .json(&json!({"name":"analyze_file","arguments":{"file_path":file,"hashes":true}}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let result: Value = response.json().await.unwrap();
+    assert_ne!(result["isError"], json!(true), "{result}");
+    assert_eq!(
+        server.state.analysis_cache().get_all_entries().await.len(),
+        1
+    );
+
+    let failed: Value = http
+        .post(format!("{}/tools/call", server.base))
+        .json(&json!({"name":"analyze_file","arguments":{"file_path":"/nonexistent"}}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(failed["isError"], json!(true));
+
+    let unknown = http
+        .post(format!("{}/tools/call", server.base))
+        .json(&json!({"name":"nope"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+}
+
+#[tokio::test]
+async fn cache_string_and_documentation_routes_answer() {
+    let server = start().await;
+    let http = client();
+    for path in [
+        "/cache/list",
+        "/cache/stats",
+        "/strings/stats",
+        "/api-docs/openapi.json",
+        "/api/info",
+        "/health",
+    ] {
+        let response = http
+            .get(format!("{}{path}", server.base))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "{path}");
+        assert!(
+            !response
+                .headers()
+                .contains_key("access-control-allow-origin"),
+            "{path}: no CORS header without an Origin, and never a wildcard"
+        );
+    }
+    for (path, body) in [
+        ("/cache/search", json!({})),
+        ("/cache/clear", json!({})),
+        ("/strings/search", json!({"query": "x"})),
+        ("/strings/related", json!({"value": "x"})),
+        ("/strings/filter", json!({})),
+        ("/initialize", json!({})),
+    ] {
+        let response = http
+            .post(format!("{}{path}", server.base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "{path}: {}",
+            response.status()
+        );
+    }
+    let openapi: Value = http
+        .get(format!("{}/api-docs/openapi.json", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(openapi["openapi"].is_string());
+    assert_eq!(openapi["info"]["title"], "File Scanner MCP API");
+    assert!(openapi["components"].is_object());
+}
+
+#[tokio::test]
+async fn rest_cache_clear_forgets_the_tracked_strings_like_the_tool_and_takes_a_scope() {
+    let server = start().await;
+    let http = client();
+    let track = || {
+        server
+            .state
+            .string_tracker()
+            .track_strings_from_results(
+                &["a tracked string".to_string()],
+                "/tmp/x",
+                "hash",
+                "analyze_file",
+            )
+            .unwrap();
     };
-
-    let mcp_result = client
-        .post(format!("http://localhost:{port}/mcp"))
-        .json(&initialize_request)
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match mcp_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-        }
-        Err(_) => {
-            // Connection error is expected in test environment
-            println!("MCP endpoint test failed - this is expected in test environment");
-        }
-    }
-
-    // Cleanup
-    server_handle.abort();
-}
-
-#[tokio::test]
-async fn test_http_tools_endpoints() {
-    let transport = McpTransportServer::new();
-    let port = 18766; // Different port
-
-    // Start server
-    let server_handle = tokio::spawn(async move {
-        let _ = transport.run_http(port).await;
-    });
-
-    sleep(Duration::from_millis(200)).await;
-
-    let client = reqwest::Client::new();
-
-    // Test tools/list endpoint
-    let tools_request = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(2)),
-        method: "tools/list".to_string(),
-        params: None,
+    let unique = || {
+        server
+            .state
+            .string_tracker()
+            .get_statistics(None)
+            .total_unique_strings
     };
-
-    let tools_result = client
-        .post(format!("http://localhost:{port}/tools/list"))
-        .json(&tools_request)
-        .timeout(Duration::from_secs(1))
+    track();
+    assert_eq!(unique(), 1);
+    // Only the analysis side: the strings stay.
+    let reply: Value = http
+        .post(format!("{}/cache/clear?scope=analysis", server.base))
         .send()
-        .await;
-
-    match tools_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-            let body: Value = response.json().await.expect("Should be valid JSON");
-            assert_eq!(body["jsonrpc"], "2.0");
-            assert!(body.get("result").is_some());
-        }
-        Err(_) => {
-            println!("Tools endpoint test failed - this is expected in test environment");
-        }
-    }
-
-    // Test tools/call endpoint with file analysis
-    let call_request = json!({
-        "name": "analyze_file",
-        "arguments": {
-            "file_path": "/bin/ls",
-            "metadata": true,
-            "hashes": false
-        }
-    });
-
-    let call_result = client
-        .post(format!("http://localhost:{port}/tools/call"))
-        .json(&call_request)
-        .timeout(Duration::from_secs(2))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reply["status"], "success", "{reply}");
+    assert_eq!(unique(), 1);
+    // The default is the tool's default: both.
+    let reply: Value = http
+        .post(format!("{}/cache/clear", server.base))
         .send()
-        .await;
-
-    match call_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-        }
-        Err(_) => {
-            println!("Tools call test failed - this is expected in test environment");
-        }
-    }
-
-    server_handle.abort();
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        reply["cleared"].to_string().contains("tracked strings"),
+        "{reply}"
+    );
+    assert_eq!(unique(), 0);
+    track();
+    let bad = http
+        .post(format!("{}/cache/clear?scope=nope", server.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+    assert_eq!(unique(), 1, "a refused scope clears nothing");
 }
 
 #[tokio::test]
-async fn test_cache_endpoints() {
-    let transport = McpTransportServer::new();
-    let port = 18767;
-
-    let server_handle = tokio::spawn(async move {
-        let _ = transport.run_http(port).await;
-    });
-
-    sleep(Duration::from_millis(200)).await;
-
-    let client = reqwest::Client::new();
-
-    // Test cache stats endpoint
-    let stats_result = client
-        .get(format!("http://localhost:{port}/cache/stats"))
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match stats_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-            let body: Value = response.json().await.expect("Should be valid JSON");
-            assert!(body.get("total_entries").is_some());
-        }
-        Err(_) => {
-            println!("Cache stats test failed - expected in test environment");
-        }
-    }
-
-    // Test cache list endpoint
-    let list_result = client
-        .get(format!("http://localhost:{port}/cache/list"))
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match list_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-        }
-        Err(_) => {
-            println!("Cache list test failed - expected in test environment");
-        }
-    }
-
-    // Test cache search endpoint
-    let search_body = json!({
-        "tool_name": "analyze_file"
-    });
-
-    let search_result = client
-        .post(format!("http://localhost:{port}/cache/search"))
-        .json(&search_body)
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match search_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-        }
-        Err(_) => {
-            println!("Cache search test failed - expected in test environment");
-        }
-    }
-
-    server_handle.abort();
-}
-
-#[tokio::test]
-async fn test_string_endpoints() {
-    let transport = McpTransportServer::new();
-    let port = 18768;
-
-    let server_handle = tokio::spawn(async move {
-        let _ = transport.run_http(port).await;
-    });
-
-    sleep(Duration::from_millis(200)).await;
-
-    let client = reqwest::Client::new();
-
-    // Test string stats endpoint
-    let stats_result = client
-        .get(format!("http://localhost:{port}/strings/stats"))
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match stats_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-            let body: Value = response.json().await.expect("Should be valid JSON");
-            assert!(body.get("total_strings").is_some());
-        }
-        Err(_) => {
-            println!("String stats test failed - expected in test environment");
-        }
-    }
-
-    // Test string search endpoint
-    let search_body = json!({
-        "query": "lib",
-        "limit": 10
-    });
-
-    let search_result = client
-        .post(format!("http://localhost:{port}/strings/search"))
-        .json(&search_body)
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match search_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-        }
-        Err(_) => {
-            println!("String search test failed - expected in test environment");
-        }
-    }
-
-    // Test string details endpoint
-    let details_body = json!({
-        "value": "libc"
-    });
-
-    let details_result = client
-        .post(format!("http://localhost:{port}/strings/details"))
-        .json(&details_body)
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match details_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-        }
-        Err(_) => {
-            println!("String details test failed - expected in test environment");
-        }
-    }
-
-    // Test string filter endpoint
-    let filter_body = json!({
-        "min_occurrences": 1,
-        "categories": ["import"],
-        "limit": 5
-    });
-
-    let filter_result = client
-        .post(format!("http://localhost:{port}/strings/filter"))
-        .json(&filter_body)
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match filter_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-        }
-        Err(_) => {
-            println!("String filter test failed - expected in test environment");
-        }
-    }
-
-    server_handle.abort();
-}
-
-#[tokio::test]
-async fn test_api_documentation_endpoints() {
-    let transport = McpTransportServer::new();
-    let port = 18769;
-
-    let server_handle = tokio::spawn(async move {
-        let _ = transport.run_http(port).await;
-    });
-
-    sleep(Duration::from_millis(200)).await;
-
-    let client = reqwest::Client::new();
-
-    // Test OpenAPI endpoint
-    let openapi_result = client
-        .get(format!("http://localhost:{port}/api-docs/openapi.json"))
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match openapi_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-            let body: Value = response.json().await.expect("Should be valid JSON");
-            assert!(body.get("openapi").is_some());
-            assert!(body.get("info").is_some());
-        }
-        Err(_) => {
-            println!("OpenAPI test failed - expected in test environment");
-        }
-    }
-
-    // Test API info endpoint
-    let info_result = client
-        .get(format!("http://localhost:{port}/api/info"))
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match info_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-            let body: Value = response.json().await.expect("Should be valid JSON");
-            assert!(body.get("name").is_some());
-            assert!(body.get("version").is_some());
-        }
-        Err(_) => {
-            println!("API info test failed - expected in test environment");
-        }
-    }
-
-    server_handle.abort();
-}
-
-#[tokio::test]
-async fn test_cors_middleware() {
-    let transport = McpTransportServer::new();
-    let port = 18770;
-
-    let server_handle = tokio::spawn(async move {
-        let _ = transport.run_http(port).await;
-    });
-
-    sleep(Duration::from_millis(200)).await;
-
-    let client = reqwest::Client::new();
-
-    // Test CORS headers on health endpoint
-    let cors_result = client
-        .get(format!("http://localhost:{port}/health"))
-        .header("Origin", "http://localhost:3000")
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match cors_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-
-            // Check for CORS headers
-            let headers = response.headers();
-            assert!(headers.get("access-control-allow-origin").is_some());
-            assert!(headers.get("access-control-allow-methods").is_some());
-            assert!(headers.get("access-control-allow-headers").is_some());
-        }
-        Err(_) => {
-            println!("CORS test failed - expected in test environment");
-        }
-    }
-
-    server_handle.abort();
-}
-
-#[tokio::test]
-async fn test_sse_connection_attempt() {
-    let transport = McpTransportServer::new();
-    let port = 18771;
-
-    let server_handle = tokio::spawn(async move {
-        let _ = transport.run_sse(port).await;
-    });
-
-    sleep(Duration::from_millis(200)).await;
-
-    let client = reqwest::Client::new();
-
-    // Test SSE endpoint connection attempt
-    let sse_result = client
-        .get(format!("http://localhost:{port}/sse"))
-        .header("Accept", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match sse_result {
-        Ok(response) => {
-            // SSE connections should return successful status
-            assert!(response.status().is_success());
-            assert_eq!(
-                response.headers().get("content-type").unwrap(),
-                "text/event-stream"
-            );
-        }
-        Err(_) => {
-            println!("SSE connection test failed - expected in test environment");
-        }
-    }
-
-    // Test SSE MCP endpoint
-    let mcp_sse_request = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(1)),
-        method: "initialize".to_string(),
-        params: None,
-    };
-
-    let mcp_sse_result = client
-        .post(format!("http://localhost:{port}/mcp"))
-        .json(&mcp_sse_request)
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await;
-
-    match mcp_sse_result {
-        Ok(response) => {
-            assert!(response.status().is_success());
-        }
-        Err(_) => {
-            println!("SSE MCP test failed - expected in test environment");
-        }
-    }
-
-    server_handle.abort();
-}
-
-#[tokio::test]
-async fn test_error_handling_invalid_requests() {
-    let transport = McpTransportServer::new();
-    let port = 18772;
-
-    let server_handle = tokio::spawn(async move {
-        let _ = transport.run_http(port).await;
-    });
-
-    sleep(Duration::from_millis(200)).await;
-
-    let client = reqwest::Client::new();
-
-    // Test invalid JSON request
-    let invalid_json_result = client
-        .post(format!("http://localhost:{port}/mcp"))
-        .header("Content-Type", "application/json")
+async fn invalid_requests_to_mcp_are_rejected_not_served() {
+    let server = start().await;
+    let http = client();
+    let url = format!("{}/mcp", server.base);
+    let bad = http
+        .post(&url)
+        .header("accept", ACCEPT)
+        .header("content-type", "application/json")
         .body("invalid json")
-        .timeout(Duration::from_secs(1))
         .send()
-        .await;
-
-    match invalid_json_result {
-        Ok(response) => {
-            // Should handle invalid JSON gracefully
-            assert!(response.status().is_client_error() || response.status().is_success());
-        }
-        Err(_) => {
-            println!("Invalid JSON test failed - expected in test environment");
-        }
-    }
-
-    // Test missing method in JSON-RPC
-    let missing_method = json!({
-        "jsonrpc": "2.0",
-        "id": 1
-        // Missing "method" field
-    });
-
-    let missing_method_result = client
-        .post(format!("http://localhost:{port}/mcp"))
-        .json(&missing_method)
-        .timeout(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(bad.status().is_client_error(), "{}", bad.status());
+    // Without the Accept pair the SDK refuses (406); the server stays up.
+    let missing_accept = http
+        .post(&url)
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"ping"}))
         .send()
-        .await;
+        .await
+        .unwrap();
+    assert!(missing_accept.status().is_client_error());
+    assert!(http
+        .get(format!("{}/health", server.base))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+}
 
-    match missing_method_result {
-        Ok(response) => {
-            assert!(response.status().is_success() || response.status().is_client_error());
-        }
-        Err(_) => {
-            println!("Missing method test failed - expected in test environment");
-        }
+#[tokio::test]
+async fn shutdown_ends_an_open_event_stream_and_the_server_returns() {
+    let cache_dir = TempDir::new().unwrap();
+    let state = Arc::new(ServerState::new(StateConfig {
+        cache_dir: cache_dir.path().to_path_buf(),
+        ..StateConfig::default()
+    }));
+    let shutdown = CancellationToken::new();
+    let config = HttpConfig {
+        shutdown_grace: Duration::from_secs(30),
+        ..HttpConfig::on_port(0)
+    };
+    let server = BoundServer::bind(FileScannerMcp::with_state(state), &config, shutdown.clone())
+        .await
+        .unwrap();
+    let base = format!("http://{}", server.local_addr().unwrap());
+    let serving = tokio::spawn(server.serve());
+
+    let http = client();
+    let initialize = http
+        .post(format!("{base}/mcp"))
+        .header("accept", ACCEPT)
+        .json(
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-11-25","capabilities":{},
+            "clientInfo":{"name":"shutdown-test","version":"0"}}}),
+        )
+        .send()
+        .await
+        .unwrap();
+    let session = initialize
+        .headers()
+        .get("mcp-session-id")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    // A GET stream that stays open until the server ends it.
+    let mut stream = http
+        .get(format!("{base}/mcp"))
+        .header("accept", "text/event-stream")
+        .header("mcp-session-id", &session)
+        .header("mcp-protocol-version", "2025-11-25")
+        .send()
+        .await
+        .unwrap();
+    assert!(stream.status().is_success());
+    let _ = stream.chunk().await;
+
+    let started = std::time::Instant::now();
+    shutdown.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(25), serving)
+        .await
+        .expect("the server returns although a stream was open")
+        .unwrap();
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(25),
+        "stopped by ending the stream, not by waiting out the grace period"
+    );
+    // The listener is closed.
+    assert!(http.get(format!("{base}/health")).send().await.is_err());
+}
+
+#[tokio::test]
+async fn binding_a_taken_port_names_the_fix() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let cache_dir = TempDir::new().unwrap();
+    let state = Arc::new(ServerState::new(StateConfig {
+        cache_dir: cache_dir.path().to_path_buf(),
+        ..StateConfig::default()
+    }));
+    let error = match BoundServer::bind(
+        FileScannerMcp::with_state(state),
+        &HttpConfig::on_port(port),
+        CancellationToken::new(),
+    )
+    .await
+    {
+        Ok(_) => panic!("the port is taken"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("--port"), "{error:#}");
+}
+
+#[tokio::test]
+async fn a_rooted_server_shows_no_cache_entry_or_string_of_a_file_outside_its_roots() {
+    use file_scanner::cache::CacheEntry;
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let server = start_with_roots(vec![root.path().to_path_buf()]).await;
+    let inside_path = root.path().join("in.bin").to_string_lossy().into_owned();
+    let outside_path = outside
+        .path()
+        .join("out.bin")
+        .to_string_lossy()
+        .into_owned();
+    let tracker = server.state.string_tracker();
+    for (path, hash, value) in [
+        (&inside_path, "aa", "INSIDE_ONLY_MARKER"),
+        (&outside_path, "bb", "OUTSIDE_ONLY_MARKER"),
+    ] {
+        tracker
+            .track_strings_from_results(
+                &[value.to_string(), "SHARED_MARKER".into()],
+                path,
+                hash,
+                "analyze_file",
+            )
+            .unwrap();
+        server
+            .state
+            .analysis_cache()
+            .add_entry(CacheEntry {
+                file_path: path.clone(),
+                file_hash: hash.into(),
+                tool_name: "analyze_file".into(),
+                tool_args: Default::default(),
+                result: json!({"marker": value}),
+                timestamp: chrono::Utc::now(),
+                file_size: 10,
+                execution_time_ms: 1,
+            })
+            .await
+            .unwrap();
     }
+    let http = client();
+    let mut answers = Vec::new();
+    let get = |path: &str| http.get(format!("{}{path}", server.base)).send();
+    answers.push(get("/cache/list").await.unwrap().text().await.unwrap());
+    answers.push(get("/strings/stats").await.unwrap().text().await.unwrap());
+    answers.push(get("/cache/stats").await.unwrap().text().await.unwrap());
+    for (path, body) in [
+        ("/cache/search", json!({"file_path_pattern": "bin"})),
+        ("/strings/search", json!({"query": "MARKER"})),
+        ("/strings/filter", json!({})),
+        ("/strings/related", json!({"value": "INSIDE_ONLY_MARKER"})),
+        ("/strings/details", json!({"value": "SHARED_MARKER"})),
+        (
+            "/tools/call",
+            json!({"name": "cache_status", "arguments": {"action": "list"}}),
+        ),
+        (
+            "/tools/call",
+            json!({"name": "search_strings", "arguments": {"query": "MARKER"}}),
+        ),
+        (
+            "/tools/call",
+            json!({"name": "string_details", "arguments": {"value": "SHARED_MARKER"}}),
+        ),
+    ] {
+        let response = http
+            .post(format!("{}{path}", server.base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        answers.push(response.text().await.unwrap());
+    }
+    for answer in &answers {
+        assert!(!answer.contains("OUTSIDE_ONLY_MARKER"), "{answer}");
+        assert!(!answer.contains(&outside_path), "{answer}");
+        assert!(!answer.contains("\"bb\""), "{answer}");
+    }
+    assert!(answers[0].contains(&inside_path), "{}", answers[0]);
+    assert!(answers[3].contains(&inside_path), "{}", answers[3]);
+    assert!(answers[4].contains("INSIDE_ONLY_MARKER") && answers[4].contains("SHARED_MARKER"));
+    // A string that lives only outside the roots is not found.
+    let response = http
+        .post(format!("{}/strings/details", server.base))
+        .json(&json!({"value": "OUTSIDE_ONLY_MARKER"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"], "String not found");
+}
 
-    server_handle.abort();
+#[tokio::test]
+async fn rest_cache_routes_print_the_canonical_path_and_match_on_it() {
+    use file_scanner::cache::CacheEntry;
+    let work = TempDir::new().unwrap();
+    let base = std::fs::canonicalize(work.path()).unwrap();
+    let inside = base.join("in");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::create_dir_all(base.join("outside_zone")).unwrap();
+    std::fs::write(inside.join("a.bin"), b"data").unwrap();
+    let server = start_with_roots(vec![inside.clone()]).await;
+    let canonical = inside.join("a.bin").to_string_lossy().into_owned();
+    let stored = format!("{}/outside_zone/../in/a.bin", base.display());
+    server
+        .state
+        .analysis_cache()
+        .add_entry(CacheEntry {
+            file_path: stored.clone(),
+            file_hash: "aa".into(),
+            tool_name: "analyze_file".into(),
+            tool_args: [("file_path".to_string(), json!(stored))].into(),
+            result: json!({"path": stored}),
+            timestamp: chrono::Utc::now(),
+            file_size: 4,
+            execution_time_ms: 1,
+        })
+        .await
+        .unwrap();
+    let http = client();
+    let list = http
+        .get(format!("{}/cache/list", server.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let mut answers = vec![list];
+    for body in [json!({}), json!({"file_path_pattern": "outside"})] {
+        answers.push(
+            http.post(format!("{}/cache/search", server.base))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+        );
+    }
+    for answer in &answers {
+        assert!(!answer.contains("outside_zone"), "{answer}");
+    }
+    let listed: Value = serde_json::from_str(&answers[0]).unwrap();
+    assert_eq!(listed["entries"][0]["file_path"], canonical.as_str());
+    assert_eq!(
+        listed["entries"][0]["tool_args"]["file_path"],
+        canonical.as_str()
+    );
+    let all: Value = serde_json::from_str(&answers[1]).unwrap();
+    assert_eq!(all["results"][0]["file_path"], canonical.as_str());
+    let none: Value = serde_json::from_str(&answers[2]).unwrap();
+    assert_eq!(none["count"], 0, "{none}");
+}
+
+#[tokio::test]
+async fn strings_related_is_filtered_by_root() {
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let inside_path = root.path().join("in.bin").to_string_lossy().into_owned();
+    let outside_path = outside
+        .path()
+        .join("out.bin")
+        .to_string_lossy()
+        .into_owned();
+    let mut answers = Vec::new();
+    for roots in [Vec::new(), vec![root.path().to_path_buf()]] {
+        let server = start_with_roots(roots).await;
+        let tracker = server.state.string_tracker();
+        for (path, hash, values) in [
+            (&inside_path, "aa", ["VALUE_A", "VALUE_B"]),
+            (&outside_path, "bb", ["VALUE_A", "VALUE_C"]),
+        ] {
+            tracker
+                .track_strings_from_results(&values.map(String::from), path, hash, "analyze_file")
+                .unwrap();
+        }
+        let text = client()
+            .post(format!("{}/strings/related", server.base))
+            .json(&json!({"value": "VALUE_A"}))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        answers.push(text);
+    }
+    assert!(
+        answers[0].contains("VALUE_B") && answers[0].contains("VALUE_C"),
+        "{}",
+        answers[0]
+    );
+    assert!(answers[1].contains("VALUE_B"), "{}", answers[1]);
+    assert!(!answers[1].contains("VALUE_C"), "{}", answers[1]);
+}
+
+#[tokio::test]
+async fn an_unknown_string_is_a_404_with_the_error_body() {
+    let server = start().await;
+    let response = client()
+        .post(format!("{}/strings/details", server.base))
+        .json(&json!({"value": "nope"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        json!({"error": "String not found"})
+    );
 }

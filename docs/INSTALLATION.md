@@ -35,7 +35,7 @@ This guide covers installing File Scanner on various platforms.
 
 - **Git**: For cloning the repository
 - **Make**: For using the Makefile (optional)
-- **pkg-config**: For linking system libraries
+- **C compiler**: Some dependencies compile C code (pkg-config and OpenSSL are not needed)
 
 ## Installing from crates.io
 
@@ -77,8 +77,8 @@ cargo build
 # Run tests
 cargo test
 
-# Run with logging
-RUST_LOG=debug cargo run -- /path/to/file
+# Run on a file
+cargo run -- /path/to/file
 ```
 
 ### Using Make
@@ -108,6 +108,9 @@ docker pull ghcr.io/threatflux/file-scanner:latest
 docker run --rm -v /path/to/files:/data:ro ghcr.io/threatflux/file-scanner:latest /data/file.bin --format json
 ```
 
+To run the MCP server from the image (which needs the files mounted at a path the client knows), see
+[MCP.md](MCP.md#docker).
+
 ### Building Docker Image
 
 ```bash
@@ -117,7 +120,7 @@ docker build -t file-scanner .
 # Run with volume mount
 docker run -v /path/to/files:/data file-scanner /data/file.bin
 
-# The distroless runtime has no shell; pass scanner arguments directly
+# The runtime image has no shell; pass scanner arguments directly
 docker run --rm -v /path/to/files:/data:ro file-scanner /data/file.bin --all --format json
 ```
 
@@ -142,7 +145,7 @@ services:
 ```bash
 # Install build dependencies
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libssl-dev
+sudo apt-get install -y build-essential
 
 # Optional: Install signature verification tools
 sudo apt-get install -y osslsigncode gpg
@@ -155,7 +158,7 @@ cargo build --release
 
 ```bash
 # Install build dependencies
-sudo dnf install -y gcc pkg-config openssl-devel
+sudo dnf install -y gcc
 
 # Optional: Install signature verification tools
 sudo dnf install -y osslsigncode gnupg2
@@ -168,7 +171,7 @@ cargo build --release
 
 ```bash
 # Install build dependencies
-sudo pacman -S base-devel pkg-config openssl
+sudo pacman -S base-devel
 
 # Optional: Install from AUR (coming soon)
 # yay -S file-scanner
@@ -187,7 +190,7 @@ xcode-select --install
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
 # Install dependencies
-brew install pkg-config openssl
+# No extra packages needed (Xcode command line tools suffice)
 
 # Optional: Install signature verification tools
 brew install osslsigncode gnupg
@@ -224,7 +227,7 @@ cargo build --release
 ```bash
 # Inside WSL2, follow Linux instructions
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libssl-dev
+sudo apt-get install -y build-essential
 cargo build --release
 ```
 
@@ -301,15 +304,20 @@ sudo apt-get install gnat
 
 ### MCP Server Test
 
-```bash
-# Test STDIO transport
-echo '{"jsonrpc":"2.0","method":"tools/list","id":1}' | \
-  ./target/release/file-scanner mcp-stdio
+The server expects one JSON object per line on stdin and starts with `initialize`:
 
-# Test with MCP Inspector
-npm install -g @modelcontextprotocol/inspector
-mcp-inspector ./target/release/file-scanner mcp-stdio
+```bash
+INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18",'
+INIT+='"capabilities":{},"clientInfo":{"name":"test","version":"1"}}}'
+printf '%s\n' "$INIT" \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  | ./target/release/file-scanner mcp-stdio 2>/dev/null | jq -c '{id, tools: (.result.tools // [] | length)}'
 ```
+
+The second line of output should report 17 tools. To connect a client, see [MCP.md](MCP.md#client-setup); the binary
+is at `target/release/file-scanner` after a source build and at `~/.cargo/bin/file-scanner` after `cargo install`. Use
+the absolute path in client configuration.
 
 ## Troubleshooting
 
@@ -323,16 +331,10 @@ rustup update stable
 rustup default stable
 ```
 
-#### Missing OpenSSL
+#### A native dependency fails to compile
 
-```bash
-# Linux
-sudo apt-get install libssl-dev
-
-# macOS
-brew install openssl
-export PKG_CONFIG_PATH="/usr/local/opt/openssl/lib/pkgconfig"
-```
+Install a C compiler (`build-essential` on Debian and Ubuntu, `gcc` on Fedora, Xcode command line tools on macOS).
+OpenSSL and pkg-config are not needed.
 
 #### Permission Denied
 
@@ -366,5 +368,5 @@ sudo swapon /swapfile
 ## Next Steps
 
 - Read the [Usage Guide](USAGE.md) to learn how to use File Scanner
-- Check out [MCP Integration](MCP.md) for AI tool integration
+- Read the [MCP guide](MCP.md) to use the scanner from Claude Code, Claude Desktop, Cursor or VS Code
 - See [Architecture](ARCHITECTURE.md) to understand the codebase

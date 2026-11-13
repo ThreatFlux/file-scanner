@@ -80,6 +80,8 @@ fn test_archive_analysis_serialization() {
             comment: None,
             file_type: FileType::Text,
             risk_indicators: vec![],
+            entry_kind: EntryKind::File,
+            link_target: None,
         }],
         security_analysis: ArchiveSecurityAnalysis {
             overall_risk: RiskLevel::Low,
@@ -94,9 +96,12 @@ fn test_archive_analysis_serialization() {
                 quine_detection: false,
             },
             hidden_content: vec![],
+            path_traversal_total: 0,
+            unsafe_entries: 0,
         },
         suspicious_indicators: SuspiciousArchiveIndicators::default(),
         nested_archives: vec![],
+        notes: vec![],
     };
 
     let json = serde_json::to_string(&analysis).unwrap();
@@ -438,6 +443,7 @@ fn test_comprehensive_suspicious_indicators() {
         script_count: 3,
         suspicious_patterns: vec!["crack.exe".to_string(), "keygen.bat".to_string()],
         risk_score: 85,
+        ..Default::default()
     };
 
     let json = serde_json::to_string(&indicators).unwrap();

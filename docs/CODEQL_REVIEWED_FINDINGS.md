@@ -1,5 +1,11 @@
 # Reviewed CodeQL false positives
 
+The 2026-11-12 CI repair changes only the ELF library-name fixture construction in
+`tests/binary_formats_test.rs`: its 20,000 entries now borrow one 1 MiB name
+instead of cloning it. The certificate-related tests in that inventoried file
+are unchanged, as are the reviewed vendor sources, call paths and nine findings.
+The file's inventory hash and policy digest were refreshed after reviewing this diff.
+
 CodeQL 2.27.1 originally reported nine results in YARA-X 1.21.0. The
 2026-10-21 dependency rollup explicitly re-reviewed the same nine source contexts
 and their callers in checksum-pinned YARA-X 1.22.0, including its documented
@@ -66,6 +72,28 @@ The 2026-10-31 Wasmtime security update changes the vendored manifest's minimum
 from 49.0.4 to 49.0.5 and the reviewed dependency version. The inventoried
 YARA-X algorithm, certificate, and crypto caller sources are unchanged; their
 source hashes and the nine exact reviewed result tuples remain the same.
+
+The 2026-11-12 MCP server rebuild changes seven first-party files in the token
+inventory and no vendored source. `src/entropy_analysis.rs`,
+`src/mcp_server/tools_analyze.rs` and `tests/binary_formats_test.rs` enter it,
+and `src/mcp_server.rs` leaves it. The matching lines were read: they are the
+scanner's own `Certificate` and `CertificateInfo` report types in the Java, PDF
+and signature analyzers, the PE certificate-table bounds check that decides
+whether the entropy analysis measures that region, the `certificate_chain` field
+that `analyze_file` copies into its answer, and the tests of those. None of
+these files imports YARA-X, and none consumes a YARA-X certificate, thumbprint
+or TLSH value. The nine exact reviewed result tuples are unchanged.
+
+The 2026-11-13 MCP hardening round changes two first-party files in the token
+inventory and no vendored source: `src/signature.rs` and
+`src/mcp_server/tools_analyze.rs`. The matching lines were read: they are the
+scanner's own `SignatureInfo.certificate_chain` and `CertificateInfo` report
+types, the PE certificate-table lookup that decides whether to ask an external
+verifier, the chain built from `codesign` authority names, the
+`certificate_chain` field that `analyze_file` copies into its answer, and the
+tests of those. Neither file imports YARA-X, and neither consumes a YARA-X
+certificate, thumbprint or TLSH value. The nine exact reviewed result tuples are
+unchanged.
 
 The historical API fixture `scripts/codeql-reviewed-findings-fixture.sarif` and
 compressed CLI evidence `scripts/codeql-reviewed-findings-raw-25c41d9.sarif.gz`

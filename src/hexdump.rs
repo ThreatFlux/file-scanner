@@ -40,6 +40,9 @@ impl Default for HexDumpOptions {
 }
 
 pub fn generate_hex_dump(path: &Path, options: HexDumpOptions) -> Result<HexDump> {
+    if options.bytes_per_line == 0 {
+        anyhow::bail!("bytes_per_line must be at least 1");
+    }
     let mut file = File::open(path)?;
     let file_size = file.metadata()?.len();
 
@@ -47,20 +50,23 @@ pub fn generate_hex_dump(path: &Path, options: HexDumpOptions) -> Result<HexDump
 
     let max_bytes = match (options.length, options.max_lines) {
         (Some(len), _) => len,
-        (None, Some(max_lines)) => max_lines * options.bytes_per_line,
-        (None, None) => file_size as usize,
+        (None, Some(max_lines)) => max_lines.saturating_mul(options.bytes_per_line),
+        (None, None) => usize::try_from(file_size).unwrap_or(usize::MAX),
     };
 
     let bytes_to_read = if options.offset >= file_size {
         0
     } else {
-        std::cmp::min(max_bytes, (file_size - options.offset) as usize)
+        std::cmp::min(max_bytes as u64, file_size - options.offset)
     };
 
-    let mut buffer = vec![0u8; bytes_to_read];
-    let mut reader = BufReader::new(file);
-    let actual_read = reader.read(&mut buffer)?;
-    buffer.truncate(actual_read);
+    // `take` bounds the read, so an oversized `length` never allocates more
+    // than the file holds, and a short read from the OS cannot cut the dump.
+    let mut buffer = Vec::new();
+    BufReader::new(file)
+        .take(bytes_to_read)
+        .read_to_end(&mut buffer)?;
+    let actual_read = buffer.len();
 
     let mut lines = Vec::new();
     let mut current_offset = options.offset;
@@ -126,7 +132,8 @@ pub fn format_hex_dump_text(hex_dump: &HexDump) -> String {
         ));
     }
 
-    if hex_dump.lines.len() * hex_dump.bytes_per_line < hex_dump.total_bytes as usize {
+    // Truncated only when the dump stops before the end of the file.
+    if hex_dump.offset + (hex_dump.length as u64) < hex_dump.total_bytes {
         output.push_str("... (truncated)\n");
     }
 
@@ -478,5 +485,40 @@ mod tests {
         assert_eq!(hex_dump.offset, 9990);
         assert_eq!(hex_dump.length, 10); // Only 10 bytes left
         assert_eq!(hex_dump.lines.len(), 2); // 10 bytes / 5 per line
+    }
+
+    /// CB22: a dump that reaches the end of the file is not "truncated", wherever it starts.
+    #[test]
+    fn test_truncated_marker_follows_the_end_of_the_file() {
+        let content: Vec<u8> = (0..100u8).collect();
+        let (_temp_dir, file_path) = create_test_file(&content).unwrap();
+        let dump = |offset: u64, length: usize| {
+            let options = HexDumpOptions {
+                offset,
+                length: Some(length),
+                bytes_per_line: 16,
+                max_lines: None,
+            };
+            format_hex_dump_text(&generate_hex_dump(&file_path, options).unwrap())
+        };
+        assert!(!dump(68, 32).contains("truncated"), "ends at byte 100");
+        assert!(!dump(68, 500).contains("truncated"));
+        assert!(!dump(0, 100).contains("truncated"));
+        assert!(dump(0, 32).contains("truncated"));
+        assert!(dump(40, 32).contains("truncated"), "stops at 72 of 100");
+    }
+
+    /// LS19: a zero line width is an error, not a panic.
+    #[test]
+    fn test_zero_bytes_per_line_is_an_error() {
+        let (_temp_dir, file_path) = create_test_file(b"abc").unwrap();
+        let options = HexDumpOptions {
+            offset: 0,
+            length: Some(3),
+            bytes_per_line: 0,
+            max_lines: Some(1),
+        };
+        let error = generate_hex_dump(&file_path, options).unwrap_err();
+        assert!(error.to_string().contains("at least 1"), "{error}");
     }
 }

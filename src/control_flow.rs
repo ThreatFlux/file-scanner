@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use capstone::prelude::*;
+use capstone::{Arch, Mode};
 use goblin::Object;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -152,23 +153,104 @@ pub struct AnalysisStats {
     pub errors: Vec<String>,
 }
 
+/// Most functions one analysis builds graphs for.
+pub const MAX_CFG_FUNCTIONS: usize = 2_000;
+/// Most bytes of a single function that are decoded (longer functions are cut and noted).
+pub const MAX_FUNCTION_BYTES: usize = 64 * 1024;
+/// Most bytes decoded across all functions of one analysis.
+pub const MAX_CFG_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+/// Most instructions kept across all functions of one analysis (bounds memory
+/// for code made of one-byte instructions, where the byte budget alone allows
+/// millions of them).
+pub const MAX_CFG_TOTAL_INSTRUCTIONS: usize = 500_000;
+/// Most entries of the loop, exit-block and unreachable-block lists kept across
+/// all functions of one analysis (code made of one-byte `ret` or self-jumping
+/// blocks would otherwise list one entry per block). The counts stay true.
+pub const MAX_CFG_LISTED_ITEMS: usize = 20_000;
+/// Entries of each of those lists a function keeps even when the shared budget
+/// is used up, so every function with a loop, an exit or unreachable code still
+/// shows one (the number of functions is bounded by `MAX_CFG_FUNCTIONS`).
+pub const MIN_CFG_LISTED_ITEMS: usize = 16;
+
+/// True sizes of the lists `limit_lists` cut.
+#[derive(Default)]
+struct ListCuts {
+    loops: usize,
+    exits: usize,
+    unreachable: usize,
+    loops_kept: usize,
+    exits_kept: usize,
+    unreachable_kept: usize,
+}
+
+/// Cut the loop, exit-block and unreachable-block lists of `cfg` to what is left
+/// of `budget` (never below `MIN_CFG_LISTED_ITEMS` each), charge what is kept,
+/// and add the true sizes to `cuts`. `complexity.loop_count` keeps the true count.
+fn limit_lists(cfg: &mut ControlFlowGraph, budget: &mut usize, cuts: &mut ListCuts) {
+    fn cut<T>(list: &mut Vec<T>, budget: &mut usize, total: &mut usize, kept: &mut usize) {
+        *total += list.len();
+        let allowed = (*budget).max(MIN_CFG_LISTED_ITEMS);
+        list.truncate(allowed);
+        list.shrink_to_fit();
+        *budget = budget.saturating_sub(list.len());
+        *kept += list.len();
+    }
+    cfg.complexity.loop_count = cfg.complexity.loop_count.max(cfg.loops.len());
+    cut(
+        &mut cfg.loops,
+        budget,
+        &mut cuts.loops,
+        &mut cuts.loops_kept,
+    );
+    cut(
+        &mut cfg.exit_blocks,
+        budget,
+        &mut cuts.exits,
+        &mut cuts.exits_kept,
+    );
+    cut(
+        &mut cfg.complexity.unreachable_blocks,
+        budget,
+        &mut cuts.unreachable,
+        &mut cuts.unreachable_kept,
+    );
+}
+
 pub struct ControlFlowAnalyzer {
     pub capstone: Capstone,
 }
 
 impl ControlFlowAnalyzer {
     pub fn new_x86_64() -> Result<Self> {
-        let capstone = Capstone::new()
+        Self::new_x86(arch::x86::ArchMode::Mode64, "x86_64")
+    }
+
+    /// 32-bit x86 engine (i386 ELF, PE32, 32-bit Mach-O).
+    pub fn new_x86_32() -> Result<Self> {
+        Self::new_x86(arch::x86::ArchMode::Mode32, "x86")
+    }
+
+    fn new_x86(mode: arch::x86::ArchMode, label: &str) -> Result<Self> {
+        let mut capstone = Capstone::new()
             .x86()
-            .mode(arch::x86::ArchMode::Mode64)
+            .mode(mode)
             .syntax(arch::x86::ArchSyntax::Intel)
             .detail(true)
             .build()
-            .map_err(|e| anyhow!("Failed to build x86_64 capstone engine: {e:?}"))?;
+            .map_err(|e| anyhow!("Failed to build {label} capstone engine: {e:?}"))?;
+        // Bytes that do not decode (jump tables, padding) are skipped, not fatal.
+        capstone
+            .set_skipdata(true)
+            .map_err(|e| anyhow!("Failed to enable skip-data mode: {e:?}"))?;
 
         Ok(Self { capstone })
     }
 
+    /// Analyze the functions of `symbol_table` that start inside the code
+    /// section found at `text_section_offset` (file offset) / `text_section_addr`
+    /// (virtual address). Functions without a symbol size run to the next
+    /// function symbol. Fails when the symbol table names no function inside the
+    /// code (for example a stripped binary).
     pub fn analyze_functions(
         &self,
         binary_data: &[u8],
@@ -176,37 +258,102 @@ impl ControlFlowAnalyzer {
         text_section_offset: u64,
         text_section_addr: u64,
     ) -> Result<ControlFlowAnalysis> {
+        let code = usize::try_from(text_section_offset)
+            .ok()
+            .and_then(|off| binary_data.get(off..))
+            .ok_or_else(|| {
+                anyhow!(
+                    "Malformed binary: code section offset {text_section_offset} is past the end of the {}-byte file",
+                    binary_data.len()
+                )
+            })?;
+        let candidates = function_candidates(symbol_table, text_section_addr, code.len(), 0);
+        self.analyze_code(code, text_section_addr, candidates)
+    }
+
+    /// Analyze `candidates` (function starts inside `code`, which is loaded at
+    /// `code_addr`). Bounded: at most `MAX_CFG_FUNCTIONS` functions,
+    /// `MAX_FUNCTION_BYTES` per function and `MAX_CFG_TOTAL_BYTES` overall; every
+    /// limit that applied is listed in `analysis_stats.errors`.
+    pub fn analyze_code(
+        &self,
+        code: &[u8],
+        code_addr: u64,
+        mut candidates: Vec<FunctionInfo>,
+    ) -> Result<ControlFlowAnalysis> {
         let start_time = std::time::Instant::now();
         let mut cfgs = Vec::new();
         let mut errors = Vec::new();
         let mut total_instructions = 0;
+        let mut bytes_analyzed: u64 = 0;
+        let mut list_budget = MAX_CFG_LISTED_ITEMS;
+        let mut cuts = ListCuts::default();
 
-        // Only analyze exported functions with valid sizes
-        let functions_to_analyze: Vec<&FunctionInfo> = symbol_table
-            .functions
-            .iter()
-            .filter(|f| f.is_exported && f.size > 0 && f.address >= text_section_addr)
-            .collect();
+        candidates.sort_by_key(|f| (f.address, std::cmp::Reverse(f.size)));
+        candidates.dedup_by_key(|f| f.address);
 
-        for function in &functions_to_analyze {
-            // Calculate the offset within the binary file
-            let file_offset = (function.address - text_section_addr + text_section_offset) as usize;
+        if candidates.is_empty() {
+            return Err(anyhow!(
+                "No function boundaries were found: the binary has no function symbols inside its code section \
+                 (it is probably stripped), so no control-flow graphs can be built. \
+                 Use the `disassemble` tool to read the code instead."
+            ));
+        }
 
-            // Ensure we don't read beyond the file
-            if file_offset >= binary_data.len() {
+        let total_candidates = candidates.len();
+        let code_end = code_addr.saturating_add(code.len() as u64);
+        let mut capped_functions = 0usize;
+        let mut cut_functions = 0usize;
+        let mut budget_hit = false;
+        let mut instruction_budget_hit = false;
+
+        for (i, function) in candidates.iter().enumerate() {
+            if cfgs.len() + errors.len() >= MAX_CFG_FUNCTIONS {
+                capped_functions = total_candidates - i;
+                break;
+            }
+            // Size: declared, else up to the next function start, else to the end of code.
+            let next_start = candidates.get(i + 1).map_or(code_end, |f| f.address);
+            let wanted = if function.size > 0 {
+                function.size
+            } else {
+                next_start.saturating_sub(function.address)
+            };
+            let wanted = usize::try_from(wanted).unwrap_or(usize::MAX);
+            let offset = function
+                .address
+                .checked_sub(code_addr)
+                .and_then(|o| usize::try_from(o).ok())
+                .unwrap_or(usize::MAX);
+            let Some(available) = code.len().checked_sub(offset).filter(|n| *n > 0) else {
                 errors.push(format!(
-                    "Function {} offset {} beyond file size",
-                    function.name, file_offset
+                    "Function {} at 0x{:x} lies outside the code section",
+                    function.name, function.address
                 ));
                 continue;
+            };
+            let mut size = wanted.min(available);
+            if size > MAX_FUNCTION_BYTES {
+                size = MAX_FUNCTION_BYTES;
+                cut_functions += 1;
             }
-
-            let function_size =
-                std::cmp::min(function.size as usize, binary_data.len() - file_offset);
-            let function_bytes = &binary_data[file_offset..file_offset + function_size];
+            if total_instructions >= MAX_CFG_TOTAL_INSTRUCTIONS {
+                budget_hit = true;
+                instruction_budget_hit = true;
+                capped_functions = total_candidates - i;
+                break;
+            }
+            if bytes_analyzed.saturating_add(size as u64) > MAX_CFG_TOTAL_BYTES as u64 {
+                budget_hit = true;
+                capped_functions = total_candidates - i;
+                break;
+            }
+            let function_bytes = &code[offset..offset + size];
+            bytes_analyzed += size as u64;
 
             match self.analyze_function(function, function_bytes) {
-                Ok(cfg) => {
+                Ok(mut cfg) => {
+                    limit_lists(&mut cfg, &mut list_budget, &mut cuts);
                     total_instructions += cfg
                         .basic_blocks
                         .iter()
@@ -221,6 +368,41 @@ impl ControlFlowAnalyzer {
                     ));
                 }
             }
+        }
+
+        if capped_functions > 0 {
+            let why = if instruction_budget_hit {
+                format!("the {MAX_CFG_TOTAL_INSTRUCTIONS}-instruction analysis budget was used up")
+            } else if budget_hit {
+                format!("the {MAX_CFG_TOTAL_BYTES}-byte analysis budget was used up")
+            } else {
+                format!("the limit of {MAX_CFG_FUNCTIONS} functions was reached")
+            };
+            errors.push(format!(
+                "Limit: {capped_functions} of {total_candidates} functions (the highest addresses) were not analyzed because {why}"
+            ));
+        }
+        if cut_functions > 0 {
+            errors.push(format!(
+                "Limit: {cut_functions} functions longer than {MAX_FUNCTION_BYTES} bytes were analyzed only up to that size"
+            ));
+        }
+
+        if cuts.loops_kept < cuts.loops
+            || cuts.exits_kept < cuts.exits
+            || cuts.unreachable_kept < cuts.unreachable
+        {
+            errors.push(format!(
+                "Limit: the lists of loops, exit blocks and unreachable blocks are cut to {MAX_CFG_LISTED_ITEMS} entries across all functions \
+                 (at least {MIN_CFG_LISTED_ITEMS} per function): loops {} of {}, exit blocks {} of {}, unreachable blocks {} of {} are listed; \
+                 the per-function counts (loop_count, basic_block_count, edge_count) are complete",
+                cuts.loops_kept,
+                cuts.loops,
+                cuts.exits_kept,
+                cuts.exits,
+                cuts.unreachable_kept,
+                cuts.unreachable
+            ));
         }
 
         let duration = start_time.elapsed().as_millis() as u64;
@@ -251,7 +433,7 @@ impl ControlFlowAnalyzer {
         Ok(ControlFlowAnalysis {
             cfgs,
             overall_metrics: OverallMetrics {
-                total_functions: functions_to_analyze.len(),
+                total_functions: total_candidates,
                 analyzed_functions,
                 total_basic_blocks,
                 average_complexity,
@@ -260,7 +442,7 @@ impl ControlFlowAnalyzer {
             },
             analysis_stats: AnalysisStats {
                 analysis_duration: duration,
-                bytes_analyzed: binary_data.len() as u64,
+                bytes_analyzed,
                 instructions_analyzed: total_instructions,
                 errors,
             },
@@ -475,8 +657,9 @@ impl ControlFlowAnalyzer {
             // Start a new block if this address is a boundary
             if boundaries.contains(&instruction.address) && !current_block_instructions.is_empty() {
                 // Finish the current block
-                let end_addr = current_block_instructions.last().unwrap().address
-                    + current_block_instructions.last().unwrap().size as u64;
+                let end_addr = current_block_instructions
+                    .last()
+                    .map_or(0, |i| i.address.saturating_add(i.size as u64));
 
                 let block_type = self.determine_block_type(&current_block_instructions);
 
@@ -505,7 +688,7 @@ impl ControlFlowAnalyzer {
             // End block if this is a control flow instruction
             match instruction.flow_control {
                 FlowControl::Return | FlowControl::Jump(_) | FlowControl::Halt => {
-                    let end_addr = instruction.address + instruction.size as u64;
+                    let end_addr = instruction.address.saturating_add(instruction.size as u64);
                     let block_type = self.determine_block_type(&current_block_instructions);
 
                     basic_blocks.push(BasicBlock {
@@ -528,8 +711,9 @@ impl ControlFlowAnalyzer {
 
         // Handle any remaining instructions
         if !current_block_instructions.is_empty() {
-            let end_addr = current_block_instructions.last().unwrap().address
-                + current_block_instructions.last().unwrap().size as u64;
+            let end_addr = current_block_instructions
+                .last()
+                .map_or(0, |i| i.address.saturating_add(i.size as u64));
             let block_type = self.determine_block_type(&current_block_instructions);
 
             basic_blocks.push(BasicBlock {
@@ -673,7 +857,8 @@ impl ControlFlowAnalyzer {
         let cyclomatic_complexity = if basic_blocks.len() <= 1 {
             1
         } else {
-            (edges.len() as i32 - basic_blocks.len() as i32 + 2).max(1) as u32
+            u32::try_from((edges.len() as i64 - basic_blocks.len() as i64 + 2).max(1))
+                .unwrap_or(u32::MAX)
         };
 
         // Simple cognitive complexity based on control structures
@@ -718,11 +903,13 @@ impl ControlFlowAnalyzer {
         for block in basic_blocks {
             match block.block_type {
                 BlockType::Conditional => {
-                    current_depth += 1;
-                    max_depth = max_depth.max(current_depth as u32);
+                    current_depth = current_depth.saturating_add(1);
+                    max_depth = max_depth.max(u32::try_from(current_depth).unwrap_or(0));
                 }
                 BlockType::Return | BlockType::Exit => {
-                    current_depth = current_depth.saturating_sub(1);
+                    // Never below zero: several return blocks before the next
+                    // conditional used to wrap the cast to u32 (about 4.29 billion).
+                    current_depth = (current_depth - 1).max(0);
                 }
                 _ => {}
             }
@@ -745,12 +932,19 @@ impl ControlFlowAnalyzer {
             reachable.insert(0);
         }
 
+        let mut successors: HashMap<usize, Vec<usize>> = HashMap::new();
+        for edge in edges {
+            successors
+                .entry(edge.from_block)
+                .or_default()
+                .push(edge.to_block);
+        }
+
         // BFS to find all reachable blocks
         while let Some(block_id) = queue.pop_front() {
-            for edge in edges {
-                if edge.from_block == block_id && !reachable.contains(&edge.to_block) {
-                    reachable.insert(edge.to_block);
-                    queue.push_back(edge.to_block);
+            for &to in successors.get(&block_id).into_iter().flatten() {
+                if reachable.insert(to) {
+                    queue.push_back(to);
                 }
             }
         }
@@ -772,50 +966,723 @@ impl ControlFlowAnalyzer {
     }
 }
 
+/// Function starts of `symbol_table` that lie inside a code section of
+/// `code_len` bytes loaded at `code_addr`, as `FunctionInfo`s with
+/// virtual addresses. Imports are skipped (their addresses are import-table
+/// slots). `rva_base` is added to symbol addresses below it: PE symbol tables
+/// hold relative addresses, so the image base is passed for PE and 0 otherwise.
+fn function_candidates(
+    symbol_table: &SymbolTable,
+    code_addr: u64,
+    code_len: usize,
+    rva_base: u64,
+) -> Vec<FunctionInfo> {
+    let code_end = code_addr.saturating_add(code_len as u64);
+    symbol_table
+        .functions
+        .iter()
+        .filter(|f| !f.is_imported && f.address != 0)
+        .map(|f| {
+            let mut f = f.clone();
+            if rva_base != 0 && f.address < rva_base {
+                f.address = f.address.saturating_add(rva_base);
+            }
+            f
+        })
+        .filter(|f| f.address >= code_addr && f.address < code_end)
+        .collect()
+}
+
+fn object_format_name(obj: &Object) -> &'static str {
+    match obj {
+        Object::Elf(_) => "ELF",
+        Object::PE(_) => "PE",
+        Object::Mach(_) => "Mach-O",
+        Object::Archive(_) => "ar archive",
+        Object::COFF(_) => "COFF object",
+        _ => "unknown",
+    }
+}
+
+/// Control-flow analysis of an ELF, PE or Mach-O file.
+///
+/// The disassembler is chosen from the binary's real architecture: x86-64 and
+/// 32-bit x86 are supported. Any other architecture (ARM, ARM64, ...) or format
+/// returns an error that names it, rather than decoding the code with the wrong
+/// instruction set. A binary with no function symbols inside its code (stripped)
+/// also returns an error saying so.
 pub fn analyze_control_flow(
     path: &Path,
     symbol_table: &SymbolTable,
 ) -> Result<ControlFlowAnalysis> {
+    analyze_control_flow_with_arch(path, None, symbol_table)
+}
+
+/// Like [`analyze_control_flow`] for a universal (fat) Mach-O: the slice named
+/// by `arch` (for example `"x86_64"`) is analyzed; `None` picks the host
+/// architecture if present, else the first slice. `symbol_table` should come
+/// from `function_analysis::analyze_symbols_with_arch` with the same `arch`.
+/// For any other file `arch` is ignored.
+pub fn analyze_control_flow_with_arch(
+    path: &Path,
+    arch_choice: Option<&str>,
+    symbol_table: &SymbolTable,
+) -> Result<ControlFlowAnalysis> {
     // Read the binary file
     let mut file = File::open(path)?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
+    let mut whole = Vec::new();
+    file.read_to_end(&mut whole)?;
+    let buffer: &[u8] = match crate::binary_parser::select_fat_slice(&whole, arch_choice) {
+        Some(selection) => {
+            crate::disassembly::require_named_slice(&selection, arch_choice)?;
+            selection.data
+        }
+        None => &whole,
+    };
 
-    // Parse the binary to get the text section info
-    let obj = Object::parse(&buffer)?;
+    check_parse_preconditions(buffer)?;
+    let obj = Object::parse(buffer)?;
+    let format = object_format_name(&obj);
+    let rva_base = match &obj {
+        Object::PE(pe) => pe.image_base,
+        _ => 0,
+    };
+    if !matches!(obj, Object::Elf(_) | Object::PE(_) | Object::Mach(_)) {
+        return Err(anyhow!(
+            "Control-flow analysis supports ELF, PE and Mach-O executables; this file is a {format} file"
+        ));
+    }
 
-    match obj {
-        Object::Elf(elf) => {
-            // Find the .text section
-            for (i, section) in elf.section_headers.iter().enumerate() {
-                if let Some(name) = elf.shdr_strtab.get_at(section.sh_name) {
-                    if name == ".text" {
-                        let analyzer = ControlFlowAnalyzer::new_x86_64()?;
-                        return analyzer.analyze_functions(
-                            &buffer,
-                            symbol_table,
-                            section.sh_offset,
-                            section.sh_addr,
-                        );
-                    }
-                } else {
-                    // For debugging: check section 16 specifically (.text section from readelf)
-                    if i == 16 {
-                        let analyzer = ControlFlowAnalyzer::new_x86_64()?;
-                        return analyzer.analyze_functions(
-                            &buffer,
-                            symbol_table,
-                            section.sh_offset,
-                            section.sh_addr,
-                        );
+    let (arch, mode, code) = crate::disassembly::detect_architecture_and_code(buffer)
+        .map_err(|e| anyhow!("Control-flow analysis of this {format} file is not possible: {e}"))?;
+
+    let analyzer = match (arch, mode) {
+        (Arch::X86, Mode::Mode64) => ControlFlowAnalyzer::new_x86_64()?,
+        (Arch::X86, Mode::Mode32) => ControlFlowAnalyzer::new_x86_32()?,
+        (other, _) => {
+            return Err(anyhow!(
+                "Control-flow analysis supports x86 and x86-64 code only; this {format} file contains {other:?} code. \
+                 Use the `disassemble` tool for this architecture (for a universal Mach-O with an x86_64 slice, `arch: \"x86_64\"` selects it)."
+            ))
+        }
+    };
+
+    let candidates = function_candidates(symbol_table, code.address, code.data.len(), rva_base);
+    analyzer.analyze_code(&code.data, code.address, candidates)
+}
+
+/// Refuses PE and Mach-O files whose import or load-command tables would make
+/// goblin's parser spend unbounded time or memory.
+pub(crate) fn check_parse_preconditions(buffer: &[u8]) -> Result<()> {
+    crate::binary_parser::check_mach_load_commands(buffer)
+        .map_err(|why| anyhow!("The Mach-O file was not analyzed: {why}"))?;
+    crate::binary_parser::check_pe_imports(buffer)
+        .map_err(|why| anyhow!("The PE file was not analyzed: {why}"))?;
+    Ok(())
+}
+
+/// Most indirect-symbol entries read in total across all sections of one file.
+const MAX_INDIRECT_IMPORTS: usize = 200_000;
+/// Total bytes of symbol names the bind streams may refer to (counted per bind).
+const MAX_BIND_NAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Insert `name` under `key`, charging its length to `budget`. Returns false (and
+/// inserts nothing) once the budget cannot cover it, so a map built through this
+/// helper never holds more than the budget in name bytes, however often one long
+/// name is referred to.
+fn put_name(map: &mut HashMap<u64, String>, budget: &mut usize, key: u64, name: &str) -> bool {
+    if name.len() > *budget {
+        return false;
+    }
+    *budget -= name.len();
+    map.insert(key, name.to_string());
+    true
+}
+
+/// Imports of a Mach-O file read from LC_DYSYMTAB's indirect symbol table: the
+/// stubs (`__stubs`) and pointer sections (`__got`, `__la_symbol_ptr`,
+/// `__nl_symbol_ptr`) name their symbols through it. Used when the dyld bind
+/// information is absent (chained fixups). Empty when the table is unusable.
+fn macho_indirect_imports(
+    macho: &goblin::mach::MachO,
+    buffer: &[u8],
+    name_budget: &mut usize,
+    cut: &mut bool,
+) -> HashMap<u64, String> {
+    use goblin::mach::load_command::CommandVariant;
+    const SKIP: u32 = 0xC000_0000; // INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS
+    let mut map = HashMap::new();
+    let Some(symbols) = macho.symbols.as_ref() else {
+        return map;
+    };
+    let Some((table_off, table_len)) = macho.load_commands.iter().find_map(|lc| match lc.command {
+        CommandVariant::Dysymtab(d) => Some((d.indirectsymoff as usize, d.nindirectsyms as usize)),
+        _ => None,
+    }) else {
+        return map;
+    };
+    // The count comes from the file: no more entries than the bytes that exist.
+    let table_len = table_len.min(buffer.len().saturating_sub(table_off) / 4);
+    let mut budget = MAX_INDIRECT_IMPORTS;
+    let entry = |index: usize| -> Option<u32> {
+        if index >= table_len {
+            return None;
+        }
+        let at = table_off.checked_add(index.checked_mul(4)?)?;
+        let raw: [u8; 4] = buffer.get(at..at.checked_add(4)?)?.try_into().ok()?;
+        Some(if macho.little_endian {
+            u32::from_le_bytes(raw)
+        } else {
+            u32::from_be_bytes(raw)
+        })
+    };
+    // goblin does not expose a section's reserved fields: read 64-bit section
+    // headers (LC_SEGMENT_64, 72 bytes, then 80 bytes per section) directly.
+    if !macho.is_64 {
+        return map;
+    }
+    let word = |at: usize, len: usize| -> Option<&[u8]> { buffer.get(at..at.checked_add(len)?) };
+    let u32_at = |at: usize| -> Option<u32> {
+        let raw: [u8; 4] = word(at, 4)?.try_into().ok()?;
+        Some(if macho.little_endian {
+            u32::from_le_bytes(raw)
+        } else {
+            u32::from_be_bytes(raw)
+        })
+    };
+    let u64_at = |at: usize| -> Option<u64> {
+        let raw: [u8; 8] = word(at, 8)?.try_into().ok()?;
+        Some(if macho.little_endian {
+            u64::from_le_bytes(raw)
+        } else {
+            u64::from_be_bytes(raw)
+        })
+    };
+    for lc in &macho.load_commands {
+        let CommandVariant::Segment64(seg) = lc.command else {
+            continue;
+        };
+        for n in 0..seg.nsects as usize {
+            let Some(at) = n
+                .checked_mul(80)
+                .and_then(|o| o.checked_add(lc.offset.checked_add(72)?))
+            else {
+                break;
+            };
+            let (Some(name), Some(addr), Some(size), Some(reserved1), Some(reserved2)) = (
+                word(at, 16),
+                u64_at(at + 32),
+                u64_at(at + 40),
+                u32_at(at + 68),
+                u32_at(at + 72),
+            ) else {
+                break;
+            };
+            let name = name.split(|b| *b == 0).next().unwrap_or(&[]);
+            let item = match name {
+                b"__stubs" => u64::from(reserved2).max(1),
+                b"__got" | b"__la_symbol_ptr" | b"__nl_symbol_ptr" | b"__auth_got" => 8,
+                _ => continue,
+            };
+            let base = reserved1 as usize;
+            // Cap the walk: a header can claim an absurd section size. The
+            // walk ends at the first entry outside the table.
+            let count = (size / item).min(table_len.saturating_sub(base) as u64) as usize;
+            for k in 0..count {
+                if budget == 0 {
+                    *cut = true;
+                    return map;
+                }
+                budget -= 1;
+                let Some(raw) = entry(base.saturating_add(k)) else {
+                    break;
+                };
+                let Some(sym) = Some(raw).filter(|v| v & SKIP == 0) else {
+                    continue;
+                };
+                if let Ok((name, _)) = symbols.get(sym as usize) {
+                    if !name.is_empty()
+                        && !put_name(
+                            &mut map,
+                            name_budget,
+                            addr.saturating_add(k as u64 * item),
+                            name,
+                        )
+                    {
+                        *cut = true;
+                        return map;
                     }
                 }
             }
-            Err(anyhow!("No .text section found"))
         }
-        _ => Err(anyhow!(
-            "Only ELF binaries are currently supported for CFG analysis"
-        )),
+    }
+    map
+}
+
+/// Map of import addresses to imported function names, for resolving calls.
+///
+/// Keys are virtual addresses of either the stub a direct `call` targets (ELF
+/// `.plt`, `.plt.sec`, `.plt.got`; Mach-O `__stubs`) or the table slot
+/// an indirect `call [slot]` reads (ELF GOT, PE import address table, Mach-O
+/// lazy and non-lazy pointers). Names are as the binary spells them (Mach-O
+/// keeps its leading underscore; strip it when comparing). Returns an empty map
+/// for files that are not ELF, PE or Mach-O or that cannot be parsed. Never panics
+/// on malformed headers.
+pub fn resolve_import_targets(buffer: &[u8]) -> HashMap<u64, String> {
+    resolve_import_targets_with_arch(buffer, None)
+}
+
+/// Like [`resolve_import_targets`]; for a universal Mach-O the imports of the
+/// slice named by `arch` (default: host architecture, else the first) are
+/// resolved.
+pub fn resolve_import_targets_with_arch(
+    buffer: &[u8],
+    arch_choice: Option<&str>,
+) -> HashMap<u64, String> {
+    resolve_import_targets_noted(buffer, arch_choice).0
+}
+
+/// Note for a result whose import map was cut by the name budget.
+pub const IMPORT_NAMES_CUT_NOTE: &str = "Imports were left unnamed: the import tables hold more name bytes than the 16 MiB analysis budget (or more entries than the entry cap), so some calls to imported functions may not be matched by name and findings that depend on them can be missing";
+
+/// Like [`resolve_import_targets_with_arch`], and also says whether the map was
+/// cut by a name or entry budget: the second value is then
+/// [`IMPORT_NAMES_CUT_NOTE`], for the partial-scan notes of the caller.
+pub fn resolve_import_targets_noted(
+    buffer: &[u8],
+    arch_choice: Option<&str>,
+) -> (HashMap<u64, String>, Option<String>) {
+    let mut cut = false;
+    let map = resolve_import_targets_inner(buffer, arch_choice, &mut cut);
+    (map, cut.then(|| IMPORT_NAMES_CUT_NOTE.to_string()))
+}
+
+fn resolve_import_targets_inner(
+    buffer: &[u8],
+    arch_choice: Option<&str>,
+    cut: &mut bool,
+) -> HashMap<u64, String> {
+    let buffer = crate::binary_parser::select_fat_slice(buffer, arch_choice)
+        .map_or(buffer, |selection| selection.data);
+    let mut map = HashMap::new();
+    // One budget of name bytes for everything put into the returned map; a second
+    // one for the intermediate slot table (a long name referred to by many slots
+    // or stubs is copied per reference otherwise).
+    let mut map_budget = MAX_BIND_NAME_BYTES;
+    let mut slot_budget = MAX_BIND_NAME_BYTES;
+    if check_parse_preconditions(buffer).is_err() {
+        // Imports could not be named safely; the note about unnamed imports applies.
+        *cut = true;
+        return map;
+    }
+    let Ok(obj) = Object::parse(buffer) else {
+        return map;
+    };
+    match obj {
+        Object::Elf(elf) => {
+            let mut got: HashMap<u64, String> = HashMap::new();
+            for reloc in elf.pltrelocs.iter().chain(elf.dynrelas.iter()) {
+                if reloc.r_sym == 0 {
+                    continue;
+                }
+                // JUMP_SLOT and GLOB_DAT have the same numbers on x86 and x86-64.
+                if !matches!(reloc.r_type, 6 | 7) {
+                    continue;
+                }
+                if let Some(name) = elf
+                    .dynsyms
+                    .get(reloc.r_sym)
+                    .and_then(|sym| elf.dynstrtab.get_at(sym.st_name))
+                {
+                    if !name.is_empty()
+                        && !put_name(&mut got, &mut slot_budget, reloc.r_offset, name)
+                    {
+                        *cut = true;
+                        break;
+                    }
+                }
+            }
+            // The table slots themselves first, then the stubs that read them, so a
+            // long name that exhausts the budget never crowds out its own slot.
+            for (key, name) in &got {
+                if !put_name(&mut map, &mut map_budget, *key, name) {
+                    *cut = true;
+                    break;
+                }
+            }
+            let x86 = matches!(
+                elf.header.e_machine,
+                goblin::elf::header::EM_X86_64 | goblin::elf::header::EM_386
+            );
+            let is_64 = elf.is_64;
+            if x86 {
+                for section in &elf.section_headers {
+                    let Some(name) = elf.shdr_strtab.get_at(section.sh_name) else {
+                        continue;
+                    };
+                    if !matches!(name, ".plt" | ".plt.sec" | ".plt.got") {
+                        continue;
+                    }
+                    let Some(bytes) = usize::try_from(section.sh_offset)
+                        .ok()
+                        .zip(usize::try_from(section.sh_size).ok())
+                        .and_then(|(o, n)| o.checked_add(n).and_then(|e| buffer.get(o..e)))
+                    else {
+                        continue;
+                    };
+                    // IBT stubs start with endbr and are 16 bytes; plain .plt.got stubs are 8.
+                    let entry = if name == ".plt.got" && !bytes.starts_with(&[0xf3, 0x0f, 0x1e]) {
+                        8
+                    } else {
+                        16
+                    };
+                    scan_jmp_stubs(
+                        bytes,
+                        section.sh_addr,
+                        entry,
+                        is_64,
+                        &got,
+                        &mut map,
+                        &mut map_budget,
+                        cut,
+                    );
+                }
+            }
+        }
+        Object::PE(pe) => {
+            for import in &pe.imports {
+                // `offset` is the RVA of this import's slot in the address table.
+                let slot = pe.image_base.saturating_add(import.offset as u64);
+                if !put_name(&mut map, &mut map_budget, slot, &import.name) {
+                    *cut = true;
+                    break;
+                }
+            }
+        }
+        Object::Mach(goblin::mach::Mach::Binary(macho)) => {
+            // Bounded own interpreter: goblin's imports() allocates one entry per
+            // bind (repeat counts come from the file) and can panic.
+            let bound = macho_bind_imports(&macho, buffer);
+            if bound.is_none() {
+                *cut = true;
+            }
+            let (names, imports) = bound.unwrap_or_default();
+            if imports.is_empty() {
+                // Chained fixups carry no bind opcodes: use the indirect symbol table.
+                return macho_indirect_imports(&macho, buffer, &mut map_budget, cut);
+            }
+            let mut slots: HashMap<u64, String> = HashMap::new();
+            for (address, name) in imports.iter().filter(|(address, _)| *address != 0) {
+                if !put_name(&mut slots, &mut slot_budget, *address, &names[*name]) {
+                    *cut = true;
+                    break;
+                }
+            }
+            for (key, name) in &slots {
+                if !put_name(&mut map, &mut map_budget, *key, name) {
+                    *cut = true;
+                    break;
+                }
+            }
+            if macho.header.cputype == goblin::mach::cputype::CPU_TYPE_X86_64 {
+                for segment in &macho.segments {
+                    let Ok(sections) = segment.sections() else {
+                        continue;
+                    };
+                    for (section, data) in sections {
+                        if section.name().ok() == Some("__stubs") {
+                            scan_jmp_stubs(
+                                data,
+                                section.addr,
+                                6,
+                                true,
+                                &slots,
+                                &mut map,
+                                &mut map_budget,
+                                cut,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    map
+}
+
+/// Imports named by the dyld bind and lazy-bind opcode streams of a Mach-O,
+/// as `(slot address, symbol name)`. This is its own bounded interpreter
+/// (instead of goblin's `imports()`, which expands repeat counts into memory and
+/// panics on a bad segment index): every number is read from the stream only,
+/// work is at most one step per stream byte, and at most `MAX_INDIRECT_IMPORTS`
+/// binds are attempted (stored or not), and the bytes of the names the binds
+/// refer to are charged to `MAX_BIND_NAME_BYTES`. Each distinct name is kept once:
+/// the result is the name table and `(slot address, index into the table)` pairs.
+/// Only the last `LC_DYLD_INFO(_ONLY)` command is read, as the loader does.
+/// Returns `None` when a cap is exceeded.
+#[allow(clippy::type_complexity)]
+fn macho_bind_imports(
+    macho: &goblin::mach::MachO,
+    buffer: &[u8],
+) -> Option<(Vec<String>, Vec<(u64, usize)>)> {
+    use goblin::mach::load_command::CommandVariant;
+    fn uleb(bytes: &[u8], pos: &mut usize) -> u64 {
+        let mut value = 0u64;
+        let mut shift = 0u32;
+        while let Some(&b) = bytes.get(*pos) {
+            *pos += 1;
+            if shift < 64 {
+                value |= u64::from(b & 0x7f) << shift;
+            }
+            shift = shift.saturating_add(7);
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        value
+    }
+    let mut names: Vec<String> = Vec::new();
+    let mut out: Vec<(u64, usize)> = Vec::new();
+    let mut attempts: usize = 0;
+    let mut name_bytes: usize = 0;
+    let Some(info) = macho
+        .load_commands
+        .iter()
+        .rev()
+        .find_map(|lc| match &lc.command {
+            CommandVariant::DyldInfo(c) | CommandVariant::DyldInfoOnly(c) => Some(*c),
+            _ => None,
+        })
+    else {
+        return Some((names, out));
+    };
+    let ptr: u64 = if macho.is_64 { 8 } else { 4 };
+    for (off, size) in [
+        (info.bind_off, info.bind_size),
+        (info.lazy_bind_off, info.lazy_bind_size),
+    ] {
+        if size == 0 {
+            continue;
+        }
+        let start = off as usize;
+        let end = start.saturating_add(size as usize).min(buffer.len());
+        let Some(stream) = buffer.get(start..end) else {
+            continue;
+        };
+        let (mut segment, mut offset, mut name) = (0usize, 0u64, usize::MAX);
+        // Whether the current SET_SYMBOL name was bound at least once: a name
+        // never bound is dropped when the next one arrives, so a stream of
+        // SET_SYMBOL opcodes alone cannot make the table grow.
+        let mut name_bound = true;
+        let mut pos = 0usize;
+        let push = |segment: usize,
+                    offset: u64,
+                    name: usize,
+                    names: &[String],
+                    out: &mut Vec<(u64, usize)>,
+                    attempts: &mut usize,
+                    name_bytes: &mut usize| {
+            if *attempts >= MAX_INDIRECT_IMPORTS {
+                return false;
+            }
+            *attempts += 1;
+            let Some(text) = names.get(name) else {
+                return true;
+            };
+            *name_bytes = name_bytes.saturating_add(text.len());
+            if *name_bytes > MAX_BIND_NAME_BYTES {
+                return false;
+            }
+            if let Some(seg) = macho.segments.get(segment) {
+                out.push((seg.vmaddr.wrapping_add(offset), name));
+            }
+            true
+        };
+        while pos < stream.len() {
+            let byte = stream[pos];
+            pos += 1;
+            let imm = u64::from(byte & 0x0f);
+            match byte & 0xf0 {
+                0x20 | 0x60 => {
+                    uleb(stream, &mut pos);
+                }
+                0x40 => {
+                    let begin = pos;
+                    while pos < stream.len() && stream[pos] != 0 {
+                        pos += 1;
+                    }
+                    if !name_bound && name != usize::MAX && name + 1 == names.len() {
+                        names.pop();
+                    }
+                    name_bound = false;
+                    names.push(String::from_utf8_lossy(&stream[begin..pos]).into_owned());
+                    name = names.len() - 1;
+                    pos = (pos + 1).min(stream.len());
+                }
+                0x70 => {
+                    segment = imm as usize;
+                    offset = uleb(stream, &mut pos);
+                }
+                0x80 => offset = offset.wrapping_add(uleb(stream, &mut pos)),
+                0x90 => {
+                    name_bound = true;
+                    if !push(
+                        segment,
+                        offset,
+                        name,
+                        &names,
+                        &mut out,
+                        &mut attempts,
+                        &mut name_bytes,
+                    ) {
+                        return None;
+                    }
+                    offset = offset.wrapping_add(ptr);
+                }
+                0xa0 => {
+                    name_bound = true;
+                    if !push(
+                        segment,
+                        offset,
+                        name,
+                        &names,
+                        &mut out,
+                        &mut attempts,
+                        &mut name_bytes,
+                    ) {
+                        return None;
+                    }
+                    offset = offset
+                        .wrapping_add(ptr)
+                        .wrapping_add(uleb(stream, &mut pos));
+                }
+                0xb0 => {
+                    name_bound = true;
+                    if !push(
+                        segment,
+                        offset,
+                        name,
+                        &names,
+                        &mut out,
+                        &mut attempts,
+                        &mut name_bytes,
+                    ) {
+                        return None;
+                    }
+                    offset = offset.wrapping_add((imm + 1).wrapping_mul(ptr));
+                }
+                0xc0 => {
+                    let count = uleb(stream, &mut pos);
+                    let skip = uleb(stream, &mut pos);
+                    if count > (MAX_INDIRECT_IMPORTS - attempts) as u64 {
+                        return None;
+                    }
+                    for _ in 0..count {
+                        name_bound = true;
+                        if !push(
+                            segment,
+                            offset,
+                            name,
+                            &names,
+                            &mut out,
+                            &mut attempts,
+                            &mut name_bytes,
+                        ) {
+                            return None;
+                        }
+                        offset = offset.wrapping_add(ptr).wrapping_add(skip);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Some((names, out))
+}
+
+/// True when the dyld bind streams of a Mach-O can be expanded within
+/// `MAX_INDIRECT_IMPORTS` entries. Callers that run goblin's `imports()`
+/// themselves should not: use the bounded interpreter's result instead.
+pub fn macho_bind_count_within_cap(macho: &goblin::mach::MachO, buffer: &[u8]) -> bool {
+    macho_bind_imports(macho, buffer).is_some()
+}
+
+/// Number of symbol names the bind interpreter keeps for this file. Names that
+/// no bind ever used are dropped, so this is at most the number of names bound
+/// (plus one). For tests.
+#[doc(hidden)]
+pub fn macho_bind_name_table_len(macho: &goblin::mach::MachO, buffer: &[u8]) -> Option<usize> {
+    macho_bind_imports(macho, buffer).map(|(names, _)| names.len())
+}
+
+/// Walk `entry`-sized stubs of a stub section; a stub that holds `jmp [slot]`
+/// (`ff 25`) and whose slot is in `slots` is recorded under the stub's address.
+fn scan_jmp_stubs(
+    bytes: &[u8],
+    base: u64,
+    entry: usize,
+    is_64: bool,
+    slots: &HashMap<u64, String>,
+    out: &mut HashMap<u64, String>,
+    name_budget: &mut usize,
+    cut: &mut bool,
+) {
+    for (index, stub) in bytes.chunks(entry).enumerate() {
+        let Some(pos) = stub.windows(2).position(|w| w == [0xff, 0x25]) else {
+            continue;
+        };
+        let Some(operand) = stub.get(pos + 2..pos + 6) else {
+            continue;
+        };
+        let raw = i32::from_le_bytes([operand[0], operand[1], operand[2], operand[3]]);
+        let stub_addr = base.wrapping_add((index * entry) as u64);
+        let slot = if is_64 {
+            // rip-relative: relative to the end of the 6-byte jmp.
+            stub_addr
+                .wrapping_add(pos as u64)
+                .wrapping_add(6)
+                .wrapping_add(raw as i64 as u64)
+        } else {
+            u64::from(raw as u32)
+        };
+        if let Some(name) = slots.get(&slot) {
+            if !put_name(out, name_budget, stub_addr, name) {
+                *cut = true;
+                return;
+            }
+        }
+    }
+}
+
+/// Address of the table slot an indirect `call`/`jmp` operand reads, for
+/// operands such as `qword ptr [rip + 0x2fe2]` or `dword ptr [0x403000]`.
+///
+/// `operands` is the operand text, `address` and `size` those of the instruction.
+pub fn indirect_slot_address(operands: &str, address: u64, size: usize) -> Option<u64> {
+    let inner = operands.split('[').nth(1)?.split(']').next()?.trim();
+    let end = address.wrapping_add(size as u64);
+    if let Some(rest) = inner.strip_prefix("rip") {
+        let rest = rest.trim();
+        let (negative, digits) = match rest.strip_prefix('-') {
+            Some(d) => (true, d),
+            None => (false, rest.strip_prefix('+').unwrap_or(rest)),
+        };
+        let disp = parse_number(digits.trim())?;
+        return Some(if negative {
+            end.wrapping_sub(disp)
+        } else {
+            end.wrapping_add(disp)
+        });
+    }
+    // Absolute address (32-bit code): the whole bracket is one number.
+    parse_number(inner)
+}
+
+fn parse_number(text: &str) -> Option<u64> {
+    match text.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
     }
 }
 

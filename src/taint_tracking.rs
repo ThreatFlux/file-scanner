@@ -1,8 +1,14 @@
-use anyhow::Result;
+//! Taint tracking over source and script text.
+//!
+//! Entry point for callers: [`taint_report_for_path`] (path in, bounded
+//! [`TaintReport`] out). The analysis is a line-pattern heuristic over text; it
+//! does not apply to compiled binaries.
+use anyhow::{anyhow, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TaintAnalysis {
@@ -231,6 +237,45 @@ pub enum Exploitability {
     Theoretical,  // Difficult to exploit in practice
 }
 
+/// Most source/sink pairings kept while analyzing (bounds time and memory).
+const MAX_FLOWS: usize = 10_000;
+/// Longest code snippet kept in a location, in characters.
+const MAX_SNIPPET_CHARS: usize = 200;
+/// Appended to a snippet that was cut.
+const SNIPPET_CUT_MARK: char = '\u{2026}';
+/// Two lines count as connected when they are fewer than this many lines apart.
+const CONNECT_DISTANCE: u32 = 50;
+
+static FUNCTION_DECL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?:function|def|fn)\s+(\w+)").expect("valid regex"));
+
+/// `line` cut to `MAX_SNIPPET_CHARS` characters (marked with an ellipsis).
+fn cut_snippet(line: &str) -> String {
+    match line.char_indices().nth(MAX_SNIPPET_CHARS) {
+        Some((end, _)) => {
+            let mut s = line[..end].to_string();
+            s.push(SNIPPET_CUT_MARK);
+            s
+        }
+        None => line.to_string(),
+    }
+}
+
+/// For each line, the name of the last function declared on an earlier line.
+fn enclosing_functions(lines: &[&str]) -> Vec<Option<String>> {
+    let mut current: Option<String> = None;
+    lines
+        .iter()
+        .map(|line| {
+            let here = current.clone();
+            if let Some(c) = FUNCTION_DECL.captures(line) {
+                current = c.get(1).map(|m| m.as_str().to_string());
+            }
+            here
+        })
+        .collect()
+}
+
 pub struct TaintTracker {
     sources_patterns: Vec<SourcePattern>,
     sinks_patterns: Vec<SinkPattern>,
@@ -287,18 +332,35 @@ impl TaintTracker {
     /// Analyze a file for taint flows
     pub fn analyze_file(&self, file_path: &Path) -> Result<TaintAnalysis> {
         let content = std::fs::read_to_string(file_path)?;
+        self.analyze_text(&content, file_path)
+    }
+
+    /// Analyze `content`; `file_path` only labels the locations in the result.
+    pub fn analyze_text(&self, content: &str, file_path: &Path) -> Result<TaintAnalysis> {
+        self.analyze_text_capped(content, file_path)
+            .map(|(analysis, _)| analysis)
+    }
+
+    /// Like `analyze_text`; the flag says the flow pairing stopped at `MAX_FLOWS`.
+    fn analyze_text_capped(
+        &self,
+        content: &str,
+        file_path: &Path,
+    ) -> Result<(TaintAnalysis, bool)> {
         let lines: Vec<&str> = content.lines().collect();
 
         // Step 1: Identify sources, sinks, and sanitizers
-        let sources = self.find_sources(&lines, file_path)?;
-        let sinks = self.find_sinks(&lines, file_path)?;
-        let sanitizers = self.find_sanitizers(&lines, file_path)?;
+        let functions = enclosing_functions(&lines);
+        let sources = self.find_sources(&lines, &functions, file_path)?;
+        let sinks = self.find_sinks(&lines, &functions, file_path)?;
+        let sanitizers = self.find_sanitizers(&lines, &functions, file_path)?;
 
         // Step 2: Build control flow graph (simplified)
         let cfg = self.build_control_flow_graph(&lines)?;
 
         // Step 3: Perform taint propagation analysis
-        let taint_flows = self.propagate_taint(&sources, &sinks, &sanitizers, &cfg)?;
+        let (taint_flows, flows_capped) =
+            self.propagate_taint(&sources, &sinks, &sanitizers, &cfg)?;
 
         // Step 4: Identify vulnerabilities
         let vulnerabilities = self.identify_vulnerabilities(&taint_flows)?;
@@ -306,17 +368,25 @@ impl TaintTracker {
         // Step 5: Generate summary
         let flow_summary = self.generate_flow_summary(&taint_flows, &vulnerabilities);
 
-        Ok(TaintAnalysis {
-            taint_flows,
-            sources,
-            sinks,
-            sanitizers,
-            vulnerabilities,
-            flow_summary,
-        })
+        Ok((
+            TaintAnalysis {
+                taint_flows,
+                sources,
+                sinks,
+                sanitizers,
+                vulnerabilities,
+                flow_summary,
+            },
+            flows_capped,
+        ))
     }
 
-    fn find_sources(&self, lines: &[&str], file_path: &Path) -> Result<Vec<TaintSource>> {
+    fn find_sources(
+        &self,
+        lines: &[&str],
+        functions: &[Option<String>],
+        file_path: &Path,
+    ) -> Result<Vec<TaintSource>> {
         let mut sources = Vec::new();
         let file_path_str = file_path.to_string_lossy().to_string();
 
@@ -329,8 +399,8 @@ impl TaintTracker {
                             file_path: file_path_str.clone(),
                             line_number: line_num as u32 + 1,
                             column: captures.get(0).map_or(0, |m| m.start() as u32),
-                            function_name: self.extract_function_name(lines, line_num),
-                            code_snippet: line.to_string(),
+                            function_name: functions[line_num].clone(),
+                            code_snippet: cut_snippet(line),
                         },
                         source_type: pattern.source_type.clone(),
                         description: pattern.description.clone(),
@@ -351,7 +421,12 @@ impl TaintTracker {
         Ok(sources)
     }
 
-    fn find_sinks(&self, lines: &[&str], file_path: &Path) -> Result<Vec<TaintSink>> {
+    fn find_sinks(
+        &self,
+        lines: &[&str],
+        functions: &[Option<String>],
+        file_path: &Path,
+    ) -> Result<Vec<TaintSink>> {
         let mut sinks = Vec::new();
         let file_path_str = file_path.to_string_lossy().to_string();
 
@@ -364,14 +439,14 @@ impl TaintTracker {
                             file_path: file_path_str.clone(),
                             line_number: line_num as u32 + 1,
                             column: captures.get(0).map_or(0, |m| m.start() as u32),
-                            function_name: self.extract_function_name(lines, line_num),
-                            code_snippet: line.to_string(),
+                            function_name: functions[line_num].clone(),
+                            code_snippet: cut_snippet(line),
                         },
                         sink_type: pattern.sink_type.clone(),
                         description: pattern.description.clone(),
                         dangerous_function: captures
                             .get(1)
-                            .map_or_else(|| "unknown".to_string(), |m| m.as_str().to_string()),
+                            .map_or_else(|| "unknown".to_string(), |m| cut_snippet(m.as_str())),
                         impact: pattern.impact.clone(),
                     };
                     sinks.push(sink);
@@ -382,7 +457,12 @@ impl TaintTracker {
         Ok(sinks)
     }
 
-    fn find_sanitizers(&self, lines: &[&str], file_path: &Path) -> Result<Vec<Sanitizer>> {
+    fn find_sanitizers(
+        &self,
+        lines: &[&str],
+        functions: &[Option<String>],
+        file_path: &Path,
+    ) -> Result<Vec<Sanitizer>> {
         let mut sanitizers = Vec::new();
         let file_path_str = file_path.to_string_lossy().to_string();
 
@@ -395,8 +475,8 @@ impl TaintTracker {
                             file_path: file_path_str.clone(),
                             line_number: line_num as u32 + 1,
                             column: 0,
-                            function_name: self.extract_function_name(lines, line_num),
-                            code_snippet: line.to_string(),
+                            function_name: functions[line_num].clone(),
+                            code_snippet: cut_snippet(line),
                         },
                         sanitizer_type: pattern.sanitizer_type.clone(),
                         effectiveness: pattern.effectiveness.clone(),
@@ -421,14 +501,24 @@ impl TaintTracker {
         sinks: &[TaintSink],
         sanitizers: &[Sanitizer],
         _cfg: &ControlFlowGraph,
-    ) -> Result<Vec<TaintFlow>> {
+    ) -> Result<(Vec<TaintFlow>, bool)> {
         let mut flows = Vec::new();
 
-        // Simplified taint propagation - match sources to sinks on same line or nearby
+        // Simplified taint propagation - match sources to sinks on nearby lines.
+        // Sinks are in line order, so only the window around each source is visited.
         for source in sources {
-            for sink in sinks {
+            let first = sinks.partition_point(|k| {
+                k.location.line_number + CONNECT_DISTANCE <= source.location.line_number
+            });
+            for sink in &sinks[first..] {
+                if sink.location.line_number >= source.location.line_number + CONNECT_DISTANCE {
+                    break;
+                }
                 // Simple heuristic: if source and sink are in same function or close lines
                 if self.are_potentially_connected(source, sink) {
+                    if flows.len() >= MAX_FLOWS {
+                        return Ok((flows, true));
+                    }
                     let is_sanitized = self.is_flow_sanitized(source, sink, sanitizers);
                     let vulnerability_type = self.determine_vulnerability_type(&sink.sink_type);
                     let risk_score = self.calculate_risk_score(source, sink, is_sanitized);
@@ -449,7 +539,7 @@ impl TaintTracker {
             }
         }
 
-        Ok(flows)
+        Ok((flows, false))
     }
 
     fn identify_vulnerabilities(&self, flows: &[TaintFlow]) -> Result<Vec<TaintVulnerability>> {
@@ -655,25 +745,14 @@ impl TaintTracker {
     }
 
     // Helper methods
-    fn extract_function_name(&self, lines: &[&str], line_num: usize) -> Option<String> {
-        // Create regex once outside the loop
-        let re = Regex::new(r"(?:function|def|fn)\s+(\w+)").ok()?;
-
-        // Look backwards for function declaration
-        for i in (0..line_num).rev() {
-            if let Some(line) = lines.get(i) {
-                if let Some(captures) = re.captures(line) {
-                    return captures.get(1).map(|m| m.as_str().to_string());
-                }
-            }
-        }
-        None
-    }
-
     fn are_potentially_connected(&self, source: &TaintSource, sink: &TaintSink) -> bool {
         // Simplified: same file and within reasonable distance
         source.location.file_path == sink.location.file_path
-            && (sink.location.line_number as i32 - source.location.line_number as i32).abs() < 50
+            && sink
+                .location
+                .line_number
+                .abs_diff(source.location.line_number)
+                < CONNECT_DISTANCE
     }
 
     fn is_flow_sanitized(
@@ -682,16 +761,15 @@ impl TaintTracker {
         sink: &TaintSink,
         sanitizers: &[Sanitizer],
     ) -> bool {
-        // Check if there's a sanitizer between source and sink
-        for sanitizer in sanitizers {
-            if sanitizer.location.file_path == source.location.file_path
-                && sanitizer.location.line_number > source.location.line_number
-                && sanitizer.location.line_number < sink.location.line_number
-            {
-                return matches!(sanitizer.effectiveness, SanitizerEffectiveness::Complete);
-            }
-        }
-        false
+        // Sanitizers are in line order: the first one after the source is the
+        // only candidate for "between source and sink".
+        let first =
+            sanitizers.partition_point(|z| z.location.line_number <= source.location.line_number);
+        sanitizers.get(first).is_some_and(|z| {
+            z.location.file_path == source.location.file_path
+                && z.location.line_number < sink.location.line_number
+                && matches!(z.effectiveness, SanitizerEffectiveness::Complete)
+        })
     }
 
     const fn determine_vulnerability_type(&self, sink_type: &SinkType) -> VulnerabilityType {
@@ -866,4 +944,134 @@ pub fn analyze_taint_flows(file_path: &Path) -> Result<TaintAnalysis> {
 /// Quick check for potential taint vulnerabilities
 pub fn has_taint_vulnerabilities(file_path: &Path) -> bool {
     analyze_taint_flows(file_path).is_ok_and(|analysis| !analysis.vulnerabilities.is_empty())
+}
+
+/// Most bytes of text read by [`taint_report_for_path`].
+pub const MAX_TAINT_INPUT_BYTES: usize = 2 * 1024 * 1024;
+/// Most entries kept in each list of a [`TaintReport`].
+pub const MAX_TAINT_ITEMS: usize = 200;
+
+/// Counts before any list was cut (flows: at most the pairing cap).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TaintTotals {
+    pub flows: usize,
+    pub sources: usize,
+    pub sinks: usize,
+    pub sanitizers: usize,
+    pub vulnerabilities: usize,
+}
+
+/// Taint analysis with every list cut to `MAX_TAINT_ITEMS`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TaintReport {
+    /// Lists are the first `MAX_TAINT_ITEMS` entries (unsanitized flows first);
+    /// `flow_summary` describes all flows found.
+    pub analysis: TaintAnalysis,
+    pub totals: TaintTotals,
+    pub truncated: bool,
+    pub notes: Vec<String>,
+}
+
+/// Run taint analysis on the source or script file at `path` and bound the result.
+///
+/// Fails with an explanatory error when the file is not UTF-8 text (taint
+/// analysis reads source code, not compiled binaries). Reads at most
+/// `MAX_TAINT_INPUT_BYTES`; longer files are cut and `notes` says so. The result
+/// is heuristic: line patterns, no real data-flow.
+pub fn taint_report_for_path(path: &Path) -> Result<TaintReport> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_TAINT_INPUT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    let mut notes = Vec::new();
+    let input_cut = bytes.len() > MAX_TAINT_INPUT_BYTES;
+    if input_cut {
+        bytes.truncate(MAX_TAINT_INPUT_BYTES);
+        notes.push(format!(
+            "only the first {MAX_TAINT_INPUT_BYTES} bytes of the file were analyzed"
+        ));
+    }
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => text,
+        // A cut in the middle of a character is fine; anything else is not text.
+        Err(e) if e.error_len().is_none() => std::str::from_utf8(&bytes[..e.valid_up_to()])
+            .map_err(|e| anyhow!("{e}"))?,
+        Err(_) => {
+            return Err(anyhow!(
+                "{} is not UTF-8 text. Taint analysis applies to source code and scripts, not to compiled binaries.",
+                path.display()
+            ))
+        }
+    };
+
+    let (mut analysis, flows_capped) = TaintTracker::new().analyze_text_capped(text, path)?;
+    let totals = TaintTotals {
+        flows: analysis.taint_flows.len(),
+        sources: analysis.sources.len(),
+        sinks: analysis.sinks.len(),
+        sanitizers: analysis.sanitizers.len(),
+        vulnerabilities: analysis.vulnerabilities.len(),
+    };
+    let snippet_cut = analysis
+        .sources
+        .iter()
+        .map(|x| &x.location)
+        .chain(analysis.sinks.iter().map(|x| &x.location))
+        .chain(analysis.sanitizers.iter().map(|x| &x.location))
+        .any(|l| l.code_snippet.ends_with(SNIPPET_CUT_MARK));
+    // Unsanitized flows are the ones worth reading first.
+    analysis.taint_flows.sort_by_key(|f| f.is_sanitized);
+    let mut cut = false;
+    macro_rules! cap {
+        ($list:expr) => {
+            if $list.len() > MAX_TAINT_ITEMS {
+                $list.truncate(MAX_TAINT_ITEMS);
+                cut = true;
+            }
+        };
+    }
+    cap!(analysis.taint_flows);
+    cap!(analysis.sources);
+    cap!(analysis.sinks);
+    cap!(analysis.sanitizers);
+    cap!(analysis.vulnerabilities);
+    // Each vulnerability lists the flows it covers: cut those lists too, and
+    // say how many ids were dropped.
+    let mut flow_ids_dropped = 0usize;
+    for v in &mut analysis.vulnerabilities {
+        if v.affected_flows.len() > MAX_TAINT_ITEMS {
+            flow_ids_dropped += v.affected_flows.len() - MAX_TAINT_ITEMS;
+            v.affected_flows.truncate(MAX_TAINT_ITEMS);
+            cut = true;
+        }
+    }
+    if flow_ids_dropped > 0 {
+        notes.push(format!(
+            "each vulnerability lists at most {MAX_TAINT_ITEMS} affected flow ids ({flow_ids_dropped} ids omitted)"
+        ));
+    }
+    if cut {
+        notes.push(format!(
+            "lists are cut to {MAX_TAINT_ITEMS} entries each; see totals for the real counts"
+        ));
+    }
+    if flows_capped {
+        notes.push(format!(
+            "flow pairing stopped at {MAX_FLOWS} flows; totals.flows and flow_summary count only those"
+        ));
+    }
+    if snippet_cut {
+        notes.push(format!(
+            "code snippets longer than {MAX_SNIPPET_CHARS} characters are cut"
+        ));
+    }
+    notes.push("heuristic: line-pattern matching, not data-flow analysis".to_string());
+
+    Ok(TaintReport {
+        analysis,
+        totals,
+        truncated: cut || input_cut || flows_capped || snippet_cut,
+        notes,
+    })
 }

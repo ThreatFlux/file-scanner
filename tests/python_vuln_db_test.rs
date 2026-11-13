@@ -171,9 +171,19 @@ fn test_get_known_malicious_packages() {
     assert!(malicious.contains(&"colourama")); // typosquatting colorama
     assert!(malicious.contains(&"python-sqlite"));
     assert!(malicious.contains(&"python-mysql"));
-    assert!(malicious.contains(&"pytorch")); // should be 'torch'
-    assert!(malicious.contains(&"sklearn")); // should be 'scikit-learn'
-    assert!(malicious.contains(&"beautifulsoup")); // should be 'beautifulsoup4'
+    // Names that are real or reserved projects, not malware, are not on the list.
+    for legitimate in [
+        "pytorch",
+        "sklearn",
+        "beautifulsoup",
+        "acquisition",
+        "crypto",
+    ] {
+        assert!(
+            !malicious.contains(&legitimate),
+            "{legitimate} is not malware"
+        );
+    }
 }
 
 #[test]
