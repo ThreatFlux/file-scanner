@@ -214,14 +214,14 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   only on fixed text beside an unrelated write does not. A package whose only High finding is a decoded payload
   passed to process execution now rates at least High. A selected source file that could not be read is no longer
   counted as scanned (`files_skipped` rises, a note says so) and the package rates at least Low. The npm and Python
-  results are cached under new keys (`package:npm:v4`, `package:python:v4`), so results stored by an earlier build are
+  results are cached under new keys (`package:npm:v5`, `package:python:v5`), so results stored by an earlier build are
   recomputed; a package directory whose walk passes 500,000 entries is never cached. The `UNSAFE ARCHIVE ENTRIES`
   note gives the true number of unsafe entries, and the `findings` section has an `unsafe_entries_note` field when
   more exist than the 50 kept as findings. Known limits are listed under `analyze_npm_package` in
   `docs/MCP.md`. A tarball, sdist or zip with a `..`, absolute-path or link entry rates at
-  least High, with one finding per entry. Every result states its advisory data (a small offline table: 6 npm
-  packages, 7 PyPI packages) and that an empty list is not a clean bill of health. Packages that were not read in full
-  are never rated Safe, and a dependency list alone is at least Low.
+  least High, with one finding per unsafe path or link target. Every result states its advisory data (a small
+  offline table: 6 npm packages, 7 PyPI packages) and that an empty list is not a clean bill of health. Packages that
+  were not read in full are never rated Safe, and a dependency list alone is at least Low.
 - Archive, document and Java results: archive risk is `unknown` instead of `low` when the listing is unavailable or
   capped, when an archive holds nested archives (named, up to 5, and not opened) or when all entries are encrypted,
   and `medium` when some are; a possible compression bomb marks its entry as `CompressionBomb (critical)`, so
@@ -291,6 +291,14 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 - Dismiss sixteen verified false positives with both-platform/source evidence. Preserve complete all-severity
   container reports, verify exact image identity and application inventories, scan both published architectures, and
   fail the security gate on any reported vulnerability.
+- `POST /cache/clear` with a JSON array as the body (`[null]`, `["strings"]`) now answers HTTP 400 and clears nothing,
+  like every other body that is not an object; it used to clear the cache.
+- The `UNSAFE ARCHIVE ENTRIES` note counts entries, not findings: 80 tar entries that each have an unsafe path and an
+  unsafe link target read `80 entries`, with `(160 findings, because an entry can have an unsafe path and an unsafe
+  link target)` after `outside it`; the note used to say `160 entries`. The package section cache keys are now
+  `package:npm:v5` and `package:python:v5`, so stored results are recomputed.
+- At most 50 unsafe-entry findings are kept; an archive of 49 single-finding entries and then one entry with two used
+  to keep 51. The cap sentence counts findings: `Only the first 50 are listed as findings; 1 more is not listed.`
 
 ### Deprecated
 

@@ -1196,21 +1196,24 @@ file. Known gaps: on a file system whose times move in steps of
 one or two seconds (HFS+, FAT, some network mounts) a source file rewritten with the same size in the same step can
 be answered from the cache; a manifest reached through a symbolic link into a file outside the directory is keyed by
 the link, so an edit of the target can still be answered from the cache. Use `--no-cache` or a fresh `--cache-dir`
-in those cases. The keys are `package:npm:v4` and `package:python:v4`.
+in those cases. The keys are `package:npm:v5` and `package:python:v5`.
 
 When a tarball, sdist or zip has entries that leave the package directory or link outside it, the note begins
-`UNSAFE ARCHIVE ENTRIES: {total} entries leave the package directory or link outside it: ...`, lists up to 5 entries
-and `and {total - shown} more`, and ends with `A tarball made by npm pack or an sdist never has such entries;
-extracting it could write outside the target directory.` `{total}` is the true number of unsafe findings in the
-archive (80 for an archive with 80 `..` entries, `and 75 more`), not the number kept. At most 50 are kept as
-findings; when more exist the note ends with a space and the sentence `Only the first 50 are listed as findings;
-30 more are not listed.`
-(`1 more is not listed.` for one), and the `findings` section carries the same sentence in the field
-`unsafe_entries_note` (present only when the findings were capped, also with `min_severity`; entry names in an
-archive cannot forge it). The count is of problems, not of archive entries: a tar entry that is both a `..` path and a
-link counts twice. If the listing stopped at a limit, entries after that point are not counted, and the note about
-the stop says so. The entry names in the note are printed as the archive gives them, so a crafted name can imitate
-the tool's own sentences; trust the leading count and `unsafe_entries_note`.
+`UNSAFE ARCHIVE ENTRIES: {total} entries leave the package directory or link outside it: ...`, lists up to 5
+findings and `and {more} more`, and ends with `A tarball made by npm pack or an sdist never has such entries;
+extracting it could write outside the target directory.` `{total}` is the true number of unsafe entries in the
+archive (80 for an archive with 80 `..` entries, `and 75 more`), not the number kept. A tar entry can have two
+findings, an unsafe path and an unsafe link target. When an archive has such entries the note adds the findings
+count after `outside it`, as in `80 entries leave the package directory or link outside it (160 findings, because
+an entry can have an unsafe path and an unsafe link target): ...`, and `{more}` counts findings (`and 155 more` for
+80 such entries). At most 50 findings are kept; when more exist the note ends with a space and the sentence
+`Only the first 50 are listed as findings; 30 more are not listed.` (`1 more is not listed.` for one), and the
+`findings` section carries the same sentence in the field `unsafe_entries_note` (present only when the findings
+were capped, also with `min_severity`; entry names in an archive cannot forge it). The cap is counted in findings:
+49 entries with one finding each, then one with two, keep 50 findings and end the note with `Only the first 50 are
+listed as findings; 1 more is not listed.` If the listing stopped at a limit, entries after that point are not
+counted, and the note about the stop says so. The entry names in the note are printed as the archive gives them, so
+a crafted name can imitate the tool's own sentences; trust the leading count and `unsafe_entries_note`.
 
 What raises the rating, in both package tools:
 
@@ -1280,12 +1283,12 @@ What raises the rating, in both package tools:
   the rows in the `dependencies` section are marked `known_malicious_release: true`.
 - A suspected typosquat (`typosquatting.suspected`) rates at least Medium.
 - A tarball, sdist or zip with an entry that has `..`, an absolute path or a link is rated at least High: one finding
-  per entry (category `unsafe-path`) and a note that begins `UNSAFE ARCHIVE ENTRIES`.
+  per unsafe path or link target (category `unsafe-path`) and a note that begins `UNSAFE ARCHIVE ENTRIES`.
 
 All of this is heuristic. The tie between a run and a write is a name and literal match, so a dropper that builds its
 command far from the write and shares no name with it can be missed. A file that a hook runs, or `setup.py`, is judged
 High only for obfuscation findings; other Medium findings there add nothing. The cached answers of both package tools
-use the keys `package:npm:v4` and `package:python:v4`, so results that an earlier build stored are recomputed.
+use the keys `package:npm:v5` and `package:python:v5`, so results that an earlier build stored are recomputed.
 
 Known limits of the package ratings (both tools, from the same scanner):
 
@@ -1714,9 +1717,11 @@ query and an empty body, `{}`, `{"scope": null}` or `{"scope": ""}` clear everyt
 `message` and a `cleared` list. Nothing is cleared, and the answer is HTTP 400 with `{status: "error", message,
 error}` (the same text in `message` and `error`), when:
 
-- the body is not a JSON object, has a field other than `scope` (a duplicate `scope` key included), or has a scope
-  that is not a string: `The body must be a JSON object with at most one field, "scope" (all (default), analysis or
-  strings), for example {"scope": "analysis"}: <parser detail>. Nothing was cleared.`
+- the body is not a JSON object (an array such as `[null]` or `["strings"]`, a string, a number and `true` included),
+  has a field other than `scope` (a duplicate `scope` key included), or has a scope that is not a string: `The body
+  must be a JSON object with at most one field, "scope" (all (default), analysis or strings), for example {"scope":
+  "analysis"}: <detail>. Nothing was cleared.` (the detail of a body that is not an object is `it is not a JSON
+  object`)
 - the scope is unknown: `Unknown scope 'bogus' in the query string: use all (default), analysis or strings. Nothing
   was cleared.` (`in the body` for a body scope).
 - the query and the body name different scopes: `The query string and the body ask for different scopes (Analysis and
@@ -1771,7 +1776,7 @@ The server keeps two kinds of results, so drill-down calls do not repeat work.
   and the package sections) carry a revision in their key: a result stored by an earlier build with older rules is
   recomputed, not served. Some keys carry more: `binary_info` and `yara_indicators` add a name class (`java-archive`,
   `java-class` or `content`), `taint` the file path, the signatures section `signatures:r2`, and the package
-  sections `package:npm:v4` and `package:python:v4` (see [analyze_file](#analyze_file) and
+  sections `package:npm:v5` and `package:python:v5` (see [analyze_file](#analyze_file) and
   [analyze_npm_package](#analyze_npm_package)). A call after an upgrade can therefore report `cache: miss` once. A
   package directory is cached only when the whole tree was keyed, and a signatures section is not cached while a
   `.sig` or `.asc` file sits beside the file.

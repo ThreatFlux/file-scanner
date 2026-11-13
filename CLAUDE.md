@@ -326,8 +326,8 @@ downloaded; a registry name is rejected with a message that says to run `npm pac
   `node_fs_1.default.writeFileSync`, `(0, node_child_process_1.execSync)(...)`) and Python
   `asyncio.create_subprocess_*`, `aiohttp` and `fd, path = tempfile.mkstemp()` are read like the plain ones. The
   `Exfiltration endpoint` rule matches out-of-band hosts only as whole host names. A package whose only High finding is
-  a decoded payload passed to process execution rates at least High. The section cache keys are `package:npm:v4` and
-  `package:python:v4`; bump them when a rating changes. A package directory is cached only when its whole tree was
+  a decoded payload passed to process execution rates at least High. The section cache keys are `package:npm:v5` and
+  `package:python:v5`; bump them when a rating changes. A package directory is cached only when its whole tree was
   keyed (not past 500,000 entries). See `docs/MCP.md`, `analyze_npm_package`, for the checked cases
   and the known limits.
 - Install hooks (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) are judged by their command string
