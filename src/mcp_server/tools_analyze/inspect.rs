@@ -1058,9 +1058,9 @@ fn listing(
             .min();
         let range = match decoded_bounds(section) {
             Some((a, b)) => format!(
-                " The analyzer decoded {} instructions in 0x{a:x}..0x{b:x} and stops at the \
-                 first byte it cannot decode, so addresses outside that range are not listed; \
-                 read_hex shows the raw bytes there.",
+                " The listing holds {} rows in 0x{a:x}..0x{b:x} (instructions, and a `.byte` row \
+                 for each byte that could not be decoded); addresses outside that range are not \
+                 listed, and read_hex shows the raw bytes there.",
                 total_instructions(section)
             ),
             _ => String::new(),
