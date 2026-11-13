@@ -4397,9 +4397,9 @@ dependencies = [
 
 [[package]]
 name = "threatflux-threat-detection"
-version = "0.2.5"
+version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c20d1d4aa350807cece79c3fda06404733c9647a315049120a767bb39252faee"
+checksum = "3bfc8941319d8f7ccfcccbbcdf489eb1a46bfa0daef0dd9b3c6d9550bd29d130"
 dependencies = [
  "aho-corasick",
  "anyhow",

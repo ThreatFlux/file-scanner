@@ -29,8 +29,8 @@ def main():
     shim = [package for package in users if package["name"] == "threatflux-threat-detection"]
     # This immutable published producer enables RSA's pkcs1v15 feature for
     # upstream YARA. Every Rust source file was checked: it invokes no RSA API.
-    require(len(users) == 2 and len(shim) == 1 and shim[0]["version"] == "0.2.5"
-            and shim[0].get("checksum") == "c20d1d4aa350807cece79c3fda06404733c9647a315049120a767bb39252faee",
+    require(len(users) == 2 and len(shim) == 1 and shim[0]["version"] == "0.2.6"
+            and shim[0].get("checksum") == "3bfc8941319d8f7ccfcccbbcdf489eb1a46bfa0daef0dd9b3c6d9550bd29d130",
             "RSA feature-only producer shim changed")
     for relative in (".cargo/audit.toml", "deny.toml"):
         require("RUSTSEC-2023-0071" not in (root / relative).read_text(),

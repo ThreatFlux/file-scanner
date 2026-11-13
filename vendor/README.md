@@ -20,10 +20,10 @@ the old RSA 0.9-specific digest aliases are no longer needed. Only public-key
 signature verification is present. The obsolete RUSTSEC-2023-0071 waiver is
 removed; the source guard now requires stable 0.10, one YARA caller and no waiver.
 
-The pinned feature-only producer is `threatflux-threat-detection` 0.2.5,
-archive SHA256 `c20d1d4aa350807cece79c3fda06404733c9647a315049120a767bb39252faee`,
-from source `d4508de414e398e2f4f19b78b1f9d6fd966b8ce6`. Its fifteen Rust files are
-byte-identical to 0.2.4 and invoke no RSA API. Its optional stable RSA dependency
+The pinned feature-only producer is `threatflux-threat-detection` 0.2.6,
+archive SHA256 `3bfc8941319d8f7ccfcccbbcdf489eb1a46bfa0daef0dd9b3c6d9550bd29d130`,
+from source `c56256c56c787fb1ae0570c4e377805240deb5b2`. Its fifteen Rust files are
+byte-identical to 0.2.5 and invoke no RSA API. Its optional stable RSA dependency
 only enables `pkcs1v15` when the YARA engine is selected.
 
 The historical 1.22 patch remains at [yara-x-1.22.0.patch](yara-x-1.22.0.patch),
