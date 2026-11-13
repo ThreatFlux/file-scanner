@@ -71,7 +71,7 @@ file-scanner mcp-http --port 3000 --allow-root /srv/samples
 Real startup output (shortened):
 
 ```text
-file-scanner 0.3.10 MCP HTTP server listening on http://127.0.0.1:3000/mcp
+file-scanner 0.3.11 MCP HTTP server listening on http://127.0.0.1:3000/mcp
   REST helpers on the same address: /health, /api/info, /tools/list, /tools/call, /cache/*, /strings/*, ...
   Host allow-list: localhost, 127.0.0.1, ::1
   Origin check: loopback origins; no CORS wildcard
@@ -102,7 +102,7 @@ print the token there with `echo "$FILE_SCANNER_AUTH_TOKEN"` before you start it
 
 ```bash
 curl -s http://127.0.0.1:3000/health
-# {"status":"ok","service":"file-scanner-mcp","version":"0.3.10","transports":["streamable-http"]}
+# {"status":"ok","service":"file-scanner-mcp","version":"0.3.11","transports":["streamable-http"]}
 
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/tools/list
 # 401   (when a token is set and none is sent)
@@ -248,7 +248,7 @@ Notes:
   the HTTP server, probe `GET /health`.
 - Build it yourself with `docker build -t file-scanner .`.
 
-The untagged image is `latest`. At the time of writing, the published image is the 0.3.10 release, which
+The untagged image is `latest`. At the time of writing, the published image is the 0.3.11 release, which
 does not have `--allow-root`, `--host`, `--allowed-host` or token support: these commands need the image
 from the release that follows it, or one you build yourself with `docker build -t file-scanner .` (then
 use `file-scanner` in place of `ghcr.io/threatflux/file-scanner`).
@@ -270,7 +270,7 @@ kubectl create secret generic file-scanner --from-literal=token="$(openssl rand 
 To read the token back for a client, run
 `kubectl get secret file-scanner -o jsonpath='{.data.token}' | base64 -d`.
 
-The image is `:latest`, which at the time of writing is the 0.3.10 release. It does not have `--allow-root`,
+The image is `:latest`, which at the time of writing is the 0.3.11 release. It does not have `--allow-root`,
 `--host`, `--allowed-host` or token support, so this manifest needs an image from a later release or one you
 build yourself.
 
@@ -362,13 +362,13 @@ index live in the process, and MCP sessions are held by the process that opened 
 stands. These must be true first:
 
 - The three version strings (`version`, the cargo package `version` and the tag in the OCI `identifier`) say
-  0.3.10 and nothing in the release automation updates them. Set them by hand to a release that has these
-  features, in the same change that bumps `Cargo.toml`. Because 0.3.10 does not accept `--allow-root`, the file
+  0.3.11 and nothing in the release automation updates them. Set them by hand to a release that has these
+  features, in the same change that bumps `Cargo.toml`. Because 0.3.11 does not accept `--allow-root`, the file
   passes only `mcp-stdio`; add `--allow-root` back to the arguments once the versions name a release that has it.
 - `README.md` must contain an `mcp-name: io.github.threatflux/file-scanner` line, which the registry is expected
   to use to check ownership of the cargo package.
 - The OCI image must carry the `io.modelcontextprotocol.server.name` label. The Dockerfile now sets it, but the
-  0.3.10 image does not have it.
+  0.3.11 image does not have it.
 - Not confirmed: whether the registry accepts `registryType` `cargo`, and whether it accepts the lower-case
   `io.github.threatflux` namespace. Check both when publishing.
 

@@ -8,12 +8,12 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/ThreatFlux/file-scanner",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "packages": [
     {
       "registryType": "cargo",
       "identifier": "threatflux-file-scanner",
-      "version": "0.3.10",
+      "version": "0.3.11",
       "transport": {
         "type": "stdio"
       },
@@ -26,7 +26,7 @@
     },
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/threatflux/file-scanner:0.3.10",
+      "identifier": "ghcr.io/threatflux/file-scanner:0.3.11",
       "transport": {
         "type": "stdio"
       },
