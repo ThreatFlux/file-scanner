@@ -154,6 +154,13 @@ async fn serve() -> anyhow::Result<()> {
 }
 ```
 
+With `allow_roots` set, the `FileScannerMcp` methods that take a path (`analyze_file`, `analyze_npm_package`,
+`analyze_python_package`, `yara_scan_file`, `llm_analyze_file`, `analyze_java_file`) and `ServerState::file_sha256`
+refuse a path outside the roots, or a link that leaves them, with the same message as the tools;
+`ServerState::path_policy()` returns the policy. Without roots nothing changes. The detached-signature helpers are
+`file_scanner::signature::verify_signature` (unchanged), `verify_signature_with`, `SideFile` and
+`PathPolicy::side_file`.
+
 `run_stdio` writes only JSON-RPC to stdout and prints its banner on stderr. `run_http(HttpConfig { .. })`
 serves Streamable HTTP and the REST routes below; `HttpConfig::default()` binds `127.0.0.1:3000` with no
 token.
@@ -175,7 +182,7 @@ one is set. Only `/health` is open without the token.
 | `/tools/list` | POST | The tool list in an envelope: `{"jsonrpc", "result": {"tools": [...]}}`. |
 | `/tools/call` | POST | Call one tool; returns the bare result. Body: `{"name": "...", "arguments": {...}}`. |
 | `/cache/stats`, `/cache/list` | GET | What the analysis cache holds. |
-| `/cache/search`, `/cache/clear` | POST | Search the cache; empty it (`?scope=all\|analysis\|strings`, default all). |
+| `/cache/search`, `/cache/clear` | POST | Search the cache; empty it (scope `all` (default), `analysis` or `strings`, as `?scope=` or a JSON body `{"scope": "analysis"}`; a bad body, an unknown scope or two different scopes is a 400 and clears nothing). |
 | `/strings/stats` | GET | Statistics of the tracked strings. |
 | `/strings/search`, `/strings/details`, `/strings/related`, `/strings/filter` | POST | Query the string index. `/strings/details` answers 404 `{"error":"String not found"}` for an unknown string. |
 

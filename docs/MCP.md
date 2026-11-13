@@ -368,6 +368,14 @@ resolve (symlinks and `..` included) to a place under one of the roots. The tool
 stored (`cache_status`, `search_strings` without `file_path`, `string_details`) also show only files inside a root;
 see [The cache](#the-cache).
 
+A Rust program that embeds the server and calls the methods of `FileScannerMcp` directly (`analyze_file`,
+`analyze_npm_package`, `analyze_python_package`, `yara_scan_file` including its `rule_path`, `llm_analyze_file`,
+`analyze_java_file`) gets the same confinement and the same error text as a registered tool when its `ServerState`
+was built with allowed roots: a path outside them, or a link that leaves them (also inside a scanned or package
+directory), is refused. `ServerState::file_sha256` refuses such a path too, and `ServerState::path_policy()` returns
+the roots policy. A state without roots reads any path, as before. The library method `analyze_file` also applies the
+policy to a detached signature file beside the file (see [analyze_file](#analyze_file)).
+
 ### Testing by hand
 
 stdio messages are one JSON object per line. Do not pretty-print a request; each line is parsed on its own. This
@@ -393,10 +401,14 @@ only JSON-RPC to stdout; the banner goes to stderr.
 ## Tool reference
 
 Arguments marked `*` are required. Every tool also accepts `max_output_bytes` (default 80,000; a value outside
-4,000 to 400,000 is clamped to that range, and a negative value is an error, even though the schema declares the
-range as minimum and maximum).
+4,000 to 400,000 is clamped to that range without a message, and a negative value is an error, even though the schema
+declares the range as minimum and maximum).
 Paged tools accept `offset` (default 0) and `limit` (default 50, at most 500 unless stated). Unknown arguments are
 rejected. All tools are read-only except `cache_clear`. Examples are shortened and use `/samples/...` for paths.
+The input schemas in `tools/list` (stdio and HTTP) and in the REST `/tools/list` give an integer or number property
+only `type`, `minimum`, `maximum`, `default` and `description`: there is no `format` such as `uint`, `uint64`, `int64`
+or `double`, and an unsigned integer keeps `minimum: 0`. (The OpenAPI document of the REST routes is separate and
+still names `int64` and `double` for some route fields.)
 
 ### analyze_file
 
@@ -482,10 +494,40 @@ paged `files` table (path, size, type, kind, sha256, entropy, `flags`), `total`,
 them), and a FIFO, socket or device is listed under `skipped`. The first `next_steps` entry names the first file of
 the page.
 
+The `signatures` section (also the `signature` entry of the overview and the section inside `all: true`) reports
+what is present and verifies a detached GPG signature when `gpg` is installed. For a good signature, `signer` is the
+text between the first and the last double quote of gpg's `Good signature from` line, for example
+`t <t@example.invalid>` (a name that contains a double quote keeps it; a line with no quotes is used as it is).
+While `<file>.sig` or `<file>.asc` exists beside the file, the section is computed on every call and never cached, so
+adding, changing or removing the side file changes the answer at once, also after a restart; with no side file, the
+answer `No signature found` is stored under the section key `signatures:r2`, so answers of earlier builds are not
+served. A side file is read only when it is safe to read; otherwise `is_signed` is false and `verification_status`
+says why, and gpg is not run:
+
+| Side file | `verification_status` |
+| --- | --- |
+| A link that resolves outside the allowed roots (server started with `--allow-root`) | `Not checked: a detached signature file (.sig or .asc) exists beside the file but was not read because it is a link that leads to <outside the allowed roots>; copy it under an allowed root, or start the server with --allow-root for the directory it is in` |
+| Not a regular file after following links (named pipe, socket, device, directory) | `Not checked: a detached signature file (a.txt.sig) exists beside the file but is a named pipe (FIFO) and was not read; only a regular file is used as a signature` (also `a socket`, `a device file`, `a directory`) |
+| Larger than 16 MiB | `Not checked: a detached signature file (a.txt.sig) exists beside the file but is 17000000 bytes, larger than the 16 MiB a detached signature can be and was not read; only a regular file is used as a signature` |
+
+The regular-file and 16 MiB rules apply with or without `--allow-root`, so a pipe named `a.txt.sig` no longer hangs
+the call. The roots rule applies on stdio, on `/mcp` and on REST `/tools/call`. On a rooted server a side-file link
+that stays inside the roots is verified (gpg gets the link's resolved path); without roots, links are followed. The
+command-line `--verify-signatures` follows links but applies the same regular-file and 16 MiB rule and gives the same
+sentences. Under `--no-cache` every call recomputes the section anyway.
+
 Limits: a file over 256 MiB gets an overview without the whole-file sections (the answer says what was skipped and
 the call that runs it). A directory walk stops after 200,000 entries or 10 seconds. The overview names the specialist
 tool for the file's kind (`analyze_document`, `analyze_script`, `inspect_archive`, `analyze_java_file`,
 `analyze_npm_package`, `analyze_python_package`).
+
+Section cache keys: `binary_info` is stored under `binary_info[:arch=<a>]:name=<class>` and `yara_indicators` under
+`yara_indicators:min=<n>[:arch=<a>]:name=<class>`, where the class comes from the file name: `java-archive` for
+`.jar`, `.war`, `.ear`, `.apk` and `.aar` (any case), `java-class` for `.class`, `content` for anything else. `taint`
+is stored per path as `taint:<path>`. Answers stored by earlier builds under the old keys are not found, so the first
+call after an upgrade reports `cache: miss`. A native executable (an ELF, a thin Mach-O or a PE) that carries a Java
+archive name still gets `binary_info: not a recognized executable format (ZIP archive is damaged or cut short ...)`,
+and for it the `arch` check does not apply; `disassemble` still lists its functions.
 
 ### query_analysis
 
@@ -667,8 +709,20 @@ ARM64 (0xaa64). The architecture is not supported`). A PE without function symbo
 cached; code outside it is decoded again on every call, which takes about a second on a large file. The answer says so
 in `window_note` and carries `cache: "partial"`. A function is found by any function name in the symbol table, also on a
 file with more than 5,000 functions: its listing is the symbol's range and `function.listed_from` says it came from the
-symbol table. An imported name has no code to list and is refused, and so is a substring that matches more than one
-function (the error lists them). A name that no function has is an error that also says the symbol table has none.
+symbol table. An imported name has no code to list and is refused. A part of a name searches the function table and the
+symbol-table-only functions together, the same list `filter` shows: one match is disassembled (`function: "check"` on
+`c_advanced_binary` lists `check_environment`), several are an error, and no match is an error that also says the
+symbol table has none:
+
+```text
+'tm_clones' matches 2 functions: deregister_tm_clones at 0x1490; register_tm_clones at 0x14c0. Pass the exact name or an `address`.
+```
+
+The count equals `total` of the function list for that `filter`; 12 names are listed, then `(and K more)` (the part
+`_` on that file gives `matches 19 functions: ... (and 7 more)`). The message may come with or without the prefix
+`The disassembly failed: `. A stripped Mach-O, or a PE
+whose symbols are RVAs, lists no functions under any name: pass an `address`, or use `query_analysis` with the
+`symbols` section.
 Following `next_address` of such a listing continues past the symbol's end, because an address lists from that
 instruction on. An address outside the decoded range is an error that says where the listing is: "No instruction at 0x10
 in this file's disassembly (the next one is at 0x1460)", then "The listing holds 773 rows in 0x1460..0x20c9
@@ -753,6 +807,13 @@ that says `file_path` searches one file and gives offsets. Strings are indexed b
 files you have not touched are not searched. `next_steps` are `{tool, arguments, gives}` objects: `string_details` for
 the first string and, in session scope, the same search on one file. With `--allow-root` the session search lists
 only strings of files inside a root.
+
+A file is known to the index by its SHA-256. The remembered hash of a path is reused only while the file is the same
+file: on Unix its length, modification time, change time, device and inode must all match, so a file rewritten in
+place with the same length and its modification time put back is hashed again, and so is a file after `chmod`, `chown`
+or a new hard link (an unchanged file is still answered from the remembered hash). On Windows the check uses length,
+write time and creation time, so a same-length rewrite with the write time set back is not detected there.
+
 Limits: indexing a file stops at 200,000 strings or 32 MiB of text, and says so.
 
 ### string_details
@@ -776,12 +837,25 @@ Everything known about one exact string: files, offsets, categories, entropy and
 ```
 
 Strings indexed by `analyze_file` are tracked too, but `analyze_file` records offsets only for strings of 4 or more
-characters. A string of 2 or 3 characters, or one past the index's scan or count limits, shows `offsets: []` and
-`occurrences` as the count `analyze_file` listed (1 for each distinct string), not the count in the file; the file
-row's `offsets_note` says so, and `search_strings` with `file_path` gives the real offsets and count. A value that was
-never tracked is an error that says how to get it tracked. With `--allow-root` only files inside a root are shown: a
-string that is tracked only in files that no longer resolve inside a root (for example a file that was replaced by a
-link out of the root after it was indexed) is answered like an untracked one.
+characters, and only the first 10 occurrences of a string per file. A string of 2 or 3 characters, or one past the
+index's scan or count limits, shows `offsets: []` and `occurrences` as the count `analyze_file` listed (1 for each
+distinct string), not the count in the file; the file row's `offsets_note` says so, and `search_strings` with
+`file_path` gives the real offsets and count. A file row whose count reached the cap of 10 and has no fuller record
+carries `occurrences_at_least: true`. When any row is marked, the answer also has `total_occurrences_at_least: true`
+and this note (wrapped here):
+
+```text
+analyze_file records only the first 10 occurrences of a string per file, so for 1 file(s) (rows marked
+occurrences_at_least) and for total_occurrences the real number may be higher. search_strings with file_path and
+query gives the exact count and offsets in one file and records them here.
+```
+
+After that `search_strings` call the marks are gone (`total_occurrences` is 40 for a string that occurs 40 times).
+Exactly 10 occurrences cannot be told from "at least 10", so a string that occurs exactly 10 times keeps the marks
+after the search. REST `POST /strings/details` returns the raw tracker entry and shows the capped count without a
+mark. A value that was never tracked is an error that says how to get it tracked. With `--allow-root` only files
+inside a root are shown: a string that is tracked only in files that no longer resolve inside a root (for example
+a file that was replaced by a link out of the root after it was indexed) is answered like an untracked one.
 
 ### llm_analyze_file
 
@@ -1098,6 +1172,39 @@ Limits: up to 400 source files, 1 MiB each and 16 MiB in all, are scanned (`.js 
 was not read in full is never rated safe. The advisory data is a small offline table (6 packages, newest advisory
 2022). An empty vulnerability list does not mean the package is clean.
 
+A selected source file that could not be read (for example because of its permissions) is not counted as scanned:
+`files_scanned` and `bytes_scanned` drop and `files_skipped` rises. The answer adds this entry to `input.notes`:
+`1 source files could not be read: lib.js. They are not counted as scanned; check the permissions of the package or
+whether something is blocking access to it, then analyze it again.` (`N source files could not be read: <first
+path>[ and others]. ...`), and the package gets the risk reason `package not fully read: 1 source file(s) were not
+scanned` and at least Low, never Safe. This holds for directories, wheels and zips, and tarballs, in both package
+tools.
+
+The cache key of a package directory covers the names, sizes and times of its files and the content of its
+manifests (up to 64, of at most 2 MiB each; on Windows also the source files the analysis reads, up to 128 MiB in
+all). A directory whose walk passes the scan's limit of 500,000 visited entries is never stored in or served from
+the cache: every call analyses it again, reports `cache: "miss"` and can take minutes. Every other directory is
+cached, also one with a dependency file over 16 MiB at its root or a root lock or requirements file that is a
+symbolic link. A cache hit still walks the whole directory and reads its manifests, so it is slower than a hit on a
+file. Known gaps: on a file system whose times move in steps of
+one or two seconds (HFS+, FAT, some network mounts) a source file rewritten with the same size in the same step can
+be answered from the cache; a manifest reached through a symbolic link into a file outside the directory is keyed by
+the link, so an edit of the target can still be answered from the cache. Use `--no-cache` or a fresh `--cache-dir`
+in those cases. The keys are `package:npm:v4` and `package:python:v4`.
+
+When a tarball, sdist or zip has entries that leave the package directory or link outside it, the note begins
+`UNSAFE ARCHIVE ENTRIES: {total} entries leave the package directory or link outside it: ...`, lists up to 5 entries
+and `and {total - shown} more`, and ends with `A tarball made by npm pack or an sdist never has such entries;
+extracting it could write outside the target directory.` `{total}` is the true number of unsafe findings in the
+archive (80 for an archive with 80 `..` entries, `and 75 more`), not the number kept. At most 50 are kept as
+findings; when more exist the note ends with ` Only the first 50 are listed as findings; 30 more are not listed.`
+(`1 more is not listed.` for one), and the `findings` section carries the same sentence in the field
+`unsafe_entries_note` (present only when the findings were capped, also with `min_severity`; entry names in an
+archive cannot forge it). The count is of problems, not of archive entries: a tar entry that is both a `..` path and a
+link counts twice. If the listing stopped at a limit, entries after that point are not counted, and the note about
+the stop says so. The entry names in the note are printed as the archive gives them, so a crafted name can imitate
+the tool's own sentences; trust the leading count and `unsafe_entries_note`.
+
 What raises the rating, in both package tools:
 
 - A download that is written to disk and run, a download passed to code evaluation, a credential file sent over the
@@ -1171,7 +1278,7 @@ What raises the rating, in both package tools:
 All of this is heuristic. The tie between a run and a write is a name and literal match, so a dropper that builds its
 command far from the write and shares no name with it can be missed. A file that a hook runs, or `setup.py`, is judged
 High only for obfuscation findings; other Medium findings there add nothing. The cached answers of both package tools
-use the keys `package:npm:v3` and `package:python:v3`, so results that an earlier build stored are recomputed.
+use the keys `package:npm:v4` and `package:python:v4`, so results that an earlier build stored are recomputed.
 
 Known limits of the package ratings (both tools, from the same scanner):
 
@@ -1220,7 +1327,9 @@ every time it starts. `setup.py` is checked for install-time behaviour. A PyPI n
 error: run `pip download 'requests==2.5.0' --no-deps -d <dir>` and pass the file; a name with shell characters (`<`,
 `>`, `!`, `~`, `=`, `^`) is single-quoted there. Version matching follows PEP 440 with normalized names; an unpinned
 requirement is unknown, not vulnerable. Limits: up to 400 source files, 1 MiB each and 16 MiB in all (the same
-extensions as for the npm tool). The advisory data is a small offline table (7 packages, newest advisory 2023).
+extensions as for the npm tool). The advisory data is a small offline table (7 packages, newest advisory 2023). If a
+wheel's `METADATA` cannot be read (its permissions, its size, or because it is beyond the first 64 manifests), the
+error still says `METADATA was not read (larger than the manifest limit)`, which may name the wrong cause.
 
 ### cache_status
 
@@ -1588,12 +1697,37 @@ protocol; they are for scripts and health checks.
 | `POST /tools/call` | Call a tool: `{"name": "...", "arguments": {...}}`. Replies `{resultType, content, isError}`. |
 | `GET /cache/list`, `GET /cache/stats` | Analysis history entries and statistics. |
 | `POST /cache/search` | Body field `file_path_pattern` (not `file_path`), and `tool_name`. |
-| `POST /cache/clear` | Clears what `cache_clear` clears by default (history, sections, tracked strings). |
+| `POST /cache/clear` | Clears the history, sections and tracked strings; optional scope, see below. |
 | `GET /strings/stats`; `POST /strings/{search,details,related,filter}` | String tracker. `details` answers 404 `{"error":"String not found"}` for an unknown string. |
 | `GET /api-docs/openapi.json` | OpenAPI description of the REST routes. |
 
-`POST /cache/clear` takes the same scopes as the tool, as a query parameter: `?scope=all|analysis|strings`. Another
-value is a 400. The reply has `status`, `message` and a `cleared` list.
+`POST /cache/clear` takes the same scopes as the tool, as a query parameter (`?scope=all|analysis|strings`) or as a
+JSON body (`{"scope": "analysis"}`), in any case (`Strings` works). The `Content-Type` header is not checked. No
+query and an empty body, `{}`, `{"scope": null}` or `{"scope": ""}` clear everything. The reply has `status`,
+`message` and a `cleared` list. Nothing is cleared, and the answer is HTTP 400 with `{status: "error", message,
+error}` (the same text in `message` and `error`), when:
+
+- the body is not a JSON object, has a field other than `scope` (a duplicate `scope` key included), or has a scope
+  that is not a string: `The body must be a JSON object with at most one field, "scope" (all (default), analysis or
+  strings), for example {"scope": "analysis"}: <parser detail>. Nothing was cleared.`
+- the scope is unknown: `Unknown scope 'bogus' in the query string: use all (default), analysis or strings. Nothing
+  was cleared.` (`in the body` for a body scope).
+- the query and the body name different scopes: `The query string and the body ask for different scopes (Analysis and
+  Strings): send one of them, or the same value in both (accepted: all (default), analysis or strings). Nothing was
+  cleared.`
+
+The same value in both is accepted. If `?scope=` is repeated, the last value wins and no conflict is reported
+(`?scope=analysis&scope=strings` clears only the tracked strings). The `/api/info` summary and the OpenAPI entry of
+the route (optional `scope` query parameter, optional `CacheClearBody` request body, a 400 response) describe the
+same rules.
+
+`POST /strings/search` (default `limit` 100) and `POST /strings/related` (default 20) count only visible results
+against `limit` on a server with `--allow-root`, so matches of files outside the roots do not use it up. To do so the
+rooted server loads every match before it drops the hidden ones, which grows with the size of the tracker (a search
+whose 10,000 matches were all hidden took about 0.6 s on a tracker of 80,000 strings; a server without roots is not
+affected). On a rooted server the related list of `string_details` (`related_limit`) and the `most_common`,
+`suspicious_strings` and `high_entropy_strings` lists of `/strings/stats` and `/strings/filter` drop hidden values
+after the list was cut, so they can show fewer entries than asked for, or none, even when visible ones exist.
 
 REST requests time out after 120 seconds (504), and at most 16 run at once. An example call:
 
@@ -1628,10 +1762,16 @@ The server keeps two kinds of results, so drill-down calls do not repeat work.
   A repeated call on an unchanged file is a `hit`; editing the file changes its hash, so a changed file is never
   served from an old entry. The sections whose ratings depend on the scanner's rules (`threats`, `enhanced_threats`,
   and the package sections) carry a revision in their key: a result stored by an earlier build with older rules is
-  recomputed, not served.
+  recomputed, not served. Some keys carry more: `binary_info` and `yara_indicators` add a name class (`java-archive`,
+  `java-class` or `content`), `taint` the file path, the signatures section `signatures:r2`, and the package
+  sections `package:npm:v4` and `package:python:v4` (see [analyze_file](#analyze_file) and
+  [analyze_npm_package](#analyze_npm_package)). A call after an upgrade can therefore report `cache: miss` once. A
+  package directory is cached only when the whole tree was keyed, and a signatures section is not cached while a
+  `.sig` or `.asc` file sits beside the file.
 - **Analysis history.** One record per `analyze_file` and `yara_scan_file` call (arguments, hash, time), used by
   `cache_status` and the REST `/cache/*` routes. Results over 4 MiB are replaced by a size note. The total is bounded
-  (256 MiB by default).
+  (256 MiB by default), and only the newest 100 rows are kept per file content (130 `analyze_file` calls on one file
+  leave 100 rows in the `cache_status` statistics).
 
 Where it lives:
 
@@ -1697,7 +1837,8 @@ What this server does and does not do.
   and 2023. Nothing is fetched. There is no CVE check for Java libraries or native binaries. Use `npm audit`,
   `pip-audit` or OSV for real coverage.
 - **Signatures.** Signature checks report what is present. A missing verifier gives "Not checked", and Java
-  signature files are listed, not verified.
+  signature files are listed, not verified. A detached `.sig` or `.asc` file is used only if it is a regular file of
+  at most 16 MiB and, on a rooted server, not a link that leaves the roots; the section then names the reason.
 - **Bounded work.** Sizes, counts and time are capped: results by `max_output_bytes`; string scans by count and
   bytes (a file with millions of strings keeps exact counts but a bounded list); disassembly to a bounded part of a
   large file (the rest is decoded on request); archives and packages by entry count, bytes read and decompressed
