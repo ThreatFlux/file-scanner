@@ -17,25 +17,35 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   2026-07-28 are negotiated. The server reports its name, version, title and usage instructions, tools carry titles
   and read-only annotations, and input schemas are generated from the request types and reject unknown arguments.
 - Overview-first analysis. `analyze_file` with only a path returns a small overview (type, hashes, headline facts,
-  the most telling strings) and `next_steps` that name the next call. A directory path returns a paged triage table
-  (`recursive`, `max_files`, `offset`, `limit`). Sections, flags and `all: true` return per-section summaries; each
-  full section is cached by SHA-256 for later drill-down. New sections `call_graph` and `taint`, and an `arch`
-  argument that picks the slice of a universal Mach-O for every per-slice section; an unknown slice name is an error
-  that lists the slices present.
+  the most telling strings) and `next_steps` that name the next call, as `{tool, arguments, gives}` objects with real
+  arguments (a few answers use `why`, or a sentence, instead of `gives`). A directory path returns a paged triage
+  table (`recursive`, `max_files`, `offset`, `limit`). Sections, flags and `all: true` return per-section summaries;
+  each full section is cached by SHA-256 for later drill-down. New sections `call_graph` and `taint`, and an `arch`
+  argument that picks the slice of a universal Mach-O for every per-slice section. Slices are named `x86_64`,
+  `arm64e` and `arm64-subtype-12`; `arm64` works when exactly one slice is ARM64-family; an unknown name is an error
+  that lists the slices present. The overview offers only what applies: no native sections or `disassemble` step for
+  a Java class file, no `inspect_archive` step for a gzip stream that is not a tar, and the x86-only sections are
+  listed under `not_applicable` for ARM code, with a hint to pass `arch: "x86_64"` when such a slice exists.
 - 11 new tools (the server had six: `analyze_file`, `llm_analyze_file`, `yara_scan_file`, `analyze_java_file`,
   `analyze_npm_package` and `analyze_python_package`):
   - `query_analysis` pages and filters the lists of any section (strings by text, regex, category or encoding;
     symbols, imports, functions, findings, call-graph edges, taint flows, and more).
   - `disassemble` lists one function or address range (it works on an ELF, a thin Mach-O, or one slice of a
-    universal Mach-O); `read_hex` reads raw bytes at any offset (negative counts from the end); `compare_files`
-    compares two files.
+    universal Mach-O). It finds a function by any name in the symbol table, also beyond the first 5,000 grouped
+    functions, and its function list says when it holds only part of them. Code outside the stored window is decoded
+    again and the answer carries `cache: "partial"`. `read_hex` reads raw bytes at any offset (negative counts from
+    the end); `compare_files` compares two files.
   - `search_strings` and `string_details` search strings in one file or across every file indexed in the session.
-  - `analyze_document` (PDF structure, JavaScript, launch actions, embedded files; Office macros, auto-exec entry
-    points, keywords), `analyze_script` (shell, PowerShell, JavaScript, Python, batch, VBScript), `inspect_archive`
-    (zip and zip-based formats, tar, tar.gz, RAR 4 and 5, 7z, with risk flags) cover file kinds that had no tool.
+  - `analyze_document` (PDF structure, JavaScript, launch actions, embedded files, up to 5,000 link targets; Office
+    macros, auto-exec entry points, keywords), `analyze_script` (shell, PowerShell, JavaScript, Python, batch,
+    VBScript; `line_from` and `line_to` scan a range again to reach findings beyond the 2,000 kept for a whole
+    file), `inspect_archive` (zip and zip-based formats, tar, tar.gz, RAR 4 and 5, 7z, with risk flags) cover file
+    kinds that had no tool.
   - `cache_status` and `cache_clear` show and empty the caches on every transport.
 - `analyze_java_file`, `analyze_npm_package` and `analyze_python_package` are rebuilt. The Java tool parses class
-  files and archives and has views for classes, findings, resources, manifest, Android and nested archives. The package
+  files and archives and has views for classes, findings, resources, manifest, Android and nested archives. Nested
+  archives, class containers and `example_classes` are named by their full path from the analyzed file joined with
+  `!` (`a.war!WEB-INF/lib/util.jar`), and `view: "class"` accepts `<container>!<class>` to pick one copy. The package
   tools are offline: source scan with file and line evidence, install scripts, dependency advisories, typosquatting;
   they accept tarballs, wheels, zips, directories and lock or requirements files, and page `findings`, `files`,
   `dependencies` and `scripts`.
@@ -44,21 +54,26 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   and `next_offset` (`yara_scan_file` names them `matches_total`, `matches_returned` and `matches_offset`). Answers
   say `cache: hit` or `miss`. Failures are tool errors (`isError: true`) whose message says what to fix.
 - `yara_scan_file` takes rules as text, as `rule_path` (a file or a directory of `.yar`/`.yara` files) or as
-  `builtin`, and has limits (`max_matches_per_rule`, `max_rules_per_file`, `max_files`, `timeout_seconds`, paging).
+  `builtin`, and has limits (`max_matches_per_rule`, `max_rules_per_file`, `max_files`, `timeout_seconds`, each at
+  least 1, and paging).
   Results include tags, metadata, matched strings with offsets and per-rule hit counts; whatever was cut is named
-  under `limits_reached`. The command-line `yara-scan` gains `--max-files` and `--timeout`, and `--rule` accepts a
+  under `limits_reached`, and many skipped files give one message with `skipped_total`. A symlinked directory given
+  as `path` is scanned. The command-line `yara-scan` gains `--max-files` and `--timeout`, and `--rule` accepts a
   directory.
 - HTTP safety options: `--host` (default `127.0.0.1`), `--allowed-host` and `--allowed-origin` (repeatable), and
   `--auth-token` (also `FILE_SCANNER_AUTH_TOKEN`), which requires `Authorization: Bearer <token>` on every route
   except `/health`. The startup banner on stderr states the bind address and which protections are active, and
   warns when a non-loopback host is used without a token. The server stops cleanly on SIGINT and SIGTERM.
 - `--allow-root <dir>` (repeatable; also `FILE_SCANNER_ALLOWED_ROOTS`, `:`-separated) on `mcp-stdio`, `mcp-http` and
-  `mcp-sse` confines every tool path to the listed directories. Symlinks and `..` are resolved before the check, and
-  a symlink inside a scanned directory that points outside the roots is refused. FIFOs, sockets and devices are
-  always refused as a path; inside a directory they are skipped and listed as skipped. A leading `~/` is expanded.
+  `mcp-sse` confines every tool path to the listed directories. Symlinks and `..` are resolved before the check. A
+  symlink inside a `yara_scan_file` directory that points outside the roots refuses the call; the `analyze_file`
+  triage table never follows links and counts them under `links_skipped`. FIFOs, sockets and devices are always
+  refused as a path; inside a directory they are skipped and listed as skipped. A leading `~/` is expanded.
 - `--cache-dir <dir>` (also `FILE_SCANNER_CACHE_DIR`) and `--no-cache` on the MCP commands;
   `FILE_SCANNER_CACHE_DISK_MB` and `FILE_SCANNER_SECTION_CACHE_MB` set cache budgets. Section results are also
-  cached on disk, so drill-down survives a server restart. At most `max(4, CPUs)` analyses run at once.
+  cached on disk, so drill-down survives a server restart. At most `max(4, CPUs)` analyses run at once. `--no-cache`
+  keeps no section cache or history, also for `analyze_java_file`; the in-memory string index still fills, and
+  `cache_status` and `cache_clear` say so.
 - Analysis coverage: universal (fat) Mach-O files are analyzed on one slice and list all slices; Authenticode
   tables, ad-hoc Mach-O signatures and detached `.sig`/`.asc` files are recognized; dependencies are grouped by
   library; entropy analysis measures bytes that no section covers; disassembly, control flow, vulnerability and
@@ -81,13 +96,20 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 - `analyze_file` arguments: `hex_dump_size` is at most 4,096 (use `read_hex` for more) and needs `hex_dump: true`;
   `hex_dump_offset` accepts a negative value; `min_string_length` is at most 4,096; unknown arguments are rejected.
   `llm_analyze_file` returns sha256, file type, architecture and a packed flag; `token_limit` is an enforced budget
-  in characters; `hex_pattern_size` must be 1 to 1,024.
+  in characters, and `truncated.how` names the limit that cut the answer (`max_output_bytes` or `token_limit`);
+  `hex_pattern_size` must be 1 to 1,024.
 - Threat results are calmer. `threats` reports the YARA matches the engine computes (tags, metadata, matched
   strings and offsets) instead of a three-rule substring check; `enhanced_threats` keeps the engine's generic
   findings under `enhanced_analysis`, so ordinary programs and documents are no longer rated Suspicious or
   Malicious because of them. Behavioral analysis searches all strings, not the first 1,000, and no longer rates
-  ordinary URLs as command and control. Weak vulnerability rules are counted in `pattern_counts` instead of listed,
-  and use-after-free, double-free and format-string call rules report Low severity.
+  ordinary URLs as command and control. A rule match whose strings are all under 4 bytes or a padding run, or whose
+  text-file match only describes a technique in words, is listed with `evidence_strength: weak` and an
+  `evidence_reason` and adds no classification or level, so ordinary files (vim, Node.js, Markdown documentation,
+  binaries with padding) are no longer rated Suspicious or Critical. The built-in rules `backdoor_patterns`,
+  `anti_analysis` and `ransomware_indicators` match less broadly, and `update_lookalike_domain`,
+  `self_announcing_evasion` and `hardcoded_xor_key` are new, so the simulated samples in `test_programs` still rate
+  Suspicious or Malicious. Weak vulnerability rules are counted in `pattern_counts` instead of listed, and
+  use-after-free, double-free and format-string call rules report Low severity.
 - Entropy and signatures are less alarmist and more honest: ordinary binaries are no longer called likely encrypted,
   a verified compression header is needed to exempt a debug section, a missing signature verifier reports "Not
   checked", and PE files with a certificate table report "Present, not verified".
@@ -99,24 +121,32 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 - Errors. Failed tool calls are tool errors with the cause in the text (a YARA compile error carries the compiler's
   message, line and column); an unknown tool is JSON-RPC `-32602`. A panic in one analyzer fails only that section;
   the release profile no longer uses `panic = "abort"`.
-- `mcp-stdio` writes only JSON-RPC to stdout, exits 0 when stdin closes, and expects one JSON object per line.
+- `mcp-stdio` writes only JSON-RPC to stdout, exits 0 when stdin closes (after up to 5 seconds for calls that are
+  still running; a call that is not done by then gets no answer and one line on stderr), and expects one JSON object
+  per line.
   Requests before `initialize` need the 2026-07-28 request metadata (`ping` is answered on a connection that has not
   used it). Over HTTP, a 2026-07-28 request also needs the `MCP-Protocol-Version`, `Mcp-Method` and, for `tools/call`,
   `Mcp-Name` headers. JSON-RPC batches are not accepted.
-- `mcp-sse` is a deprecated alias of `mcp-http` and prints a notice. The SSE transport and the `/sse` route are
-  gone. What to change: point SSE clients at `http://host:port/mcp`.
 - REST helper routes: `/api/info` lists exactly the routes that exist and a real uptime; `/health` reports
   `transports: ["streamable-http"]` and the package version; `POST /tools/call` answers success, tool failure and
   unknown tool with one body shape (`resultType`, `content`, `isError`); failures are `{"error": ...}` JSON.
-  `POST /cache/search` filters on `file_path_pattern`, not `file_path`.
+  `POST /cache/search` filters on `file_path_pattern`, not `file_path`. `POST /cache/clear` clears the analysis
+  history, the cached sections (in memory too), the tracked strings and the Java tool's in-memory results, and takes
+  `?scope=all|analysis|strings`.
 - Package tools. Registry names (`express`, `requests==2.5.0`) are rejected with an offline message; pass a local
   file. Mainstream packages are no longer flagged as typosquats of themselves or labelled malicious. Known-malicious
-  names are Critical on their own; compromised releases of legitimate packages are matched by name and version.
-  Every result states its advisory data (a small offline table: 6 npm packages, 7 PyPI packages) and that an empty
-  list is not a clean bill of health. Packages that were not read in full are never rated Safe.
-- Archive and Java results: archive risk is `unknown` instead of `low` when the listing is unavailable or capped;
-  signing is reported as "signature files present, not verified"; `classes.dex` is reported as not parsed; the
-  archive kind is decided from content, not the file name.
+  names are Critical on their own; compromised releases of legitimate packages are matched by name and version, and
+  a dependency on one rates at least High. A suspected typosquat rates at least Medium. A tarball, sdist or zip with
+  a `..`, absolute-path or link entry rates at least High, with one finding per entry. Every result states its
+  advisory data (a small offline table: 6 npm packages, 7 PyPI packages) and that an empty list is not a clean bill
+  of health. Packages that were not read in full are never rated Safe, and a dependency list alone is at least Low.
+- Archive, document and Java results: archive risk is `unknown` instead of `low` when the listing is unavailable or
+  capped, when an archive holds nested archives (named, up to 5, and not opened) or when all entries are encrypted,
+  and `medium` when some are; a possible compression bomb marks its entry, so `risky_only` returns it; the
+  `inspect_archive` summary always carries `entries`, `uncompressed_bytes` and `compression_ratio`, null when not
+  measured. A PDF in which no object could be read is rated at least medium. Signing is reported as "signature
+  files present, not verified"; `classes.dex` is reported as not parsed and an archive with DEX files is rated at
+  least Medium; the archive kind is decided from content, not the file name.
 - Bounded analysis. Parsers for hostile input carry byte, count and time budgets: strings and disassembly are kept
   in bounded form (counts stay exact), archives, packages, PDFs, Office files, Java archives and YARA directory
   scans stop at documented limits and say so. Directory YARA scans share one compiled rule set across a bounded
@@ -148,20 +178,28 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   follows symlinks outside the directory.
 - PDF and Office: the PDF analyzer reports what the file contains instead of constants; macros are found in any VBA
   storage and in OOXML packages; `has_macros` is no longer true for every OLE2 file.
-- Package tools: install scripts that download and run code are rated High or Critical; payloads in `.d.ts` files,
-  after block comments or in template literals are no longer missed; Python metadata is read from PEP 621, Poetry,
-  `setup.py` and `PKG-INFO`; a tarball with a hidden or oversized header is refused.
+- Package tools: install scripts that download and run code are rated High or Critical, also when the code is in a
+  file an install hook runs (`node scripts/setup.js`); download, write and run code (Node `https.get`;
+  Python `urlretrieve`), a download passed to `eval` or `exec`, and credential files
+  or the whole environment sent over the network are High findings when the statements lie close together;
+  payloads in `.d.ts` files, after block comments or in template literals are no longer missed; Python metadata is
+  read from PEP 621, Poetry, `setup.py` and `PKG-INFO`; a tarball with a hidden or oversized header is refused.
 - Java: analysis of tiny crafted class files, manifests and archives no longer exhausts memory; a JAR with leading
   bytes opens; a class file followed by a JAR is no longer reported clean.
 - `analyze_file` with `code_quality` or `all: true` completes on binaries with extreme metrics (the Go samples).
-- `POST /cache/clear` also empties the in-memory section cache. The cache is no longer truncated when a stdio
-  session ends, and symlinks planted in the cache directory are not followed.
+- The cache is no longer truncated when a stdio session ends, and symlinks planted in the cache directory are not
+  followed.
 - Remediate the eleven confirmed runtime findings with a pinned Wolfi glibc 2.44 runtime and patched static zlib
   1.3.2. Backport upstream's nonblocking gzip security fix into stable libz-sys; verify it with AddressSanitizer and
   a source guard rather than relying only on package-version scans.
 - Dismiss sixteen verified false positives with both-platform/source evidence. Preserve complete all-severity
   container reports, verify exact image identity and application inventories, scan both published architectures, and
   fail the security gate on any reported vulnerability.
+
+### Deprecated
+
+- `mcp-sse` is a deprecated alias of `mcp-http`: it prints a notice and starts the same server. Use `mcp-http` and
+  point SSE clients at `http://host:port/mcp`.
 
 ### Removed
 

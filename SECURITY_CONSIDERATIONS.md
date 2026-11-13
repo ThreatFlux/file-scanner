@@ -112,8 +112,9 @@ and paths from the analyzed files.
   `$XDG_CACHE_HOME/file-scanner`, `~/Library/Caches/file-scanner` (macOS) or `~/.cache/file-scanner`.
 - Move it with `--cache-dir` or `FILE_SCANNER_CACHE_DIR`. Turn it off with `--no-cache`: no section cache or history is
   kept, on disk or in memory (the in-memory string index still fills while the server runs).
-- The `cache_clear` tool, `POST /cache/clear` and deleting the directory remove it. The on-disk size is
-  bounded (see `FILE_SCANNER_CACHE_DISK_MB`).
+- The `cache_clear` tool, `POST /cache/clear` and deleting the directory remove it. The tool and the route also
+  empty the in-memory string index and the Java tool's in-memory results. The on-disk size is bounded (see
+  `FILE_SCANNER_CACHE_DISK_MB`).
 - If the directory cannot be used, the server says so on stderr and keeps results in memory.
 
 If you analyze files that are confidential, put the cache on an encrypted volume, or use `--no-cache`.

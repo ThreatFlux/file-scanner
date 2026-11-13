@@ -231,8 +231,10 @@ Design rules every tool follows:
   SHA-256 and returned as summaries; `query_analysis` pages the items. `all: true` runs everything once and still
   returns summaries only.
 - Every tool takes `max_output_bytes` (default 80,000, ceiling 400,000). Output is compact JSON; anything cut is
-  named in the answer (`truncated`, `hint` or `note`). Lists page with `offset` and `limit`; most answers carry
-  `total`, `returned` and `next_offset`, with per-tool field names (see `docs/MCP.md`, Paging).
+  named in the answer: a cut page has `hint` and `next_offset`, a cut `disassemble` listing has `note` and
+  `next_address`, section summaries reduced to counts have `note`, and `compare_files` and `llm_analyze_file` list
+  the cut under `truncated`. Lists page with `offset` and `limit`; most answers carry `total`, `returned` and
+  `next_offset`, with per-tool field names (see `docs/MCP.md`, Paging).
 - Answers that can come from the cache carry `cache: hit | miss`.
 - Input schemas reject unknown fields. Failures are tool errors (`isError: true`) whose message names the fix.
 - All tools are read-only except `cache_clear`. Nothing is executed.
@@ -288,12 +290,19 @@ curl http://127.0.0.1:3000/api-docs/openapi.json
 Offline analysis of a local npm package (`.tgz`, directory, `package.json`, `package-lock.json`). Nothing is
 downloaded; a registry name is rejected with a message that says to run `npm pack`.
 
-- Source scan (`package_scan.rs`): up to 400 files, 1 MiB each, 16 MiB in all, for download-and-execute, decoded
-  `eval`, credential and wallet access, exfiltration endpoints, miners, reverse shells and obfuscation, with file and
-  line evidence.
+- Source scan (`package_scan.rs`): up to 400 files, 1 MiB each, 16 MiB in all, for download-and-execute (shell
+  one-liners and Node or Python download, write and run code), decoded `eval`, a download passed to `eval` or `exec`,
+  credential and wallet access, credential files or the whole environment sent over the network, exfiltration
+  endpoints, miners, reverse shells and obfuscation, with file and line evidence. The multi-line checks need the
+  statements within 60 lines of each other (8 for the environment) and skip lines over 1,000 characters.
 - Install hooks (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) are judged by their command string
-  (for example a download piped to a shell). The tool does not follow a hook into the script it runs: a hook that runs
-  a JavaScript file is judged by that file only through the ordinary source scan.
+  (for example a download piped to a shell) and also by the file they run. A file named by a hook (`node
+  scripts/setup.js`, `sh setup.sh`, `./setup.sh`, also after `&&`) is install-time code: its High findings set
+  `install_scripts.dangerous_commands` and add a risk reason such as `an install-time script runs suspicious code:
+  ... (preinstall runs scripts/setup.js)`. The tool reads the runner from the command. A runner such as `npx`, a
+  file reached only through `require()`, and a download in one file that is run from another are not followed.
+- Risk floors: a dependency on a known malicious release is at least High; a suspected typosquat is at least Medium;
+  a tarball or zip with a `..`, absolute-path or link entry is at least High (category `unsafe-path`).
 - Typosquatting check against a popular-package list; a popular package is never a typosquat of itself.
 - Advisories: `src/npm_vuln_db.rs` holds a small table (6 packages: event-stream, ua-parser-js, node-ipc, colors,
   lodash, minimist) matched by semver range. Every result states the table's date and size. An empty list means "not

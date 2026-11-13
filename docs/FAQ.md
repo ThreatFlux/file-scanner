@@ -233,8 +233,8 @@ it. See [MCP.md](MCP.md#the-cache).
 
 ### Answers are cut off or the client complains about output size
 
-Every answer is capped at `max_output_bytes` (default 80,000). Look for `truncated`, `returned` and `next_offset`,
-page with `offset`, narrow with `filter`, or raise `max_output_bytes` (ceiling 400,000).
+Every answer is capped at `max_output_bytes` (default 80,000). Look for `truncated`, `hint`, `note`, `returned` and
+`next_offset`, page with `offset`, narrow with `filter`, or raise `max_output_bytes` (ceiling 400,000).
 
 ## Security Concerns
 

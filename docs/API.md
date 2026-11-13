@@ -175,7 +175,7 @@ one is set. Only `/health` is open without the token.
 | `/tools/list` | POST | The tool list in an envelope: `{"jsonrpc", "result": {"tools": [...]}}`. |
 | `/tools/call` | POST | Call one tool; returns the bare result. Body: `{"name": "...", "arguments": {...}}`. |
 | `/cache/stats`, `/cache/list` | GET | What the analysis cache holds. |
-| `/cache/search`, `/cache/clear` | POST | Search the cache; empty it. |
+| `/cache/search`, `/cache/clear` | POST | Search the cache; empty it (`?scope=all\|analysis\|strings`, default all). |
 | `/strings/stats` | GET | Statistics of the tracked strings. |
 | `/strings/search`, `/strings/details`, `/strings/related`, `/strings/filter` | POST | Query the string index. |
 
