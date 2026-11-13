@@ -175,9 +175,9 @@
   "token_source_inventory": {
     "src/entropy_analysis.rs": "0ed6bac8809e04a046e8627cf1d8bdbbc9afaded17abcab5dc31b49d75c58a93",
     "src/java_analysis.rs": "09b146487001962f5aee03a3e2e5b5ab292a5abd541fdbfed416229044d4f836",
-    "src/mcp_server/tools_analyze.rs": "8d4ce4c0208abeaebb78204cc515873538371628f17dc2939a11b32dc23cb7cc",
+    "src/mcp_server/tools_analyze.rs": "7787a5f24f9cc4c9e66ad3f2d01176fbaaa8bd08a97693338fa22afcf8d5d5b7",
     "src/pdf_analysis.rs": "c740b874c3d70a974aeb9edf2de79521f1d1d9177851887b5404874a23e8fc2d",
-    "src/signature.rs": "8bb6a21a6710090810c7511b7f260b8dfb1095db8996f53055fe4d4322ffe678",
+    "src/signature.rs": "fb9c7ed2eb6fbe682df43a8682e49df1618ab5c9d3b9a97ea7d7812263b3f948",
     "tests/binary_formats_test.rs": "3559346ac6ac9c5553292cf20d502e25e30e2bbf55e25e437185273a26bff30f",
     "tests/java_analysis_test.rs": "b2188807dce8292680720c03d61162f5663edb8c1f47a99d61681f25aeb32bf5",
     "tests/pdf_analysis_test.rs": "4192eca28de9f953c215fe2f47b7e4b2c8a6aaa7d41be6ec4f01783347f8f943",

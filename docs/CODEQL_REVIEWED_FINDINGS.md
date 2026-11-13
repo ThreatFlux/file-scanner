@@ -84,6 +84,17 @@ that `analyze_file` copies into its answer, and the tests of those. None of
 these files imports YARA-X, and none consumes a YARA-X certificate, thumbprint
 or TLSH value. The nine exact reviewed result tuples are unchanged.
 
+The 2026-11-13 MCP hardening round changes two first-party files in the token
+inventory and no vendored source: `src/signature.rs` and
+`src/mcp_server/tools_analyze.rs`. The matching lines were read: they are the
+scanner's own `SignatureInfo.certificate_chain` and `CertificateInfo` report
+types, the PE certificate-table lookup that decides whether to ask an external
+verifier, the chain built from `codesign` authority names, the
+`certificate_chain` field that `analyze_file` copies into its answer, and the
+tests of those. Neither file imports YARA-X, and neither consumes a YARA-X
+certificate, thumbprint or TLSH value. The nine exact reviewed result tuples are
+unchanged.
+
 The historical API fixture `scripts/codeql-reviewed-findings-fixture.sarif` and
 compressed CLI evidence `scripts/codeql-reviewed-findings-raw-25c41d9.sarif.gz`
 remain byte-for-byte intact. They describe 1.21.0 and are **not** fresh 1.22.0
