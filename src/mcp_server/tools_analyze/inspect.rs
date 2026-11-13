@@ -1551,10 +1551,7 @@ mod tests {
             &json!({}),
         )
         .unwrap_err();
-        assert!(
-            err.contains("45000 instructions in 0x1000..0xbfc7"),
-            "{err}"
-        );
+        assert!(err.contains("45000 rows in 0x1000..0xbfc7"), "{err}");
     }
 
     /// A function that is only in the symbol table (the analyzer groups the
