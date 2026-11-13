@@ -947,7 +947,21 @@ impl ServerState {
     /// hashed is hashed again (a later edit could keep its timestamp). Any
     /// difference means the file is hashed again, and the same content still
     /// finds its cached sections because they are keyed by the hash.
+    ///
+    /// With allowed roots the path first goes through
+    /// [`Self::resolve_path`] (same refusals, same text), so a rooted state
+    /// never reads, and never reveals the hash of, a file outside its roots or
+    /// a link leaving them.
     pub async fn file_sha256(&self, path: &Path) -> Result<String, String> {
+        let resolved;
+        let path = if self.policy.roots().is_empty() {
+            path
+        } else {
+            resolved =
+                self.policy
+                    .resolve(&path.to_string_lossy(), "File", super::paths::Expect::File)?;
+            resolved.as_path()
+        };
         let stamp = FileIdentity::stat(path);
         if let Some(stamp) = &stamp {
             let known = self.identities().get(path).cloned();

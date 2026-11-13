@@ -611,3 +611,85 @@ async fn the_library_entry_points_refuse_what_the_registered_tools_refuse() {
     assert!(server.analyze_file(request).await.is_ok());
     client.cancel().await.unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_last_library_entry_points_refuse_what_the_registered_tools_refuse() {
+    use file_scanner::mcp_server::{
+        JavaAnalysisRequest, LlmFileAnalysisRequest, ServerState, StateConfig,
+    };
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let outside_path = outside.path().canonicalize().unwrap();
+    let cache = TempDir::new().unwrap();
+    let state = std::sync::Arc::new(ServerState::new(StateConfig {
+        cache_dir: cache.path().to_path_buf(),
+        allow_roots: vec![root_path.clone()],
+        ..StateConfig::default()
+    }));
+    let server = FileScannerMcp::with_state(std::sync::Arc::clone(&state));
+    let client = rooted_client(&root_path).await;
+
+    let secret = write(&outside_path, "secret.bin", b"SECRET_BYTES and more text\n");
+    let inside_file = write(&root_path, "ok.bin", b"inside file with some text\n");
+    let link_file = root_path.join("link.bin");
+    std::os::unix::fs::symlink(&secret, &link_file).unwrap();
+
+    for target in [&secret, &link_file] {
+        let raw = target.to_string_lossy().into_owned();
+
+        let request: LlmFileAnalysisRequest =
+            serde_json::from_value(json!({"file_path": raw})).unwrap();
+        let library = server
+            .llm_analyze_file(request)
+            .await
+            .err()
+            .expect("refused");
+        let tool = tool_error_text(&client, "llm_analyze_file", json!({"file_path": raw})).await;
+        assert_eq!(library, tool);
+
+        let request: JavaAnalysisRequest =
+            serde_json::from_value(json!({"file_path": raw})).unwrap();
+        let library = server
+            .analyze_java_file(request)
+            .await
+            .err()
+            .expect("refused");
+        let tool = tool_error_text(&client, "analyze_java_file", json!({"file_path": raw})).await;
+        assert_eq!(library, tool);
+
+        // The hash primitive of the state refuses the same way.
+        let library = state.file_sha256(target).await.expect_err("refused");
+        let tool = tool_error_text(&client, "analyze_file", json!({"file_path": raw})).await;
+        assert_eq!(library, tool);
+    }
+
+    // Inside the root both still work (a text file is not a Java file, but
+    // the refusal is the Java parser's, not the roots').
+    let request: LlmFileAnalysisRequest =
+        serde_json::from_value(json!({"file_path": inside_file})).unwrap();
+    let digest = server
+        .llm_analyze_file(request)
+        .await
+        .expect("inside works");
+    assert_eq!(digest.0.file_size, 27);
+    let request: JavaAnalysisRequest =
+        serde_json::from_value(json!({"file_path": inside_file})).unwrap();
+    if let Err(message) = server.analyze_java_file(request).await {
+        assert!(!message.contains("allowed roots"), "{message}");
+    }
+    assert_eq!(state.file_sha256(&inside_file).await.unwrap().len(), 64);
+
+    // Without roots nothing changes: the outside file is read.
+    let open = FileScannerMcp::new();
+    let request: LlmFileAnalysisRequest =
+        serde_json::from_value(json!({"file_path": secret})).unwrap();
+    assert!(open.llm_analyze_file(request).await.is_ok());
+    let unrooted = ServerState::new(StateConfig {
+        cache_dir: cache.path().to_path_buf(),
+        ..StateConfig::default()
+    });
+    assert_eq!(unrooted.file_sha256(&secret).await.unwrap().len(), 64);
+    client.cancel().await.unwrap();
+}

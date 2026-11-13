@@ -1,7 +1,9 @@
 //! `analyze_java_file`: an overview of a Java archive or class file, then paged
 //! drill-down into classes, dangerous-API findings, resources and single classes.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
 use rmcp::{
@@ -275,7 +277,7 @@ impl FileScannerMcp {
         &self,
         request: JavaAnalysisRequest,
     ) -> Result<Json<JavaAnalysisResult>, String> {
-        let path = PathBuf::from(&request.file_path);
+        let path = self.confine_library_path(&request.file_path, "File", Expect::File)?;
         if !path.exists() {
             return Err(format!("File does not exist: {}", request.file_path));
         }

@@ -19,7 +19,9 @@ use crate::{
     entropy_analysis::analyze_entropy,
     hash::calculate_all_hashes,
     hexdump::{generate_hex_dump, HexDumpOptions},
-    mcp_server::{output::strip_nulls, tools_formats::detect_file_kind, FileScannerMcp},
+    mcp_server::{
+        output::strip_nulls, paths::Expect, tools_formats::detect_file_kind, FileScannerMcp,
+    },
     strings::{extract_strings, ExtractedStrings},
 };
 
@@ -612,6 +614,11 @@ impl FileScannerMcp {
         &self,
         request: LlmFileAnalysisRequest,
     ) -> Result<Json<LlmFileAnalysisResult>, String> {
+        let mut request = request;
+        request.file_path = self
+            .confine_library_path(&request.file_path, "File", Expect::File)?
+            .to_string_lossy()
+            .into_owned();
         let digest = self
             .llm_digest_within(&request, crate::mcp_server::output::MAX_OUTPUT_BYTES)
             .await?;
