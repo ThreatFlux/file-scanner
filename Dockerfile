@@ -10,8 +10,13 @@
 # Refresh with: docker buildx imagetools inspect <image>
 # Dependabot tracks both image references. See docs/security for fix evidence.
 
-# rust 1.99.1 on Debian 13 (trixie); multi-arch index digest
-FROM rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS rust-base
+# rust 1.100.0 on Debian 13 (trixie); multi-arch index digest
+FROM rust:1.100.0-trixie@sha256:e19840879045c951c905d0eaa9887f3439c62000e429963371b376bac8d38c31 AS rust-base
+
+# Install every requested component before the nonroot builder enters the repo.
+ENV RUST_VERSION=1.100.0
+RUN rustup component add --toolchain 1.100.0 clippy rustfmt llvm-tools-preview && \
+    rustc --version | grep -q '^rustc 1[.]100[.]0 '
 
 ARG VERSION=0.3.5
 ARG BUILD_DATE=unknown

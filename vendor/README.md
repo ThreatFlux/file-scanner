@@ -8,7 +8,7 @@ changes the actual parent requirements instead of forcing lockfile transitives.
 - Official archive SHA256: `e8a5ff1e1bb43734cc68f3ddc94646c9740c8c559d38fae559f0c79076f801db`.
 - Verified against [the official sparse index](https://index.crates.io/ya/ra/yara-x) on 2026-11-12.
 - Upstream commit: [`afe4585b12f56c698794dc80b3d28ddb87b56c0a`](https://github.com/VirusTotal/yara-x/tree/afe4585b12f56c698794dc80b3d28ddb87b56c0a/lib).
-- The BSD-3-Clause license is retained from that exact upstream commit (the crate archive omits it); SHA256 df05444c9178e662fa28810d94a1fa6ec32d7be798241c98094213317265880. Upstream source/build assets are preserved.
+- The BSD-3-Clause license is retained from that exact upstream commit (the crate archive omits it); SHA256 `fdf05444c9178e662fa28810d94a1fa6ec32d7be798241c98094213317265880`. Upstream source/build assets are preserved.
 - [Exact local diff](yara-x-1.23.0.patch): stable RSA 0.10 with its newly required
   `pkcs1v15` feature, Wasmtime 50.0.1, current `rsa::PublicKey` aliases, and the
   independent OpenSSL signature regression retained from the previous patch.
@@ -49,7 +49,7 @@ and the equivalent `as_chunks` pattern iteration. The active root patch is
 removed; the historical source and exact diff below remain for provenance.
 Hosted archive, native and security checks validate the registry replacement.
 
-The latest published `threatflux-binary-analysis` 0.3.1 requires ZIP 8.6.0,
+The then-current published `threatflux-binary-analysis` 0.3.1 required ZIP 8.6.0,
 which is reported by RustSec advisories RUSTSEC-2026-0367, RUSTSEC-2026-0368 and
 RUSTSEC-2026-0369. The root patch uses the exact published crate with ZIP 9.0.5
 and the small necessary API migration. No additional advisory exceptions are

@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Consolidate dependency updates on Rust 1.99.1, refresh stable crate/tool/container
+- Consolidate dependency updates on Rust 1.100.0, refresh stable crate/tool/container
   pins and migrate archive readers to ZIP 9's fallible filename API.
+- Update the reviewed MCP SDK pin to 3.10.0, including its tool-schema dependency
+  property-name fix, while retaining the existing transport and server behavior.
 - Replace deprecated `serde_yaml`/unmaintained `unsafe-libyaml` with maintained
   `serde-saphyr` 2.0.0 under the existing source alias. YAML data remains compatible;
   emitted formatting may differ.

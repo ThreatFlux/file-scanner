@@ -132,10 +132,11 @@ Then switch the repository to trusted publishing:
 
 ## Container image
 
-The `Dockerfile` builds on `rust:1.99.1-trixie` and runs on
-`gcr.io/distroless/cc-debian13:nonroot` (both pinned by digest) as uid 65532
-under `tini`. The runtime has no shell or package manager, so pass scanner
-arguments straight to the container:
+The `Dockerfile` builds on the pinned official `rust:1.100.0-trixie` image.
+Requested Rust components are installed as root and the exact compiler version
+is asserted before the nonroot build. The pinned minimal Wolfi
+glibc runtime runs as uid 65532 under `tini`, with no shell or package manager.
+Pass scanner arguments straight to the container:
 
 ```bash
 docker run --rm -v /path/to/files:/data:ro ghcr.io/threatflux/file-scanner /data/file.bin --format json
