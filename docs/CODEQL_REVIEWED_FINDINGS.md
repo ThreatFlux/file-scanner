@@ -67,6 +67,17 @@ from 49.0.4 to 49.0.5 and the reviewed dependency version. The inventoried
 YARA-X algorithm, certificate, and crypto caller sources are unchanged; their
 source hashes and the nine exact reviewed result tuples remain the same.
 
+The 2026-11-12 MCP server rebuild changes seven first-party files in the token
+inventory and no vendored source. `src/entropy_analysis.rs`,
+`src/mcp_server/tools_analyze.rs` and `tests/binary_formats_test.rs` enter it,
+and `src/mcp_server.rs` leaves it. The matching lines were read: they are the
+scanner's own `Certificate` and `CertificateInfo` report types in the Java, PDF
+and signature analyzers, the PE certificate-table bounds check that decides
+whether the entropy analysis measures that region, the `certificate_chain` field
+that `analyze_file` copies into its answer, and the tests of those. None of
+these files imports YARA-X, and none consumes a YARA-X certificate, thumbprint
+or TLSH value. The nine exact reviewed result tuples are unchanged.
+
 The historical API fixture `scripts/codeql-reviewed-findings-fixture.sarif` and
 compressed CLI evidence `scripts/codeql-reviewed-findings-raw-25c41d9.sarif.gz`
 remain byte-for-byte intact. They describe 1.21.0 and are **not** fresh 1.22.0
