@@ -73,9 +73,14 @@ and is shared by every server that uses that directory, so a rooted server can s
 unrestricted one. The rooted server shows only entries whose stored path is inside its roots:
 
 - Filtered: `cache_status` `list` and `search`, `search_strings` without `file_path`, `string_details`, and over HTTP
-  `/cache/list`, `/cache/search`, `/strings/search`, `/strings/details`, and the string values listed by
-  `/strings/stats` and `/strings/filter`. An entry that no longer resolves inside a root (for example a file replaced
-  by a link that leaves the root) is left out.
+  `/cache/list`, `/cache/search`, `/strings/search`, `/strings/details`, `/strings/related`, and the string values
+  listed by `/strings/stats` and `/strings/filter`. An entry that no longer resolves inside a root (for example a file
+  replaced by a link that leaves the root) is left out.
+- Printed canonically: the rows of `cache_status` `list` and `search` and of `/cache/list` and `/cache/search` show
+  each file's canonical path (symlinks and `..` resolved) in `file_path` and `tool_args`, so a file that another
+  server stored as `<dir>/outside/../in/a.bin` is listed as `<dir>/in/a.bin` and the name of a directory outside the
+  roots does not appear. `file_path_pattern` matches the printed path. A path argument such as the `rule_path` of
+  `yara_scan_file` that lies outside the roots is shown as `<outside the allowed roots>`.
 - Not filtered: counts and sizes. `cache_status` `stats`, `/cache/stats`, and the totals and distributions of
   `/strings/stats` and `/strings/filter` count entries of files outside the roots too. They name no path and no
   string, but they do tell a client how much the history holds.

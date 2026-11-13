@@ -236,7 +236,13 @@ Design rules every tool follows:
   the cut under `truncated`. Lists page with `offset` and `limit`; most answers carry `total`, `returned` and
   `next_offset`, with per-tool field names (see `docs/MCP.md`, Paging).
 - `next_steps` entries, in every tool that has them, are `{tool, arguments, gives}` objects (no `why`, no plain
-  strings); advice that is not a call goes in `hint` or `summary.notes`.
+  strings); advice that is not a call goes in `hint` or `summary.notes`. The overview offers only steps that work:
+  `analyze_script` for shell, PowerShell, JavaScript, Python, batch and VBScript (decided by the shebang, then the
+  extension; no step for Perl, Ruby, PHP, Lua or AWK), no `inspect_archive` when `format_details.archive.error` is set,
+  and both package steps for a `.tar.gz` and a `.tgz`. Under a small `max_output_bytes` a step is kept whole or
+  dropped (the overview lists the drop as `truncated.cut` path `/next_steps`; an `analyze_file` answer reduced to
+  counts says so only in `note`); the top-level `file_path`, `package_path` or `path` echo is shortened only as a last
+  resort. Section answers spell a slice `arm64-subtype-12`, like the overview.
 - Answers that can come from the cache carry `cache: hit | miss` (`partial` for a section set that was partly
   stored, and for `disassemble` code outside the stored window).
 - Input schemas reject unknown fields. Failures are tool errors (`isError: true`) whose message names the fix.
@@ -248,7 +254,9 @@ Design rules every tool follows:
 - Analysis history: one file per file hash (bounded in bytes and entries, LRU), read by `cache_status` and the REST
   `/cache/*` routes. Every server that uses the same cache directory shares it. With `--allow-root`, `cache_status`
   `list` and `search`, `search_strings`, `string_details`, `/cache/list`, `/cache/search` and `/strings/*` show only
-  entries of files inside a root; counts and sizes (`cache_status` `stats`, `/cache/stats`, string totals) stay global.
+  entries of files inside a root (`/strings/related` included), and print each row's canonical path in `file_path` and
+  `tool_args`, matched by `file_path_pattern`; counts and sizes (`cache_status` `stats`, `/cache/stats`, string
+  totals) stay global.
 - The threats, enhanced_threats and package section keys carry a revision, so ratings stored by an earlier build are
   recomputed.
 - Location: `--cache-dir`, else `FILE_SCANNER_CACHE_DIR`, else `$XDG_CACHE_HOME/file-scanner`, else
@@ -303,9 +311,14 @@ downloaded; a registry name is rejected with a message that says to run `npm pac
   environment sent over the network, exfiltration endpoints, miners, reverse shells and obfuscation, with file and
   line evidence. The multi-line checks need the statements within 60 lines of each other (8 for the environment) and
   skip lines over 1,000 characters. One named environment variable beside a URL or HTTP call is not a finding. A
-  run is tied to a write only when it names the written variable, field, expression or path literal, or starts a
-  shell, interpreter or `chmod`; a call whose first argument is only a string literal (`spawn('sh', [path])`) is
-  not seen as a run, except a literal `chmod +x` (`exec('chmod +x /tmp/x.sh')`), which is.
+  run is tied to a write when it names the written variable, field, expression or, inside a `+` expression, a path
+  literal, or starts a shell, interpreter or `chmod` held in a variable or joined with `+`. A call whose first argument
+  is only a quoted literal is not seen as a run in JavaScript or in a Python file other than `setup.py`
+  (`spawn('sh', [path])`, `exec('/tmp/agent')`, `subprocess.run(['/tmp/agent'])`), except a literal `chmod +x`
+  (`exec('chmod +x /tmp/x.sh')`). In `setup.py` it is seen when the write names its path as a literal
+  (`urlretrieve(url, '/tmp/agent')` then `subprocess.run(['/tmp/agent'])`, `os.system('./run.sh')`, a shell or
+  interpreter with fixed arguments); `git status`, `ls` and `npm run build` are not tied to a write. See
+  `docs/MCP.md`, `analyze_npm_package`, for the checked cases.
 - Install hooks (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) are judged by their command string
   (for example a download piped to a shell) and also by the file they run. A file named by a hook (`node
   scripts/setup.js`, `sh setup.sh`, `./setup.sh`, also after `&&`, `cd dir &&` or leading `NAME=value` words; an

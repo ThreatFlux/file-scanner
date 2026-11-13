@@ -16,20 +16,25 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 - MCP server on the rmcp SDK over stdio and Streamable HTTP (`/mcp`). Protocol revisions 2024-11-05 through
   2026-07-28 are negotiated. The server reports its name, version, title and usage instructions, tools carry titles
   and read-only annotations, and input schemas are generated from the request types and reject unknown arguments.
-- Overview-first analysis. `analyze_file` with only a path returns a small overview (type, hashes, headline facts,
-  the most telling strings) and `next_steps` that name the next call. Every `next_steps` entry of every tool is a
-  `{tool, arguments, gives}` object with real arguments; advice that is not a call goes in `hint` or `summary.notes`.
-  A directory path returns a paged triage
-  table (`recursive`, `max_files`, `offset`, `limit`). Sections, flags and `all: true` return per-section summaries;
-  each full section is cached by SHA-256 for later drill-down. New sections `call_graph` and `taint`, and an `arch`
-  argument that picks the slice of a universal Mach-O for every per-slice section. Slices are named `x86_64`,
-  `arm64e` and `arm64-subtype-12`; `arm64` works when exactly one slice is ARM64-family; an unknown name is an error
-  that lists the slices present; directory triage rows name them the same way. The overview offers only what
-  applies: no native sections or `disassemble` step for a Java class file, no native `symbols` and `threats` pair or
-  `disassemble` step for a zip, no `inspect_archive` step for a gzip stream that is not a tar, and the x86-only
-  sections are listed under `not_applicable` for ARM code, with a hint to pass `arch: "x86_64"` when such a slice
-  exists. A `.war`, `.ear` or `.aar`, and a zip that the parser reads as a Java archive (for example with `WEB-INF/`
-  entries), is reported as kind `jar` and gets an `analyze_java_file` step.
+- Overview-first analysis. `analyze_file` with only a path returns a small overview (type, hashes, headline facts, the
+  most telling strings) and `next_steps` that name the next call. Every `next_steps` entry of every tool is a `{tool,
+  arguments, gives}` object with real arguments; advice that is not a call goes in `hint` or `summary.notes`. A
+  directory path returns a paged triage table (`recursive`, `max_files`, `offset`, `limit`). Sections, flags and `all:
+  true` return per-section summaries; each full section is cached by SHA-256 for later drill-down. New sections
+  `call_graph` and `taint`, and an `arch` argument that picks the slice of a universal Mach-O for every per-slice
+  section. Slices are named `x86_64`, `arm64e` and `arm64-subtype-12`; `arm64` and `aarch64` pick the slice
+  named `arm64` when the file has one, else the only ARM64-family slice; an unknown name, or `arm64` when several slices
+  are ARM64-family and none is named `arm64`, is an error that lists the slices present; directory triage rows name
+  them the same way.
+  The overview offers only what applies: no native sections or `disassemble` step for a Java class file, no native
+  `symbols` and `threats` pair or `disassemble` step for a zip, no `inspect_archive` step for a gzip stream that is not
+  a tar or for a zip whose central directory cannot be read (`format_details.archive.error`), `analyze_script` only for
+  shell, PowerShell, JavaScript, Python, batch and VBScript files (none for Perl, Ruby, PHP, Lua or AWK), both package
+  steps for a `.tgz` as for a `.tar.gz`, no function or symbol counts for a Java class file and no `symbols` note for a
+  Java archive. The x86-only sections are listed under `not_applicable` for ARM code, with a hint to pass `arch:
+  "x86_64"` when such a slice exists; the steps of section answers spell the slice as the overview does. A `.war`,
+  `.ear` or `.aar`, and a zip that the parser reads as a Java archive (for example with `WEB-INF/` entries), is reported
+  as kind `jar` and gets an `analyze_java_file` step.
 - 11 new tools (the server had six: `analyze_file`, `llm_analyze_file`, `yara_scan_file`, `analyze_java_file`,
   `analyze_npm_package` and `analyze_python_package`):
   - `query_analysis` pages and filters the lists of any section (strings by text, regex, category or encoding;
@@ -61,10 +66,11 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   they accept tarballs, wheels, zips, directories and lock or requirements files, and page `findings`, `files`,
   `dependencies` and `scripts`. For a wheel that ships a `.pth` file with findings, `section: "scripts"` lists them
   under `dangerous_operations`.
-- Output control on every tool: `max_output_bytes` (default 80,000, ceiling 400,000) caps each result, anything cut
-  is named in the answer (`truncated`, `hint` or `note`), and lists page with `offset`, `limit`, `total`, `returned`
-  and `next_offset` (`yara_scan_file` names them `matches_total`, `matches_returned` and `matches_offset`). Answers
-  say `cache: hit` or `miss`. Failures are tool errors (`isError: true`) whose message says what to fix.
+- Output control on every tool: `max_output_bytes` (default 80,000, ceiling 400,000) caps each result, anything cut is
+  named in the answer (`truncated`, `hint` or `note`; a `next_steps` entry is kept whole or dropped, never shortened,
+  and the top-level path echo is shortened only as a last resort), and lists page with `offset`, `limit`, `total`,
+  `returned` and `next_offset` (`yara_scan_file` names them `matches_total`, `matches_returned` and `matches_offset`).
+  Answers say `cache: hit` or `miss`. Failures are tool errors (`isError: true`) whose message says what to fix.
 - `yara_scan_file` takes rules as text, as `rule_path` (a file or a directory of `.yar`/`.yara` files) or as
   `builtin`, and has limits (`max_matches_per_rule`, `max_rules_per_file`, `max_files`, `timeout_seconds`, each at
   least 1, and paging).
@@ -79,13 +85,15 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   `mcp-stdio` exits 0 on both as well, also when the signal comes during the handshake.
 - `--allow-root <dir>` (repeatable; also `FILE_SCANNER_ALLOWED_ROOTS`, `:`-separated) on `mcp-stdio`, `mcp-http` and
   `mcp-sse` confines every tool path to the listed directories. Symlinks and `..` are resolved before the check. A
-  symlink inside a `yara_scan_file` directory that points outside the roots refuses the call; the `analyze_file`
-  triage table never follows links and counts them under `links_skipped`. FIFOs, sockets and devices are always
-  refused as a path; inside a directory they are skipped and listed as skipped. A leading `~/` is expanded. The cache
-  and string tools and routes show only files inside a root (`cache_status` `list` and `search`, `search_strings`,
-  `string_details`, `/cache/list`, `/cache/search` and the `/strings/*` routes); counts and sizes (`cache_status`
-  `stats`, `/cache/stats`, string totals) stay global and name no path. The analysis history is shared by every
-  server that uses the same cache directory, and a rooted server lists only the entries inside its roots.
+  symlink inside a `yara_scan_file` directory that points outside the roots refuses the call; the `analyze_file` triage
+  table never follows links and counts them under `links_skipped`. FIFOs, sockets and devices are always refused as a
+  path; inside a directory they are skipped and listed as skipped. A leading `~/` is expanded. The cache and string
+  tools and routes show only files inside a root (`cache_status` `list` and `search`, `search_strings`,
+  `string_details`, `/cache/list`, `/cache/search` and the `/strings/*` routes, `/strings/related` included); the cache
+  listings print each row's canonical path in `file_path` and `tool_args` and match `file_path_pattern` against it, and
+  a path argument outside the roots (such as a `rule_path`) is shown as `<outside the allowed roots>`; counts and sizes
+  (`cache_status` `stats`, `/cache/stats`, string totals) stay global and name no path. The analysis history is shared
+  by every server that uses the same cache directory, and a rooted server lists only the entries inside its roots.
 - `--cache-dir <dir>` (also `FILE_SCANNER_CACHE_DIR`) and `--no-cache` on the MCP commands;
   `FILE_SCANNER_CACHE_DISK_MB` and `FILE_SCANNER_SECTION_CACHE_MB` set cache budgets. Section results are also
   cached on disk, so drill-down survives a server restart. At most `max(4, CPUs)` analyses run at once. `--no-cache`
@@ -127,9 +135,10 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   Suspicious or Critical. The built-in rules `backdoor_patterns`, `anti_analysis` and `ransomware_indicators` match
   less broadly, and `update_lookalike_domain`, `self_announcing_evasion` and `hardcoded_xor_key` are new, so the
   simulated samples in `test_programs` still rate Suspicious or Malicious. The word `schtasks` alone no longer matches
-  `persistence_mechanisms` (a created task or the word beside a Run key does), a match on hypervisor product names
-  alone is weak, the get-pc and SEH shellcode patterns in a file over 256 KiB are weak, and `backdoor_patterns` also
-  matches a Python reverse shell (`os.dup2(`, `/bin/sh` or `pty.spawn(`, `socket.socket(` and `.connect(` together).
+  `persistence_mechanisms` (a created task, or the word in a file that also names a Run key, does), a match on
+  hypervisor product names alone is weak, the get-pc and SEH shellcode patterns in a file over 256 KiB are weak, and
+  `backdoor_patterns` also matches a Python reverse shell (a file that creates a socket, calls connect, calls dup2 at
+  least once and names the path of `sh` or a pty spawn, all four present).
   The threats and enhanced_threats caches carry a revision, so results from earlier builds are recomputed, and
   `query_analysis` `filter` on those rows also searches the metadata values (`filter: "weak"` finds weak-evidence
   rows). Weak vulnerability rules are counted in `pattern_counts` instead of listed, and use-after-free, double-free
@@ -212,9 +221,10 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   download, write and run code (Node `https.get`; Python `urlretrieve`), a download passed to `eval` or `exec`, a
   decoded payload passed to `exec`, `spawn`, `os.system` or `subprocess`, and credential files or the whole
   environment sent over the network are High findings when the statements lie close together. A run counts only when
-  it starts what was written (the same name, field, expression or path literal, or a shell, interpreter or `chmod`),
-  so an update check beside a generic `spawn(command, args)` runner is not a dropper, and one named environment
-  variable (`process.env.API_URL`, `os.getenv('X')`) beside a URL is not an exfiltration finding;
+  it starts what was written (the same name, field, expression or path literal, or a shell, interpreter or `chmod`; in
+  `setup.py` also a literal temp path, a `./` script, or a shell or interpreter command after a write that names its
+  path as a literal), so an update check beside a generic `spawn(command, args)` runner is not a dropper, and one
+  named environment variable (`process.env.API_URL`, `os.getenv('X')`) beside a URL is not an exfiltration finding;
   payloads in `.d.ts` files, after block comments or in template literals are no longer missed; Python metadata is
   read from PEP 621, Poetry, `setup.py` and `PKG-INFO`; a tarball with a hidden or oversized header is refused.
 - Java: analysis of tiny crafted class files, manifests and archives no longer exhausts memory; a JAR with leading

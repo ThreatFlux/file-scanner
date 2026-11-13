@@ -139,7 +139,10 @@ The server has 17 tools. Start with `analyze_file` and a path: it returns an ove
 
 Every answer is capped (80,000 bytes by default, adjustable with `max_output_bytes`), lists come back in pages, and
 full analysis runs are cached so follow-up calls are fast. Every `next_steps` entry is a `{tool, arguments, gives}`
-call that can be sent as written.
+call that can be sent as written: the overview names `analyze_script` only for shell, PowerShell, JavaScript, Python,
+batch and VBScript files (not Perl, Ruby, PHP, Lua or AWK) and leaves out `inspect_archive` for a zip whose central
+directory cannot be read. At a small `max_output_bytes` a step is kept whole or dropped (the overview lists the drop as
+`/next_steps` in `truncated.cut`); its path is never shortened.
 
 `analyze_script` keeps the first 2,000 findings of a whole file; `line_from` and `line_to` scan a range of lines to
 reach the rest. `mcp-stdio` exits 0 when stdin closes (after up to 5 seconds for calls that are still running) and on

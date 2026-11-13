@@ -195,8 +195,10 @@ curl -s -X POST http://127.0.0.1:3000/tools/call \
 
 REST calls run at most 16 at a time and time out after 120 seconds. The `--allow-root` scope applies to
 them as it does to MCP calls: `/tools/call` refuses paths outside the roots, and `/cache/list`, `/cache/search`,
-`/strings/search`, `/strings/details`, `/strings/filter` and `/strings/stats` show only entries and strings of files
-inside a root. The analysis history is shared by every server that uses the same cache directory, so a rooted server
+`/strings/search`, `/strings/details`, `/strings/related`, `/strings/filter` and `/strings/stats` show only entries and
+strings of files inside a root. The cache routes print each entry's canonical path (symlinks and `..` resolved) in
+`file_path`, in `tool_args` and in any result string equal to the stored path, and `file_path_pattern` matches the
+printed path. The analysis history is shared by every server that uses the same cache directory, so a rooted server
 filters it by stored path. Counts and sizes are not filtered: `/cache/stats` and the totals in `/strings/stats` and
 `/strings/filter` include entries of files outside the roots and name no path. For anything that needs a session or
 streaming, use `/mcp`.
