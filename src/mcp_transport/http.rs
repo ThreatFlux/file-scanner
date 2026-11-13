@@ -815,6 +815,8 @@ impl BoundServer {
 /// Resolves when the process receives SIGINT or SIGTERM (Ctrl-C only, off Unix).
 /// Registers the SIGINT and SIGTERM handlers now (not on first poll) and returns the future
 /// that resolves when either arrives, so a signal sent early is not lost.
+// Keep one signature across platforms; Unix must register handlers before the future is polled.
+#[cfg_attr(not(unix), allow(clippy::manual_async_fn))]
 pub fn arm_shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {
     #[cfg(unix)]
     let streams = {

@@ -1,5 +1,11 @@
 # Reviewed CodeQL false positives
 
+The 2026-11-12 CI repair changes only the ELF library-name fixture construction in
+`tests/binary_formats_test.rs`: its 20,000 entries now borrow one 1 MiB name
+instead of cloning it. The certificate-related tests in that inventoried file
+are unchanged, as are the reviewed vendor sources, call paths and nine findings.
+The file's inventory hash and policy digest were refreshed after reviewing this diff.
+
 CodeQL 2.27.1 originally reported nine results in YARA-X 1.21.0. The
 2026-10-21 dependency rollup explicitly re-reviewed the same nine source contexts
 and their callers in checksum-pinned YARA-X 1.22.0, including its documented

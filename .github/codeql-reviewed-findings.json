@@ -178,7 +178,7 @@
     "src/mcp_server/tools_analyze.rs": "8d4ce4c0208abeaebb78204cc515873538371628f17dc2939a11b32dc23cb7cc",
     "src/pdf_analysis.rs": "c740b874c3d70a974aeb9edf2de79521f1d1d9177851887b5404874a23e8fc2d",
     "src/signature.rs": "8bb6a21a6710090810c7511b7f260b8dfb1095db8996f53055fe4d4322ffe678",
-    "tests/binary_formats_test.rs": "f7dc2a100a17d4cf4074e75b707433d7ca307e479662d439441edf607aa3427b",
+    "tests/binary_formats_test.rs": "3559346ac6ac9c5553292cf20d502e25e30e2bbf55e25e437185273a26bff30f",
     "tests/java_analysis_test.rs": "b2188807dce8292680720c03d61162f5663edb8c1f47a99d61681f25aeb32bf5",
     "tests/pdf_analysis_test.rs": "4192eca28de9f953c215fe2f47b7e4b2c8a6aaa7d41be6ec4f01783347f8f943",
     "tests/signature_test.rs": "fbd98e0f800e12b67b3355ffc453ba6f88bf141c0235fe7cec40c4e172412f2c",

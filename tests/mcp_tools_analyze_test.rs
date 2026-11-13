@@ -1159,23 +1159,25 @@ async fn arch_reaches_the_code_sections_of_a_universal_binary() {
         return;
     }
     let harness = Harness::new().await;
-    let flow = |arch: &'static str| {
+    let flow = |arch: &str| {
         let harness = &harness;
-        async move {
-            harness
-                .err(
-                    "analyze_file",
-                    json!({"file_path": "/bin/ls", "sections": ["control_flow"], "arch": arch}),
-                )
-                .await
-        }
+        let arguments = json!({"file_path": "/bin/ls", "sections": ["control_flow"], "arch": arch});
+        async move { harness.err("analyze_file", arguments).await }
     };
     let x86 = flow("x86_64").await;
     let arm = flow("arm64e").await;
     assert!(!x86.contains("ARM64"), "{x86}");
     assert!(arm.contains("ARM64"), "{arm}");
-    // The names the overview prints are accepted.
-    let printed = flow("ARM64 (subtype 12)").await;
+    // The reported name is accepted. System binaries vary across macOS
+    // versions; this runner's /bin/ls need not contain ARM64 subtype 12.
+    let (info, _) = harness
+        .ok(
+            "analyze_file",
+            json!({"file_path": "/bin/ls", "sections": ["binary_info"], "arch": "arm64e"}),
+        )
+        .await;
+    let printed_arch = info["binary_info"]["analyzed_slice"].as_str().unwrap();
+    let printed = flow(printed_arch).await;
     assert!(printed.contains("ARM64"), "{printed}");
 
     let (x86, _) = harness
@@ -1702,7 +1704,7 @@ async fn arch_picks_the_slice_of_a_fat_macho_built_in_the_test() {
 async fn slice_names_in_the_overview_are_the_names_arch_accepts() {
     let harness = Harness::new().await;
     let dir = TempDir::new().unwrap();
-    // x86_64, ARM64E and "ARM64 (subtype 12)", as /bin/ls has them.
+    // x86_64, ARM64E and "ARM64 (subtype 12)", independent of the host's /bin/ls.
     let three = dir.path().join("three.bin");
     std::fs::write(
         &three,
