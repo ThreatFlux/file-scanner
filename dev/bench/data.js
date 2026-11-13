@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794599177582,
+  "lastUpdate": 1794602925214,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -14055,6 +14055,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
             "value": 262801.16838343313,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8828f69ca29c7476feb7f31774b6f8f97385a717",
+          "message": "fix(mcp): refuse a JSON array body on cache clear and count unsafe archive entries once (#321)\n\n- REST `POST /cache/clear` now refuses any body that is not a JSON object. An array such as `[null]` used to be accepted and cleared the whole cache; it now gets a 400 that says nothing was cleared.\n- Package scans count each unsafe archive entry once. An entry with an unsafe path and an unsafe link target is one entry with two findings, and the note gives both numbers when they differ. Listed findings stop at 50.\n- Package cache keys move to `package:npm:v5` and `package:python:v5`, so results cached by older builds are not reused.\n- `server.json`, the `Dockerfile` default version and the deployment and API docs name release 0.4.0.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nCo-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>",
+          "timestamp": "2026-11-13T15:12:38-05:00",
+          "tree_id": "a29a065e4650f483a7f266ef34111f24099bc640",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/8828f69ca29c7476feb7f31774b6f8f97385a717"
+        },
+        "date": 1794602924018,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 2197.273423846951,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_large_binary",
+            "value": 99859.58144474681,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_pe",
+            "value": 3011.3323301768983,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 1794126.5360216512,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 2739201.30631579,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 248320.11084992177,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2247653.7504347814,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 58135.6713838993,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 33081.22432571011,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 215269.14994284365,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 1876904.9335601183,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 49752.21235502751,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 33602.12871876481,
+            "unit": "ns"
+          },
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2469467.035714285,
+            "unit": "ns"
+          },
+          {
+            "name": "string_categorization/extract_with_categorization",
+            "value": 784840.691902709,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/10000_strings",
+            "value": 6978711.93125,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/1000_strings",
+            "value": 868605.3505037235,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/100_strings",
+            "value": 163168.48080753334,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_16",
+            "value": 6092856.2425,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_4",
+            "value": 7400983.494285714,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_8",
+            "value": 6656375.665,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_16",
+            "value": 710103.2070155835,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_4",
+            "value": 877810.5144020873,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_8",
+            "value": 885874.0907130903,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_16",
+            "value": 137899.8129874095,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_4",
+            "value": 164898.55082083584,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
+            "value": 196909.88828578324,
             "unit": "ns"
           }
         ]
