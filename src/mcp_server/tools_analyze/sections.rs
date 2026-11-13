@@ -235,9 +235,14 @@ pub(super) fn plan(name: &'static str, options: &Options, path: &str, mtime_ns: 
             "hex_dump:size={}:offset={}",
             options.hex_size, options.hex_offset
         ),
-        "dependencies" | "behavioral" | "yara_indicators" => {
-            format!("{name}:min={}{arch}", options.min)
-        }
+        "dependencies" | "behavioral" => format!("{name}:min={}{arch}", options.min),
+        // Reads the imports and sections of `binary_info`, so it depends on the
+        // name's class too.
+        "yara_indicators" => format!(
+            "yara_indicators:min={}{arch}:name={}",
+            options.min,
+            name_class(path)
+        ),
         // Bump THREATS_REVISION whenever the built-in rules or the weak-evidence
         // logic change, so ratings stored by an earlier build are not served.
         "threats" => format!("threats:basic:r{THREATS_REVISION}"),
@@ -245,9 +250,15 @@ pub(super) fn plan(name: &'static str, options: &Options, path: &str, mtime_ns: 
         // Revision 2: answers stored under the bare name by an earlier build did
         // not know about detached signature files.
         "signatures" => "signatures:r2".to_string(),
+        // The parser routes a file by the class of its name (a Java archive
+        // or class name is read as one, whatever the bytes are).
+        "binary_info" => format!("binary_info{arch}:name={}", name_class(path)),
         // Everything built from the symbol table or the parsed binary.
-        "binary_info" | "symbols" | "control_flow" | "vulnerabilities" | "code_quality"
-        | "disassembly" | "call_graph" => format!("{name}{arch}"),
+        "symbols" | "control_flow" | "vulnerabilities" | "code_quality" | "disassembly"
+        | "call_graph" => format!("{name}{arch}"),
+        // The sources and sinks rows carry the analyzed path in their
+        // locations, so the answer is stored per path.
+        "taint" => format!("taint:{path}"),
         other => other.to_string(),
     };
     // A detached signature next to this path is read by the check but is not
@@ -258,6 +269,24 @@ pub(super) fn plan(name: &'static str, options: &Options, path: &str, mtime_ns: 
         name,
         key,
         cacheable,
+    }
+}
+
+/// How `binary_parser::parse_binary_buffer` classifies a file by its name:
+/// `.jar`, `.war`, `.ear`, `.apk` and `.aar` are read as Java archives,
+/// `.class` as a Java class file, any other name by its content alone. Two
+/// names of one class never differ in the answer; a cached answer is shared
+/// only inside a class.
+fn name_class(path: &str) -> &'static str {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match extension.as_str() {
+        "jar" | "war" | "ear" | "apk" | "aar" => "java-archive",
+        "class" => "java-class",
+        _ => "content",
     }
 }
 

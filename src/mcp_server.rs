@@ -83,6 +83,14 @@ impl FileScannerMcp {
             + Self::services_router();
         #[cfg(test)]
         let router = router + Self::test_support_router();
+        let mut router = router;
+        // The one place every tool definition passes: `tools/list` on stdio and
+        // HTTP, the REST listing and the OpenAPI-facing definitions all read it.
+        for route in router.map.values_mut() {
+            let mut schema = (*route.attr.input_schema).clone();
+            drop_numeric_formats(&mut schema);
+            route.attr.input_schema = Arc::new(schema);
+        }
         Self {
             tool_router: router,
             state,
@@ -97,6 +105,36 @@ impl FileScannerMcp {
     /// Every tool definition, sorted by name: what `tools/list` returns.
     pub fn tool_definitions(&self) -> Vec<rmcp::model::Tool> {
         self.tool_router.list_all()
+    }
+}
+
+/// Remove the `format` of every integer or number node of a tool's input
+/// schema. The schema generator writes the Rust type there (`uint`, `uint64`,
+/// `int64`, `double` ...), which JSON Schema does not define: strict
+/// validators, and model APIs that accept a fixed list of formats, refuse them.
+/// `minimum`, `maximum`, `type` and the rest of the node stay as they are.
+fn drop_numeric_formats(node: &mut serde_json::Map<String, serde_json::Value>) {
+    use serde_json::Value;
+    let numeric = match node.get("type") {
+        Some(Value::String(t)) => t == "integer" || t == "number",
+        Some(Value::Array(types)) => types
+            .iter()
+            .any(|t| matches!(t.as_str(), Some("integer" | "number"))),
+        _ => false,
+    };
+    if numeric {
+        node.remove("format");
+    }
+    for value in node.values_mut() {
+        drop_numeric_formats_in(value);
+    }
+}
+
+fn drop_numeric_formats_in(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => drop_numeric_formats(map),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(drop_numeric_formats_in),
+        _ => {}
     }
 }
 
