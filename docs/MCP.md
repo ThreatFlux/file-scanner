@@ -531,11 +531,13 @@ the stored list). A `filter`, `category` or `encoding` scans the whole file agai
 A `threats` or `enhanced_threats` match row whose evidence is thin carries `evidence_strength: "weak"` and an
 `evidence_reason` in its `metadata`. A weak match is listed but adds no classification and does not raise the
 threat level. Because `filter` also searches the metadata values, `filter: "weak"` returns only those rows. Reasons
-seen from the built-in rules include `only hypervisor product names matched` (the `anti_analysis` rule with no
-debugger check, tracer read or `/dmi/id/` read), `two short byte patterns found far apart in a large file` (the
-`shellcode_patterns` get-pc and SEH pair in a file over 256 KiB), `every matched string is under 4 bytes or a run of
-one repeated byte` (also a padding run beside a lone get-pc string) and `a text file that describes the technique in
-words`. A match without these keys is full evidence:
+seen from the built-in rules include `only hypervisor product names matched` (the `anti_analysis` rule with fewer
+than two debugger API names, no tracer test and no `/dmi/id/` string), `two short byte patterns found far apart in a
+large file` (the `shellcode_patterns` get-pc and SEH pair in a file over 256 KiB), `every matched string is under 4
+bytes or a run of one repeated byte` (also a padding run beside a lone get-pc string) and `a text file that
+describes the technique in words` (an anti-debug or anti-VM match in a text file that does not call the technique, see
+below, or a `backdoor_patterns` match in a text file on the words `bind shell` or `reverse shell`, also when part of
+the Python reverse-shell set is present). A match without these keys is full evidence:
 
 ```json
 { "rule_identifier": "anti_analysis", "tags_count": 2,
@@ -553,8 +555,59 @@ the full set, such as a tutorial with complete code, is still rated Suspicious w
 text file that holds only some of the four does not match the rule, and a text file that only says `reverse shell` or
 `bind shell` is listed as weak.
 
-The threats and enhanced_threats sections are stored with a revision in their cache key: results that an earlier
-build stored are recomputed, not served.
+A text source file that calls an anti-debug or anti-VM technique keeps the `anti_analysis` rule's normal level
+(Suspicious) instead of being called a text file that describes the technique in words. The rule itself must still match
+on more than hypervisor names alone: two debugger API names, `TracerPid` with `/proc/self/status` (and `ptrace`, a
+`/dmi/id/` string or one of the calls below), or two hypervisor names beside a `/dmi/id/` string. A file that holds two
+hypervisor names and calls `ptrace(PTRACE_TRACEME, ...)` or `IsDebuggerPresent()`, with no second debugger API, no
+`TracerPid` and no `/dmi/id/` string, stays weak (`only hypervisor product names matched`, Clean). The forms that
+count as a call are `IsDebuggerPresent(` or `CheckRemoteDebuggerPresent(` called; `ptrace(` with `PTRACE_TRACEME` or
+`0`; an open, read, exists or inquire call on `"/proc/self/status"`; `sysctl` followed within 300 bytes by `P_TRACED`
+(not seen when the first `sysctl` within those 300 bytes does not count itself, such as the one in
+`#include <sys/sysctl.h>`, whose line has no `;`, `{` or `=`); and, only in some spellings, a file-read call in a file
+that holds a double-quoted string with `/dmi/id/` (see the known limits below).
+Seven sources in `test_programs` rate Suspicious this way (`ada_test.adb`, `c_advanced.c`, `d_test.d`,
+`fortran_test.f90`, `go_test.go`, `nim_test.nim` and `zig_test.zig`); the rule does not match `cpp_test.cpp`, which
+calls `IsDebuggerPresent()` and `ptrace(PTRACE_TRACEME, ...)` but has no second debugger API name, no `TracerPid` and
+no hypervisor names. These do not count as a call, and the match stays weak evidence (Clean): a name inside a
+double-quoted string, a backtick span, a `//` line comment or a `/*` comment that is not yet closed; anything in a file
+with a Markdown fence line; a file with no declaration or include line (`fn`, `def`, `func`, `class`, `import`, `use`,
+`package`, `let`, `const`, `#include`, `#define` and similar); and a debugger-API, `ptrace`, `sysctl` or
+`/proc/self/status` match whose line has no `;`, `{` or `=` (the DMI file read needs none). A real call after a closed
+`/* ... */` comment, such as a header comment above `main`, counts.
+When the call is a read of `/proc/self/status`, `TracerPid` and that read in source code meet the tracer test, so the
+file is no longer dismissed with `only hypervisor product names matched`.
+
+Known limits of these rules:
+
+- Ordinary code that calls a debugger-check API is rated Suspicious. A source file that calls `IsDebuggerPresent()`
+  and also uses `OutputDebugString`, such as a Windows logging helper that writes to the debugger output window when
+  one is attached, rates Suspicious, as its compiled form does. The scanner cannot tell a debug-aware logger from
+  anti-debug code, because both call the same API.
+- Hardware-inventory or virtualization-detection code can be rated Suspicious, and whether it is depends on other
+  string literals in the file. Source that reads a DMI product file (under `/sys/class/dmi/id/` or
+  `/sys/devices/virtual/dmi/id/`) and names two hypervisors rated Suspicious when the file also held two adjacent
+  quoted items (`"VirtualBox", "VMware"`, an unrelated `["a", "b"]`, or `fopen("...", "r")` in C) or, in Go, an
+  `import ( ... )` block of two or more packages. The same Go read with `== "VirtualBox"` and `== "VMware"`
+  comparisons rated Clean (weak) after a one-line `import "os"`, and so did Python that tested `"VMware" in name` with
+  no such list. A host-report tool and anti-VM code get the same rating.
+- A long block comment or a `#` comment can be taken for a call. A `/* */` comment that opens more than 4,096 bytes
+  before the API name is not recognised as a comment, and neither is a `#` comment (Python, shell) whose line contains
+  `;`, `{` or `=`. A benign file that names `IsDebuggerPresent();` and `CheckRemoteDebuggerPresent();` in such a
+  comment rates Suspicious.
+- Some real anti-debug code still rates Clean. Only debugger-API, `ptrace`, `sysctl` and `/proc/self/status` calls that
+  share a line with `;`, `{` or `=` count as statements, so a Python `with open("/proc/self/status") as f:` read does
+  not count, and neither does code whose only checks are VM names or `OutputDebugString`. Such code keeps the weak
+  `describes the technique in words` rating.
+- A bash script that opens a read-write network descriptor and then loops over commands read from it, or starts a
+  shell on it, is not detected and rates Clean. The classic redirect of a shell's standard streams to a network path
+  and the Python socket, `dup2` and pty reverse shell are detected.
+- Text that quotes threat strings is still rated as the threat. Documents and sources that quote ransom-note phrases,
+  reverse-shell command lines or miner pool strings as examples rate the same as the real thing:
+  `THREATFLUX_THREAT_DETECTION_LIBRARY_DESIGN.md` and `src/mcp_server/tools_yara.rs` rate Critical (Ransomware).
+
+The threats and enhanced_threats sections are stored with a revision in their cache key (revision 3): results that an
+earlier build stored are recomputed, not served.
 
 ### disassemble
 
@@ -1056,34 +1109,47 @@ What raises the rating, in both package tools:
   finding: a package that only does that rates Safe.
 - A run counts as the run of a download only when it starts what was written. It is tied to the write when it names
   the same variable, the same field (`this.path`, `self.path`), the same expression written again
-  (`path.join(os.tmpdir(), name)`) or, inside a `+` expression, a string literal of the path
-  (`exec('/tmp/x.sh' + ' -q')`, `exec('sh -c ' + '/tmp/agent')`), or when its command is a shell, an interpreter or
-  `chmod` (`sh`, `bash`, `node`, `python`, `chmod`) held in a variable or joined with `+` (`spawn(shell, [...])`,
-  `exec('sh ' + dest)`). A command held in a variable is followed one assignment back, wherever in the file the
-  assignment is (before the run). A run whose first argument is a call (`cp.execFile(path.join(os.tmpdir(),
-  name))`) is seen as a run.
-- A run whose first argument is a plain quoted literal is not seen as a run in JavaScript or in a Python file other than
-  `setup.py`, so a dropper written that way is not caught: `spawn('/tmp/agent')`, `exec('/tmp/agent -q')`, `exec` of a
-  template literal, `spawn('sh', ['/tmp/agent'])`, `spawn('sh', [dest])` and `exec('sh /tmp/agent')` after a write of
-  that file (`fs.writeFileSync('/tmp/agent', ...)` or of `dest`) leave the package at Safe (with the Medium
-  `Process execution module` finding only), and so does `urlretrieve(url, '/tmp/agent')` followed by
-  `subprocess.run(['/tmp/agent'])` in a Python module (with the Medium `Process execution` finding only). The exception
-  is a literal `chmod +x`
-  (`exec('chmod +x /tmp/x.sh')`, `spawn('chmod', ['+x', '/tmp/x.sh'])`, `os.system('chmod +x /tmp/x.sh')`), which counts
-  as the run even for another path. In `setup.py` a literal run is seen when the write also names its path as a literal:
-  `urlretrieve(url, '/tmp/agent')` followed by `subprocess.run(['/tmp/agent'])`, `subprocess.run('/tmp/agent')` or
-  `os.system('/tmp/agent')` is a High `Download written to disk and run`, and so are `os.system('./run.sh')`, a literal
-  temp path that is a different file (`os.system('/tmp/other')`), a shell or interpreter with fixed arguments
-  (`subprocess.run(['sh', '-c', 'echo hi'])`, `subprocess.run(['python3', 'x.py'])`) and
-  `os.system('chmod +x /tmp/other')`. When the `setup.py` write holds its path in a variable
-  (`d = '/tmp/agent'; urlretrieve(url, d)`), a literal list `subprocess.run(['/tmp/agent'])` is not tied to it, while
-  `subprocess.run([d])` is. Fixed commands that start something else are not tied to a write (`git status` and
-  `npm run build` in JavaScript; `git status`, `ls`, `npm run build` and `/usr/bin/git status` in Python, `setup.py`
-  included), and neither is a generic runner that starts whatever it is given (`spawn(command, args)`) beside a write of
-  an unrelated cache file.
+  (`path.join(os.tmpdir(), name)`), or any word of the write's path argument, however short (`'/tmp/x.sh'` gives `tmp`,
+  `x` and `sh`; generic words such as `path`, `join`, `os`, `tmpdir` and `name` do not count), or a whole quoted
+  literal of 4 or more characters from the value of the variable that holds the path (`'/tmp'` after
+  `dest = path.join('/tmp', 'out.bin')`), or when its command is a shell or an interpreter (`sh`, `bash`, `node`,
+  `python`, `chmod`) started on a variable or an expression (`spawn(shell, [...])`, `spawn('sh', ['-c', script])`,
+  `exec('sh ' + dest)`). A command held in a variable is followed one assignment back,
+  wherever in the file the assignment is (before the run). A run whose first argument is a call
+  (`cp.execFile(path.join(os.tmpdir(), name))`) is seen as a run.
+- A run whose first argument is a quoted literal is seen as a run in JavaScript (`spawn`, `exec`, `execSync`,
+  `execFile`, `fork`) and in Python (`subprocess.*`, `os.system`, `asyncio.create_subprocess_*`) when its text names
+  the written path. After `fs.writeFileSync('/tmp/x.sh', body)`, `cp.spawn('/tmp/x.sh')`, `cp.spawn('sh',
+  ['/tmp/x.sh'])` and `cp.exec('sh /tmp/x.sh')` are each a High `Download written to disk and run`, and so is
+  `subprocess.run(['/tmp/agent.bin'])` after `urlretrieve(url, '/tmp/agent.bin')`. A literal run that names another
+  path (`cp.execFile('/opt/other')` after a write to `/tmp/x.sh`) is not tied. A shell or interpreter started only on
+  fixed text (`spawn('node', ['scripts/build.js'])`, `execSync('sh -c "echo done"')`, `spawnSync('python3', ['-V'])`),
+  and a generic runner that starts whatever it is given (`spawn(command, args)`), are not tied to an unrelated write
+  that is a few lines away (`fs.writeFileSync('/var/cache/app/data.json', body)`). After a write of a `.sh` file, a
+  literal command that starts with `sh` (`execSync('sh -c "echo done"')`) is tied and rates High 60.
+- Python tuple assignments give each name the assigned value, so after `fd, path = tempfile.mkstemp()` a write with
+  `os.write(fd, data)` is a write and `os.system(path)` is tied to it.
+- Compiled TypeScript spellings are read like the plain ones: `node_https_1.default.get` and `.request` are network
+  calls, `node_fs_1.default.writeFileSync` and `(0, node_fs_1.writeFileSync)(...)` are file writes, and
+  `node_child_process_1.spawn`, `node_child_process_1.default.spawn` and `(0, node_child_process_1.execSync)(...)` are
+  runs. A compiled postinstall dropper rates Critical 95, like the plain one. A compiled file that writes
+  `JSON.stringify(process.env)` to a request (`req.write`) is reported as `Environment sent over the network`.
+- In Python, `asyncio.create_subprocess_exec` and `create_subprocess_shell` are a Medium `Process execution` finding
+  and count as runs, and `aiohttp.ClientSession` and `aiohttp.request` count as a download. An async dropper
+  (`aiohttp` download, write, `create_subprocess_exec` on the written path) rates High 60. Benign asyncio worker code
+  stays Safe, with a score of 8 instead of 0.
+- A High `Exfiltration endpoint` finding is a webhook or out-of-band host: Discord, Telegram and Slack webhook URLs,
+  `webhook.site`, `requestbin.`, `pipedream.net`, `oast.pro`, `oast.live`, `oast.site`, `oast.online`, `oast.fun`,
+  `oast.me`, `interact.sh`, `burpcollaborator.net` and `ngrok` hosts. The out-of-band and webhook names match only as
+  whole host names, and an `ngrok` host only with a word boundary after the TLD, so property reads such as
+  `toast.promise` or `cfg.webhook.siteUrl` are not findings.
 - High 'Decoded payload passed to process execution' (category `obfuscation`): `exec`, `execSync`, `spawn` or
   `spawnSync` given a base64 or hex `Buffer`, `atob` or `String.fromCharCode` (JavaScript), and `os.system`,
-  `os.popen` or `subprocess.*` given `b64decode`, `fromhex`, `unhexlify` or `codecs.decode` (Python).
+  `os.popen` or `subprocess.*` given `b64decode`, `fromhex`, `unhexlify` or `codecs.decode` (Python). A package whose
+  only High finding is this one rates at least High: `cp.exec(Buffer.from(..., 'base64').toString())` rates High 68,
+  and `subprocess.Popen(base64.b64decode(...), shell=True)` rates High 68; with other findings the package can reach
+  Critical. The finding is also listed as `injection_type: "Decoded payload passed to process execution"` under
+  `other_signals.code_injection_patterns` in the `findings` section.
 - A file named by an install hook (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) is install-time
   code. Its High findings, and any obfuscation finding in it (obfuscator identifiers, an escaped or char-code string
   blob), raise the package to at least High, appear in `install_scripts.dangerous_commands` and in a risk reason such
@@ -1104,9 +1170,38 @@ What raises the rating, in both package tools:
 
 All of this is heuristic. The tie between a run and a write is a name and literal match, so a dropper that builds its
 command far from the write and shares no name with it can be missed. A file that a hook runs, or `setup.py`, is judged
-High only for obfuscation findings; other Medium findings there add nothing. The cached `findings`, `files`,
-`dependencies` and `scripts` sections carry a revision in their key, so results that an earlier build stored are
-recomputed.
+High only for obfuscation findings; other Medium findings there add nothing. The cached answers of both package tools
+use the keys `package:npm:v3` and `package:python:v3`, so results that an earlier build stored are recomputed.
+
+Known limits of the package ratings (both tools, from the same scanner):
+
+- An environment held in an object or variable and then sent is not detected. `const payload = { env: process.env };
+  fetch(url, { method: 'POST', body: JSON.stringify(payload) })` and `const e = process.env;` followed by
+  `JSON.stringify(e)` are not reported as `Environment sent over the network`. Only a whole `process.env` (or
+  `os.environ`) used directly in or next to the request is.
+- A count of the environment is read as the whole environment: sending only `Object.keys(process.env).length` in a
+  request body is reported as `Environment sent over the network`.
+- A shell started on a variable after an unrelated download and write is treated as running the download. If a file
+  downloads something, writes it to disk and, within 60 lines, starts a shell or interpreter on a variable, the run is
+  tied to the download, whatever the variable holds. A task runner whose update check caches the latest version and
+  then calls `spawn('sh', ['-c', script])` rates High 60 `Download written to disk and run`; so does the
+  `execSync('sh -c ' + script)` spelling. When the command comes from the downloaded data, the finding is accurate.
+- A run that shares a word with the written path is tied to the write. A run whose text contains any word of the
+  write's path argument, however short (a directory name, the file name or its extension: after a write to
+  `/srv/data/out.bin`, `execSync('ls /usr/bin')` rates High 60), or a whole literal of 4 or more characters from the
+  variable holding that path, counts as running the written file. Benign build helpers rate High 60: a schema
+  downloaded into `node_modules/.cache` and then `node node_modules/.bin/tsc`, a data file downloaded into `build/` and
+  then `make -C build`, JSON saved under `/tmp` and then `du -sh /tmp`.
+- Compiled TypeScript spellings have the false alarms of the plain spelling. Logging `JSON.stringify(process.env)` in
+  a compiled file that also makes a request (`node_https_1.default.request` and `req.write`) rates Critical. A
+  download through an object whose name ends in `http` (`this._http.get`), written to a file and followed by
+  `git add` on it, rates High.
+- Detection-rule text shipped as data still rates as a reverse shell. A package that ships reverse-shell command
+  strings in a data file, such as detection rules in a mock file, rates Critical `Reverse shell`.
+- Benign asyncio subprocess code rates Safe with a small bump: a worker that calls `asyncio.create_subprocess_exec`
+  or `create_subprocess_shell` gets a Medium `Process execution` finding and a score of 8 or 13 instead of 0 or 5.
+- A host name is a host name: a property read that spells a listed out-of-band host in full (`cfg.oast.pro`) still
+  rates as an `Exfiltration endpoint`.
 
 ### analyze_python_package
 

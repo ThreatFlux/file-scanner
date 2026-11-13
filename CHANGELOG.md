@@ -131,8 +131,17 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   Behavioral analysis searches all strings, not the first 1,000, and no longer rates ordinary URLs as command and
   control. A rule match whose strings are all under 4 bytes or a padding run, or whose text-file match only describes
   a technique in words, is listed with `evidence_strength: weak` and an `evidence_reason` and adds no classification
-  or level, so ordinary files (vim, Node.js, Markdown documentation, binaries with padding) are no longer rated
-  Suspicious or Critical. The built-in rules `backdoor_patterns`, `anti_analysis` and `ransomware_indicators` match
+  or level, so ordinary files (vim, Node.js, binaries with padding, and documentation that names a technique in
+  prose, such as this repository's README files) are no longer rated Suspicious or Critical. Text that quotes a rule's
+  trigger strings as an example (ransom-note phrases, reverse-shell command lines, miner pool strings) is still rated
+  as the threat: `THREATFLUX_THREAT_DETECTION_LIBRARY_DESIGN.md` rates Critical. A source file that calls an
+  anti-debug technique (`IsDebuggerPresent(`, `CheckRemoteDebuggerPresent(`, `ptrace(PTRACE_TRACEME`, a read of
+  `/proc/self/status`, and in some spellings a file read beside a `/dmi/id/` path) keeps the `anti_analysis` rule's
+  level (Suspicious) when the rule matched on more than hypervisor names;
+  a name inside a double-quoted string, a backtick span, a `//` comment, a Markdown document or a file without a
+  declaration line stays weak evidence (a single-quoted string, a `#` comment or a very long `/* */` comment on a line
+  with `;`, `{` or `=` can still be taken for a call).
+  The built-in rules `backdoor_patterns`, `anti_analysis` and `ransomware_indicators` match
   less broadly, and `update_lookalike_domain`, `self_announcing_evasion` and `hardcoded_xor_key` are new, so the
   simulated samples in `test_programs` still rate Suspicious or Malicious. The word `schtasks` alone no longer matches
   `persistence_mechanisms` (a created task, or the word in a file that also names a Run key, does), a match on
@@ -172,7 +181,18 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   packages are no longer flagged as typosquats of themselves or labelled malicious. Known-malicious names are Critical
   on their own; compromised releases of legitimate packages are matched by name and version, and a dependency on one
   rates at least High and is named `name@version` (npm) or `name==version` (Python, for example `ctx==0.1.2`). A
-  suspected typosquat rates at least Medium. A tarball, sdist or zip with a `..`, absolute-path or link entry rates at
+  suspected typosquat rates at least Medium.
+  The `Exfiltration endpoint` rule matches out-of-band and webhook hosts (`webhook.site`, `oast.pro`, `interact.sh`
+  and similar) only as whole host names and `ngrok` hosts only with a word boundary after the TLD, so property
+  reads such as `toast.promise` no longer rate Critical. Compiled TypeScript spellings (`node_https_1.default.get`,
+  `node_fs_1.default.writeFileSync`, `(0, node_child_process_1.execSync)(...)`) count as network calls, file writes and
+  process runs, and Python `asyncio.create_subprocess_*` and `aiohttp` count as runs and downloads. A run whose first
+  argument is a quoted literal now counts in the download-write-run check (JavaScript `spawn`, `exec`, `execFile` and
+  `fork`; Python `subprocess.*`, `os.system`), as does a shell started on a variable; a shell or interpreter started
+  only on fixed text beside an unrelated write does not. A package whose only High finding is a decoded payload
+  passed to process execution now rates at least High. The npm and Python results are cached under new keys, so
+  results stored by an earlier build are recomputed. Known limits are listed under `analyze_npm_package` in
+  `docs/MCP.md`. A tarball, sdist or zip with a `..`, absolute-path or link entry rates at
   least High, with one finding per entry. Every result states its advisory data (a small offline table: 6 npm
   packages, 7 PyPI packages) and that an empty list is not a clean bill of health. Packages that were not read in full
   are never rated Safe, and a dependency list alone is at least Low.
@@ -224,9 +244,11 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   download, write and run code (Node `https.get`; Python `urlretrieve`), a download passed to `eval` or `exec`, a
   decoded payload passed to `exec`, `spawn`, `os.system` or `subprocess`, and credential files or the whole
   environment sent over the network are High findings when the statements lie close together. A run counts only when
-  it starts what was written (the same name, field, expression or path literal, or a shell, interpreter or `chmod`; in
-  `setup.py` also a literal temp path, a `./` script, or a shell or interpreter command after a write that names its
-  path as a literal), so an update check beside a generic `spawn(command, args)` runner is not a dropper, and one
+  it starts what was written (the same name, field or expression, any word of the written path however short, such
+  as `tmp`, `x` or `sh` of `/tmp/x.sh`, a literal of 4 or more characters from the variable that holds it, or a
+  shell or interpreter started on a variable), so a shell or interpreter started on fixed text
+  (`spawn('node', ['scripts/build.js'])`) or a generic `spawn(command, args)` runner beside an unrelated write is not
+  a dropper, and one
   named environment variable (`process.env.API_URL`, `os.getenv('X')`) beside a URL is not an exfiltration finding;
   payloads in `.d.ts` files, after block comments or in template literals are no longer missed; Python metadata is
   read from PEP 621, Poetry, `setup.py` and `PKG-INFO`; a tarball with a hidden or oversized header is refused.

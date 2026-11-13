@@ -311,14 +311,19 @@ downloaded; a registry name is rejected with a message that says to run `npm pac
   environment sent over the network, exfiltration endpoints, miners, reverse shells and obfuscation, with file and
   line evidence. The multi-line checks need the statements within 60 lines of each other (8 for the environment) and
   skip lines over 1,000 characters. One named environment variable beside a URL or HTTP call is not a finding. A
-  run is tied to a write when it names the written variable, field, expression or, inside a `+` expression, a path
-  literal, or starts a shell, interpreter or `chmod` held in a variable or joined with `+`. A call whose first argument
-  is only a quoted literal is not seen as a run in JavaScript or in a Python file other than `setup.py`
-  (`spawn('sh', [path])`, `exec('/tmp/agent')`, `subprocess.run(['/tmp/agent'])`), except a literal `chmod +x`
-  (`exec('chmod +x /tmp/x.sh')`). In `setup.py` it is seen when the write names its path as a literal
-  (`urlretrieve(url, '/tmp/agent')` then `subprocess.run(['/tmp/agent'])`, `os.system('./run.sh')`, a shell or
-  interpreter with fixed arguments); `git status`, `ls` and `npm run build` are not tied to a write. See
-  `docs/MCP.md`, `analyze_npm_package`, for the checked cases.
+  run is tied to a write when it names the written variable, field or expression, shares any word, however short,
+  with the write's path argument (`tmp`, `x` or `sh` of `'/tmp/x.sh'`; not generic words such as `path`, `join` or
+  `tmpdir`), contains a whole literal of 4 or more characters from the variable that holds the path, or starts a
+  shell or interpreter on a variable or expression. A run whose first argument is a quoted literal counts
+  (`spawn('/tmp/x.sh')`, `exec('sh /tmp/x.sh')`, `subprocess.run(['/tmp/agent.bin'])`) when its text names the
+  written path; a shell or interpreter on fixed text (`spawn('node', ['scripts/build.js'])`) or a generic
+  `spawn(command, args)` is not tied to an unrelated write. Compiled TypeScript spellings (`node_https_1.default.get`,
+  `node_fs_1.default.writeFileSync`, `(0, node_child_process_1.execSync)(...)`) and Python
+  `asyncio.create_subprocess_*`, `aiohttp` and `fd, path = tempfile.mkstemp()` are read like the plain ones. The
+  `Exfiltration endpoint` rule matches out-of-band hosts only as whole host names. A package whose only High finding is
+  a decoded payload passed to process execution rates at least High. The section cache keys are `package:npm:v3` and
+  `package:python:v3`; bump them when a rating changes. See `docs/MCP.md`, `analyze_npm_package`, for the checked cases
+  and the known limits.
 - Install hooks (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) are judged by their command string
   (for example a download piped to a shell) and also by the file they run. A file named by a hook (`node
   scripts/setup.js`, `sh setup.sh`, `./setup.sh`, also after `&&`, `cd dir &&` or leading `NAME=value` words; an
