@@ -18,7 +18,7 @@ ENV RUST_VERSION=1.100.0
 RUN rustup component add --toolchain 1.100.0 clippy rustfmt llvm-tools-preview && \
     rustc --version | grep -q '^rustc 1[.]100[.]0 '
 
-ARG VERSION=0.3.13
+ARG VERSION=0.4.0
 ARG BUILD_DATE=unknown
 ARG VCS_REF=unknown
 ARG BINARY_NAME=file-scanner
@@ -84,7 +84,7 @@ RUN mkdir -p /home/builder/out/bin /home/builder/out/doc /home/builder/runtime-s
 # Wolfi glibc 2.44, nonroot uid/gid 65532; amd64/arm64 multi-arch index digest
 FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:cb7aa4681bef604e99ad3fb6fb365330a3ca24fcee56df0b60b27ac4983409eb AS runtime
 
-ARG VERSION=0.3.13
+ARG VERSION=0.4.0
 ARG BUILD_DATE=unknown
 ARG VCS_REF=unknown
 ARG OCI_IMAGE_TITLE="File Scanner"
@@ -126,7 +126,8 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 #   MCP, HTTP:    docker run --rm -p 127.0.0.1:3000:3000 -v DIR:/data:ro <image> \
 #                   mcp-http --host 0.0.0.0 --allow-root /data \
 #                   (set FILE_SCANNER_AUTH_TOKEN with -e)
-# (These need an image newer than 0.3.13.) Tool calls name paths inside the container, so only mounted files can be analyzed.
+# (These need an image newer than release 0.3.13, such as release 0.4.0 or later.) Tool calls name paths
+# inside the container, so only mounted files can be analyzed.
 # The HTTP server must bind 0.0.0.0 here for Docker to reach it; publish the port on 127.0.0.1.
 # See DEPLOYMENT_GUIDE.md.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/file-scanner"]

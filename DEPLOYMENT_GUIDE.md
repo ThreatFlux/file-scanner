@@ -73,7 +73,7 @@ file-scanner mcp-http --port 3000 --allow-root /srv/samples
 Real startup output (shortened):
 
 ```text
-file-scanner 0.3.13 MCP HTTP server listening on http://127.0.0.1:3000/mcp
+file-scanner 0.4.0 MCP HTTP server listening on http://127.0.0.1:3000/mcp
   REST helpers on the same address: /health, /api/info, /tools/list, /tools/call, /cache/*, /strings/*, ...
   Host allow-list: localhost, 127.0.0.1, ::1
   Origin check: loopback origins; no CORS wildcard
@@ -104,7 +104,7 @@ print the token there with `echo "$FILE_SCANNER_AUTH_TOKEN"` before you start it
 
 ```bash
 curl -s http://127.0.0.1:3000/health
-# {"status":"ok","service":"file-scanner-mcp","version":"0.3.13","transports":["streamable-http"]}
+# {"status":"ok","service":"file-scanner-mcp","version":"0.4.0","transports":["streamable-http"]}
 
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:3000/tools/list
 # 401   (when a token is set and none is sent)
@@ -252,10 +252,11 @@ Notes:
   the HTTP server, probe `GET /health`.
 - Build it yourself with `docker build -t file-scanner .`.
 
-The untagged image is `latest`. At the time of writing, the published image is the 0.3.13 release, which
-does not have `--allow-root`, `--host`, `--allowed-host` or token support: these commands need the image
-from the release that follows it, or one you build yourself with `docker build -t file-scanner .` (then
-use `file-scanner` in place of `ghcr.io/threatflux/file-scanner`).
+The untagged image is `latest`, which follows the newest accepted build of the main branch, not a release.
+Release 0.3.13 and older images do not have `--allow-root`, `--host`, `--allowed-host` or token support:
+these commands need a newer image, such as one of release 0.4.0 or later (check the tags with
+`crane ls ghcr.io/threatflux/file-scanner`), or one you build yourself with `docker build -t file-scanner .`
+(then use `file-scanner` in place of `ghcr.io/threatflux/file-scanner`).
 The `docker run` commands above are written from the Dockerfile's `ENTRYPOINT` and `WORKDIR`. They were
 not run against a built image when this guide was written; the same arguments were run against the
 native binary.
@@ -274,9 +275,9 @@ kubectl create secret generic file-scanner --from-literal=token="$(openssl rand 
 To read the token back for a client, run
 `kubectl get secret file-scanner -o jsonpath='{.data.token}' | base64 -d`.
 
-The image is `:latest`, which at the time of writing is the 0.3.13 release. It does not have `--allow-root`,
-`--host`, `--allowed-host` or token support, so this manifest needs an image from a later release or one you
-build yourself.
+The image is `:latest`, which follows the newest accepted build of the main branch, not a release. Release 0.3.13
+and older images do not have `--allow-root`, `--host`, `--allowed-host` or token support, so this manifest needs
+a newer image, such as one of release 0.4.0 or later, or one you build yourself.
 
 ```yaml
 apiVersion: apps/v1
@@ -365,14 +366,17 @@ index live in the process, and MCP sessions are held by the process that opened 
 `server.json` at the repository root describes the server for the MCP registry. It cannot be published as it
 stands. These must be true first:
 
-- The three version strings (`version`, the cargo package `version` and the tag in the OCI `identifier`) say
-  0.3.13 and nothing in the release automation updates them. Set them by hand to a release that has these
-  features, in the same change that bumps `Cargo.toml`. Because 0.3.13 does not accept `--allow-root`, the file
-  passes only `mcp-stdio`; add `--allow-root` back to the arguments once the versions name a release that has it.
+- The three version strings (`version`, the cargo package `version` and the tag in the OCI `identifier`) name
+  0.4.0. Nothing in the release automation updates them, so set them by hand at each release, in the same
+  change that bumps `Cargo.toml`. The file still passes only `mcp-stdio`; adding `--allow-root` to its
+  arguments remains to be done, now that the versions name a release that accepts it.
+- The cargo package cannot be resolved until the crate `threatflux-file-scanner` is published on crates.io.
+  It is not there yet, and the release workflow's publish step stays off until a first manual publish (see
+  [.github/workflows/README.md](.github/workflows/README.md)).
 - `README.md` must contain an `mcp-name: io.github.threatflux/file-scanner` line, which the registry is expected
   to use to check ownership of the cargo package.
-- The OCI image must carry the `io.modelcontextprotocol.server.name` label. The Dockerfile now sets it, but the
-  0.3.13 image does not have it.
+- The OCI image must carry the `io.modelcontextprotocol.server.name` label. The Dockerfile sets it, so images
+  of release 0.4.0 and later have it; release 0.3.13 and older images do not.
 - Not confirmed: whether the registry accepts `registryType` `cargo`, and whether it accepts the lower-case
   `io.github.threatflux` namespace. Check both when publishing.
 

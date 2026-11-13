@@ -8,12 +8,12 @@ the MCP endpoint. For the MCP tools themselves, see [MCP.md](MCP.md).
 The package is `threatflux-file-scanner`. The library is imported as `file_scanner`, and the installed
 binary is `file-scanner`. The unrelated `file-scanner` crate on crates.io is not this project.
 
-The examples below use items added after 0.3.13 (`scan_strings`, `scan_bytes`, `calculate_sha256_only`,
-the `rule_path`, `max_files` and `timeout_seconds` fields of `YaraScanRequest`, `files_matched`,
-`StateConfig`, `with_config` and `HttpConfig`). The `"0.3"` requirement resolves to 0.3.13 and does not
-have them, so until the next release is published, depend on the repository. The git dependency resolves the
-default branch, which has these items only after the change that adds them is merged. A dependent build also
-does not apply this repository's `[patch.crates-io]` entries, which Cargo ignores outside the workspace root;
+The examples below use items that are in release 0.4.0 and later, and not in older releases (`scan_strings`,
+`scan_bytes`, `calculate_sha256_only`, the `rule_path`, `max_files` and `timeout_seconds` fields of
+`YaraScanRequest`, `files_matched`, `StateConfig`, `with_config` and `HttpConfig`). The crate is not on
+crates.io yet, so no version requirement resolves to it: depend on the repository, pinned to a release tag
+(`tag = "v0.4.0"` or later). Without a tag, the git dependency resolves the default branch. A dependent build
+also does not apply this repository's `[patch.crates-io]` entries, which Cargo ignores outside the workspace root;
 that build was not tried here.
 
 ```toml
@@ -165,7 +165,7 @@ refuse a path outside the roots, or a link that leaves them, with the same messa
 serves Streamable HTTP and the REST routes below; `HttpConfig::default()` binds `127.0.0.1:3000` with no
 token.
 
-The examples above were compiled and run against the library at this revision (not against 0.3.13).
+The examples above were compiled and run against the library at this revision (not against a release older than 0.4.0).
 
 ## REST helper routes
 
