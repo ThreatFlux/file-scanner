@@ -38,7 +38,7 @@ const CANDIDATES: usize = 12;
 
 pub(super) const DISASSEMBLE_DESCRIPTION: &str =
     "Read the machine code of ONE function or address \
-range of an ELF or Mach-O binary (a universal Mach-O: the slice `arch` names, else the host's, else the first) as a text listing (address, bytes, mnemonic, operands, direct call and jump targets named when they match a function). Never the whole binary. Pass `function` (a name from query_analysis section \
+range of an ELF, Mach-O or PE (x86, x86-64, ARM64) binary (a universal Mach-O: the slice `arch` names, else the host's, else the first) as a text listing (address, bytes, mnemonic, operands, direct call and jump targets named when they match a function). Never the whole binary. Pass `function` (a name from query_analysis section \
 `disassembly` list `functions`, or from analyze_file's symbols) or `address` (\"0x401136\" or a \
 number); the listing is capped at `max_instructions` (default 200, at most 1000) and says where to \
 continue (`next_address`). With neither, it lists the functions (name, address, size, complexity) \

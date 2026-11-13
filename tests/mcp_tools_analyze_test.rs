@@ -2140,3 +2140,281 @@ async fn the_function_list_step_runs_when_names_repeat_and_decimal_addresses_wor
         .await;
     assert_eq!(by_hex["listing"], by_decimal["listing"], "{by_decimal}");
 }
+
+// ---------------------------------------------------------------------------
+// Round 8: overview steps that run, and a budget that never shortens a path
+// ---------------------------------------------------------------------------
+
+/// Tool names of an answer's `next_steps`.
+fn step_tools(answer: &Value) -> Vec<&str> {
+    answer["next_steps"]
+        .as_array()
+        .map(|steps| steps.iter().filter_map(|s| s["tool"].as_str()).collect())
+        .unwrap_or_default()
+}
+
+fn write_tgz(path: &std::path::Path) {
+    let mut tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar);
+        let data = b"{\"name\":\"x\",\"version\":\"1.0.0\"}";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "package/package.json", &data[..])
+            .unwrap();
+        builder.finish().unwrap();
+    }
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, &tar).unwrap();
+    std::fs::write(path, encoder.finish().unwrap()).unwrap();
+}
+
+/// analyze_script refuses a language it has no rules for, so the overview of a
+/// Perl, Ruby or PHP script (extension or `#!` line) does not offer it.
+#[tokio::test]
+async fn the_overview_offers_analyze_script_only_for_languages_it_reads() {
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    let write = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    };
+    for (name, body) in [
+        ("fetch.pl", "#!/usr/bin/perl\nprint 1;\n"),
+        ("noext_perl", "#!/usr/bin/env perl\nprint 1;\n"),
+        ("r.rb", "puts 1\n"),
+        ("p.php", "<?php echo 1; ?>\n"),
+    ] {
+        let path = write(name, body);
+        let (overview, _) = harness.ok("analyze_file", json!({"file_path": path})).await;
+        assert_eq!(overview["kind"], "script", "{name}: {overview}");
+        assert!(
+            !step_tools(&overview).contains(&"analyze_script"),
+            "{name}: {overview}"
+        );
+    }
+    for (name, body) in [
+        ("a.sh", "#!/bin/sh\necho 1\n"),
+        ("a.py", "print(1)\n"),
+        ("a.js", "console.log(1)\n"),
+        ("a.ps1", "Write-Host 1\n"),
+        ("a.bat", "@echo off\n"),
+        ("a.vbs", "WScript.Echo 1\n"),
+    ] {
+        let path = write(name, body);
+        let (overview, _) = harness.ok("analyze_file", json!({"file_path": path})).await;
+        let tools = step_tools(&overview);
+        assert_eq!(tools[0], "analyze_script", "{name}: {overview}");
+        // The step runs as written.
+        let step = &overview["next_steps"][0];
+        let (_, _) = harness
+            .ok("analyze_script", step["arguments"].clone())
+            .await;
+    }
+}
+
+/// A zip whose central directory cannot be read does not offer the listing
+/// that would fail; a readable one still does.
+#[tokio::test]
+async fn the_overview_leaves_out_inspect_archive_for_an_unreadable_archive() {
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    let garbage = dir.path().join("garbage.zip");
+    let mut bytes = b"PK\x03\x04".to_vec();
+    bytes.extend_from_slice(&[7u8; 200]);
+    std::fs::write(&garbage, bytes).unwrap();
+    let (overview, _) = harness
+        .ok("analyze_file", json!({"file_path": garbage}))
+        .await;
+    assert!(
+        overview["format_details"]["archive"]["error"].is_string(),
+        "{overview}"
+    );
+    assert!(
+        !step_tools(&overview).contains(&"inspect_archive"),
+        "{overview}"
+    );
+
+    let good = dir.path().join("good.zip");
+    {
+        let mut zip = zip::write::ZipWriter::new(std::fs::File::create(&good).unwrap());
+        zip.start_file("a.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut zip, b"hello").unwrap();
+        zip.finish().unwrap();
+    }
+    let (overview, _) = harness.ok("analyze_file", json!({"file_path": good})).await;
+    assert_eq!(step_tools(&overview)[0], "inspect_archive", "{overview}");
+}
+
+/// A Java archive has no symbol table: the overview carries no note about one.
+#[tokio::test]
+async fn the_overview_of_a_java_archive_has_no_symbols_note() {
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    for name in ["a.jar", "a.war", "a.ear", "a.aar"] {
+        let path = dir.path().join(name);
+        let mut zip = zip::write::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("META-INF/MANIFEST.MF", opts).unwrap();
+        std::io::Write::write_all(&mut zip, b"Manifest-Version: 1.0\n").unwrap();
+        zip.start_file("A.class", opts).unwrap();
+        std::io::Write::write_all(&mut zip, &[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 0x34, 0, 1])
+            .unwrap();
+        zip.finish().unwrap();
+        let (overview, _) = harness.ok("analyze_file", json!({"file_path": path})).await;
+        assert!(
+            overview["notes"].get("symbols").is_none(),
+            "{name}: {overview}"
+        );
+        assert!(!overview.to_string().contains("symbol analysis"), "{name}");
+        assert!(
+            step_tools(&overview).contains(&"analyze_java_file"),
+            "{name}"
+        );
+    }
+}
+
+/// A .tgz can be an npm package or a Python sdist, like a .tar.gz.
+#[tokio::test]
+async fn the_overview_of_a_tgz_offers_both_package_tools_like_a_tar_gz() {
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    let mut gives = Vec::new();
+    for name in ["pkg-1.0.tgz", "pkg-1.0.tar.gz"] {
+        let path = dir.path().join(name);
+        write_tgz(&path);
+        let (overview, _) = harness.ok("analyze_file", json!({"file_path": path})).await;
+        let tools = step_tools(&overview);
+        assert!(tools.contains(&"analyze_npm_package"), "{name}: {tools:?}");
+        assert!(
+            tools.contains(&"analyze_python_package"),
+            "{name}: {tools:?}"
+        );
+        gives.push(
+            overview["next_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|s| s["tool"].as_str().is_some_and(|t| t.ends_with("_package")))
+                .map(|s| s["gives"].clone())
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(gives[0], gives[1]);
+}
+
+/// The overview names the disassemble tool's real reach: PE as well.
+#[tokio::test]
+async fn the_disassemble_description_names_pe() {
+    let harness = Harness::new().await;
+    let tools = harness.client.list_all_tools().await.unwrap();
+    let tool = tools.iter().find(|t| t.name == "disassemble").unwrap();
+    let text = tool.description.as_deref().unwrap_or_default();
+    assert!(text.contains("PE"), "{text}");
+}
+
+/// Section-answer steps carry the caller's spelling of `arch`.
+#[tokio::test]
+async fn section_next_steps_spell_a_slice_arch_the_way_the_overview_does() {
+    let harness = Harness::new().await;
+    let dir = TempDir::new().unwrap();
+    let three = dir.path().join("three.bin");
+    std::fs::write(
+        &three,
+        fat_macho(&[(0x0100_0007, 3), (0x0100_000c, 2), (0x0100_000c, 12)]),
+    )
+    .unwrap();
+    for arch in ["arm64-subtype-12", "ARM64 (subtype 12)"] {
+        let (answer, _) = harness
+            .ok(
+                "analyze_file",
+                json!({"file_path": three, "sections": ["binary_info"], "arch": arch}),
+            )
+            .await;
+        let steps = answer["next_steps"].as_array().unwrap();
+        assert!(!steps.is_empty(), "{answer}");
+        for step in steps {
+            if let Some(got) = step["arguments"].get("arch") {
+                assert_eq!(got, "arm64-subtype-12", "{arch}: {step}");
+            }
+        }
+    }
+}
+
+/// At the smallest budget a path of 240 or 1000 bytes is never shortened, in
+/// a step or in the echo: a step is kept whole or dropped and counted.
+#[tokio::test]
+async fn the_budget_never_shortens_a_path_in_a_next_step() {
+    let harness = Harness::new().await;
+    let root = TempDir::new().unwrap();
+    for target in [240usize, 1000] {
+        let mut dir = root.path().to_path_buf();
+        let mut left = target.saturating_sub(dir.to_string_lossy().len() + 16);
+        while left > 0 {
+            let k = left.min(200);
+            dir.push("d".repeat(k));
+            left = left.saturating_sub(k + 1);
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cases: Vec<(&str, &str, String)> = Vec::new();
+        let tgz = dir.join("pkg-1.0.tgz");
+        write_tgz(&tgz);
+        let sh = dir.join("run.sh");
+        std::fs::write(&sh, "#!/bin/sh\necho hi\n").unwrap();
+        let jar = dir.join("a.jar");
+        {
+            let mut zip = zip::write::ZipWriter::new(std::fs::File::create(&jar).unwrap());
+            zip.start_file("A.class", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut zip, &[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 0x34, 0, 1])
+                .unwrap();
+            zip.finish().unwrap();
+        }
+        let bin = dir.join("c_advanced_binary");
+        std::fs::copy(sample("c_advanced_binary"), &bin).unwrap();
+        for (tool, key, file) in [
+            ("analyze_file", "file_path", &sh),
+            ("analyze_file", "file_path", &tgz),
+            ("analyze_file", "file_path", &bin),
+            ("analyze_java_file", "file_path", &jar),
+            ("analyze_npm_package", "package_path", &tgz),
+            ("analyze_python_package", "package_path", &tgz),
+            ("analyze_script", "file_path", &sh),
+            ("inspect_archive", "file_path", &jar),
+            ("disassemble", "file_path", &bin),
+            ("query_analysis", "file_path", &bin),
+        ] {
+            cases.push((tool, key, file.to_string_lossy().into_owned()));
+        }
+        for (tool, key, path) in cases {
+            let mut args = json!({ key: path, "max_output_bytes": 4000 });
+            if tool == "query_analysis" {
+                args["section"] = "strings".into();
+            }
+            let result = harness.raw(tool, args.clone()).await;
+            let text = result.content[0].as_text().unwrap().text.clone();
+            if result.is_error == Some(true) {
+                continue;
+            }
+            assert!(text.len() <= 4000, "{tool} {target}: {} bytes", text.len());
+            let answer: Value = serde_json::from_str(&text).unwrap();
+            for step in answer["next_steps"].as_array().into_iter().flatten() {
+                for (name, value) in step["arguments"].as_object().unwrap() {
+                    if name == "file_path" || name == "package_path" {
+                        assert_eq!(value, &Value::String(path.clone()), "{tool}: {step}");
+                    }
+                }
+            }
+            for echo in ["file_path", "package_path"] {
+                if let Some(got) = answer.get(echo) {
+                    assert_eq!(got, &Value::String(path.clone()), "{tool} {echo}");
+                }
+            }
+        }
+    }
+}

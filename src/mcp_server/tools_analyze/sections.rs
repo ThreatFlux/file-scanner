@@ -192,6 +192,13 @@ pub(super) fn resolve_arch(path: &Path, arch: Option<String>) -> Option<String> 
 /// the slice the call was about.
 pub(super) fn with_arch(mut arguments: Value, arch: Option<&str>) -> Value {
     if let (Some(arch), Some(map)) = (arch.filter(|a| !a.is_empty()), arguments.as_object_mut()) {
+        // The parser's slice name (`arm64 (subtype 12)`) is written the way
+        // the overview and every other step spell it.
+        let arch = if arch.starts_with("arm64 (subtype ") {
+            slice_name(arch)
+        } else {
+            arch.to_string()
+        };
         map.insert("arch".into(), arch.into());
     }
     arguments
@@ -2233,7 +2240,12 @@ pub(super) fn overview(
             None
         }
     };
-    if binary_ok && !heavy {
+    // A Java archive or class file has no symbol table to read: asking would
+    // only add a note about an analysis no step offers.
+    let java_kind = kind
+        .as_ref()
+        .is_some_and(|k| matches!(k.kind.as_str(), "jar" | "apk" | "java-class"));
+    if binary_ok && !heavy && !java_kind {
         match load(engine, "symbols") {
             Ok(symbols) => {
                 if let Some(items) = symbols.get("functions").and_then(Value::as_array) {
@@ -2353,10 +2365,15 @@ pub(super) fn overview(
     if !not_available.is_empty() {
         out.insert("not_applicable".into(), Value::Object(not_available));
     }
+    // The archive probe of the overview itself failed: listing would fail too.
+    let archive_unreadable = out
+        .get("format_details")
+        .and_then(|d| d.get("archive"))
+        .is_some_and(|a| a.get("error").is_some());
     let mut steps: Vec<Value> = kind
         .as_ref()
         .filter(|_| kind_is_known)
-        .map(|k| specialist_steps(k, path, file_path))
+        .map(|k| specialist_steps(k, path, file_path, archive_unreadable))
         .unwrap_or_default();
     // Sections that suit this kind of file, all of them in `available_sections`.
     let suggested: Vec<&str> = if binary_ok {
@@ -2584,12 +2601,24 @@ fn java_archive_kind(ext: &str) -> crate::mcp_server::tools_formats::FileKind {
     }
 }
 
+/// Languages `analyze_script` has rules for, as the overview's type label
+/// spells them.
+const ANALYZE_SCRIPT_LANGUAGES: [&str; 6] = [
+    "Shell",
+    "PowerShell",
+    "JavaScript",
+    "Python",
+    "Batch",
+    "VBScript",
+];
+
 /// The tool that specializes in this kind of file, as overview `next_steps`
 /// (first, before the generic drill-down).
 fn specialist_steps(
     kind: &crate::mcp_server::tools_formats::FileKind,
     path: &Path,
     file_path: &str,
+    archive_unreadable: bool,
 ) -> Vec<Value> {
     let call = |tool: &str, gives: &str| {
         json!({
@@ -2623,10 +2652,17 @@ fn specialist_steps(
                     "install-time hooks, dependencies and findings of this Python package",
                 ));
             }
-            steps.push(call(
-                "analyze_script",
-                "risky constructs, obfuscation and decoded payloads of this script",
-            ));
+            // analyze_script refuses a language it has no rules for (Perl, Ruby,
+            // PHP, Lua, AWK); the label starts with the language name.
+            if ANALYZE_SCRIPT_LANGUAGES
+                .iter()
+                .any(|language| kind.label.starts_with(&format!("{language} script")))
+            {
+                steps.push(call(
+                    "analyze_script",
+                    "risky constructs, obfuscation and decoded payloads of this script",
+                ));
+            }
             steps.push(json!({
                 "tool": "analyze_file",
                 "arguments": {"file_path": file_path, "sections": ["taint"]},
@@ -2638,10 +2674,12 @@ fn specialist_steps(
             "class structure, constant pool and risky API use",
         )),
         "jar" | "apk" => {
-            steps.push(call(
-                "inspect_archive",
-                "list and filter the entries of the archive",
-            ));
+            if !archive_unreadable {
+                steps.push(call(
+                    "inspect_archive",
+                    "list and filter the entries of the archive",
+                ));
+            }
             steps.push(call(
                 "analyze_java_file",
                 "classes, manifest and risky API use",
@@ -2650,10 +2688,12 @@ fn specialist_steps(
         // A gzip stream that holds no tar is compressed data, not a listable archive.
         "gzip" if !kind.label.contains("tar") => {}
         "zip" | "gzip" | "tar" | "rar" | "7z" | "bzip2" | "xz" => {
-            steps.push(call(
-                "inspect_archive",
-                "list and filter the entries of the archive",
-            ));
+            if !archive_unreadable {
+                steps.push(call(
+                    "inspect_archive",
+                    "list and filter the entries of the archive",
+                ));
+            }
             // A package is also an archive; the file name says which kind.
             if name.ends_with(".whl") || (kind.kind == "zip" && name.ends_with(".egg")) {
                 steps.push(package(
@@ -2666,13 +2706,12 @@ fn specialist_steps(
                     "lifecycle scripts, dependencies and findings of an npm package; errors when this \
                          archive is not an npm package (no package.json)",
                 ));
-                if name.ends_with(".tar.gz") {
-                    steps.push(package(
-                        "analyze_python_package",
-                        "install hooks and findings of a Python source distribution; errors when this \
-                             archive is not a Python package (no setup.py, pyproject.toml or PKG-INFO)",
-                    ));
-                }
+                // A Python sdist is a .tar.gz or a .tgz.
+                steps.push(package(
+                    "analyze_python_package",
+                    "install hooks and findings of a Python source distribution; errors when this \
+                         archive is not a Python package (no setup.py, pyproject.toml or PKG-INFO)",
+                ));
             }
         }
         "text" => {

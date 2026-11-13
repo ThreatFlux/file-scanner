@@ -28,6 +28,8 @@ pub const MIN_OUTPUT_BYTES: usize = 4_000;
 
 /// Bytes kept free for the `truncated` note while cutting.
 const NOTE_RESERVE: usize = 2_000;
+/// The smaller reserve tried first for an answer close to its budget.
+const LEAN_NOTE_RESERVE: usize = 900;
 /// Cut notes listed individually in the `truncated` object.
 const MAX_LISTED_CUTS: usize = 10;
 /// Strings shorter than this are never cut.
@@ -327,10 +329,34 @@ pub fn render(mut value: Value, budget: usize) -> String {
         return value.to_string();
     }
 
+    // An answer only a little over the budget keeps most of its steps and
+    // sections with a small note reserve; when that does not fit (a long note),
+    // the generous reserve is used. The first try works on a copy, so only
+    // answers of at most twice the budget pay for it.
+    if original <= budget.saturating_mul(2) {
+        if let Ok(text) = shrink_to_fit(value.clone(), budget, original, LEAN_NOTE_RESERVE) {
+            return text;
+        }
+    }
+    match shrink_to_fit(value, budget, original, NOTE_RESERVE) {
+        Ok(text) => text,
+        Err(text) => preview_fallback(&text, budget, original),
+    }
+}
+
+/// Shorten `value` to leave `reserve` bytes for the note and render it with
+/// the note. `Err` holds the text when it still does not fit `budget`.
+fn shrink_to_fit(
+    mut value: Value,
+    budget: usize,
+    original: usize,
+    reserve: usize,
+) -> Result<String, String> {
     let mut cuts = Cuts::default();
     shrink(
         &mut value,
-        budget.saturating_sub(NOTE_RESERVE),
+        budget.saturating_sub(reserve),
+        budget.saturating_sub(LEAN_NOTE_RESERVE),
         original,
         &mut cuts,
     );
@@ -345,9 +371,10 @@ pub fn render(mut value: Value, budget: usize) -> String {
     root.insert("truncated".to_string(), note(budget, original, &cuts.list));
     let text = Value::Object(root).to_string();
     if text.len() <= budget {
-        return text;
+        Ok(text)
+    } else {
+        Err(text)
     }
-    preview_fallback(&text, budget, original)
 }
 
 /// Last resort: a short preview of the JSON that always fits.
@@ -450,26 +477,37 @@ fn is_protected(path: &str) -> bool {
     })
 }
 
+/// Whether a JSON pointer names a path the caller can send back: any string
+/// inside a next step's `arguments` (a shortened path makes the step fail as
+/// written, so a step is kept whole or dropped whole) and, with `include_echo`
+/// false, the top-level `file_path`, `package_path` and `path` echo.
+fn is_path_argument(path: &str, include_echo: bool) -> bool {
+    path.contains("/arguments/")
+        || (!include_echo && matches!(path, "/file_path" | "/package_path" | "/path"))
+}
+
 struct Candidate {
     path: String,
     is_string: bool,
     size: usize,
 }
 
-fn collect(value: &Value, path: &mut String, out: &mut Vec<Candidate>) {
+fn collect(value: &Value, path: &mut String, out: &mut Vec<Candidate>, include_echo: bool) {
     match value {
-        Value::String(s) if s.len() >= MIN_CUT_STRING => out.push(Candidate {
-            path: path.clone(),
-            is_string: true,
-            size: s.len() + 2,
-        }),
+        Value::String(s) if s.len() >= MIN_CUT_STRING && !is_path_argument(path, include_echo) => {
+            out.push(Candidate {
+                path: path.clone(),
+                is_string: true,
+                size: s.len() + 2,
+            })
+        }
         Value::Array(items) => {
             let before = out.len();
             for (index, item) in items.iter().enumerate() {
                 let len = path.len();
                 path.push('/');
                 path.push_str(&index.to_string());
-                collect(item, path, out);
+                collect(item, path, out, include_echo);
                 path.truncate(len);
             }
             // An array is cut by dropping elements only when none of its elements
@@ -491,7 +529,7 @@ fn collect(value: &Value, path: &mut String, out: &mut Vec<Candidate>) {
                 let len = path.len();
                 path.push('/');
                 path.push_str(&key.replace('~', "~0").replace('/', "~1"));
-                collect(item, path, out);
+                collect(item, path, out, include_echo);
                 path.truncate(len);
             }
         }
@@ -506,11 +544,14 @@ fn collect(value: &Value, path: &mut String, out: &mut Vec<Candidate>) {
 /// sections therefore lose the most, small ones nothing, and no section is
 /// wiped out while another stays whole.
 ///
+/// `hard` is the size above which only a step's `arguments` stay uncut: the
+/// path echo is shortened only past it.
+///
 /// `known_len` is the compact size of `value` on entry. The size is then
 /// tracked from the cuts instead of serializing the whole value on every pass
 /// (that cost seconds on a 100 MB section); the tracked size is an estimate,
 /// so it is confirmed exactly before the loop ends.
-fn shrink(value: &mut Value, target: usize, known_len: usize, cuts: &mut Cuts) {
+fn shrink(value: &mut Value, target: usize, hard: usize, known_len: usize, cuts: &mut Cuts) {
     let mut total = known_len;
     for _ in 0..64 {
         if total <= target {
@@ -520,7 +561,13 @@ fn shrink(value: &mut Value, target: usize, known_len: usize, cuts: &mut Cuts) {
             }
         }
         let mut candidates = Vec::new();
-        collect(value, &mut String::new(), &mut candidates);
+        collect(value, &mut String::new(), &mut candidates, false);
+        if candidates.is_empty() && total > hard {
+            // Only the path echo is left to cut and the answer would not fit
+            // with its note (a path about as long as the budget): shorten it
+            // as the last resort, never a step's arguments.
+            collect(value, &mut String::new(), &mut candidates, true);
+        }
         if candidates.is_empty() {
             return;
         }
@@ -931,5 +978,63 @@ mod tests {
         let before = value.clone();
         fit_rows(&mut value, "items", 5_000, 0, rows.len());
         assert_eq!(value, before);
+    }
+
+    fn steps_value(path: &str) -> Value {
+        let step = |tool: &str, extra: Value| {
+            let mut arguments = json!({"file_path": path});
+            arguments
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            json!({"tool": tool, "arguments": arguments, "gives": "something useful"})
+        };
+        json!({
+            "file_path": path,
+            "sha256": "0".repeat(64),
+            "big": (0..400).map(|i| format!("item {i}")).collect::<Vec<_>>(),
+            "next_steps": [
+                step("analyze_file", json!({})),
+                step("query_analysis", json!({"section": "strings"})),
+                step("read_hex", json!({"offset": 0, "length": 256})),
+            ],
+        })
+    }
+
+    #[test]
+    fn a_path_argument_in_a_next_step_is_never_shortened() {
+        for len in [200usize, 240, 1000] {
+            let path = format!("/{}", "p".repeat(len - 1));
+            let text = render(steps_value(&path), MIN_OUTPUT_BYTES);
+            assert!(text.len() <= MIN_OUTPUT_BYTES, "{len}: {}", text.len());
+            let parsed: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(parsed["file_path"], path.as_str(), "{len}");
+            for step in parsed["next_steps"].as_array().into_iter().flatten() {
+                assert_eq!(step["arguments"]["file_path"], path.as_str(), "{len}");
+            }
+            assert!(parsed["truncated"].is_object(), "{len}");
+        }
+    }
+
+    #[test]
+    fn steps_that_cannot_fit_are_dropped_whole_and_counted() {
+        let path = format!("/{}", "p".repeat(1_000));
+        let parsed: Value =
+            serde_json::from_str(&render(steps_value(&path), MIN_OUTPUT_BYTES)).unwrap();
+        let kept = parsed["next_steps"].as_array().map_or(0, Vec::len);
+        assert!(kept < 3, "{kept}");
+        let listed = parsed["truncated"]["cut"].to_string();
+        assert!(listed.contains("/next_steps"), "{listed}");
+    }
+
+    #[test]
+    fn a_path_echo_longer_than_the_budget_is_the_last_thing_cut() {
+        let path = format!("/{}", "p".repeat(5_000));
+        let value = json!({"file_path": path, "n": 1});
+        let text = render(value, MIN_OUTPUT_BYTES);
+        assert!(text.len() <= MIN_OUTPUT_BYTES, "{}", text.len());
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["n"], 1);
+        assert!(parsed["truncated"].is_object());
     }
 }
