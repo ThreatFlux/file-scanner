@@ -171,12 +171,12 @@ path = "src/main.rs"
 
 [dependencies]
 # ThreatFlux libraries - migrated to crates.io
-threatflux-hashing = { version = "1.7.3", features = ["serde"] }
-threatflux-string-analysis = { version = "0.2.4" }
-threatflux-cache = { version = "0.2.3" } # TODO: Update library to use utoipa 5.4.0 for openapi feature
-threatflux-binary-analysis = { version = "0.3.2", features = ["serde-support"] }
+threatflux-hashing = { version = "1.7.4", features = ["serde"] }
+threatflux-string-analysis = { version = "0.2.5" }
+threatflux-cache = { version = "0.2.4" }
+threatflux-binary-analysis = { version = "0.3.3", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis
-threatflux-threat-detection = { version = "0.2.4", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
+threatflux-threat-detection = { version = "0.2.5", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
 # threatflux-package-security = { version = "0.1.0" } # Not used in actual source code
 
 # Core dependencies (using workspace versions)

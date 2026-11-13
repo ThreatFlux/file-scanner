@@ -4268,9 +4268,9 @@ dependencies = [
 
 [[package]]
 name = "threatflux-binary-analysis"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25ebd67c144138a7e892309cf37a60d5c7d872fe7fe7180ff4272d6a7bbece93"
+checksum = "eb4c328cb03697698d3cc7ee8e890364426c371409684c627565684f22408b39"
 dependencies = [
  "goblin",
  "memmap2",
@@ -4282,9 +4282,9 @@ dependencies = [
 
 [[package]]
 name = "threatflux-cache"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a428e2434557ccfc4ec01d74d528320a0580ba801ea2bf547559a8239b5adaf"
+checksum = "b19f59e1f1fe400c7f5fb118295c06a46f6337f203dd6eec4a172897c2758eea"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4370,9 +4370,9 @@ dependencies = [
 
 [[package]]
 name = "threatflux-hashing"
-version = "1.7.3"
+version = "1.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3064c605b8ef55c8bcbdd7eeb7745a9fa8c2c0d33f0212fe6a33fa28e5b46a77"
+checksum = "bab8f971e521cc917e30904bc90af1139061e9faa498558094cb73aea6261f7e"
 dependencies = [
  "blake3",
  "futures",
@@ -4385,9 +4385,9 @@ dependencies = [
 
 [[package]]
 name = "threatflux-string-analysis"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49cf9f48f738debf0150b973bf855d171018e9fe1705dde2deaeba927d62cb1f"
+checksum = "ad6766309e6fe81f6049a477792bfef1c5df0af5b786f8cc941a232b54d19df7"
 dependencies = [
  "chrono",
  "regex",
@@ -4397,9 +4397,9 @@ dependencies = [
 
 [[package]]
 name = "threatflux-threat-detection"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "720272194e648b1de6a538671e89401d0ad3b86306fc836f2c6d5017d6708450"
+checksum = "c20d1d4aa350807cece79c3fda06404733c9647a315049120a767bb39252faee"
 dependencies = [
  "aho-corasick",
  "anyhow",
