@@ -177,7 +177,7 @@
     "src/java_analysis.rs": "09b146487001962f5aee03a3e2e5b5ab292a5abd541fdbfed416229044d4f836",
     "src/mcp_server/tools_analyze.rs": "7787a5f24f9cc4c9e66ad3f2d01176fbaaa8bd08a97693338fa22afcf8d5d5b7",
     "src/pdf_analysis.rs": "c740b874c3d70a974aeb9edf2de79521f1d1d9177851887b5404874a23e8fc2d",
-    "src/signature.rs": "fb9c7ed2eb6fbe682df43a8682e49df1618ab5c9d3b9a97ea7d7812263b3f948",
+    "src/signature.rs": "bf7b9a7e5cd5d974fcc830d9d4a8855b41308e8e08d87116fae5509aa9ef2c25",
     "tests/binary_formats_test.rs": "3559346ac6ac9c5553292cf20d502e25e30e2bbf55e25e437185273a26bff30f",
     "tests/java_analysis_test.rs": "b2188807dce8292680720c03d61162f5663edb8c1f47a99d61681f25aeb32bf5",
     "tests/pdf_analysis_test.rs": "4192eca28de9f953c215fe2f47b7e4b2c8a6aaa7d41be6ec4f01783347f8f943",
