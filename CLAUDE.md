@@ -235,7 +235,10 @@ Design rules every tool follows:
   `next_address`, section summaries reduced to counts have `note`, and `compare_files` and `llm_analyze_file` list
   the cut under `truncated`. Lists page with `offset` and `limit`; most answers carry `total`, `returned` and
   `next_offset`, with per-tool field names (see `docs/MCP.md`, Paging).
-- Answers that can come from the cache carry `cache: hit | miss`.
+- `next_steps` entries, in every tool that has them, are `{tool, arguments, gives}` objects (no `why`, no plain
+  strings); advice that is not a call goes in `hint` or `summary.notes`.
+- Answers that can come from the cache carry `cache: hit | miss` (`partial` for a section set that was partly
+  stored, and for `disassemble` code outside the stored window).
 - Input schemas reject unknown fields. Failures are tool errors (`isError: true`) whose message names the fix.
 - All tools are read-only except `cache_clear`. Nothing is executed.
 
@@ -243,7 +246,11 @@ Design rules every tool follows:
 
 - Section cache: compressed JSON in memory (256 MiB) and on disk (1 GiB), keyed by file SHA-256 and options.
 - Analysis history: one file per file hash (bounded in bytes and entries, LRU), read by `cache_status` and the REST
-  `/cache/*` routes.
+  `/cache/*` routes. Every server that uses the same cache directory shares it. With `--allow-root`, `cache_status`
+  `list` and `search`, `search_strings`, `string_details`, `/cache/list`, `/cache/search` and `/strings/*` show only
+  entries of files inside a root; counts and sizes (`cache_status` `stats`, `/cache/stats`, string totals) stay global.
+- The threats, enhanced_threats and package section keys carry a revision, so ratings stored by an earlier build are
+  recomputed.
 - Location: `--cache-dir`, else `FILE_SCANNER_CACHE_DIR`, else `$XDG_CACHE_HOME/file-scanner`, else
   `~/.cache/file-scanner` (Linux) or `~/Library/Caches/file-scanner` (macOS). Mode 0700 directory, 0600 files. An
   unusable directory degrades to memory-only with one line on stderr.
@@ -291,16 +298,23 @@ Offline analysis of a local npm package (`.tgz`, directory, `package.json`, `pac
 downloaded; a registry name is rejected with a message that says to run `npm pack`.
 
 - Source scan (`package_scan.rs`): up to 400 files, 1 MiB each, 16 MiB in all, for download-and-execute (shell
-  one-liners and Node or Python download, write and run code), decoded `eval`, a download passed to `eval` or `exec`,
-  credential and wallet access, credential files or the whole environment sent over the network, exfiltration
-  endpoints, miners, reverse shells and obfuscation, with file and line evidence. The multi-line checks need the
-  statements within 60 lines of each other (8 for the environment) and skip lines over 1,000 characters.
+  one-liners and Node or Python download, write and run code), decoded `eval`, a decoded payload passed to a process
+  call, a download passed to `eval` or `exec`, credential and wallet access, credential files or the whole
+  environment sent over the network, exfiltration endpoints, miners, reverse shells and obfuscation, with file and
+  line evidence. The multi-line checks need the statements within 60 lines of each other (8 for the environment) and
+  skip lines over 1,000 characters. One named environment variable beside a URL or HTTP call is not a finding. A
+  run is tied to a write only when it names the written variable, field, expression or path literal, or starts a
+  shell, interpreter or `chmod`; a call whose first argument is only a string literal (`spawn('sh', [path])`) is
+  not seen as a run, except a literal `chmod +x` (`exec('chmod +x /tmp/x.sh')`), which is.
 - Install hooks (`preinstall`, `install`, `postinstall`, `prepare`, `prepublish`) are judged by their command string
   (for example a download piped to a shell) and also by the file they run. A file named by a hook (`node
-  scripts/setup.js`, `sh setup.sh`, `./setup.sh`, also after `&&`) is install-time code: its High findings set
-  `install_scripts.dangerous_commands` and add a risk reason such as `an install-time script runs suspicious code:
-  ... (preinstall runs scripts/setup.js)`. The tool reads the runner from the command. A runner such as `npx`, a
-  file reached only through `require()`, and a download in one file that is run from another are not followed.
+  scripts/setup.js`, `sh setup.sh`, `./setup.sh`, also after `&&`, `cd dir &&` or leading `NAME=value` words; an
+  extensionless path or a directory is tried with `.js`, `.cjs`, `.mjs` and `index.js`) is install-time code: its
+  High findings and any obfuscation finding in it set `install_scripts.dangerous_commands`, raise the package to at
+  least High and add a risk reason such as `an install-time script runs suspicious code: ... (preinstall runs
+  scripts/setup.js)`. The tool reads the runner from the command. A runner such as `npx`, a path that leaves the
+  package, a file reached only through `require()`, and a download in one file that is run from another are not
+  followed.
 - Risk floors: a dependency on a known malicious release is at least High; a suspected typosquat is at least Medium;
   a tarball or zip with a `..`, absolute-path or link entry is at least High (category `unsafe-path`).
 - Typosquatting check against a popular-package list; a popular package is never a typosquat of itself.
@@ -330,6 +344,8 @@ The same design for Python: a local `.whl`, `.tar.gz`/`.tgz`, `.zip`, a source d
   behaviour.
 - Advisories: `src/python_vuln_db.rs` holds a small table (7 packages: Django, Flask, requests, Pillow, PyYAML, NumPy,
   urllib3) matched with PEP 440 and normalized names. An unpinned requirement is unknown, not vulnerable.
+- Obfuscation in `setup.py` raises the package to at least High (reason `setup.py runs suspicious code at install
+  time: <rule> (line N)`). A known-malicious release is named `name==version` (for example `ctx==0.1.2`).
 - Known-malicious data in `python_vuln_db.rs`: `get_known_malicious_packages()` (malicious at every version, for
   example colourama and python3-dateutil) and `get_known_malicious_versions()` (hijacked releases such as ctx 0.1.2
   and some ultralytics 8.3.x). Names of legitimate packages were removed from the first list (sklearn, pytorch,

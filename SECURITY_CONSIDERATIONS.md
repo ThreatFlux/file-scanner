@@ -68,6 +68,22 @@ readable path is allowed. The server expands a leading `~/` in `--allow-root` an
 `FILE_SCANNER_ALLOWED_ROOTS` to the home directory, so a JSON client config may use it. The startup banner
 prints the expanded path.
 
+A root also limits what the server reports from earlier calls. The analysis history is kept in the cache directory
+and is shared by every server that uses that directory, so a rooted server can share a directory with an
+unrestricted one. The rooted server shows only entries whose stored path is inside its roots:
+
+- Filtered: `cache_status` `list` and `search`, `search_strings` without `file_path`, `string_details`, and over HTTP
+  `/cache/list`, `/cache/search`, `/strings/search`, `/strings/details`, and the string values listed by
+  `/strings/stats` and `/strings/filter`. An entry that no longer resolves inside a root (for example a file replaced
+  by a link that leaves the root) is left out.
+- Not filtered: counts and sizes. `cache_status` `stats`, `/cache/stats`, and the totals and distributions of
+  `/strings/stats` and `/strings/filter` count entries of files outside the roots too. They name no path and no
+  string, but they do tell a client how much the history holds.
+
+A path that a tool names directly is checked against the roots before it is read, as above. A directory scan checks
+each entry it reaches: `yara_scan_file` refuses a directory that holds a link out of the roots, and the
+`analyze_file` triage table skips links and counts them under `links_skipped`.
+
 ### HTTP
 
 `mcp-http` is a network service that returns file contents and analysis of files. The defaults are
@@ -112,6 +128,8 @@ and paths from the analyzed files.
   `$XDG_CACHE_HOME/file-scanner`, `~/Library/Caches/file-scanner` (macOS) or `~/.cache/file-scanner`.
 - Move it with `--cache-dir` or `FILE_SCANNER_CACHE_DIR`. Turn it off with `--no-cache`: no section cache or history is
   kept, on disk or in memory (the in-memory string index still fills while the server runs).
+- Several servers can share one cache directory and then share the analysis history. `--allow-root` filters what a
+  server shows from it (see above), not what is stored.
 - The `cache_clear` tool, `POST /cache/clear` and deleting the directory remove it. The tool and the route also
   empty the in-memory string index and the Java tool's in-memory results. The on-disk size is bounded (see
   `FILE_SCANNER_CACHE_DISK_MB`).

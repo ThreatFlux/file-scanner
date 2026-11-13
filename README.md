@@ -138,7 +138,13 @@ The server has 17 tools. Start with `analyze_file` and a path: it returns an ove
 | Cache | `cache_status`, `cache_clear` |
 
 Every answer is capped (80,000 bytes by default, adjustable with `max_output_bytes`), lists come back in pages, and
-full analysis runs are cached so follow-up calls are fast.
+full analysis runs are cached so follow-up calls are fast. Every `next_steps` entry is a `{tool, arguments, gives}`
+call that can be sent as written.
+
+`analyze_script` keeps the first 2,000 findings of a whole file; `line_from` and `line_to` scan a range of lines to
+reach the rest. `mcp-stdio` exits 0 when stdin closes (after up to 5 seconds for calls that are still running) and on
+SIGINT or SIGTERM. With `--allow-root`, the cache and string tools show only entries of files inside a root; counts
+and sizes stay global (see [docs/MCP.md](docs/MCP.md#the-cache)).
 
 ## Example CLI output
 

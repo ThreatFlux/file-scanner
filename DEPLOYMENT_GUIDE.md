@@ -15,7 +15,9 @@ What exists:
 - A `Host` header allow-list and an `Origin` allow-list (`--allowed-host`, `--allowed-origin`).
 - An optional bearer token (`--auth-token` or `FILE_SCANNER_AUTH_TOKEN`) on every route except `/health`.
 - A path scope (`--allow-root`, repeatable, or `FILE_SCANNER_ALLOWED_ROOTS`): every tool path must
-  resolve, symlinks and `..` included, to a place under one of the roots.
+  resolve, symlinks and `..` included, to a place under one of the roots. The cache and string tools and routes
+  also show only entries of files inside a root. Counts and sizes (`cache_status` `stats`, `/cache/stats`, string
+  totals) stay global.
 - A limit of 16 concurrent REST requests and a 120 second REST timeout.
 
 What does not exist, and belongs in the layer in front of the server:
@@ -155,7 +157,9 @@ WantedBy=multi-user.target
 ```
 
 `/etc/file-scanner.env` holds one line, `FILE_SCANNER_AUTH_TOKEN=...`, readable by root only. This unit
-binds loopback; put the reverse proxy on the same host. This unit was not run for this guide.
+binds loopback; put the reverse proxy on the same host. This unit was not run for this guide. Servers that point at
+the same `FILE_SCANNER_CACHE_DIR` share one analysis history; a server with `--allow-root` lists only the entries of
+files inside its roots.
 
 ### Reverse proxy
 

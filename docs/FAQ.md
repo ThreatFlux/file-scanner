@@ -218,7 +218,8 @@ The second reply should say 17 tools. Do not pretty-print the requests: each lin
 ### A tool says a path is outside the directories the server may read
 
 The server was started with `--allow-root` (or `FILE_SCANNER_ALLOWED_ROOTS`) and the path is not under a root. The
-message names the allowed directories.
+message names the allowed directories. With a root set, `cache_status`, `search_strings` and `string_details` also
+show only files inside a root; their counts and sizes stay global (see [MCP.md](MCP.md#the-cache)).
 
 ### Can I run the MCP server from the Docker image?
 
