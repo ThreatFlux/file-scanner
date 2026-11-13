@@ -1237,6 +1237,7 @@ pub(crate) fn finish_analysis(
                 " {ALL_ENCRYPTED}, so no entry content could be rated."
             ));
         }
+        note.push_str(" Get the password and extract them to inspect their content.");
         notes.push(note);
     }
     if !nested_archives.is_empty() {
@@ -1733,7 +1734,9 @@ fn mark_bomb_entries(entries: &mut [ArchiveEntry], compressed: bool) {
             "Possible compression bomb: {} bytes unpack from {} bytes",
             entry.size_uncompressed, entry.size_compressed
         ),
-        severity: RiskLevel::High,
+        // The archive is rated critical for a possible bomb, so its entry carries the
+        // same level (the score and the level are one scale).
+        severity: RiskLevel::Critical,
     };
     let mut marked = false;
     for entry in entries.iter_mut() {

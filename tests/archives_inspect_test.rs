@@ -79,7 +79,10 @@ async fn inspect_archive_is_listed_and_pages_a_zip() {
     assert_eq!(first["entries"]["returned"], 50);
     assert_eq!(first["entries"]["total"], 122);
     assert_eq!(first["entries"]["next_offset"], 50);
-    assert!(first["next_steps"].to_string().contains("offset=50"));
+    let step = &first["next_steps"][0];
+    assert_eq!(step["tool"], "inspect_archive");
+    assert_eq!(step["arguments"]["offset"], 50);
+    assert!(step["gives"].is_string());
 
     let second = ok(&results[1]);
     assert_eq!(second["cache"], "hit", "paging is served from the cache");

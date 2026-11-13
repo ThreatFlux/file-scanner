@@ -282,6 +282,20 @@ fn macho_cpu(cputype: u32) -> &'static str {
     }
 }
 
+/// A slice's architecture as `arch` accepts it and the analyze_file overview prints it
+/// (`ARM64 (subtype 12)` is `arm64-subtype-12`). A copy of `slice_name` in
+/// tools_analyze/sections.rs, which is private to that module.
+fn slice_name(architecture: &str) -> String {
+    let lower = architecture.to_ascii_lowercase();
+    match lower
+        .strip_prefix("arm64 (subtype ")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        Some(n) => format!("arm64-subtype-{n}"),
+        None => lower.replace(' ', "-"),
+    }
+}
+
 fn macho_or_java_kind(head: &[u8]) -> Option<FileKind> {
     let magic = head.get(..4)?;
     let be32 = |at: usize| -> Option<u32> {
@@ -344,7 +358,13 @@ fn macho_or_java_kind(head: &[u8]) -> Option<FileKind> {
         }
         let entry = if fat64 { 32 } else { 20 };
         let slices = (0..next.min(32) as usize)
-            .filter_map(|i| be32(8 + i * entry).map(macho_cpu))
+            .filter_map(|i| {
+                let cputype = be32(8 + i * entry)?;
+                let subtype = be32(12 + i * entry)?;
+                Some(slice_name(&crate::binary_parser::mach_architecture_name(
+                    cputype, subtype,
+                )))
+            })
             .collect::<Vec<_>>();
         let label = format!(
             "Mach-O universal binary ({next} slice{}: {})",
@@ -961,7 +981,7 @@ pub struct InspectArchiveRequest {
 }
 
 /// Section-cache key for the complete listing; the file's SHA-256 is the other half.
-const ARCHIVE_CACHE_KEY: &str = "archive:listing:v5";
+const ARCHIVE_CACHE_KEY: &str = "archive:listing:v6";
 
 #[tool_router(router = formats_router, vis = "pub(crate)")]
 impl FileScannerMcp {
@@ -1283,44 +1303,87 @@ fn build_listing(
         summary["comment"] = comment.into();
     }
 
-    let mut next_steps: Vec<String> = Vec::new();
+    let mut next_steps: Vec<Value> = Vec::new();
+    // Advice that is not a call (get the password, extract nested archives) is in
+    // summary.notes.
     if needle.is_none()
         && !risky_only
         && security["path_traversal_risks"]
             .as_array()
             .is_some_and(|l| !l.is_empty())
     {
-        next_steps.push(
-            "Unsafe paths exist: call inspect_archive with risky_only=true to list them."
-                .to_string(),
-        );
-    }
-    if gaps.nested {
-        next_steps.push(
-            "Nested archives were not opened: extract each one and call inspect_archive on it."
-                .to_string(),
-        );
-    }
-    if gaps.encrypted {
-        next_steps.push(
-            "Password-protected entries were not read: get the password and extract them to \
-             inspect their content."
-                .to_string(),
-        );
+        next_steps.push(json!({
+            "tool": "inspect_archive",
+            "arguments": {"file_path": request.file_path, "risky_only": true},
+            "gives": "only the entries with a risk indicator, such as paths that leave the extraction root",
+        }));
     }
     if matches!(detected["label"].as_str(), Some(l) if l.starts_with("Java")) {
-        next_steps
-            .push("Java archive: analyze_java_file inspects classes and the manifest.".to_string());
+        next_steps.push(json!({
+            "tool": "analyze_java_file",
+            "arguments": {"file_path": request.file_path},
+            "gives": "the archive's classes, manifest and findings",
+        }));
     }
 
-    // The envelope around the rows: summary, echoed file_path and filter, and the
-    // next steps (plus the "More entries" step added below), all measured.
+    // The envelope around the rows: summary, echoed file_path and filter, the
+    // next steps and the paging step added below, all measured. The paging step
+    // repeats file_path, filter and limit, so it is built here at its longest
+    // (offset = total) and counted before the rows are sized.
     let json_len = |v: &Value| serde_json::to_vec(v).map_or(0, |b| b.len());
-    let envelope = json_len(&summary)
-        + json_len(&json!(request.file_path))
-        + json_len(&json!(request.filter))
-        + json_len(&json!(next_steps))
-        + 96;
+    let paging_arguments = |next: usize| {
+        let mut arguments = json!({"file_path": request.file_path, "offset": next});
+        if let Some(filter) = &request.filter {
+            arguments["filter"] = json!(filter);
+        }
+        if risky_only {
+            arguments["risky_only"] = json!(true);
+        }
+        if let Some(limit) = request.limit {
+            arguments["limit"] = json!(limit);
+        }
+        arguments
+    };
+    let paging_len = json_len(&json!({
+        "tool": "inspect_archive",
+        "arguments": paging_arguments(total_selected),
+        "gives": "the next page of entries",
+    })) + 1;
+    let envelope_of = |summary: &Value, steps: &[Value]| {
+        json_len(summary)
+            + json_len(&json!(request.file_path))
+            + json_len(&json!(request.filter))
+            + json_len(&json!(steps))
+            + paging_len
+            + 96
+    };
+    // Room for the rows must hold at least one typical row; when it does not,
+    // the optional steps that repeat file_path are dropped first, then the
+    // examples of unsafe paths one by one (`unsafe_paths` keeps their count,
+    // and `risky_only` lists them all).
+    const ROW_ROOM: usize = 700;
+    let mut envelope = envelope_of(&summary, &next_steps);
+    if budget.saturating_sub(envelope + 1000) < ROW_ROOM {
+        next_steps.clear();
+        envelope = envelope_of(&summary, &next_steps);
+    }
+    while budget.saturating_sub(envelope + 1000) < ROW_ROOM {
+        let Some(examples) = summary
+            .get_mut("unsafe_path_examples")
+            .and_then(Value::as_array_mut)
+        else {
+            break;
+        };
+        if examples.pop().is_none() {
+            break;
+        }
+        if examples.is_empty() {
+            if let Some(map) = summary.as_object_mut() {
+                map.remove("unsafe_path_examples");
+            }
+        }
+        envelope = envelope_of(&summary, &next_steps);
+    }
     super::output::fit_rows(
         &mut entries,
         "items",
@@ -1329,9 +1392,15 @@ fn build_listing(
         total_selected,
     );
     if let Some(next) = entries["next_offset"].as_u64() {
+        // Same listing, next page: the filter, risky_only and limit are kept.
+        let arguments = paging_arguments(next as usize);
         next_steps.insert(
             0,
-            format!("More entries: call inspect_archive again with offset={next}."),
+            json!({
+                "tool": "inspect_archive",
+                "arguments": arguments,
+                "gives": "the next page of entries",
+            }),
         );
     }
 
@@ -1811,16 +1880,20 @@ mod tests {
         assert_eq!(kind.label, "Mach-O 64-bit executable (arm64)");
 
         // Fat binary with two slices (x86-64, arm64): same magic as Java.
-        let mut fat = vec![0u8; 8 + 40];
+        let mut fat = vec![0u8; 8 + 60];
         fat[..4].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe]);
-        fat[4..8].copy_from_slice(&2u32.to_be_bytes());
+        fat[4..8].copy_from_slice(&3u32.to_be_bytes());
         fat[8..12].copy_from_slice(&0x0100_0007u32.to_be_bytes());
         fat[28..32].copy_from_slice(&0x0100_000cu32.to_be_bytes());
+        fat[32..36].copy_from_slice(&2u32.to_be_bytes());
+        fat[48..52].copy_from_slice(&0x0100_000cu32.to_be_bytes());
+        fat[52..56].copy_from_slice(&12u32.to_be_bytes());
         let kind = kind_of(dir.path(), "fat", &fat);
         assert_eq!(kind.kind, "macho-fat");
+        // The names `arch` accepts, as the analyze_file overview prints them.
         assert_eq!(
             kind.label,
-            "Mach-O universal binary (2 slices: x86-64, arm64)"
+            "Mach-O universal binary (3 slices: x86_64, arm64e, arm64-subtype-12)"
         );
 
         let class = [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 52, 0, 0];
@@ -2110,7 +2183,25 @@ mod tests {
         let notes = summary["notes"].to_string();
         assert!(notes.contains("counted but not opened"), "{notes}");
         assert!(notes.contains("inner/one.zip") && notes.contains("two.tar.gz"));
-        assert!(page["next_steps"].to_string().contains("extract each one"));
+        assert!(summary["notes"].to_string().contains("Extract them"));
+        assert!(page["next_steps"].is_null(), "{page}");
+    }
+
+    #[test]
+    fn next_steps_are_calls_that_keep_the_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        let names: Vec<String> = (0..70).map(|i| format!("d/f{i:03}.txt")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let page = listing_of(dir.path(), "many.zip", &zip_with(&refs), false);
+        let step = &page["next_steps"][0];
+        assert_eq!(step["tool"], "inspect_archive", "{page}");
+        assert_eq!(step["arguments"]["offset"], page["entries"]["next_offset"]);
+        assert!(step["gives"].is_string());
+        assert!(page["next_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(Value::is_object));
     }
 
     #[test]
@@ -2133,6 +2224,13 @@ mod tests {
         assert_eq!(items.len(), 1, "{page}");
         assert_eq!(items[0]["path"], "zeros.bin");
         assert!(items[0]["risks"].to_string().contains("CompressionBomb"));
+        // The archive level and the entry flag are the same level.
+        assert_eq!(page["summary"]["risk"], "critical", "{page}");
+        assert!(
+            items[0]["risks"].to_string().contains("critical"),
+            "{}",
+            items[0]["risks"]
+        );
     }
 
     #[test]
@@ -2153,7 +2251,12 @@ mod tests {
     fn a_size_cut_page_sends_every_row_it_reports_with_a_long_file_path() {
         let dir = tempfile::tempdir().unwrap();
         let mut names: Vec<String> = (0..120).map(|i| format!("dir/file{i:03}.txt")).collect();
-        names.push("../evil.txt".into());
+        // Many unsafe paths, so the summary carries its full list of examples.
+        names.extend(
+            (0..12).map(|i| {
+                format!("../../../../some/long/way/up/and/out/of/the/tree/evil{i:02}.txt")
+            }),
+        );
         names.push("inner/one.zip".into());
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut bytes = zip_with(&refs);
@@ -2162,6 +2265,7 @@ mod tests {
         let kind = detect_file_kind(&path).unwrap();
         let analysis = analyze_archive(&path, &kind, 1 << 30).unwrap();
         let stored = stored_listing(analysis, &kind).unwrap();
+        // The path is echoed in the answer and in each next step, so it counts three times.
         let long_path = format!("/{}", "d".repeat(900));
         let mut offset = 0usize;
         let mut seen = 0usize;
@@ -2186,10 +2290,21 @@ mod tests {
             let text = text_with_summary_nulls(page, budget);
             let parsed: Value = serde_json::from_str(&text).unwrap();
             assert!(parsed.get("truncated").is_none(), "{text}");
+            assert_eq!(parsed["file_path"], long_path.as_str(), "{text}");
             let entries = &parsed["entries"];
             let items = entries["items"].as_array().unwrap().len();
             assert_eq!(entries["returned"], items, "{text}");
             assert!(items > 0, "{text}");
+            if entries["next_offset"].is_u64() {
+                // The paging step can be sent as written.
+                assert_eq!(
+                    parsed["next_steps"][0]["arguments"]["file_path"],
+                    long_path.as_str(),
+                    "{text}"
+                );
+            }
+            // The count of unsafe paths survives when examples are dropped for room.
+            assert_eq!(parsed["summary"]["unsafe_paths"], 12, "{text}");
             total = entries["total"].as_u64().unwrap() as usize;
             seen += items;
             match entries["next_offset"].as_u64() {
