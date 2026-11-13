@@ -643,6 +643,41 @@ pub fn load(path: &Path, container: ContainerKind, select: &Selector) -> Result<
         ContainerKind::Zip => read_zip_files(path, &want)?,
     };
 
+    // The counters above were raised when files were selected. A selected file
+    // that came back without content (permission denied, removed since the
+    // listing, a damaged archive member, blocked by a security agent) was not
+    // scanned: take it out of the scanned counters and count it as not read, so
+    // coverage stays honest and the incomplete-package floor applies.
+    let mut unread: Vec<&str> = Vec::new();
+    for entry in &listed {
+        if !want.contains(&entry.ordinal) || contents.contains_key(&entry.ordinal) {
+            continue;
+        }
+        unread.push(&entry.path);
+        if (select.is_source)(&entry.path) {
+            let manifest = (select.is_manifest)(&entry.path);
+            let counted = if manifest {
+                entry.size as usize
+            } else {
+                (entry.size as usize).min(MAX_FILE_BYTES)
+            };
+            files_scanned = files_scanned.saturating_sub(1);
+            bytes_scanned = bytes_scanned.saturating_sub(counted);
+            if !manifest && entry.size as usize > MAX_FILE_BYTES {
+                files_partial = files_partial.saturating_sub(1);
+            }
+        }
+    }
+    if let Some(first) = unread.first() {
+        files_skipped += unread.len();
+        let shown: String = first.chars().take(200).collect();
+        notes.push(format!(
+            "{} source files could not be read: {shown}{}. They are not counted as scanned; check the permissions of the package or whether something is blocking access to it, then analyze it again.",
+            unread.len(),
+            if unread.len() > 1 { " and others" } else { "" }
+        ));
+    }
+
     let mut files: Vec<LoadedFile> = listed
         .into_iter()
         .map(|entry| {

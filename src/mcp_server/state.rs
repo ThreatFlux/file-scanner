@@ -1392,11 +1392,26 @@ const FILE_IDENTITY_LIMIT: usize = 4096;
 const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What identifies an unchanged file without reading it.
+///
+/// The modification time alone is not enough: an archive extractor or `touch -r`
+/// can put it back after the content was rewritten with the same length. So the
+/// identity also holds what a write changes and the writer cannot set back.
+/// On Unix that is the change time (`ctime`, nanoseconds), which every write,
+/// truncate, rename-over and `utimensat` call advances, plus the device and
+/// inode numbers. Std exposes no change time on Windows, so there the identity
+/// is the length, the write time, the creation time and nothing else: an
+/// in-place rewrite of the same length whose write time is set back is not
+/// detected there (a replaced file, which gets a new creation time, is). The
+/// identity lives in memory only, so no stored entry of an older build exists.
+/// When anything differs the file is hashed again, which is always correct.
 #[derive(Debug, Clone)]
 struct FileIdentity {
     len: u64,
     modified: SystemTime,
+    /// Last status change (Unix `ctime`), or the creation time elsewhere.
+    changed: SystemTime,
     inode: u64,
+    device: u64,
     sha256: String,
     hashed_at: SystemTime,
 }
@@ -1405,16 +1420,26 @@ impl FileIdentity {
     fn stat(path: &Path) -> Option<Self> {
         let meta = std::fs::metadata(path).ok()?;
         #[cfg(unix)]
-        let inode = {
+        let (inode, device, changed) = {
             use std::os::unix::fs::MetadataExt;
-            meta.ino()
+            let nanos = u32::try_from(meta.ctime_nsec()).unwrap_or(0);
+            let changed = match u64::try_from(meta.ctime()) {
+                Ok(secs) => UNIX_EPOCH + std::time::Duration::new(secs, nanos),
+                Err(_) => {
+                    UNIX_EPOCH - std::time::Duration::new(meta.ctime().unsigned_abs(), 0)
+                        + std::time::Duration::from_nanos(u64::from(nanos))
+                }
+            };
+            (meta.ino(), meta.dev(), changed)
         };
         #[cfg(not(unix))]
-        let inode = 0;
+        let (inode, device, changed) = (0, 0, meta.created().unwrap_or(UNIX_EPOCH));
         Some(Self {
             len: meta.len(),
             modified: meta.modified().ok()?,
+            changed,
             inode,
+            device,
             sha256: String::new(),
             hashed_at: UNIX_EPOCH,
         })
@@ -1423,9 +1448,12 @@ impl FileIdentity {
     fn matches(&self, now: &Self) -> bool {
         self.len == now.len
             && self.modified == now.modified
+            && self.changed == now.changed
             && self.inode == now.inode
+            && self.device == now.device
             && self
                 .modified
+                .max(self.changed)
                 .checked_add(RACY_WINDOW)
                 .is_some_and(|stable| stable <= self.hashed_at)
     }
@@ -1756,18 +1784,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f.bin");
         std::fs::write(&path, b"first content").unwrap();
-        // Old enough that its timestamp can be trusted.
+        // Old enough that its timestamps can be trusted: the change time is the
+        // moment of the write above, so wait out the racy window.
         let old = filetime::FileTime::from_unix_time(1_000_000, 0);
         filetime::set_file_mtime(&path, old).unwrap();
+        std::thread::sleep(RACY_WINDOW + std::time::Duration::from_millis(300));
         let state = ServerState::default();
         let first = state.file_sha256(&path).await.unwrap();
         assert_eq!(first.len(), 64);
+        // Hashed after the window: the remembered answer is trusted as it is.
+        let stamp = FileIdentity::stat(&path).unwrap();
+        let known = state.identities().get(&path).cloned().unwrap();
+        assert!(known.matches(&stamp));
+        assert_eq!(state.file_sha256(&path).await.unwrap(), first);
 
-        // Unchanged: answered without reading the file (it is unreadable now).
+        // A permission change moves the change time: hashed again, which is
+        // visible because the file can no longer be read.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let readable = std::fs::File::open(&path).is_ok();
-        if !readable {
-            assert_eq!(state.file_sha256(&path).await.unwrap(), first);
+        if std::fs::File::open(&path).is_err() {
+            assert!(!known.matches(&FileIdentity::stat(&path).unwrap()));
+            assert!(state.file_sha256(&path).await.is_err());
         }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
@@ -1775,6 +1811,11 @@ mod tests {
         std::fs::write(&path, b"second, longer content").unwrap();
         let second = state.file_sha256(&path).await.unwrap();
         assert_ne!(second, first);
+        // Same length, modification time put back: the change time still moves.
+        std::fs::write(&path, b"SECOND, LONGER CONTENT").unwrap();
+        filetime::set_file_mtime(&path, old).unwrap();
+        let third = state.file_sha256(&path).await.unwrap();
+        assert_ne!(third, second);
         // A file that does not exist is an error naming it.
         let error = state
             .file_sha256(&dir.path().join("gone"))

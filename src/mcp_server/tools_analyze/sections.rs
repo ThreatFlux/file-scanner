@@ -209,6 +209,11 @@ pub(super) fn with_arch(mut arguments: Value, arch: Option<&str>) -> Value {
 pub(super) struct Planned {
     pub name: &'static str,
     pub key: String,
+    /// False when the answer depends on something the key cannot capture (the
+    /// detached signature files next to this path, the user's keyring): the
+    /// section is then computed on every call and neither read from nor
+    /// written to the cache.
+    pub cacheable: bool,
 }
 
 /// Revision of the stored `threats` and `enhanced_threats` sections. Bump it
@@ -237,12 +242,34 @@ pub(super) fn plan(name: &'static str, options: &Options, path: &str, mtime_ns: 
         // logic change, so ratings stored by an earlier build are not served.
         "threats" => format!("threats:basic:r{THREATS_REVISION}"),
         "enhanced_threats" => format!("threats:enhanced:r{THREATS_REVISION}"),
+        // Revision 2: answers stored under the bare name by an earlier build did
+        // not know about detached signature files.
+        "signatures" => "signatures:r2".to_string(),
         // Everything built from the symbol table or the parsed binary.
         "binary_info" | "symbols" | "control_flow" | "vulnerabilities" | "code_quality"
         | "disassembly" | "call_graph" => format!("{name}{arch}"),
         other => other.to_string(),
     };
-    Planned { name, key }
+    // A detached signature next to this path is read by the check but is not
+    // part of the file's SHA-256, so the shared answer is only valid when there
+    // is none.
+    let cacheable = name != "signatures" || !has_detached_signature(Path::new(path));
+    Planned {
+        name,
+        key,
+        cacheable,
+    }
+}
+
+/// Whether a detached signature file (`<file>.sig`, `<file>.asc`) exists for
+/// `path`. An entry that cannot be inspected counts as present.
+fn has_detached_signature(path: &Path) -> bool {
+    crate::signature::detached_signature_candidates(path)
+        .iter()
+        .any(|candidate| match std::fs::symlink_metadata(candidate) {
+            Ok(_) => true,
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        })
 }
 
 /// Why a section produced nothing.
@@ -1096,9 +1123,11 @@ impl<'a> Engine<'a> {
     /// The section: from the cache when this unchanged file has it, otherwise
     /// computed, stored and returned. A failure is not stored.
     pub(super) fn load(&mut self, planned: &Planned) -> SectionResult {
-        if let Some(hit) = self.cache.get(self.sha, &planned.key) {
-            self.cached += 1;
-            return Ok(hit);
+        if planned.cacheable {
+            if let Some(hit) = self.cache.get(self.sha, &planned.key) {
+                self.cached += 1;
+                return Ok(hit);
+            }
         }
         // An analyzer that panics on a malformed sample fails its own section,
         // not the whole call.
@@ -1106,6 +1135,9 @@ impl<'a> Engine<'a> {
         let name = planned.name;
         let value = contain(name, || ctx.compute(name))?;
         self.computed += 1;
+        if !planned.cacheable {
+            return Ok(Arc::new(value));
+        }
         let outcome = self.cache.put(self.sha, &planned.key, &value);
         if !outcome.kept {
             self.not_kept.push((planned.name, outcome.bytes));

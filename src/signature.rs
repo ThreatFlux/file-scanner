@@ -399,7 +399,7 @@ fn check_authenticode_signature(path: &Path) -> Result<SignatureInfo> {
 
 /// Candidate detached-signature paths: the full file name plus `.sig` / `.asc`
 /// (`app` -> `app.sig`, `app.bin` -> `app.bin.sig`).
-fn detached_signature_candidates(path: &Path) -> Vec<std::path::PathBuf> {
+pub(crate) fn detached_signature_candidates(path: &Path) -> Vec<std::path::PathBuf> {
     ["sig", "asc"]
         .iter()
         .map(|suffix| {
