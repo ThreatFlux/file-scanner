@@ -74,9 +74,14 @@ impl Drop for TestServer {
 }
 
 async fn start() -> TestServer {
+    start_with_roots(Vec::new()).await
+}
+
+async fn start_with_roots(allow_roots: Vec<std::path::PathBuf>) -> TestServer {
     let cache_dir = TempDir::new().unwrap();
     let state = Arc::new(ServerState::new(StateConfig {
         cache_dir: cache_dir.path().to_path_buf(),
+        allow_roots,
         ..StateConfig::default()
     }));
     state.warm_up();
@@ -559,4 +564,114 @@ async fn binding_a_taken_port_names_the_fix() {
         Err(error) => error,
     };
     assert!(format!("{error:#}").contains("--port"), "{error:#}");
+}
+
+#[tokio::test]
+async fn a_rooted_server_shows_no_cache_entry_or_string_of_a_file_outside_its_roots() {
+    use file_scanner::cache::CacheEntry;
+    let root = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let server = start_with_roots(vec![root.path().to_path_buf()]).await;
+    let inside_path = root.path().join("in.bin").to_string_lossy().into_owned();
+    let outside_path = outside
+        .path()
+        .join("out.bin")
+        .to_string_lossy()
+        .into_owned();
+    let tracker = server.state.string_tracker();
+    for (path, hash, value) in [
+        (&inside_path, "aa", "INSIDE_ONLY_MARKER"),
+        (&outside_path, "bb", "OUTSIDE_ONLY_MARKER"),
+    ] {
+        tracker
+            .track_strings_from_results(
+                &[value.to_string(), "SHARED_MARKER".into()],
+                path,
+                hash,
+                "analyze_file",
+            )
+            .unwrap();
+        server
+            .state
+            .analysis_cache()
+            .add_entry(CacheEntry {
+                file_path: path.clone(),
+                file_hash: hash.into(),
+                tool_name: "analyze_file".into(),
+                tool_args: Default::default(),
+                result: json!({"marker": value}),
+                timestamp: chrono::Utc::now(),
+                file_size: 10,
+                execution_time_ms: 1,
+            })
+            .await
+            .unwrap();
+    }
+    let http = client();
+    let mut answers = Vec::new();
+    let get = |path: &str| http.get(format!("{}{path}", server.base)).send();
+    answers.push(get("/cache/list").await.unwrap().text().await.unwrap());
+    answers.push(get("/strings/stats").await.unwrap().text().await.unwrap());
+    answers.push(get("/cache/stats").await.unwrap().text().await.unwrap());
+    for (path, body) in [
+        ("/cache/search", json!({"file_path_pattern": "bin"})),
+        ("/strings/search", json!({"query": "MARKER"})),
+        ("/strings/filter", json!({})),
+        ("/strings/related", json!({"value": "INSIDE_ONLY_MARKER"})),
+        ("/strings/details", json!({"value": "SHARED_MARKER"})),
+        (
+            "/tools/call",
+            json!({"name": "cache_status", "arguments": {"action": "list"}}),
+        ),
+        (
+            "/tools/call",
+            json!({"name": "search_strings", "arguments": {"query": "MARKER"}}),
+        ),
+        (
+            "/tools/call",
+            json!({"name": "string_details", "arguments": {"value": "SHARED_MARKER"}}),
+        ),
+    ] {
+        let response = http
+            .post(format!("{}{path}", server.base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        answers.push(response.text().await.unwrap());
+    }
+    for answer in &answers {
+        assert!(!answer.contains("OUTSIDE_ONLY_MARKER"), "{answer}");
+        assert!(!answer.contains(&outside_path), "{answer}");
+        assert!(!answer.contains("\"bb\""), "{answer}");
+    }
+    assert!(answers[0].contains(&inside_path), "{}", answers[0]);
+    assert!(answers[3].contains(&inside_path), "{}", answers[3]);
+    assert!(answers[4].contains("INSIDE_ONLY_MARKER") && answers[4].contains("SHARED_MARKER"));
+    // A string that lives only outside the roots is not found.
+    let response = http
+        .post(format!("{}/strings/details", server.base))
+        .json(&json!({"value": "OUTSIDE_ONLY_MARKER"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"], "String not found");
+}
+
+#[tokio::test]
+async fn an_unknown_string_is_a_404_with_the_error_body() {
+    let server = start().await;
+    let response = client()
+        .post(format!("{}/strings/details", server.base))
+        .json(&json!({"value": "nope"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        json!({"error": "String not found"})
+    );
 }

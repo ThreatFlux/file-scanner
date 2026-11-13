@@ -23,7 +23,7 @@ use serde_json::Value;
 use super::paths::{Expect, PathPolicy};
 use crate::{
     cache::{AnalysisCache, CacheDir, CacheEntry, DEFAULT_MAX_TOTAL_BYTES},
-    string_tracker_compat::StringTracker,
+    string_tracker_compat::{StringEntry, StringStatistics, StringTracker},
 };
 
 /// Environment variable holding `:`-separated allow-root directories.
@@ -1001,6 +1001,104 @@ impl ServerState {
     /// existing directories canonicalized. Empty means unrestricted.
     pub fn allowed_roots(&self) -> &[PathBuf] {
         self.policy.roots()
+    }
+
+    /// Whether a path stored by an earlier call (analysis history, string
+    /// index) may be shown by this server. Unrestricted servers show every
+    /// path. With roots, the path must be inside a root: canonical when the
+    /// file still exists, otherwise judged by the stored path itself (a path
+    /// with `..` or a relative path is never shown).
+    pub fn path_is_visible(&self, stored: &str) -> bool {
+        let roots = self.policy.roots();
+        if roots.is_empty() {
+            return true;
+        }
+        let path = std::path::Path::new(stored);
+        let canonical = match std::fs::canonicalize(path) {
+            Ok(canonical) => canonical,
+            Err(_) => {
+                // The file is gone: resolve the nearest directory that still
+                // exists and keep the rest of the stored name.
+                let plain = path.is_absolute()
+                    && path
+                        .components()
+                        .all(|part| !matches!(part, std::path::Component::ParentDir));
+                if !plain {
+                    return false;
+                }
+                let mut tail = Vec::new();
+                let mut head = path;
+                let mut base = None;
+                while let Some(parent) = head.parent() {
+                    if let Some(name) = head.file_name() {
+                        tail.push(name);
+                    }
+                    if let Ok(found) = std::fs::canonicalize(parent) {
+                        base = Some(found);
+                        break;
+                    }
+                    head = parent;
+                }
+                let mut resolved = base.unwrap_or_else(|| path.to_path_buf());
+                resolved.extend(tail.iter().rev());
+                resolved
+            }
+        };
+        roots.iter().any(|root| canonical.starts_with(root))
+    }
+
+    /// A string-index entry as this server may show it: occurrences and files
+    /// outside the roots are dropped (`None` when none are left). The total
+    /// then counts the occurrences kept. Unrestricted servers get the entry
+    /// unchanged.
+    pub fn visible_string_entry(&self, mut entry: StringEntry) -> Option<StringEntry> {
+        if self.policy.roots().is_empty() {
+            return Some(entry);
+        }
+        let hidden = entry.unique_files.iter().any(|f| !self.path_is_visible(f))
+            || entry
+                .occurrences
+                .iter()
+                .any(|o| !self.path_is_visible(&o.file_path));
+        entry.unique_files.retain(|f| self.path_is_visible(f));
+        if entry.unique_files.is_empty() {
+            return None;
+        }
+        if hidden {
+            entry
+                .occurrences
+                .retain(|o| self.path_is_visible(&o.file_path));
+            entry.total_occurrences = entry.occurrences.len().max(entry.unique_files.len());
+        }
+        Some(entry)
+    }
+
+    /// Whether the string index holds `value` in a file this server may show.
+    pub fn string_value_is_visible(&self, value: &str) -> bool {
+        self.policy.roots().is_empty()
+            || self
+                .string_tracker()
+                .get_string_details(value)
+                .and_then(|entry| self.visible_string_entry(entry))
+                .is_some()
+    }
+
+    /// String statistics without the values that occur only in files outside
+    /// the roots. Counts stay global (they name no path or value).
+    pub fn visible_string_statistics(&self, mut stats: StringStatistics) -> StringStatistics {
+        if self.policy.roots().is_empty() {
+            return stats;
+        }
+        stats
+            .most_common
+            .retain(|(value, _)| self.string_value_is_visible(value));
+        stats
+            .suspicious_strings
+            .retain(|value| self.string_value_is_visible(value));
+        stats
+            .high_entropy_strings
+            .retain(|(value, _)| self.string_value_is_visible(value));
+        stats
     }
 
     /// Resolve a tool path argument (see [`PathPolicy::resolve`]).

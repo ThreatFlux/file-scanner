@@ -867,8 +867,11 @@ async fn api_info_openapi_and_the_router_list_the_same_routes() {
         let body =
             (route.method == "POST").then(|| json!({"name": "analyze_file", "arguments": {}}));
         let reply = send(&fx.app, request(method, route.path, &[], body.as_ref())).await;
+        // /strings/details answers 404 with this body for an unknown string.
+        let unknown_string = reply.body.contains("String not found");
         assert!(
-            reply.status != StatusCode::NOT_FOUND && reply.status != StatusCode::METHOD_NOT_ALLOWED,
+            (reply.status != StatusCode::NOT_FOUND || unknown_string)
+                && reply.status != StatusCode::METHOD_NOT_ALLOWED,
             "{} {} -> {}",
             route.method,
             route.path,

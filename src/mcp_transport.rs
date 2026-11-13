@@ -145,7 +145,7 @@ impl McpTransportServer {
 
     /// Serve one connection over `transport` until it closes.
     ///
-    /// With `handle_ctrl_c`, Ctrl-C asks the service to stop (in-flight calls
+    /// With `handle_ctrl_c`, Ctrl-C (and SIGTERM on Unix) asks the service to stop (in-flight calls
     /// get a short drain). A transport that closes before the client has
     /// started a session is a clean exit, not an error.
     pub async fn serve_transport<T, E, A>(&self, transport: T, handle_ctrl_c: bool) -> Result<()>
@@ -153,7 +153,18 @@ impl McpTransportServer {
         T: IntoTransport<RoleServer, E, A>,
         E: std::error::Error + Send + Sync + 'static,
     {
-        let service = match self.handler.clone().serve(transport).await {
+        // Handlers are registered before the handshake so a signal at any moment ends the
+        // server cleanly.
+        let mut signal = handle_ctrl_c.then(|| Box::pin(http::arm_shutdown_signal()));
+        let handshake = self.handler.clone().serve(transport);
+        let result = match signal.as_mut() {
+            Some(signal) => tokio::select! {
+                result = handshake => result,
+                _ = signal.as_mut() => return Ok(()),
+            },
+            None => handshake.await,
+        };
+        let service = match result {
             Ok(service) => service,
             Err(ServerInitializeError::ConnectionClosed(_)) => return Ok(()),
             Err(_) => {
@@ -163,12 +174,11 @@ impl McpTransportServer {
                 );
             }
         };
-        if handle_ctrl_c {
+        if let Some(signal) = signal {
             let cancel = service.cancellation_token();
             tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    cancel.cancel();
-                }
+                signal.await;
+                cancel.cancel();
             });
         }
         service.waiting().await?;

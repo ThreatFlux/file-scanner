@@ -308,3 +308,55 @@ fn a_slow_call_is_still_answered_after_stdin_closes() {
         run.stderr
     );
 }
+
+/// SIGTERM, what a supervisor sends, ends the stdio server with exit 0 like SIGINT.
+#[cfg(unix)]
+#[test]
+fn sigterm_ends_the_stdio_server_with_exit_zero() {
+    use std::io::{BufRead, BufReader};
+    let mut child = Command::new(BIN)
+        .args(["mcp-stdio", "--no-cache"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-11-25", "capabilities": {},
+        "clientInfo": {"name": "sigterm-test", "version": "1"}}})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    )
+    .unwrap();
+    // Wait for the reply, then stop the server and keep stdin open (the handlers are
+    // installed before the handshake, so the timing does not matter).
+    let mut line = String::new();
+    BufReader::new(child.stdout.as_mut().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert!(line.contains("\"id\":1"), "{line}");
+    let pid = i32::try_from(child.id()).unwrap();
+    // SAFETY: signals a child process this test started.
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the server ignored SIGTERM for 30 seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(0), "{status:?}");
+}

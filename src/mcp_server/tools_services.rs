@@ -635,9 +635,42 @@ fn search_session_blocking(
     paging: PageArgs,
 ) -> Result<Value, String> {
     let tracker = state.string_tracker();
-    let accept =
-        move |entry: &StringEntry| entry_accepted(entry, category, min_entropy, suspicious_only);
-    let found = tracker.search_filtered(query, pattern, MAX_SESSION_MATCHES, &accept);
+    // Visibility is decided once per distinct path for this call.
+    let memo = std::cell::RefCell::new(std::collections::HashMap::<String, bool>::new());
+    let visible = |path: &str| -> bool {
+        if let Some(known) = memo.borrow().get(path) {
+            return *known;
+        }
+        let known = state.path_is_visible(path);
+        memo.borrow_mut().insert(path.to_string(), known);
+        known
+    };
+    let rooted = !state.allowed_roots().is_empty();
+    let accept = |entry: &StringEntry| {
+        entry_accepted(entry, category, min_entropy, suspicious_only)
+            && (!rooted || entry.unique_files.iter().any(|f| visible(f)))
+    };
+    let found: Vec<StringEntry> = tracker
+        .search_filtered(query, pattern, MAX_SESSION_MATCHES, &accept)
+        .into_iter()
+        .filter_map(|mut entry| {
+            if !rooted {
+                return Some(entry);
+            }
+            let hidden = entry.unique_files.iter().any(|f| !visible(f))
+                || entry.occurrences.iter().any(|o| !visible(&o.file_path));
+            if !hidden {
+                return Some(entry);
+            }
+            entry.unique_files.retain(|f| visible(f));
+            if entry.unique_files.is_empty() {
+                return None;
+            }
+            entry.occurrences.retain(|o| visible(&o.file_path));
+            entry.total_occurrences = entry.occurrences.len().max(entry.unique_files.len());
+            Some(entry)
+        })
+        .collect();
     let items: Vec<Value> = found
         .iter()
         .map(|entry| {
@@ -677,10 +710,22 @@ fn search_session_blocking(
     if items.is_empty() {
         out["hint"] = no_match_hint(&tracker, category).into();
     } else {
-        out["next_steps"] = json!([
-            "string_details {value} for the files and offsets a string occurs at",
-            "search_strings with file_path to search one file and get offsets"
-        ]);
+        if let Some(first) = items.first() {
+            let mut steps = vec![json!({
+                "tool": "string_details",
+                "arguments": {"value": first["value"]},
+                "gives": "the files and offsets the first string occurs at"
+            })];
+            if let Some(file) = first["files"].get(0) {
+                steps.push(json!({
+                    "tool": "search_strings",
+                    "arguments": {"file_path": file, "query": first["value"]},
+                    "gives": "that string's offsets in one file, searched in the file itself"
+                }));
+            }
+            out["next_steps"] = steps.into();
+        }
+        out["hint"] = "search_strings with file_path searches one file and gives offsets.".into();
     }
     if tracker.is_full() {
         out["tracker_full"] = tracker_full_text().into();
@@ -978,9 +1023,14 @@ impl FileScannerMcp {
                     )
                     .into();
                 }
-                if total > 0 {
-                    out["next_steps"] =
-                        json!(["string_details {value} lists the files and offsets of one string"]);
+                if let Some(first) = out["items"].get(0).map(|row| row["value"].clone()) {
+                    if first.is_string() {
+                        out["next_steps"] = json!([{
+                            "tool": "string_details",
+                            "arguments": {"value": first},
+                            "gives": "the files and offsets of the first string listed"
+                        }]);
+                    }
                 }
                 Ok(out)
             })
@@ -1067,6 +1117,8 @@ fn string_details_value(
                 }
             }
         }
+        // Strings that occur only in files outside the roots are not shown.
+        let exact = exact.and_then(|entry| state.visible_string_entry(entry));
         let Some(entry) = exact else {
             return Err(if tracker.is_full() {
                 format!(
@@ -1078,8 +1130,9 @@ fn string_details_value(
                 )
             } else {
                 "That string is not tracked. Find exact values with search_strings (it tracks \
-                 the strings of every file it searches), or analyze the file with analyze_file \
-                 and strings: true first. A value shown cut (`value_cut: true`) is accepted \
+                 the strings of every file it searches); analyze_file indexes a file's strings \
+                 too, but a string shorter than 4 characters is indexed without an offset and a \
+                 string beyond the index limits is not indexed. A value shown cut (`value_cut: true`) is accepted \
                  when it is the start of exactly one tracked string."
                     .to_string()
             });
@@ -1114,21 +1167,27 @@ fn string_details_value(
             .map(|(path, hash, count, offsets)| {
                 let mut row = json!({"file_path": path, "file_hash": hash, "occurrences": count, "offsets": offsets});
                 if offsets.is_empty() {
-                    row["offsets_note"] = "No offset was recorded for this file: the string was \
-                        indexed without one (it is shorter than 4 characters or lies beyond the \
-                        string index's scan or count limits). search_strings with file_path and \
-                        query gives its offsets."
+                    row["offsets_note"] = "No offset was recorded for this file, and `occurrences` here is 1 \
+                        or the number analyze_file listed, not a count of the file: analyze_file \
+                        lists each distinct string once and records offsets only for strings of \
+                        4 or more characters (a string of 2 or 3 characters, or one beyond the \
+                        string index's scan or count limits, has none), so the file may hold it \
+                        more often. search_strings with file_path, min_length and query gives \
+                        its offsets and exact count."
                         .into();
                 }
                 row
             })
             .collect();
-        let related = tracker
+        let related: Vec<(String, f64)> = tracker
             .try_get_related_strings(
                 &entry.value,
                 request.related_limit.unwrap_or(10).clamp(1, 50),
             )
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(value, _)| state.string_value_is_visible(value))
+            .collect();
         let (value, cut) = shown(&entry.value);
         let mut out = page(
             &rows,
@@ -1199,7 +1258,12 @@ fn cache_status_value(
                 min_file_size: None,
                 max_file_size: None,
             };
-            let rows: Vec<EntrySummary> = state.analysis_cache().list_summaries(&query);
+            let rows: Vec<EntrySummary> = state
+                .analysis_cache()
+                .list_summaries(&query)
+                .into_iter()
+                .filter(|row| state.path_is_visible(&row.file_path))
+                .collect();
             let mut out = page(
                 &rows,
                 request.offset.unwrap_or(0),
@@ -1217,14 +1281,28 @@ fn cache_status_value(
             } else {
                 let tools: std::collections::BTreeSet<&str> =
                     rows.iter().map(|row| row.tool_name.as_str()).collect();
-                out["next_steps"] = if tools.iter().all(|tool| *tool == "analyze_file") {
-                    json!(["analyze_file with the same arguments returns the cached result"])
+                // Calls that can be sent as written: the newest row's own file,
+                // and a narrowing search by a tool the list shows.
+                let newest = &rows[0];
+                let mut steps = vec![json!({
+                    "tool": "search_strings",
+                    "arguments": {"file_path": newest.file_path, "query": "http"},
+                    "gives": "strings of the newest listed file that contain \"http\", with offsets"
+                })];
+                if tools.len() > 1 || request.tool_name.is_none() {
+                    steps.push(json!({
+                        "tool": "cache_status",
+                        "arguments": {"action": "search", "tool_name": newest.tool_name},
+                        "gives": "the history narrowed to the tool of the newest row"
+                    }));
+                }
+                out["next_steps"] = steps.into();
+                out["hint"] = if tools.iter().all(|tool| *tool == "analyze_file") {
+                    "Calling analyze_file again with the same arguments returns the cached result."
                 } else {
-                    json!([
-                        "string_details or search_strings drill into one file's strings",
-                        "cache_status {action: \"search\", tool_name} narrows the list to one tool"
-                    ])
-                };
+                    "string_details or search_strings drill into one file's strings."
+                }
+                .into();
             }
             out
         }
@@ -1271,10 +1349,10 @@ fn cache_stats_value(state: &ServerState) -> Value {
             "categories": categories.into_iter().take(15).collect::<Vec<_>>(),
         },
         "next_steps": [
-            "cache_status {action: \"list\"} pages through past calls",
-            "search_strings {query} searches the indexed strings",
-            "cache_clear forgets cached results (destructive)"
+            {"tool": "cache_status", "arguments": {"action": "list"}, "gives": "the past calls, newest first, paged"},
+            {"tool": "search_strings", "arguments": {"query": "http"}, "gives": "indexed strings that contain \"http\", across every file indexed this session"}
         ],
+        "hint": "cache_clear forgets cached results (destructive).",
     });
     if !state.cache_enabled() {
         out["note"] = "Caching is off (--no-cache): no analysis history or cached sections are \
@@ -1845,6 +1923,10 @@ mod tests {
         assert_eq!(found["scope"], "session");
         assert_eq!(found["items"][0]["total_occurrences"], 2, "{found}");
         assert_eq!(found["items"][0]["files_total"], 2);
+        let step = &found["next_steps"][0];
+        assert_eq!(step["tool"], "string_details", "{found}");
+        assert_eq!(step["arguments"]["value"], found["items"][0]["value"]);
+        assert!(step["gives"].is_string() && found["next_steps"][0].get("why").is_none());
 
         let (error, details) = call(
             &client,
@@ -1963,10 +2045,15 @@ mod tests {
         let (error, _) = call(&client, "cache_status", json!({"action": "search"})).await;
         assert!(error, "search needs a filter");
         // Only analyze_file calls are served from the cache by repeating them.
-        assert!(list["next_steps"][0]
-            .as_str()
-            .unwrap()
-            .contains("analyze_file"));
+        assert!(list["hint"].as_str().unwrap().contains("analyze_file"));
+        for step in list["next_steps"].as_array().unwrap() {
+            assert!(
+                step["tool"].is_string()
+                    && step["arguments"].is_object()
+                    && step["gives"].is_string(),
+                "next steps are calls: {step}"
+            );
+        }
         state
             .analysis_cache()
             .add_entry(crate::cache::CacheEntry {
@@ -1988,7 +2075,7 @@ mod tests {
         )
         .await;
         assert!(
-            !yara["next_steps"].to_string().contains("same arguments"),
+            !yara["hint"].to_string().contains("same arguments"),
             "{yara}"
         );
 

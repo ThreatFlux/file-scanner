@@ -417,7 +417,8 @@ async fn handle_api_info(State(state): State<RestState>) -> AxumJson<Value> {
 // Cache management handlers
 #[utoipa::path(get, path = "/cache/list", responses((status = 200, description = "`{entries, count}`")))]
 async fn list_cache_entries(State(state): State<RestState>) -> AxumJson<Value> {
-    let entries = state.cache.get_all_entries().await;
+    let mut entries = state.cache.get_all_entries().await;
+    entries.retain(|entry| state.handler.state().path_is_visible(&entry.file_path));
     AxumJson(json!({
         "entries": entries,
         "count": entries.len()
@@ -429,7 +430,8 @@ async fn search_cache(
     State(state): State<RestState>,
     JsonBody(query): JsonBody<CacheSearchQuery>,
 ) -> AxumJson<Value> {
-    let results = state.cache.search_entries(&query).await;
+    let mut results = state.cache.search_entries(&query).await;
+    results.retain(|entry| state.handler.state().path_is_visible(&entry.file_path));
     AxumJson(json!({
         "results": results,
         "count": results.len()
@@ -498,7 +500,10 @@ async fn clear_cache(
 // String tracker handlers
 #[utoipa::path(get, path = "/strings/stats", responses((status = 200, description = "String tracker statistics")))]
 async fn get_string_stats(State(state): State<RestState>) -> AxumJson<Value> {
-    let stats = state.string_tracker.get_statistics(None);
+    let stats = state
+        .handler
+        .state()
+        .visible_string_statistics(state.string_tracker.get_statistics(None));
     AxumJson(json!({
         "total_strings": stats.total_unique_strings,
         "total_unique_strings": stats.total_unique_strings,
@@ -522,26 +527,31 @@ async fn search_strings(
     State(state): State<RestState>,
     JsonBody(request): JsonBody<StringSearchRequest>,
 ) -> RestResult {
-    let results = state
+    let results: Vec<_> = state
         .string_tracker
         .try_search_strings(&request.query, request.limit.unwrap_or(100))
-        .map_err(|e| rest_error(StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| rest_error(StatusCode::BAD_REQUEST, e))?
+        .into_iter()
+        .filter_map(|entry| state.handler.state().visible_string_entry(entry))
+        .collect();
     Ok(AxumJson(json!({
         "results": results,
         "count": results.len()
     })))
 }
 
-#[utoipa::path(post, path = "/strings/details", request_body = StringValueRequest, responses((status = 200, description = "The tracked string, or `{error: \"String not found\"}`")))]
+#[utoipa::path(post, path = "/strings/details", request_body = StringValueRequest, responses((status = 200, description = "The tracked string"), (status = 404, description = "`{error: \"String not found\"}`")))]
 async fn handle_string_details(
     State(state): State<RestState>,
     JsonBody(request): JsonBody<StringValueRequest>,
-) -> AxumJson<Value> {
-    match state.string_tracker.get_string_details(&request.value) {
-        Some(details) => AxumJson(json!(details)),
-        None => AxumJson(json!({
-            "error": "String not found"
-        })),
+) -> (StatusCode, AxumJson<Value>) {
+    match state
+        .string_tracker
+        .get_string_details(&request.value)
+        .and_then(|entry| state.handler.state().visible_string_entry(entry))
+    {
+        Some(details) => (StatusCode::OK, AxumJson(json!(details))),
+        None => rest_error(StatusCode::NOT_FOUND, "String not found"),
     }
 }
 
@@ -555,10 +565,16 @@ async fn handle_strings_related(
     State(state): State<RestState>,
     JsonBody(request): JsonBody<StringValueRequest>,
 ) -> RestResult {
-    let related = state
+    let shared = state.handler.state();
+    let mut related = state
         .string_tracker
         .try_get_related_strings(&request.value, request.limit.unwrap_or(20))
         .map_err(|e| rest_error(StatusCode::BAD_REQUEST, e))?;
+    // Neither the asked value nor its relatives may live only outside the roots.
+    if !shared.string_value_is_visible(&request.value) {
+        related.clear();
+    }
+    related.retain(|(value, _)| shared.string_value_is_visible(value));
     Ok(AxumJson(json!({
         "related": related,
         "count": related.len()
@@ -579,7 +595,10 @@ async fn handle_strings_filter(
         .string_tracker
         .try_get_statistics(Some(&filter))
         .map_err(|e| rest_error(StatusCode::BAD_REQUEST, e))?;
-    Ok(AxumJson(json!(stats)))
+    Ok(AxumJson(json!(state
+        .handler
+        .state()
+        .visible_string_statistics(stats))))
 }
 
 #[cfg(test)]

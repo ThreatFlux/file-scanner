@@ -813,6 +813,43 @@ impl BoundServer {
 }
 
 /// Resolves when the process receives SIGINT or SIGTERM (Ctrl-C only, off Unix).
+/// Registers the SIGINT and SIGTERM handlers now (not on first poll) and returns the future
+/// that resolves when either arrives, so a signal sent early is not lost.
+pub fn arm_shutdown_signal() -> impl std::future::Future<Output = ()> + Send + 'static {
+    #[cfg(unix)]
+    let streams = {
+        use tokio::signal::unix::{signal, SignalKind};
+        (
+            signal(SignalKind::terminate()).ok(),
+            signal(SignalKind::interrupt()).ok(),
+        )
+    };
+    async move {
+        #[cfg(unix)]
+        {
+            let (terminate, interrupt) = streams;
+            match (terminate, interrupt) {
+                (Some(mut t), Some(mut i)) => {
+                    tokio::select! { _ = t.recv() => {} _ = i.recv() => {} }
+                }
+                (Some(mut t), None) => {
+                    tokio::select! { _ = t.recv() => {} _ = tokio::signal::ctrl_c() => {} }
+                }
+                (None, Some(mut i)) => {
+                    i.recv().await;
+                }
+                (None, None) => {
+                    let _ = tokio::signal::ctrl_c().await;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
 pub async fn shutdown_signal() {
     #[cfg(unix)]
     {
