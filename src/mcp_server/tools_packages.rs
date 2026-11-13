@@ -471,104 +471,185 @@ fn fingerprint(path: &Path) -> Result<Option<String>, String> {
 /// [`fingerprint`] with the entry limit as a parameter.
 fn fingerprint_with(path: &Path, max_entries: usize) -> Result<Option<String>, String> {
     use sha2::{Digest, Sha256};
-    use std::io::Read;
-
-    /// Content of files up to this size is hashed, up to [`HASH_BUDGET`] bytes in all.
-    const HASH_FILE_LIMIT: u64 = 2 * 1024 * 1024;
-    const HASH_BUDGET: u64 = 128 * 1024 * 1024;
 
     let mut hasher = Sha256::new();
     if path.is_dir() {
         hasher.update(b"dir:");
-        let mut hashed = 0u64;
-        let walker = walkdir::WalkDir::new(path)
-            .follow_links(false)
-            .sort_by_file_name()
-            .into_iter()
-            // The directories the analysis does not enter are not read here either,
-            // so the content-hashed set is the one the analysis reads.
-            .filter_entry(|entry| {
-                entry.depth() == 0
-                    || !(entry.file_type().is_dir()
-                        && crate::package_scan::SKIPPED_DIRS
-                            .contains(&entry.file_name().to_string_lossy().as_ref()))
-            });
-        // Content is hashed only for what the analysis reads: manifests and the
-        // shallowest sources (the same order package_scan reads them in). The rest
-        // is covered by size and time, so a call on a big tree does not read it all.
-        let mut manifests: Vec<std::path::PathBuf> = Vec::new();
-        let mut sources: Vec<(usize, std::path::PathBuf)> = Vec::new();
-        let mut visited = 0usize;
-        for entry in walker.filter_map(Result::ok) {
-            visited += 1;
-            if visited > max_entries {
-                return Ok(None);
-            }
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            let modified = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos());
-            hasher.update(entry.path().to_string_lossy().as_bytes());
-            hasher.update(metadata.len().to_le_bytes());
-            hasher.update(modified.to_le_bytes());
-            // The inode change time moves with every write and cannot be set back,
-            // so for a source file it stands in for reading the content.
-            #[cfg(unix)]
-            let changed_at = {
-                use std::os::unix::fs::MetadataExt as _;
-                Some((metadata.ctime(), metadata.ctime_nsec()))
-            };
-            #[cfg(not(unix))]
-            let changed_at: Option<(i64, i64)> = None;
-            if let Some((secs, nanos)) = changed_at {
-                hasher.update(secs.to_le_bytes());
-                hasher.update(nanos.to_le_bytes());
-            }
-            // Size and time are not enough: an edit that keeps both would be served
-            // from the cache.
-            if metadata.len() > HASH_FILE_LIMIT {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy();
-            let is_manifest = matches!(
-                name.as_ref(),
-                "package.json"
-                    | "package-lock.json"
-                    | "npm-shrinkwrap.json"
-                    | "setup.py"
-                    | "setup.cfg"
-                    | "pyproject.toml"
-                    | "PKG-INFO"
-                    | "METADATA"
-                    | "poetry.lock"
-            ) || (name.starts_with("requirements") && name.ends_with(".txt"));
-            if is_manifest {
-                manifests.push(entry.path().to_path_buf());
-            } else if changed_at.is_none() && crate::package_scan::language_of(&name).is_some() {
-                let relative = entry.path().strip_prefix(path).unwrap_or(entry.path());
-                let depth = relative.to_string_lossy().matches('/').count();
-                sources.push((depth, entry.path().to_path_buf()));
-            }
+        if !hash_directory(&mut hasher, path, max_entries) {
+            return Ok(None);
         }
-        sources.sort();
-        sources.truncate(crate::package_scan::MAX_SCANNED_FILES);
+    } else {
+        hash_file_content(&mut hasher, path)?;
+    }
+    Ok(Some(
+        hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+    ))
+}
+
+/// Content of files up to this size is hashed, up to [`HASH_BUDGET`] bytes in all.
+const HASH_FILE_LIMIT: u64 = 2 * 1024 * 1024;
+const HASH_BUDGET: u64 = 128 * 1024 * 1024;
+
+/// Hash the whole content of one file, read in 64 KiB chunks.
+fn hash_file_content(hasher: &mut sha2::Sha256, path: &Path) -> Result<(), String> {
+    use sha2::Digest as _;
+    use std::io::Read;
+
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buffer)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    Ok(())
+}
+
+/// Walk a package directory in name order, without following links.
+fn package_walker(path: &Path) -> impl Iterator<Item = Result<walkdir::DirEntry, walkdir::Error>> {
+    walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        // The directories the analysis does not enter are not read here either,
+        // so the content-hashed set is the one the analysis reads.
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || !(entry.file_type().is_dir()
+                    && crate::package_scan::SKIPPED_DIRS
+                        .contains(&entry.file_name().to_string_lossy().as_ref()))
+        })
+}
+
+/// Hash the directory tree: path, size and times of every file, then the
+/// content of the manifests and shallow sources. `false` when the walk passed
+/// `max_entries`, in which case the digest is not complete.
+fn hash_directory(hasher: &mut sha2::Sha256, path: &Path, max_entries: usize) -> bool {
+    use sha2::Digest as _;
+
+    // Content is hashed only for what the analysis reads: manifests and the
+    // shallowest sources (the same order package_scan reads them in). The rest
+    // is covered by size and time, so a call on a big tree does not read it all.
+    let mut candidates = ContentCandidates::default();
+    let mut visited = 0usize;
+    for entry in package_walker(path).filter_map(Result::ok) {
+        visited += 1;
+        if visited > max_entries {
+            return false;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        hasher.update(entry.path().to_string_lossy().as_bytes());
+        let change_time_hashed = hash_size_and_times(hasher, &metadata);
+        // Size and time are not enough: an edit that keeps both would be served
+        // from the cache.
+        if metadata.len() > HASH_FILE_LIMIT {
+            continue;
+        }
+        candidates.add(&entry, path, change_time_hashed);
+    }
+    candidates.hash_content(hasher, path);
+    hasher.update(path.to_string_lossy().as_bytes());
+    true
+}
+
+/// Hash the size and the times of a file; `true` when the inode change time
+/// was among them (Unix), `false` when it is not available.
+fn hash_size_and_times(hasher: &mut sha2::Sha256, metadata: &std::fs::Metadata) -> bool {
+    use sha2::Digest as _;
+
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    hasher.update(metadata.len().to_le_bytes());
+    hasher.update(modified.to_le_bytes());
+    // The inode change time moves with every write and cannot be set back,
+    // so for a source file it stands in for reading the content.
+    #[cfg(unix)]
+    let changed_at = {
+        use std::os::unix::fs::MetadataExt as _;
+        Some((metadata.ctime(), metadata.ctime_nsec()))
+    };
+    #[cfg(not(unix))]
+    let changed_at: Option<(i64, i64)> = None;
+    if let Some((secs, nanos)) = changed_at {
+        hasher.update(secs.to_le_bytes());
+        hasher.update(nanos.to_le_bytes());
+    }
+    changed_at.is_some()
+}
+
+/// Whether a file name is a manifest the analysis reads.
+fn is_manifest_name(name: &str) -> bool {
+    matches!(
+        name,
+        "package.json"
+            | "package-lock.json"
+            | "npm-shrinkwrap.json"
+            | "setup.py"
+            | "setup.cfg"
+            | "pyproject.toml"
+            | "PKG-INFO"
+            | "METADATA"
+            | "poetry.lock"
+    ) || (name.starts_with("requirements") && name.ends_with(".txt"))
+}
+
+/// The files of a directory whose content goes into the digest.
+#[derive(Default)]
+struct ContentCandidates {
+    manifests: Vec<PathBuf>,
+    sources: Vec<(usize, PathBuf)>,
+}
+
+impl ContentCandidates {
+    /// Sort a file into the manifests or, when its change time was not hashed,
+    /// the sources.
+    fn add(&mut self, entry: &walkdir::DirEntry, root: &Path, change_time_hashed: bool) {
+        let name = entry.file_name().to_string_lossy();
+        if is_manifest_name(&name) {
+            self.manifests.push(entry.path().to_path_buf());
+        } else if !change_time_hashed && crate::package_scan::language_of(&name).is_some() {
+            let relative = entry.path().strip_prefix(root).unwrap_or(entry.path());
+            let depth = relative.to_string_lossy().matches('/').count();
+            self.sources.push((depth, entry.path().to_path_buf()));
+        }
+    }
+
+    /// Hash the content of the chosen files, up to [`HASH_BUDGET`] bytes.
+    fn hash_content(mut self, hasher: &mut sha2::Sha256, root: &Path) {
+        use sha2::Digest as _;
+
+        self.sources.sort();
+        self.sources
+            .truncate(crate::package_scan::MAX_SCANNED_FILES);
         // The manifest the analysis reads is the shallowest one; in walk order
         // many nested manifests can sort before it and push it past the cap.
-        manifests.sort_by_key(|file| {
-            let relative = file.strip_prefix(path).unwrap_or(file);
+        self.manifests.sort_by_key(|file| {
+            let relative = file.strip_prefix(root).unwrap_or(file);
             (relative.components().count(), file.clone())
         });
-        for file in manifests
+        let mut hashed = 0u64;
+        for file in self
+            .manifests
             .iter()
             .take(64)
-            .chain(sources.iter().map(|(_, f)| f))
+            .chain(self.sources.iter().map(|(_, f)| f))
         {
             if hashed >= HASH_BUDGET {
                 break;
@@ -578,28 +659,7 @@ fn fingerprint_with(path: &Path, max_entries: usize) -> Result<Option<String>, S
                 hasher.update(&bytes);
             }
         }
-        hasher.update(path.to_string_lossy().as_bytes());
-    } else {
-        let mut file = std::fs::File::open(path)
-            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-        let mut buffer = vec![0u8; 64 * 1024];
-        loop {
-            let n = file
-                .read(&mut buffer)
-                .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-        }
     }
-    Ok(Some(
-        hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-    ))
 }
 
 // ---------------------------------------------------------------------------

@@ -1323,53 +1323,80 @@ fn read_tar_files(
     Ok(out)
 }
 
+/// Open a zip archive, with the messages the zip listing reports.
+fn open_zip_for_listing(path: &Path) -> Result<zip::ZipArchive<File>> {
+    let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
+    zip::ZipArchive::new(file).context("The file is not a readable zip archive")
+}
+
+/// Record an entry name that is an unsafe path, keeping at most
+/// `MAX_UNSAFE_ENTRIES` of them.
+fn note_unsafe_zip_name(
+    raw: &str,
+    unsafe_entries: &mut Vec<UnsafeEntry>,
+    unsafe_total: &mut usize,
+) {
+    if let Some(kind) = unsafe_path_kind(raw) {
+        *unsafe_total += 1;
+        if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
+            unsafe_entries.push(UnsafeEntry {
+                path: raw.to_string(),
+                kind,
+                target: None,
+            });
+        }
+    }
+}
+
+/// What the zip listing has gathered so far.
+#[derive(Default)]
+struct ZipListing {
+    listed: Vec<Listed>,
+    truncated: bool,
+    ignored: usize,
+    declared: u64,
+}
+
+impl ZipListing {
+    /// Whether an entry of `size` declared bytes still fits in the listing;
+    /// when it does not, the listing is marked truncated.
+    fn admit(&mut self, size: u64) -> bool {
+        if self.listed.len() >= MAX_LISTED_ENTRIES {
+            self.truncated = true;
+            return false;
+        }
+        self.declared = self.declared.saturating_add(size);
+        if self.declared > MAX_DECLARED_BYTES {
+            self.truncated = true;
+            return false;
+        }
+        true
+    }
+}
+
 fn list_zip(
     path: &Path,
     unsafe_entries: &mut Vec<UnsafeEntry>,
     unsafe_total: &mut usize,
 ) -> Result<Listing> {
-    let file = File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(file).context("The file is not a readable zip archive")?;
-    let mut listed = Vec::new();
-    let mut truncated = false;
-    let mut ignored = 0usize;
-    let mut declared = 0u64;
+    let mut zip = open_zip_for_listing(path)?;
+    let mut state = ZipListing::default();
     for index in 0..zip.len().min(MAX_VISITED_ENTRIES) {
         let mut entry = zip.by_index(index)?;
         if entry.is_dir() {
             continue;
         }
-        {
-            let raw = entry.name()?.to_string();
-            if let Some(kind) = unsafe_path_kind(&raw) {
-                *unsafe_total += 1;
-                if unsafe_entries.len() < MAX_UNSAFE_ENTRIES {
-                    unsafe_entries.push(UnsafeEntry {
-                        path: raw,
-                        kind,
-                        target: None,
-                    });
-                }
-            }
+        let raw = entry.name()?.to_string();
+        note_unsafe_zip_name(&raw, unsafe_entries, unsafe_total);
+        let name = normalise_entry_path(&raw);
+        if is_metadata_entry(&name) && is_appledouble(&name, &read_head(&mut entry)) {
+            state.ignored += 1;
+            continue;
         }
-        let name = normalise_entry_path(&entry.name()?);
-        if is_metadata_entry(&name) {
-            let head = read_head(&mut entry);
-            if is_appledouble(&name, &head) {
-                ignored += 1;
-                continue;
-            }
-        }
-        if listed.len() >= MAX_LISTED_ENTRIES {
-            truncated = true;
+        if !state.admit(entry.size()) {
             break;
         }
-        declared = declared.saturating_add(entry.size());
-        if declared > MAX_DECLARED_BYTES {
-            truncated = true;
-            break;
-        }
-        listed.push(Listed {
+        state.listed.push(Listed {
             path: name,
             size: entry.size(),
             ordinal: index,
@@ -1377,9 +1404,9 @@ fn list_zip(
         });
     }
     if zip.len() > MAX_VISITED_ENTRIES {
-        truncated = true;
+        state.truncated = true;
     }
-    Ok((listed, truncated, ignored))
+    Ok((state.listed, state.truncated, state.ignored))
 }
 
 fn read_zip_files(path: &Path, want: &HashSet<usize>) -> Result<HashMap<usize, Vec<u8>>> {
