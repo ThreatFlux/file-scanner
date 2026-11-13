@@ -8,7 +8,7 @@ changes the actual parent requirements instead of forcing lockfile transitives.
 - Official archive SHA256: `e8a5ff1e1bb43734cc68f3ddc94646c9740c8c559d38fae559f0c79076f801db`.
 - Verified against [the official sparse index](https://index.crates.io/ya/ra/yara-x) on 2026-11-12.
 - Upstream commit: [`afe4585b12f56c698794dc80b3d28ddb87b56c0a`](https://github.com/VirusTotal/yara-x/tree/afe4585b12f56c698794dc80b3d28ddb87b56c0a/lib).
-- The BSD-3-Clause license is retained from that exact upstream commit (the crate archive omits it); SHA256 df05444c9178e662fa28810d94a1fa6ec32d7be798241c98094213317265880. Upstream source/build assets are preserved.
+- The BSD-3-Clause license is retained from that exact upstream commit (the crate archive omits it); SHA256 `fdf05444c9178e662fa28810d94a1fa6ec32d7be798241c98094213317265880`. Upstream source/build assets are preserved.
 - [Exact local diff](yara-x-1.23.0.patch): stable RSA 0.10 with its newly required
   `pkcs1v15` feature, Wasmtime 50.0.1, current `rsa::PublicKey` aliases, and the
   independent OpenSSL signature regression retained from the previous patch.
@@ -19,6 +19,12 @@ runtime source bridge. RSA 0.10 shares the current digest/PKCS8 generation, so
 the old RSA 0.9-specific digest aliases are no longer needed. Only public-key
 signature verification is present. The obsolete RUSTSEC-2023-0071 waiver is
 removed; the source guard now requires stable 0.10, one YARA caller and no waiver.
+
+The pinned feature-only producer is `threatflux-threat-detection` 0.2.5,
+archive SHA256 `c20d1d4aa350807cece79c3fda06404733c9647a315049120a767bb39252faee`,
+from source `d4508de414e398e2f4f19b78b1f9d6fd966b8ce6`. Its fifteen Rust files are
+byte-identical to 0.2.4 and invoke no RSA API. Its optional stable RSA dependency
+only enables `pkcs1v15` when the YARA engine is selected.
 
 The historical 1.22 patch remains at [yara-x-1.22.0.patch](yara-x-1.22.0.patch),
 and its complete source is preserved in Git history. The fixed public-key,
@@ -49,7 +55,13 @@ and the equivalent `as_chunks` pattern iteration. The active root patch is
 removed; the historical source and exact diff below remain for provenance.
 Hosted archive, native and security checks validate the registry replacement.
 
-The latest published `threatflux-binary-analysis` 0.3.1 requires ZIP 8.6.0,
+The final consumer refresh selects published `threatflux-binary-analysis` 0.3.3,
+archive SHA256 `eb4c328cb03697698d3cc7ee8e890364426c371409684c627565684f22408b39`,
+from source `ea44848973abef0a67a5f2d1b0a4a7d156728b78`. All 56 Rust files are
+byte-identical to the reviewed 0.3.2 archive; its normalized manifest changes
+only its own package version. The historical patch remains unselected.
+
+The then-current published `threatflux-binary-analysis` 0.3.1 required ZIP 8.6.0,
 which is reported by RustSec advisories RUSTSEC-2026-0367, RUSTSEC-2026-0368 and
 RUSTSEC-2026-0369. The root patch uses the exact published crate with ZIP 9.0.5
 and the small necessary API migration. No additional advisory exceptions are

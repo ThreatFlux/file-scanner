@@ -36,7 +36,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - name: Cache cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -108,7 +108,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -159,7 +159,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: 1.99.1
+          toolchain: 1.100.0
       - name: Generate SBOM
         run: |
           cargo install cargo-cyclonedx --locked --version 0.5.10
@@ -229,13 +229,13 @@ jobs:
           WORKFLOW_VALUE_3: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_VALUE_4: ${{ github.event.pull_request.head.sha }}
       - name: Report informational verified TruffleHog findings
-        uses: trufflesecurity/trufflehog@ea68ca03c865c5f324e86e849ced20ed3cf9dbbb # v3.99.8
+        uses: trufflesecurity/trufflehog@3bd2b5887eb0efb8fa18bfd1d296032924e4ffdc # v3.99.9
         with:
           path: ./
           base: ${{ steps.scan-strategy.outputs.base }}
           head: ${{ steps.scan-strategy.outputs.head }}
           extra_args: --log-level=2 --results=verified
-          version: 3.99.8@sha256:674b2f187620a19df77f44cf9a7d77efcc581a5662accef2f2739cbb46ba4a3a
+          version: 3.99.9@sha256:2ec535840f860aa27f11fee20222fb790326ecd66325c96bd49d02ec6af46eca
         continue-on-error: true
 
   semgrep-scan:

@@ -53,7 +53,7 @@ object = "0.41.0"
 ring = "0.17.14"
 
 # MCP SDK
-rmcp = { version = "=3.9.0", features = ["transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "=3.10.0", features = ["transport-io", "transport-streamable-http-server"] }
 schemars = "1.2.3"
 tokio-util = "0.7.20"
 
@@ -134,7 +134,7 @@ pre-release-replacements = [
 # the library stays `file_scanner`.
 [package]
 name = "threatflux-file-scanner"
-version = "0.3.11"
+version = "0.3.12"
 edition = "2021"
 rust-version = "1.97.1"
 authors = ["File Scanner Project <dev@threatflux.com>"]
@@ -168,10 +168,10 @@ path = "src/main.rs"
 
 [dependencies]
 # ThreatFlux libraries - migrated to crates.io
-threatflux-string-analysis = { version = "0.2.4" }
-threatflux-binary-analysis = { version = "0.3.2", features = ["serde-support"] }
+threatflux-string-analysis = { version = "0.2.5" }
+threatflux-binary-analysis = { version = "0.3.3", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis
-threatflux-threat-detection = { version = "0.2.4", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
+threatflux-threat-detection = { version = "0.2.5", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
 # threatflux-package-security = { version = "0.1.0" } # Not used in actual source code
 
 # Core dependencies (using workspace versions)

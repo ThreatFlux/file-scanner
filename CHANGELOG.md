@@ -189,12 +189,15 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   scans stop at documented limits and say so. Directory YARA scans share one compiled rule set across a bounded
   worker pool.
 - `estimate_technical_debt` uses saturating arithmetic, so extreme metrics no longer overflow and panic.
-- Consolidate dependency updates on Rust 1.99.1, refresh stable crate/tool/container pins and migrate archive
+- Consolidate dependency updates on Rust 1.100.0, refresh stable crate/tool/container pins and migrate archive
   readers to ZIP 9's fallible filename API.
-- Replace deprecated `serde_yaml`/unmaintained `unsafe-libyaml` with maintained `serde-saphyr` 2.0.0 under the
+- Adopt the verified shared v0.7.11 release workflow and final stable ThreatFlux libraries; update the locked TLS
+  verifier to 0.103.17.
+- Update the reviewed MCP SDK pin to 3.10.0, including its tool-schema dependency property-name fix.
+- Replace deprecated `serde_yaml`/unmaintained `unsafe-libyaml` with maintained `serde-saphyr` 2.1.1 under the
   existing source alias. YAML data remains compatible; emitted formatting may differ.
-- Refresh the documented stable YARA-X runtime/crypto patch and patch the latest binary-analysis release to remove
-  its vulnerable ZIP 8 dependency. Repository overrides do not propagate to downstream crates.io library consumers.
+- Consume the reviewed binary-analysis release with ZIP 9 and preserve the stable YARA-X runtime/crypto override.
+  Repository overrides do not propagate to downstream crates.io library consumers.
 - Add complete open security-alert assessments and per-TP remediation plans in `docs/security`, including
   deployment and evidence limits.
 
@@ -232,9 +235,9 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 - `analyze_file` with `code_quality` or `all: true` completes on binaries with extreme metrics (the Go samples).
 - The cache is no longer truncated when a stdio session ends, and symlinks planted in the cache directory are not
   followed.
-- Remediate the eleven confirmed runtime findings with a pinned Wolfi glibc 2.44 runtime and patched static zlib
-  1.3.2. Backport upstream's nonblocking gzip security fix into stable libz-sys; verify it with AddressSanitizer and
-  a source guard rather than relying only on package-version scans.
+- Remediate the eleven confirmed runtime findings with a pinned Wolfi glibc 2.44 runtime and stable libz-sys 1.1.33
+  with pristine bundled zlib 1.4, which includes the prior nonblocking gzip fix. Retain the AddressSanitizer
+  regression and exact native-source guard.
 - Dismiss sixteen verified false positives with both-platform/source evidence. Preserve complete all-severity
   container reports, verify exact image identity and application inventories, scan both published architectures, and
   fail the security gate on any reported vulnerability.
