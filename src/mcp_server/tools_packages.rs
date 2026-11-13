@@ -185,8 +185,8 @@ impl Ecosystem {
 
     const fn cache_key(self) -> &'static str {
         match self {
-            Self::Npm => "package:npm:v2",
-            Self::Python => "package:python:v2",
+            Self::Npm => "package:npm:v3",
+            Self::Python => "package:python:v3",
         }
     }
 

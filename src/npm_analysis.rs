@@ -2323,7 +2323,10 @@ fn detect_code_injection_patterns(
     // Only evaluation of decoded payloads counts here; plain eval is a Medium finding.
     for finding in findings
         .iter()
-        .filter(|f| f.rule == "Eval of decoded payload")
+        .filter(|f| {
+            f.rule == "Eval of decoded payload"
+                || f.rule == "Decoded payload passed to process execution"
+        })
         .take(20)
     {
         patterns.push(CodeInjectionPattern {

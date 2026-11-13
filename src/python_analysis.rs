@@ -2506,7 +2506,10 @@ fn detect_code_injection_patterns(findings: &[SourceFinding]) -> Vec<CodeInjecti
 
     for finding in findings
         .iter()
-        .filter(|f| f.rule == "Exec of decoded payload")
+        .filter(|f| {
+            f.rule == "Exec of decoded payload"
+                || f.rule == "Decoded payload passed to process execution"
+        })
         .take(20)
     {
         patterns.push(CodeInjectionPattern {

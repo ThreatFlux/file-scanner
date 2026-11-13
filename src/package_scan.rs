@@ -1531,7 +1531,7 @@ fn rules() -> &'static Vec<Rule> {
                 "exfiltration",
                 "High",
                 ALL,
-                r"(?i)(discord(app)?\.com/api/webhooks|api\.telegram\.org/bot|hooks\.slack\.com/services|webhook\.site|requestbin\.|pipedream\.net|\.ngrok(-free)?\.(io|app|dev)|oast\.(pro|live|site|online|fun|me)|interact\.sh|burpcollaborator\.net)",
+                r"(?i)(discord(app)?\.com/api/webhooks|api\.telegram\.org/bot|hooks\.slack\.com/services|(^|[^a-z0-9_$])(webhook\.site|requestbin\.|pipedream\.net|oast\.(pro|live|site|online|fun|me)|interact\.sh|burpcollaborator\.net)\b|\.ngrok(-free)?\.(io|app|dev)\b)",
             ),
             (
                 "Anonymous file host",
@@ -1567,7 +1567,7 @@ fn rules() -> &'static Vec<Rule> {
                 "process-exec",
                 "Medium",
                 JS,
-                r#"(require\s*\(\s*['"](node:)?child_process['"]\s*\)|from\s+['"](node:)?child_process['"]|\bchild_process\.(exec|execSync|spawn|spawnSync|execFile|execFileSync|fork)\s*\()"#,
+                r#"(require\s*\(\s*['"](node:)?child_process['"]\s*\)|from\s+['"](node:)?child_process['"]|[\w$]*child_process(_\d+)?(\.default)?\.(exec|execSync|spawn|spawnSync|execFile|execFileSync|fork)\s*\)?\s*\()"#,
             ),
             (
                 "Eval of decoded payload",
@@ -1581,7 +1581,7 @@ fn rules() -> &'static Vec<Rule> {
                 "obfuscation",
                 "High",
                 JS,
-                r#"\b(exec|execSync|spawn|spawnSync)\s*\(\s*(Buffer\.from\([^)]*,\s*['"](base64|hex)['"]|atob\(|String\.fromCharCode)"#,
+                r#"\b(exec|execSync|spawn|spawnSync)\s*\)?\s*\(\s*(Buffer\.from\([^)]*,\s*['"](base64|hex)['"]|atob\(|String\.fromCharCode)"#,
             ),
             (
                 "Dynamic code evaluation",
@@ -1624,7 +1624,7 @@ fn rules() -> &'static Vec<Rule> {
                 "process-exec",
                 "Medium",
                 PY,
-                r"\b(subprocess\.(call|run|Popen|check_output|check_call|getoutput)|os\.(system|popen|execl|execv|execlp|execvp)|pty\.spawn|commands\.getoutput)\s*\(",
+                r"\b(subprocess\.(call|run|Popen|check_output|check_call|getoutput)|os\.(system|popen|execl|execv|execlp|execvp)|pty\.spawn|commands\.getoutput|asyncio\.create_subprocess_(exec|shell))\s*\(",
             ),
             (
                 "Exec of decoded payload",
@@ -2538,10 +2538,10 @@ fn flow_regexes(lang: Lang) -> &'static FlowRegexes {
     if lang == Lang::Python {
         PY_FLOW.get_or_init(|| {
             build(
-                r"(\burlretrieve\(|\burlopen\(|\brequests\.(get|post|put|request)\(|\bhttpx\.\w+\(|\bhttp\.client\b|\burllib3\b|\bwget\.download\(|\burllib\.request\.\w+\()",
-                r#"(\burlretrieve\(\s*[^,)]+,|\bopen\([^)]*,\s*['"][wa][b+]*['"]|\.write_bytes\(|\.write_text\(|\bcopyfileobj\(|\bwget\.download\()"#,
-                r#"((subprocess\.\w+|os\.(system|popen|exec\w+|spawn\w+)|pty\.spawn)\s*\(\s*(\[\s*)?([A-Za-z_][\w.]*\s*[,)\](]|f['"]|[^)\n]*(\+|%\s|\.format\()))"#,
-                r"((subprocess\.\w+|os\.(system|popen|exec\w+|spawn\w+)|pty\.spawn)\s*\()",
+                r"(\burlretrieve\(|\burlopen\(|\brequests\.(get|post|put|request)\(|\bhttpx\.\w+\(|\bhttp\.client\b|\burllib3\b|\bwget\.download\(|\burllib\.request\.\w+\(|\baiohttp\.(ClientSession|request)\b|\bClientSession\s*\()",
+                r#"(\burlretrieve\(\s*[^,)]+,|\bopen\([^)]*,\s*['"][wa][b+]*['"]|\.write_bytes\(|\.write_text\(|\bcopyfileobj\(|\bwget\.download\(|\bos\.write\()"#,
+                r#"((subprocess\.\w+|os\.(system|popen|exec\w+|spawn\w+)|pty\.spawn|asyncio\.create_subprocess_(exec|shell))\s*\(\s*(\[\s*)?(['"]|[A-Za-z_][\w.]*\s*[,)\](]|f['"]|[^)\n]*(\+|%\s|\.format\()))"#,
+                r"((subprocess\.\w+|os\.(system|popen|exec\w+|spawn\w+)|pty\.spawn|asyncio\.create_subprocess_(exec|shell))\s*\()",
                 r"((^|[^.\w])(exec|eval)\s*\([^\n]*(\.text\b|\.content\b|\.read\(\)))",
                 r"(\brequests\.(post|put|patch)\(|\bhttpx\.(post|put|patch)\(|[(,]\s*(data|json|files)\s*=|\.sendall?\(|\bsmtplib\b|\bftplib\b|\burlopen\([^)]*,)",
                 r"(os\.environ(\s*[,)\]}]|\s*$)|dict\(os\.environ\)|os\.environ\.(copy|items)\(\))",
@@ -2552,9 +2552,9 @@ fn flow_regexes(lang: Lang) -> &'static FlowRegexes {
     } else {
         JS_FLOW.get_or_init(|| {
             build(
-                r#"(\b(https?|http2)\s*\.\s*(get|request)\s*\(|['"]\)\s*\.\s*(get|request)\s*\(|(^|[^.\w$])fetch\s*\(|\baxios\b|\bgot\s*[.(]|\bnode-fetch\b|\bsuperagent\b|\bneedle\s*[.(])"#,
-                r"\b(writeFile(Sync)?|appendFile(Sync)?|createWriteStream|copyFile(Sync)?)\s*\(",
-                r"((^|[^.\w$])(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)|\b(child_process|childProcess|cp)\s*\.\s*(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork))\s*\(\s*([A-Za-z_$][\w$.]*\s*[,)(]|[^)\n]*(\+|\$\{))",
+                r#"([\w$]*(https?|http2)(_\d+)?(\.default)?\s*\.\s*(get|request)\s*\(|\(\s*0\s*,\s*[\w$.]*(https?|http2)(_\d+)?(\.default)?\s*\.\s*(get|request)\s*\)\s*\(|['"]\)\s*\.\s*(get|request)\s*\(|(^|[^.\w$])fetch\s*\(|\baxios\b|\bgot\s*[.(]|\bnode-fetch\b|\bsuperagent\b|\bneedle\s*[.(])"#,
+                r"\b(writeFile(Sync)?|appendFile(Sync)?|createWriteStream|copyFile(Sync)?)\s*\)?\s*\(",
+                r#"((^|[^.\w$])(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)|([\w$]*(child_process|childProcess)(_\d+)?(\.default)?|\bcp)\s*\.\s*(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)|\(\s*0\s*,\s*[\w$.]*\.(exec|execSync|execFile|execFileSync|spawn|spawnSync|fork)\s*\))\s*\(\s*(['"`]|[A-Za-z_$][\w$.]*\s*[,)(]|[^)\n]*(\+|\$\{))"#,
                 r"(^|[^.\w$])(exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(",
                 r"((^|[^.\w$])(eval\s*\(|new\s+Function\s*\()\s*[A-Za-z_$]|\bvm\.run\w+\s*\(\s*[A-Za-z_$])",
                 r#"(\.(post|put|patch)\s*\(|method\s*:\s*['"](POST|PUT|PATCH)['"]|\breq(uest)?\.(write|end)\s*\(\s*[^)\s]|\.send\s*\(|\bbody\s*:|\bform\s*:)"#,
@@ -2645,6 +2645,22 @@ fn correlate_file(
             continue;
         }
         let path_arg = write_path_argument(lang, flow, write_text);
+        // Earlier values of the names in the written path (bounded).
+        let sources: Vec<&str> = name_regex()
+            .find_iter(&path_arg)
+            .map(|m| m.as_str())
+            .filter_map(|name| assigned.get(name))
+            .flat_map(|values| {
+                let before = values.partition_point(|(n, _)| *n < write_line);
+                values[..before]
+                    .iter()
+                    .rev()
+                    .take(RUN_CONTEXT_VALUES)
+                    .map(|(_, v)| *v)
+                    .collect::<Vec<_>>()
+            })
+            .take(8)
+            .collect();
         // The first run after the write that is tied to it. What a run line
         // starts does not depend on the fetch, so it is worked out once per line.
         let first = code.partition_point(|(n, _)| *n < write_line);
@@ -2657,7 +2673,7 @@ fn correlate_file(
                     && runs
                         .entry(*n)
                         .or_insert_with(|| RunContext::of(line, &assigned, *n))
-                        .is_tied_to(&path_arg)
+                        .is_tied_to_with(&path_arg, &sources)
             });
         if let Some(&(exec_line, exec_text)) = hit {
             add(
@@ -2827,9 +2843,19 @@ fn assignments<'a>(code: &[(usize, &'a str)]) -> Assignments<'a> {
             || right.contains("require (")
             || right.contains("import(")
             || right.contains("__import__(");
-        let is_name = name_regex().find(left).is_some_and(|m| m.as_str() == left);
-        if is_name && !right.starts_with('=') && !is_import {
+        if right.starts_with('=') || is_import {
+            continue;
+        }
+        let is_name = |s: &str| name_regex().find(s).is_some_and(|m| m.as_str() == s);
+        if is_name(left) {
             map.entry(left).or_default().push((*n, right));
+        } else if left.contains(',') {
+            // `fd, path = tempfile.mkstemp()`: every name holds a part of it.
+            for part in left.split(',').map(str::trim).take(4) {
+                if is_name(part) {
+                    map.entry(part).or_default().push((*n, right));
+                }
+            }
         }
     }
     map
@@ -2882,6 +2908,9 @@ struct RunContext {
     text: String,
     names: std::collections::HashSet<String>,
     starts_interpreter: bool,
+    /// The run line itself (not an earlier assignment) hands a variable or an
+    /// expression to the call, not only fixed text.
+    has_variable: bool,
 }
 
 impl RunContext {
@@ -2919,11 +2948,41 @@ impl RunContext {
             text,
             names,
             starts_interpreter,
+            has_variable: names_a_variable(exec_line),
         }
     }
 
     fn is_tied_to(&self, path_arg: &str) -> bool {
-        if self.starts_interpreter {
+        self.is_tied_to_with(path_arg, &[])
+    }
+
+    /// `sources` are the earlier values of the names in the written path: the
+    /// file descriptor of `os.write(fd, ...)` and the path of the run come
+    /// from one `tempfile.mkstemp()`, and a path kept in a variable is
+    /// spelled out as a literal in the run.
+    fn is_tied_to_with(&self, path_arg: &str, sources: &[&str]) -> bool {
+        // A shell or interpreter is started on something that is not fixed
+        // text: a variable or an expression. `spawn('node', ['build.js'])` next
+        // to an unrelated cache write names nothing that was written.
+        if self.starts_interpreter && self.has_variable {
+            return true;
+        }
+        if sources.iter().any(|source| {
+            let source = source.trim();
+            source.len() >= 8 && source.contains('(') && self.text.contains(source)
+        }) {
+            return true;
+        }
+        if sources.iter().any(|source| {
+            literal_regex().captures_iter(source).any(|c| {
+                let lit = c
+                    .get(1)
+                    .or_else(|| c.get(2))
+                    .or_else(|| c.get(3))
+                    .map_or("", |m| m.as_str());
+                !lit.is_empty() && self.text.contains(lit)
+            })
+        }) {
             return true;
         }
         let dest = path_arg.trim();
@@ -2957,6 +3016,93 @@ impl RunContext {
             !lit.is_empty() && self.text.contains(lit)
         })
     }
+}
+
+/// Identifiers that are not a variable handed to a call.
+const NOT_A_VARIABLE: &[&str] = &[
+    "true",
+    "false",
+    "null",
+    "undefined",
+    "True",
+    "False",
+    "None",
+    "await",
+    "async",
+    "new",
+    "return",
+    "const",
+    "let",
+    "var",
+    "cp",
+    "subprocess",
+    "child_process",
+    "childProcess",
+    "asyncio",
+    "PIPE",
+    "STDOUT",
+    "DEVNULL",
+    "inherit",
+    "ignore",
+    "pipe",
+    "utf8",
+    "utf",
+];
+
+/// Whether the run line hands anything but fixed text to the call: a name that
+/// is not a callee, a key, a module or a keyword, or a `${...}` / `{...}`
+/// expansion. String literals are taken out first.
+fn names_a_variable(line: &str) -> bool {
+    let mut rest = String::with_capacity(line.len());
+    let mut quote: Option<char> = None;
+    let mut fstring = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == '\\' {
+                    chars.next();
+                } else if c == q {
+                    quote = None;
+                } else if (q == '`' && c == '$' && chars.peek() == Some(&'{'))
+                    || (fstring && c == '{')
+                {
+                    // An expansion inside a literal is an expression.
+                    return true;
+                }
+            }
+            None => {
+                if matches!(c, '\'' | '"' | '`') {
+                    let prefix = rest.chars().next_back();
+                    let before_prefix = rest.chars().rev().nth(1);
+                    fstring = matches!(prefix, Some('f' | 'F'))
+                        && !before_prefix.is_some_and(|b| b.is_alphanumeric() || b == '_');
+                    quote = Some(c);
+                    rest.push(' ');
+                } else {
+                    rest.push(c);
+                }
+            }
+        }
+    }
+    name_regex().find_iter(&rest).any(|m| {
+        let name = m.as_str();
+        let before = rest[..m.start()].trim_end().chars().next_back();
+        let after = rest[m.end()..].trim_start();
+        let callee_or_key = after.starts_with('(')
+            || (after.starts_with(':') && !after.starts_with("::"))
+            || (after.starts_with('=') && !after.starts_with("=="));
+        // `node_child_process_1`, `fs_1`: a compiled module binding.
+        let module_binding = name
+            .trim_end_matches(|c: char| c.is_ascii_digit())
+            .ends_with('_')
+            && name.len() > 2;
+        before != Some('.')
+            && !callee_or_key
+            && !NOT_A_VARIABLE.contains(&name)
+            && !PATH_NOISE.contains(&name)
+            && !module_binding
+    })
 }
 
 /// Whether `text` holds the dotted name `chain` as a whole name (not as part
