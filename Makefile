@@ -17,7 +17,7 @@ LIBRARIES := threatflux-package-security
          fmt-check test-no-features test-mcp-features build-examples test-doc doc-check doc-links \
          deny outdated security-geiger security-supply-chain semver-check feature-test feature-test-full \
          msrv msrv-install security-enhanced ci-local validate analyze examples release-prep docs \
-         hooks-install test-all test-package-security lint-package-security bench-check workflow-check codeql-review-check container-review-check native-zlib-check
+         hooks-install test-all test-package-security lint-package-security bench-check workflow-check codeql-review-check container-review-check native-zlib-check release-metadata-check
 
 # Default target
 all: setup-optimization fmt lint build test security-audit
@@ -36,6 +36,7 @@ ci-local:
 	$(MAKE) msrv
 	$(MAKE) security-audit
 	$(MAKE) codeql-review-check
+	$(MAKE) release-metadata-check
 	$(MAKE) container-review-check
 	$(MAKE) deny
 	$(MAKE) workflow-check
@@ -215,6 +216,10 @@ container-review-check:
 codeql-review-check:
 	python3 scripts/codeql-reviewed-findings.py --check-sources
 	python3 -m unittest discover -s scripts -p 'test_codeql_*.py'
+
+release-metadata-check:
+	python3 scripts/stamp_server_json.py --check
+	python3 -m unittest discover -s scripts -p 'test_stamp_*.py'
 
 # Build examples
 build-examples:

@@ -366,10 +366,15 @@ index live in the process, and MCP sessions are held by the process that opened 
 `server.json` at the repository root describes the server for the MCP registry. It cannot be published as it
 stands. These must be true first:
 
-- The three version strings (`version`, the cargo package `version` and the tag in the OCI `identifier`) name
-  0.4.0. Nothing in the release automation updates them, so set them by hand at each release, in the same
-  change that bumps `Cargo.toml`. The file still passes only `mcp-stdio`; adding `--allow-root` to its
-  arguments remains to be done, now that the versions name a release that accepts it.
+- Publish the stamped copy, not the file in the repository. The committed `server.json` is a template: its three
+  version strings (`version`, the cargo package `version` and the tag in the OCI `identifier`) hold the
+  placeholder 0.0.0, so nothing needs editing at a release. `release.yml` writes a copy with those three strings
+  set to the release version and attaches it to the GitHub release as the asset `server.json`. Releases up to and
+  including 0.4.2 have no such asset; later releases carry one. To stamp one by hand, run from the repository root
+  `python3 scripts/stamp_server_json.py --version X.Y.Z --output "${TMPDIR:-/tmp}/server.json"` (the version
+  has no `v` prefix; the script refuses an output path that is the template).
+  `make release-metadata-check` checks the template and the stamping script.
+  The file still passes only `mcp-stdio`; adding `--allow-root` to its arguments remains to be done.
 - The cargo package cannot be resolved until the crate `threatflux-file-scanner` is published on crates.io.
   It is not there yet, and the release workflow's publish step stays off until a first manual publish (see
   [.github/workflows/README.md](.github/workflows/README.md)).
@@ -383,6 +388,15 @@ stands. These must be true first:
 The file was checked by hand against the registry schema, not validated online.
 
 ## Building a custom image
+
+The `Dockerfile` default for the `VERSION` build argument is the placeholder 0.0.0. `docker.yml` passes the git
+ref name as `VERSION`: `vX.Y.Z` on a release tag and `main` on main. The release dry run passes `vX.Y.Z`.
+A build without `--build-arg VERSION` labels the image 0.0.0 in `org.opencontainers.image.version`.
+To label a local image, pass it:
+
+```bash
+docker build --build-arg VERSION=vX.Y.Z -t file-scanner .
+```
 
 The repository `Dockerfile` is the supported build. It needs the whole repository, because Cargo
 patches three crates from `vendor/`, so a Dockerfile that copies only `Cargo.toml`, `Cargo.lock` and

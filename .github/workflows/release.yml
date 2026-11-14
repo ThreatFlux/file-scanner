@@ -87,6 +87,16 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      # Rehearse the server.json stamp now, so a broken template fails a dry
+      # run or the start of a release instead of the final upload.
+      - name: Rehearse server.json stamp
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RUNNER_TEMP_DIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          python3 scripts/stamp_server_json.py --version "${VERSION}" --output "${RUNNER_TEMP_DIR}/server.json"
+
       # The crate and binaries are built at their Cargo.toml version, so a real
       # release must match it. A dry run may rehearse a version that is not
       # bumped yet, so it only warns.
@@ -399,6 +409,20 @@ jobs:
         with:
           path: artifacts
           pattern: release-*
+
+      # server.json in the repository is a template that holds the placeholder
+      # 0.0.0. The release carries a copy stamped with this release's version.
+      # The upload step below picks it up with the other files under artifacts/.
+      - name: Stamp server.json
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$(find artifacts -type f -print -quit)" ]]; then
+            echo "::error::No release artifacts were downloaded"
+            exit 1
+          fi
+          python3 scripts/stamp_server_json.py --version "${VERSION}" --output artifacts/release-metadata/server.json
 
       - name: Upload to release
         env:

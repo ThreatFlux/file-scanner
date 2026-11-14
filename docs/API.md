@@ -23,8 +23,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 ```
 
-The crate has no Cargo features. The documentation of every public item is on
-[docs.rs](https://docs.rs/threatflux-file-scanner). The library is the code the binary is built from, so
+The crate has no Cargo features. It is not published on crates.io, so docs.rs has no page for it. Build the
+documentation of every public item from a checkout with `cargo doc --lib --no-deps --open`; the page opens at
+`target/doc/file_scanner/index.html`. The library is the code the binary is built from, so
 its surface is large and has changed between releases: pin the version you test against.
 
 ### Modules
