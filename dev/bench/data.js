@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794608520138,
+  "lastUpdate": 1794631226960,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -14373,6 +14373,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
             "value": 246009.76099391346,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4be77dfad7a63babf8c02b4d4bdca9032799be23",
+          "message": "ci(release): attach a version-stamped server.json to each release (#322)\n\n* chore: use the 0.0.0 placeholder for version strings in server.json and the Dockerfile\n\nserver.json and both ARG VERSION defaults in the Dockerfile named 0.4.0,\nwhile the latest release is 0.4.2. The release commit made by the shared\nauto-release workflow rewrites only Cargo.toml and Cargo.lock, so these\nstrings went stale at every release unless someone edited them by hand.\n\nThe three version strings in server.json now hold the placeholder 0.0.0,\nwhich makes the committed file a template. A later commit stamps the\nrelease version into a copy at release time.\n\nThe Dockerfile defaults are now 0.0.0 as well, matching the organization's\nRust template. docker.yml passes the git ref name and the release dry run\npasses vX.Y.Z with --build-arg VERSION, so CI and release images keep\ntheir real version label. Only a build without that argument is labelled\n0.0.0. The rust-base copy of the argument is not read in that stage, and\nits comment now says so.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nCo-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>\n\n* ci: stamp server.json at release time and check the template in CI\n\nscripts/stamp_server_json.py reads the server.json template and writes a\ncopy with the top-level version, the cargo package version and the OCI\nimage tag set to the given version. It accepts exactly the version pattern\nthat the prepare job of release.yml validates. It refuses a template that\ndoes not have the expected shape (one cargo package named\nthreatflux-file-scanner, one oci package for ghcr.io/threatflux/file-scanner\nand nothing else), a template string that is not the placeholder, and\nformatting that differs from 2-space JSON with a trailing newline. On any\nrefusal it exits non-zero and writes nothing, and it will not write over\nthe template. Its --check mode verifies the template and the two\nDockerfile defaults without writing.\n\nscripts/test_stamp_server_json.py covers stamping the committed file,\nbyte-level formatting, prerelease versions, each refusal, the CLI, and\nthat the version pattern equals the one in release.yml.\n\nmake release-metadata-check runs both. ci.yml runs it in the\nsecurity-audit job, which runs on every pull request into main and on\npushes to main, and auto-release requires ci.yml. A broken template\ntherefore fails CI before a release can be cut.\n\nrelease.yml rehearses the stamp in prepare right after the version is\nvalidated, so a dry run and the start of every release prove it works.\nupload-assets writes the stamped file to\nartifacts/release-metadata/server.json after the build artifacts are\ndownloaded, and the existing upload loop attaches it to the release as\nserver.json. No build artifact uses that name. Values reach the shell\nthrough env:.\n\nNothing is committed back to main after a release: docker.yml promotes\nlatest and main only while the built commit is still the head of main,\nso a follow-up commit would stop latest from ever being promoted.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nCo-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>\n\n* docs: describe the server.json template and stamped release asset\n\nDEPLOYMENT_GUIDE.md no longer says to set the server.json versions by\nhand at each release. It says the committed file is a template, that\nreleases attach a stamped copy as the asset server.json, and how to stamp\none locally. Its custom image section explains the 0.0.0 VERSION default\nand how to label a local build. .github/workflows/README.md lists the new\nrelease asset and describes the stamp steps and the CI check, and\nCHANGELOG.md records the change under Unreleased.\n\ndocs/API.md linked to docs.rs, which has no page because the crate is not\npublished on crates.io. It now says how to build the API documentation\nlocally with cargo doc.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nCo-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 5.5 <noreply@anthropic.com>",
+          "timestamp": "2026-11-13T23:04:03-05:00",
+          "tree_id": "face00dea9209e9d0c37a1407943ad58b1bf4fac",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/4be77dfad7a63babf8c02b4d4bdca9032799be23"
+        },
+        "date": 1794631226299,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 5251.544486739845,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_large_binary",
+            "value": 63642.558721558424,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_pe",
+            "value": 6314.478954179785,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 1912799.4615197785,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 2655417.7310526315,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 263593.6082360086,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2298932.440454545,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 60321.477792844504,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 33505.79947172092,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 206045.85315716808,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 1900339.5464102188,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 38405.491066289556,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 22184.55264271471,
+            "unit": "ns"
+          },
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2259483.4617391312,
+            "unit": "ns"
+          },
+          {
+            "name": "string_categorization/extract_with_categorization",
+            "value": 796914.260618282,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/10000_strings",
+            "value": 8370015.453333334,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/1000_strings",
+            "value": 952207.774173299,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/100_strings",
+            "value": 167512.74757881818,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_16",
+            "value": 8155549.802857143,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_4",
+            "value": 8380376.161666665,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_8",
+            "value": 8373061.581428572,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_16",
+            "value": 906664.5198499698,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_4",
+            "value": 951664.7807087238,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_8",
+            "value": 980952.8215346832,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_16",
+            "value": 147447.02025935915,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_4",
+            "value": 167797.2457434534,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
+            "value": 201294.12589423038,
             "unit": "ns"
           }
         ]
