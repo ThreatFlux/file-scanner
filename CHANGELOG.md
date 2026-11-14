@@ -13,6 +13,10 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 
 ### Added
 
+- Release metadata: `server.json` is now a template with the placeholder version 0.0.0, and each release cut from
+  now on attaches a copy stamped with the release version as the asset `server.json`
+  (`scripts/stamp_server_json.py`; `make release-metadata-check` runs in CI). The `Dockerfile` default for the
+  `VERSION` build argument is the same placeholder, so a local build without `--build-arg VERSION` is labelled 0.0.0.
 - MCP server on the rmcp SDK over stdio and Streamable HTTP (`/mcp`). Protocol revisions 2024-11-05 through
   2026-07-28 are negotiated. The server reports its name, version, title and usage instructions, tools carry titles
   and read-only annotations, and input schemas are generated from the request types and reject unknown arguments.

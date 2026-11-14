@@ -61,6 +61,7 @@ pushes no image.
 | macOS | Intel | `file-scanner-vX.Y.Z-macos-amd64.tar.gz` |
 | Windows | x86_64 | `file-scanner-vX.Y.Z-windows-amd64.zip` |
 | SBOM | - | `file-scanner-vX.Y.Z.cdx.json` (CycloneDX 1.5) |
+| MCP registry file | - | `server.json`, on releases after 0.4.2 (see below) |
 
 Each archive has a `.sha256` checksum beside it. Asset names follow the
 `file-scanner` binary, not the `threatflux-file-scanner` crate name, so download
@@ -76,6 +77,26 @@ the promotion lock. `main` and `latest` continue tracking current main; a stale
 main build or historical tag retry cannot rewind them. A release tag must match
 the package version compiled from Cargo and belong to accepted main history.
 Publication-policy regressions run in the existing hosted container review suite.
+
+### Release metadata (`server.json`)
+
+`server.json` in the repository is a template. Its three version strings hold the placeholder `0.0.0`, as do the
+two `ARG VERSION` defaults in the `Dockerfile`, so no file needs a hand edit at a release. `release.yml` stamps the
+release version in two places:
+
+- `prepare` runs `scripts/stamp_server_json.py` right after it validates the version, writing to the runner temp
+  directory. A dry run, and the start of every release, therefore prove the stamp works.
+- `upload-assets` writes the stamped file to `artifacts/release-metadata/server.json` after the build artifacts
+  are downloaded. The existing upload loop attaches it to the release as the asset `server.json`. Releases up
+  to and including 0.4.2 have no such asset. A dry run skips `upload-assets`.
+
+`ci.yml` runs `make release-metadata-check` in the `security-audit` job on every pull request into `main` and
+on pushes to `main`. It checks that `server.json` and both Dockerfile defaults hold the placeholder and runs
+the unit tests of the stamping script, so a broken template fails CI before a release can be cut.
+
+Nothing is committed back to `main` after a release. The auto-release commit changes only `Cargo.toml` and
+`Cargo.lock`, and `docker.yml` promotes `latest` and `main` only while the built commit is still the head of
+`main`: a follow-up commit would stop `latest` from ever being promoted.
 
 ### crates.io
 
