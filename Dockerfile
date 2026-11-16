@@ -83,7 +83,7 @@ RUN mkdir -p /home/builder/out/bin /home/builder/out/doc /home/builder/runtime-s
     cp "/build/${BINARY_NAME}-sbom.json" /home/builder/out/doc/sbom.cdx.json
 
 # Wolfi glibc 2.44, nonroot uid/gid 65532; amd64/arm64 multi-arch index digest
-FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:cb7aa4681bef604e99ad3fb6fb365330a3ca24fcee56df0b60b27ac4983409eb AS runtime
+FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:48ce6d7d3006f17054a54ef41aac5222ac308282db6d67ed508cf024a6df04de AS runtime
 
 # Placeholder: docker.yml passes the git ref name (vX.Y.Z on release tags) and the release
 # dry run passes vX.Y.Z with --build-arg VERSION. A build without it is labelled 0.0.0.
