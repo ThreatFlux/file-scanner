@@ -258,6 +258,24 @@ def signature_record(label, signatures):
     return rec, {f"{label}.unsigned": unsigned and none_found}
 
 
+def full_fixture_page(page, path, name):
+    items = page.get("items")
+    if not isinstance(items, list) or type(page.get("total")) is not int:
+        return False
+    expected = {
+        "file_path": str(path),
+        "section": "binary_info",
+        "list": name,
+        "offset": 0,
+        "total": len(items),
+        "unfiltered_total": len(items),
+        "returned": len(items),
+    }
+    return "next_offset" not in page and all(
+        page.get(key) == value for key, value in expected.items()
+    )
+
+
 def verify_identity(label, path, data, overview, sections, pages):
     """Refuse answers that do not describe this exact fixture."""
     digest = hashlib.sha256(data).hexdigest()
@@ -270,23 +288,12 @@ def verify_identity(label, path, data, overview, sections, pages):
         and sections.get("sha256") == digest
         and hashes.get("sha256") == digest
     )
-    for name, page in pages.items():
-        items = page.get("items")
-        same = same and (
-            page.get("file_path") == str(path)
-            and page.get("section") == "binary_info"
-            and page.get("list") == name
-            and page.get("offset") == 0
-            and isinstance(items, list)
-            and type(page.get("total")) is int
-            and page["total"] == page.get("returned") == len(items)
-            and page["total"] == page.get("unfiltered_total")
-            and "next_offset" not in page
-        )
     if not same:
         raise Refused(
             f"{label}: an answer does not match the fixture path, size or SHA-256"
         )
+    if not all(full_fixture_page(page, path, name) for name, page in pages.items()):
+        raise Refused(f"{label}: a binary_info list is incomplete or misattributed")
     for name in ("binary_info", "signatures"):
         if not isinstance(sections.get(name), dict):
             raise Refused(f"{label}: the {name} section produced no result")
@@ -427,22 +434,87 @@ def source_facts():
     return revision, clean, sdk.group(1)
 
 
-def qualify(binary, revision, clean, sdk_version):
+def fixture_tools():
     clang, lld = shutil.which("clang"), shutil.which("ld.lld")
     if not clang or not lld:
         raise Refused("clang and ld.lld are required")
     # which() gives an absolute path; symlinks are kept so ld.lld keeps its name.
     lld = os.path.abspath(lld)
-    toolchain = {
-        "clang": version_of(clang, r"clang version (\d+\.\d+\.\d+)"),
-        "pe_linker": {
-            "name": "ld.lld",
-            "passed_as": "--ld-path",
-            "sha256": sha256_file(lld),
-            "version": version_of(lld, r"LLD (\d+\.\d+\.\d+)"),
+    return (
+        clang,
+        lld,
+        {
+            "clang": version_of(clang, r"clang version (\d+\.\d+\.\d+)"),
+            "pe_linker": {
+                "name": "ld.lld",
+                "passed_as": "--ld-path",
+                "sha256": sha256_file(lld),
+                "version": version_of(lld, r"LLD (\d+\.\d+\.\d+)"),
+            },
+            "elf_linker": "clang default, not verified",
         },
-        "elf_linker": "clang default, not verified",
+    )
+
+
+def scan_fixtures(binary, work, cache, messages):
+    scanner_sha = sha256_file(binary)
+    try:
+        by_id = SMOKE.run_session(binary, work, cache, messages)
+    except (OSError, RuntimeError, ValueError, queue.Empty, subprocess.SubprocessError):
+        raise Refused("the MCP session failed") from None
+    if sha256_file(binary) != scanner_sha:
+        raise Refused("the scanner executable changed during the run")
+    server = (by_id.get(1) or {}).get("result") or {}
+    info = server.get("serverInfo") or {}
+    if (
+        info.get("name") != "file-scanner"
+        or not SEMVER.fullmatch(str(info.get("version", "")))
+        or server.get("protocolVersion") != SMOKE.PROTOCOL_VERSION
+    ):
+        raise Refused("initialize did not name a file-scanner server")
+    return by_id, {
+        "sha256": scanner_sha,
+        "version": info["version"],
+        "protocol_version": SMOKE.PROTOCOL_VERSION,
     }
+
+
+def fixture_records(paths, by_id, ids):
+    fixtures, checks = {}, {}
+    for label, path in paths.items():
+        data = path.read_bytes()
+        overview = answer(by_id, ids, (label, "overview"))
+        sections = answer(by_id, ids, (label, "sections"))
+        pages = (
+            {name: answer(by_id, ids, (label, name)) for name in LISTS}
+            if label != TEXT
+            else {}
+        )
+        digest = verify_identity(label, path, data, overview, sections, pages)
+        if label == TEXT:
+            record, found = text_record(overview, sections["binary_info"])
+        else:
+            record, found = binary_record(
+                label,
+                overview,
+                sections["binary_info"],
+                pages,
+                header_entry_points(label, data),
+            )
+        signature, signed = signature_record(label, sections["signatures"])
+        checks.update(found)
+        checks.update(signed)
+        fixtures[label] = {
+            "sha256": digest,
+            "size": len(data),
+            "binary_info": record,
+            "signature": signature,
+        }
+    return fixtures, dict(sorted(checks.items()))
+
+
+def qualify(binary, revision, clean, sdk_version):
+    clang, lld, toolchain = fixture_tools()
     with tempfile.TemporaryDirectory(prefix="file-scanner-qualify-") as directory:
         base = pathlib.Path(directory).resolve()
         work, cache = base / "samples", base / "cache"
@@ -452,69 +524,14 @@ def qualify(binary, revision, clean, sdk_version):
         if sha256_file(lld) != toolchain["pe_linker"]["sha256"]:
             raise Refused("the PE linker changed during fixture compilation")
         messages, ids = plan(paths)
-        scanner_sha = sha256_file(binary)
-        try:
-            by_id = SMOKE.run_session(binary, work, cache, messages)
-        except (
-            OSError,
-            RuntimeError,
-            ValueError,
-            queue.Empty,
-            subprocess.SubprocessError,
-        ):
-            raise Refused("the MCP session failed") from None
-        if sha256_file(binary) != scanner_sha:
-            raise Refused("the scanner executable changed during the run")
-        server = (by_id.get(1) or {}).get("result") or {}
-        info = server.get("serverInfo") or {}
-        if (
-            info.get("name") != "file-scanner"
-            or not SEMVER.fullmatch(str(info.get("version", "")))
-            or server.get("protocolVersion") != SMOKE.PROTOCOL_VERSION
-        ):
-            raise Refused("initialize did not name a file-scanner server")
-        fixtures, checks = {}, {}
-        for label, path in paths.items():
-            data = path.read_bytes()
-            overview, sections = (
-                answer(by_id, ids, (label, "overview")),
-                answer(by_id, ids, (label, "sections")),
-            )
-            pages = (
-                {n: answer(by_id, ids, (label, n)) for n in LISTS}
-                if label != TEXT
-                else {}
-            )
-            digest = verify_identity(label, path, data, overview, sections, pages)
-            if label == TEXT:
-                record, found = text_record(overview, sections["binary_info"])
-            else:
-                record, found = binary_record(
-                    label,
-                    overview,
-                    sections["binary_info"],
-                    pages,
-                    header_entry_points(label, data),
-                )
-            signature, signed = signature_record(label, sections["signatures"])
-            checks.update(found)
-            checks.update(signed)
-            fixtures[label] = {
-                "sha256": digest,
-                "size": len(data),
-                "binary_info": record,
-                "signature": signature,
-            }
+        by_id, scanner = scan_fixtures(binary, work, cache, messages)
+        fixtures, checks = fixture_records(paths, by_id, ids)
     return {
         "schema": SCHEMA,
         "outcome": "qualified" if all(checks.values()) else "failed",
         "source_revision": revision,
         "source_tree_clean": clean,
-        "scanner": {
-            "sha256": scanner_sha,
-            "version": info["version"],
-            "protocol_version": SMOKE.PROTOCOL_VERSION,
-        },
+        "scanner": scanner,
         "route": {
             "transport": "mcp-stdio",
             "tools": ["analyze_file", "query_analysis"],
@@ -526,7 +543,7 @@ def qualify(binary, revision, clean, sdk_version):
         },
         "toolchain": toolchain,
         "fixtures": fixtures,
-        "checks": dict(sorted(checks.items())),
+        "checks": checks,
     }
 
 
