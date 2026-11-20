@@ -158,6 +158,45 @@ fn calculate_blake3(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_string())
 }
 
+/// All four hashes of `reader` in one pass, keeping its first `head_len`
+/// bytes in `head`. The sandboxed metadata worker (`crate::isolation`) hashes
+/// its inherited input with this; the digests equal [`calculate_all_hashes`]
+/// of the same bytes.
+pub fn hash_reader<R: Read>(
+    mut reader: R,
+    head: &mut Vec<u8>,
+    head_len: usize,
+) -> std::io::Result<Hashes> {
+    let mut md5 = Md5::new();
+    let mut sha256 = Sha256::new();
+    let mut sha512 = Sha512::new();
+    let mut blake3 = Blake3Hasher::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        let chunk = &buffer[..count];
+        if head.len() < head_len {
+            let take = (head_len - head.len()).min(chunk.len());
+            head.extend_from_slice(&chunk[..take]);
+        }
+        md5.update(chunk);
+        sha256.update(chunk);
+        sha512.update(chunk);
+        blake3.update(chunk);
+    }
+    Ok(Hashes {
+        md5: encode_hex(&md5.finalize()),
+        sha256: encode_hex(&sha256.finalize()),
+        sha512: encode_hex(&sha512.finalize()),
+        blake3: blake3.finalize().to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +469,28 @@ mod tests {
         assert_eq!(deserialized.sha256, hashes.sha256);
         assert_eq!(deserialized.sha512, hashes.sha512);
         assert_eq!(deserialized.blake3, hashes.blake3);
+    }
+
+    #[tokio::test]
+    async fn hash_reader_matches_the_file_hashes_and_keeps_the_head() {
+        // Larger than one read buffer, so the head and the digests span chunks.
+        let content: Vec<u8> = (0..200_000_u32).map(|i| (i % 251) as u8).collect();
+        let (_dir, path) = create_test_file(&content).unwrap();
+        let expected = calculate_all_hashes(&path).await.unwrap();
+        let mut head = Vec::new();
+        let got = hash_reader(fs::File::open(&path).unwrap(), &mut head, 512).unwrap();
+        assert_eq!(got.md5, expected.md5);
+        assert_eq!(got.sha256, expected.sha256);
+        assert_eq!(got.sha512, expected.sha512);
+        assert_eq!(got.blake3, expected.blake3);
+        assert_eq!(head, content[..512]);
+
+        let mut head = Vec::new();
+        let empty = hash_reader(std::io::empty(), &mut head, 512).unwrap();
+        assert_eq!(
+            empty.sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert!(head.is_empty());
     }
 }

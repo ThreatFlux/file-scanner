@@ -58,6 +58,7 @@ mod entropy_analysis;
 mod function_analysis;
 mod hash;
 mod hexdump;
+mod isolation;
 mod java_analysis;
 mod mcp_server;
 mod mcp_transport;
@@ -168,7 +169,8 @@ struct Args {
     yara_indicators: bool,
 }
 
-/// Which files the MCP tools may read (all three mcp-* subcommands).
+/// Which files the MCP tools may read and where analyses run (all three mcp-*
+/// subcommands).
 #[derive(clap::Args, Debug)]
 struct ScopeArgs {
     /// Directory the tools may read; repeatable. When any is set, every tool path
@@ -184,6 +186,18 @@ struct ScopeArgs {
     /// Turn result caching off: nothing is stored or served from a cache
     #[arg(long = "no-cache")]
     no_cache: bool,
+    /// Where analyses run. `none` (the default): inside the server process.
+    /// `bwrap` (Linux): the metadata section of analyze_file runs in a
+    /// bubblewrap sandbox and every other analysis is refused; the server does
+    /// not start when the sandbox cannot be verified
+    #[arg(
+        long = "isolation",
+        value_enum,
+        env = isolation::ISOLATION_ENV,
+        default_value_t = isolation::IsolationProfile::None,
+        value_name = "PROFILE"
+    )]
+    isolation: isolation::IsolationProfile,
 }
 
 /// Network settings of mcp-http and mcp-sse.
@@ -230,7 +244,9 @@ impl HttpArgs {
 }
 
 /// The server state for the command line: `--allow-root` wins over the environment.
-fn mcp_server_for(scope: ScopeArgs) -> McpTransportServer {
+/// `--isolation bwrap` verifies and probes the sandbox first; a failure is a
+/// typed error before any transport starts, never a fall back to `none`.
+async fn mcp_server_for(scope: ScopeArgs) -> Result<McpTransportServer> {
     let mut config = mcp_server::StateConfig::from_env();
     if !scope.allow_root.is_empty() {
         config.allow_roots = scope.allow_root;
@@ -239,7 +255,29 @@ fn mcp_server_for(scope: ScopeArgs) -> McpTransportServer {
         config.cache_dir = dir;
     }
     config.cache_enabled = !scope.no_cache;
-    McpTransportServer::with_config(config)
+    match scope.isolation {
+        isolation::IsolationProfile::None => {}
+        isolation::IsolationProfile::Bwrap => {
+            let worker = std::env::current_exe().map_err(|error| {
+                isolation::IsolationError::WorkerExecutable {
+                    path: "the running executable".to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+            // The roots are opened now; every file is later opened beneath them.
+            let sandbox = isolation::Sandbox::detect(&worker, &config.allow_roots).await?;
+            eprintln!(
+                "file-scanner: --isolation bwrap: only analyze_file sections [\"metadata\"] runs, \
+                 in a sandbox ({}, {} MiB address space per process, {} s deadline); every other \
+                 analysis is refused",
+                sandbox.bwrap_path().display(),
+                sandbox.memory_bytes() / (1024 * 1024),
+                sandbox.deadline().as_secs()
+            );
+            config.sandbox = Some(std::sync::Arc::new(sandbox));
+        }
+    }
+    Ok(McpTransportServer::with_config(config))
 }
 
 #[derive(Subcommand, Debug)]
@@ -321,6 +359,12 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    // The sandboxed metadata worker (`--isolation bwrap`): handled before the
+    // argument parser and the async runtime, so the worker starts no thread
+    // and reads nothing but its stdin.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(isolation::WORKER_ARG)) {
+        std::process::exit(isolation::worker_main());
+    }
     // An explicit runtime instead of `#[tokio::main]`: dropping a runtime waits
     // for running `spawn_blocking` closures, which would keep a stdio server
     // alive for minutes after its client left. Bound that wait.
@@ -338,13 +382,19 @@ async fn run() -> Result<()> {
     // Handle commands
     match args.command {
         Some(Commands::McpStdio { scope }) => {
-            return mcp_server_for(scope).run_stdio().await;
+            return mcp_server_for(scope).await?.run_stdio().await;
         }
         Some(Commands::McpHttp { http, scope }) => {
-            return mcp_server_for(scope).run_http(http.into_config()).await;
+            return mcp_server_for(scope)
+                .await?
+                .run_http(http.into_config())
+                .await;
         }
         Some(Commands::McpSse { http, scope }) => {
-            return mcp_server_for(scope).run_sse(http.into_config()).await;
+            return mcp_server_for(scope)
+                .await?
+                .run_sse(http.into_config())
+                .await;
         }
         Some(Commands::LlmAnalyze {
             file_path,

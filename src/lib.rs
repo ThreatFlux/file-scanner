@@ -54,6 +54,7 @@ pub mod entropy_analysis;
 pub mod function_analysis;
 pub mod hash;
 pub mod hexdump;
+pub mod isolation;
 pub mod java_analysis;
 pub mod mcp_server;
 pub mod mcp_transport;

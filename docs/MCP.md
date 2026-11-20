@@ -1595,11 +1595,41 @@ It reports a download-and-run on line 3 and a cron entry on line 4. If you are n
 | `--allow-root <DIR>` | all | Directory the tools may read. Repeatable. |
 | `--cache-dir <DIR>` | all | Cache directory (created with mode 0700). |
 | `--no-cache` | all | Keep no section cache or analysis history, in memory or on disk. |
+| `--isolation <PROFILE>` | all | Where analyses run; `none` (default) is in-process. See below. |
 | `--port`, `-p <PORT>` | HTTP | Default 3000; 0 picks a free port. |
 | `--host <HOST>` | HTTP | Bind address, default `127.0.0.1`. |
 | `--allowed-host <HOST>` | HTTP | Extra `Host` value to accept (`name` or `name:port`). Repeatable. |
 | `--allowed-origin <ORIGIN>` | HTTP | Extra browser `Origin` (`scheme://host[:port\|:*]`). Repeatable. |
 | `--auth-token <TOKEN>` | HTTP | Bearer token required on every route except `/health`. |
+
+`--isolation` takes `none` (default: every analysis runs in the server process) or `bwrap` (Linux only):
+
+- One supported tool call: `analyze_file` with `sections: ["metadata"]` (or `metadata: true`) on one regular file.
+  Every other analysis tool, the overview, other sections and directories are refused with a tool error before the
+  file is opened. `cache_status`, `cache_clear`, `string_details` and `search_strings` without `file_path` work.
+- `--allow-root` (or `FILE_SCANNER_ALLOWED_ROOTS`) is required. Each root is opened once at start-up. A call's
+  path must be absolute and spelled under a root; the file is opened with one `openat2` beneath that root
+  (`RESOLVE_BENEATH`, `RESOLVE_NO_MAGICLINKS`: `..`, absolute links, links out of the root and `/proc` links fail),
+  non-blocking (a FIFO or device cannot hang the call), then `fstat` must show a regular file of at most 2 GiB.
+  That one descriptor is used for everything; the server never reopens the path and never reads the content.
+- The worker (this executable) runs under bubblewrap with that descriptor as its stdin and only input: new user,
+  PID, network, IPC, UTS and cgroup namespaces, no network, a root that is read-only and holds only read-only binds
+  of `/usr`, the library directories, `/etc/ld.so.cache` and the worker, no `/proc`, `/dev` or `/tmp`, an empty
+  environment, no capabilities, no other descriptor. It hashes at most 2 GiB and returns the MIME type and hashes;
+  the stat fields come from the server's `fstat` of the descriptor, and an answer is refused when that `fstat`
+  changed while the worker read.
+- Limits: a 1 GiB address-space limit (`RLIMIT_AS`) for each process (bubblewrap and the worker each get it; it is
+  not a total, and it counts the mapped executable), a CPU-time limit and a 120 s wall-clock deadline per call. A
+  limit below what the executable needs to load is refused before launch ("startup memory refusal"). A worker past
+  its deadline is killed and reaped; a cancelled call or a server shutting down kills the live sandbox at once.
+  The message names the limit.
+- Cache: a sandboxed result is stored under its own key (`metadata:bwrap-v1:...`) and found again only through a
+  SHA-256 a worker reported in this process for the same unchanged file. An in-process `metadata` result is never
+  served, so `cache: "hit"` with `isolation.profile: "bwrap"` always means sandboxed.
+- Start-up opens the roots, checks `openat2`, checks that `/usr/bin/bwrap` (or `/bin/bwrap`) and every directory
+  above it are owned by root and not writable by others, then runs the worker once. If anything fails (no root,
+  no bubblewrap, no unprivileged user namespaces, Linux older than 5.11, another OS) the server prints the reason
+  and exits 1 without serving. It never falls back to `none`. An unknown value is a usage error (exit code 2).
 
 ### Environment variables
 
@@ -1609,6 +1639,7 @@ It reports a download-and-run on line 3 and a cron entry on line 4. If you are n
 | `FILE_SCANNER_AUTH_TOKEN` | The bearer token. Prefer it to `--auth-token`: command lines are visible to other users. |
 | `FILE_SCANNER_CACHE_DIR` | Cache directory, used when no `--cache-dir` is given. |
 | `FILE_SCANNER_CACHE_DISK_MB` | Section cache disk budget in MiB (default 1,024); the history gets a quarter of it. |
+| `FILE_SCANNER_ISOLATION` | Isolation profile, used when no `--isolation` is given (same values). |
 | `FILE_SCANNER_SECTION_CACHE_MB` | Memory budget of the section cache in MiB (default 256). |
 
 These are the only `FILE_SCANNER_*` variables. The default cache location also depends on `HOME`, `XDG_CACHE_HOME`
@@ -1859,7 +1890,8 @@ What this server does and does not do.
 - **Hostile files.** The parsers carry byte, count and time budgets, and a panic in one analyzer fails only that
   section. That is best-effort bounding, not a guarantee: a crafted file can still use a lot of memory or CPU before a
   budget stops it. When you scan untrusted files, run the server under an OS or container memory and CPU limit
-  (`ulimit -v`, a systemd `MemoryMax=`, or `docker run --memory`), with `--allow-root` set.
+  (`ulimit -v`, a systemd `MemoryMax=`, or `docker run --memory`), with `--allow-root` set. `--isolation bwrap`
+  sandboxes only the metadata section and refuses the other analyses (see [Options](#options)).
 - **Not a sandbox for the host.** The server reads only; it does not write outside its cache directory. But it will
   read whatever a caller asks for within `--allow-root`, so scope it.
 

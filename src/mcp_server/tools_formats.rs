@@ -999,6 +999,9 @@ impl FileScannerMcp {
         )
     )]
     async fn inspect_archive_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("inspect_archive", &args) {
+            return Ok(refused);
+        }
         let (request, budget, _raw) = match parse_request::<InspectArchiveRequest>(args) {
             Ok(parsed) => parsed,
             Err(message) => return Ok(tool_error(message)),

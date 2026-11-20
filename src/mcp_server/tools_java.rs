@@ -124,6 +124,9 @@ impl FileScannerMcp {
         )
     )]
     async fn analyze_java_file_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("analyze_java_file", &args) {
+            return Ok(refused);
+        }
         let (request, budget, _raw) = match parse_request::<JavaAnalysisRequest>(args) {
             Ok(parsed) => parsed,
             Err(message) => return Ok(tool_error(message)),

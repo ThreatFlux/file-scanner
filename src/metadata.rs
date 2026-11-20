@@ -22,6 +22,58 @@ use crate::strings::ExtractedStrings;
 use crate::threat_detection::ThreatAnalysis;
 use crate::vulnerability_detection::VulnerabilityDetectionResult;
 
+/// Header bytes the MIME check looks at.
+pub const MIME_HEADER_BYTES: usize = 512;
+
+/// Every value [`mime_type_of`] returns.
+pub const MIME_TYPES: [&str; 13] = [
+    "application/x-elf",
+    "application/x-dosexec",
+    "application/java-vm",
+    "application/x-mach-binary",
+    "text/x-shellscript",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "application/zip",
+    "application/gzip",
+    "application/x-bzip2",
+    "application/pdf",
+    "application/octet-stream",
+];
+
+/// The MIME type of a file from its first bytes (`head`, at most
+/// [`MIME_HEADER_BYTES`] are used). A shorter head reads as if padded with
+/// zero bytes, as the in-process check always did.
+pub fn mime_type_of(head: &[u8]) -> &'static str {
+    let mut buffer = [0_u8; MIME_HEADER_BYTES];
+    let count = head.len().min(MIME_HEADER_BYTES);
+    buffer[..count].copy_from_slice(&head[..count]);
+    match &buffer[..] {
+        b if b.starts_with(b"\x7FELF") => "application/x-elf",
+        b if b.starts_with(b"MZ") => "application/x-dosexec",
+        // CAFEBABE is a universal Mach-O or a Java class file: the
+        // four bytes after it are an architecture count or a class version.
+        b if crate::binary_parser::is_java_class_header(b) => "application/java-vm",
+        b if crate::binary_parser::is_fat_macho(b)
+            || b.starts_with(b"\xFE\xED\xFA")
+            || b.starts_with(b"\xCF\xFA\xED\xFE")
+            || b.starts_with(b"\xCE\xFA\xED\xFE") =>
+        {
+            "application/x-mach-binary"
+        }
+        b if b.starts_with(b"#!/") => "text/x-shellscript",
+        b if b.starts_with(b"\x89PNG") => "image/png",
+        b if b.starts_with(b"\xFF\xD8\xFF") => "image/jpeg",
+        b if b.starts_with(b"GIF8") => "image/gif",
+        b if b.starts_with(b"PK\x03\x04") => "application/zip",
+        b if b.starts_with(b"\x1F\x8B") => "application/gzip",
+        b if b.starts_with(b"BZh") => "application/x-bzip2",
+        b if b.starts_with(b"%PDF") => "application/pdf",
+        _ => "application/octet-stream",
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileMetadata {
     pub file_path: PathBuf,
@@ -95,7 +147,14 @@ impl FileMetadata {
 
     pub fn extract_basic_info(&mut self) -> Result<()> {
         let metadata = fs::metadata(&self.file_path)?;
+        self.apply_stat(&metadata);
+        self.detect_mime_type()?;
+        Ok(())
+    }
 
+    /// Fill the size, ownership, permission and time fields from `metadata`
+    /// (a `stat` of the path, or an `fstat` of a file the caller has open).
+    pub fn apply_stat(&mut self, metadata: &fs::Metadata) {
         self.file_size = metadata.len();
         self.size = metadata.len(); // Keep both for compatibility
 
@@ -147,44 +206,14 @@ impl FileMetadata {
         if let Ok(created) = metadata.created() {
             self.created = Some(DateTime::from(created));
         }
-
-        self.detect_mime_type()?;
-
-        Ok(())
     }
 
     fn detect_mime_type(&mut self) -> Result<()> {
-        let mut buffer = vec![0u8; 512];
+        let mut buffer = vec![0u8; MIME_HEADER_BYTES];
         if let Ok(mut file) = fs::File::open(&self.file_path) {
             use std::io::Read;
-            let _ = file.read(&mut buffer)?;
-
-            self.mime_type = Some(
-                match &buffer[..] {
-                    b if b.starts_with(b"\x7FELF") => "application/x-elf",
-                    b if b.starts_with(b"MZ") => "application/x-dosexec",
-                    // CAFEBABE is a universal Mach-O or a Java class file: the
-                    // four bytes after it are an architecture count or a class version.
-                    b if crate::binary_parser::is_java_class_header(b) => "application/java-vm",
-                    b if crate::binary_parser::is_fat_macho(b)
-                        || b.starts_with(b"\xFE\xED\xFA")
-                        || b.starts_with(b"\xCF\xFA\xED\xFE")
-                        || b.starts_with(b"\xCE\xFA\xED\xFE") =>
-                    {
-                        "application/x-mach-binary"
-                    }
-                    b if b.starts_with(b"#!/") => "text/x-shellscript",
-                    b if b.starts_with(b"\x89PNG") => "image/png",
-                    b if b.starts_with(b"\xFF\xD8\xFF") => "image/jpeg",
-                    b if b.starts_with(b"GIF8") => "image/gif",
-                    b if b.starts_with(b"PK\x03\x04") => "application/zip",
-                    b if b.starts_with(b"\x1F\x8B") => "application/gzip",
-                    b if b.starts_with(b"BZh") => "application/x-bzip2",
-                    b if b.starts_with(b"%PDF") => "application/pdf",
-                    _ => "application/octet-stream",
-                }
-                .to_string(),
-            );
+            let count = file.read(&mut buffer)?;
+            self.mime_type = Some(mime_type_of(&buffer[..count]).to_string());
         }
 
         Ok(())
@@ -444,5 +473,29 @@ mod tests {
         // Should successfully read through the symlink
         assert!(result.is_ok());
         assert_eq!(metadata.file_size, 14); // "target content"
+    }
+
+    #[test]
+    fn mime_type_of_returns_only_listed_types_and_matches_the_file_check() {
+        let heads: [&[u8]; 8] = [
+            b"",
+            b"\x7FELF\x02\x01\x01",
+            b"MZ",
+            b"#!/bin/sh\n",
+            b"%PDF-1.7",
+            b"PK\x03\x04",
+            b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34",
+            b"plain text",
+        ];
+        for head in heads {
+            let mime = mime_type_of(head);
+            assert!(MIME_TYPES.contains(&mime), "{mime}");
+            let (_dir, path) = create_test_file(head).unwrap();
+            let mut metadata = FileMetadata::new(&path).unwrap();
+            metadata.extract_basic_info().unwrap();
+            assert_eq!(metadata.mime_type.as_deref(), Some(mime), "{head:?}");
+        }
+        assert_eq!(mime_type_of(b"\x7FELF"), "application/x-elf");
+        assert_eq!(mime_type_of(b""), "application/octet-stream");
     }
 }

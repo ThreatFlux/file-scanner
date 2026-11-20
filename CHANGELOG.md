@@ -13,6 +13,12 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 
 ### Added
 
+- First isolated analysis (#316): the MCP subcommands take `--isolation none|bwrap` (`FILE_SCANNER_ISOLATION`).
+  `none`, the default, changes nothing. `bwrap` (Linux, requires `--allow-root`) runs only the `metadata` section
+  of `analyze_file`: the file is opened once with `openat2` beneath a root opened at start-up and handed as that
+  one descriptor to a bubblewrap sandbox (no network, read-only runtime binds, 1 GiB address space per process,
+  120 s deadline, 2 GiB input cap). Every other analysis is refused with a tool error; cache-only tools keep working.
+  Sandboxed results have their own cache key. The server does not start when the sandbox cannot be verified.
 - Release metadata: `server.json` is now a template with the placeholder version 0.0.0, and each release cut from
   now on attaches a copy stamped with the release version as the asset `server.json`
   (`scripts/stamp_server_json.py`; `make release-metadata-check` runs in CI). The `Dockerfile` default for the
