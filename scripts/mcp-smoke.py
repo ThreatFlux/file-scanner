@@ -18,13 +18,14 @@ Usage: python3 scripts/mcp-smoke.py target/release/file-scanner
 import hashlib
 import json
 import os
-from pathlib import Path
+import queue
+
 # This smoke test intentionally executes the local scanner with a fixed argument vector.
 import subprocess  # nosec B404
 import sys
-import queue
 import tempfile
 import threading
+from pathlib import Path
 
 # Newest revision that an initialize request negotiates on stdio (older ones work too).
 PROTOCOL_VERSION = "2025-11-25"
@@ -98,15 +99,20 @@ def parse_line(line):
 
 
 def exchange(binary, fixture, cache_dir):
+    return run_session(binary, fixture.parent, cache_dir, requests_for(fixture))
+
+
+def run_session(binary, root, cache_dir, messages):
+    """Send `messages` in order to one `mcp-stdio` server confined to `root`; answers by id."""
     binary = Path(binary).resolve(strict=True)
     if binary.name != "file-scanner" or not binary.is_file():
         raise ValueError("Pass a local file-scanner build artifact")
     env = dict(os.environ, FILE_SCANNER_CACHE_DIR=str(cache_dir))
     # The caller chooses its local build directory; executable/arguments are fixed
-    # apart from the temporary directories made by this script, shell expansion is
+    # apart from the temporary directories made by the caller, shell expansion is
     # disabled, and every wait is bounded. No remote input is used.
     server = subprocess.Popen(  # nosec B603
-        ["./file-scanner", "mcp-stdio", "--allow-root", str(fixture.parent)], cwd=binary.parent,
+        ["./file-scanner", "mcp-stdio", "--allow-root", str(root)], cwd=binary.parent,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         text=True, shell=False, env=env,
     )
@@ -122,7 +128,7 @@ def exchange(binary, fixture, cache_dir):
     try:
         # A client waits for each answer before it sends the next request, so the
         # cache is warm when the drill-down arrives.
-        for message in requests_for(fixture):
+        for message in messages:
             server.stdin.write(json.dumps(message) + "\n")
             server.stdin.flush()
             if "id" not in message:
