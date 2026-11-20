@@ -253,109 +253,164 @@ mod tests {
     /// Under `--isolation bwrap` every tool that would analyze a file in the
     /// server is refused through the router (the path MCP and REST share),
     /// whatever its arguments; only the cache-only tools and analyze_file's
-    /// sandboxed metadata section get past the gate. A new tool fails this
-    /// test until it is gated.
-    #[tokio::test]
-    async fn isolation_refuses_every_in_process_analysis_through_the_router() {
+    /// sandboxed metadata section get past the gate. A new tool fails these
+    /// tests until it is gated.
+    mod isolation_gate {
+        use super::*;
         use crate::mcp_transport::rest::{call_tool_direct, ToolCallParams};
         use serde_json::{json, Value};
 
-        let dir = tempfile::tempdir().unwrap();
-        let sample = dir.path().join("sample.bin");
-        std::fs::write(&sample, b"\x7FELF\x02\x01\x01 benign bytes").unwrap();
-        let path = sample.to_string_lossy().into_owned();
-        let state = Arc::new(ServerState::new(StateConfig {
-            cache_dir: dir.path().join("cache"),
-            sandbox: Some(Arc::new(crate::isolation::Sandbox::unverified_for_tests(
-                dir.path().join("no-bwrap-here"),
-                dir.path(),
-            ))),
-            ..StateConfig::default()
-        }));
-        let mcp = FileScannerMcp::with_state(state);
-        let call = |name: &str, arguments: Value| {
-            let params = ToolCallParams {
-                name: name.to_string(),
-                arguments: arguments.as_object().cloned().unwrap_or_default(),
-            };
-            let mcp = mcp.clone();
-            async move { call_tool_direct(&mcp, params).await.unwrap() }
-        };
-        let text = |reply: &Value| {
-            reply["content"][0]["text"]
-                .as_str()
-                .unwrap_or("")
-                .to_string()
-        };
-
-        let cache_only = [
+        /// Tools that read only the server's own caches (and the test-only
+        /// panic tool, which takes no file).
+        const CACHE_ONLY: [&str; 4] = [
             "cache_status",
             "cache_clear",
             "string_details",
             "test_panic",
         ];
-        for tool in mcp.tool_definitions() {
-            let name = tool.name.to_string();
-            if cache_only.contains(&name.as_str()) || name == "analyze_file" {
-                continue;
+
+        /// A server whose sandbox was never verified (its bubblewrap does not
+        /// exist) with a temporary directory, holding one benign sample, as
+        /// its allowed root.
+        struct Gate {
+            dir: tempfile::TempDir,
+            sample: String,
+            mcp: FileScannerMcp,
+        }
+
+        /// What a call answered: whether it is a tool error, and its text.
+        struct Reply {
+            is_error: bool,
+            text: String,
+        }
+
+        impl Gate {
+            fn new() -> Self {
+                let dir = tempfile::tempdir().unwrap();
+                let sample = dir.path().join("sample.bin");
+                std::fs::write(&sample, b"\x7FELF\x02\x01\x01 benign bytes").unwrap();
+                let sandbox = crate::isolation::Sandbox::unverified_for_tests(
+                    dir.path().join("no-bwrap-here"),
+                    dir.path(),
+                );
+                let state = Arc::new(ServerState::new(StateConfig {
+                    cache_dir: dir.path().join("cache"),
+                    sandbox: Some(Arc::new(sandbox)),
+                    ..StateConfig::default()
+                }));
+                Self {
+                    sample: sample.to_string_lossy().into_owned(),
+                    mcp: FileScannerMcp::with_state(state),
+                    dir,
+                }
             }
-            let reply = call(&name, json!({"file_path": path, "package_path": path})).await;
-            assert_eq!(reply["isError"], true, "{name}: {reply}");
-            assert!(
-                text(&reply).starts_with(&format!("{name} is refused")),
-                "{name}: {reply}"
-            );
+
+            fn dir(&self) -> String {
+                self.dir.path().to_string_lossy().into_owned()
+            }
+
+            async fn call(&self, name: &str, arguments: Value) -> Reply {
+                let params = ToolCallParams {
+                    name: name.to_string(),
+                    arguments: arguments.as_object().cloned().unwrap_or_default(),
+                };
+                let reply = call_tool_direct(&self.mcp, params).await.unwrap();
+                Reply {
+                    is_error: reply["isError"] == true,
+                    text: reply["content"][0]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                }
+            }
         }
 
-        // search_strings over the server's index only is a cache read.
-        let reply = call("search_strings", json!({"query": "x"})).await;
-        assert!(!text(&reply).contains("is refused"), "{reply}");
-        let reply = call("cache_status", json!({})).await;
-        assert_ne!(reply["isError"], true, "{reply}");
-
-        // analyze_file: everything but the metadata section is refused...
-        for arguments in [
-            json!({"file_path": path}),
-            json!({"file_path": path, "all": true}),
-            json!({"file_path": path, "sections": ["metadata", "strings"]}),
-            json!({"file_path": path, "hashes": true}),
-            json!({"file_path": dir.path().to_string_lossy()}),
-        ] {
-            let reply = call("analyze_file", arguments.clone()).await;
-            assert_eq!(reply["isError"], true, "{arguments}: {reply}");
-            assert!(text(&reply).contains("is refused"), "{arguments}: {reply}");
-        }
-        // ...and the metadata section goes to the sandbox, here one that
-        // cannot start: a typed failure, never an in-process answer. (Off
-        // Linux no root can be opened, so admission refuses it first.)
-        for arguments in [
-            json!({"file_path": path, "sections": ["metadata"]}),
-            json!({"file_path": path, "metadata": true}),
-        ] {
-            let reply = call("analyze_file", arguments.clone()).await;
-            assert_eq!(reply["isError"], true, "{arguments}: {reply}");
-            let message = text(&reply);
-            if cfg!(target_os = "linux") {
-                assert!(message.contains("cannot start the sandbox"), "{message}");
-            } else {
+        #[tokio::test]
+        async fn every_analysis_tool_is_refused_before_it_runs() {
+            let gate = Gate::new();
+            for tool in gate.mcp.tool_definitions() {
+                let name = tool.name.to_string();
+                if CACHE_ONLY.contains(&name.as_str()) || name == "analyze_file" {
+                    continue;
+                }
+                let arguments = json!({"file_path": gate.sample, "package_path": gate.sample});
+                let reply = gate.call(&name, arguments).await;
+                assert!(reply.is_error, "{name}: {}", reply.text);
                 assert!(
-                    message.contains("not spelled under an allowed root"),
-                    "{message}"
+                    reply.text.starts_with(&format!("{name} is refused")),
+                    "{name}: {}",
+                    reply.text
                 );
             }
-            assert!(!message.contains("application/x-elf"), "{message}");
         }
-        let reply = call(
-            "analyze_file",
-            json!({"file_path": dir.path().to_string_lossy(), "metadata": true}),
-        )
-        .await;
-        assert_eq!(reply["isError"], true, "{reply}");
-        if cfg!(target_os = "linux") {
-            assert!(
-                text(&reply).starts_with("analyze_file on a directory is refused"),
-                "{reply}"
-            );
+
+        #[tokio::test]
+        async fn cache_only_tools_still_answer() {
+            let gate = Gate::new();
+            // search_strings over the server's index only is a cache read.
+            let reply = gate.call("search_strings", json!({"query": "x"})).await;
+            assert!(!reply.text.contains("is refused"), "{}", reply.text);
+            let reply = gate.call("cache_status", json!({})).await;
+            assert!(!reply.is_error, "{}", reply.text);
+        }
+
+        #[tokio::test]
+        async fn analyze_file_refuses_everything_but_the_metadata_section() {
+            let gate = Gate::new();
+            let path = &gate.sample;
+            for arguments in [
+                json!({"file_path": path}),
+                json!({"file_path": path, "all": true}),
+                json!({"file_path": path, "sections": ["metadata", "strings"]}),
+                json!({"file_path": path, "hashes": true}),
+                json!({"file_path": gate.dir()}),
+            ] {
+                let reply = gate.call("analyze_file", arguments.clone()).await;
+                assert!(reply.is_error, "{arguments}: {}", reply.text);
+                assert!(
+                    reply.text.contains("is refused"),
+                    "{arguments}: {}",
+                    reply.text
+                );
+            }
+            let reply = gate
+                .call(
+                    "analyze_file",
+                    json!({"file_path": gate.dir(), "metadata": true}),
+                )
+                .await;
+            assert!(reply.is_error, "{}", reply.text);
+            if cfg!(target_os = "linux") {
+                assert!(
+                    reply
+                        .text
+                        .starts_with("analyze_file on a directory is refused"),
+                    "{}",
+                    reply.text
+                );
+            }
+        }
+
+        /// The metadata section goes to the sandbox, here one that cannot
+        /// start: a typed failure, never an in-process answer. (Off Linux no
+        /// root can be opened, so admission refuses it first.)
+        #[tokio::test]
+        async fn the_metadata_section_goes_to_the_sandbox_never_in_process() {
+            let gate = Gate::new();
+            let expected = if cfg!(target_os = "linux") {
+                "cannot start the sandbox"
+            } else {
+                "not spelled under an allowed root"
+            };
+            for arguments in [
+                json!({"file_path": gate.sample, "sections": ["metadata"]}),
+                json!({"file_path": gate.sample, "metadata": true}),
+            ] {
+                let reply = gate.call("analyze_file", arguments.clone()).await;
+                assert!(reply.is_error, "{arguments}: {}", reply.text);
+                assert!(reply.text.contains(expected), "{}", reply.text);
+                assert!(!reply.text.contains("application/x-elf"), "{}", reply.text);
+            }
         }
     }
 }

@@ -1,10 +1,10 @@
 use anyhow::Result;
 use blake3::Hasher as Blake3Hasher;
-use md5::{Digest as _, Md5};
+use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Sha512};
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -90,71 +90,47 @@ pub async fn calculate_md5(path: &Path) -> Result<String> {
     task::spawn_blocking(move || calculate_md5_sync(&path)).await?
 }
 
-fn calculate_md5_sync(path: &Path) -> Result<String> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Md5::new();
-    let mut buffer = [0; 8192];
+/// Size of one read while hashing; it does not change any digest.
+const HASH_CHUNK: usize = 64 * 1024;
 
+/// Feed every chunk of `reader`, in order, to `each`; an interrupted read is
+/// retried. Every hash in this module reads through here.
+fn for_each_chunk<R: Read>(mut reader: R, mut each: impl FnMut(&[u8])) -> std::io::Result<()> {
+    let mut buffer = vec![0_u8; HASH_CHUNK];
     loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(count) => each(&buffer[..count]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
         }
-        hasher.update(&buffer[..count]);
     }
+}
 
+/// The lowercase hex digest `D` (MD5, SHA-256, SHA-512) of the file at `path`.
+fn digest_file<D: Digest>(path: &Path) -> Result<String> {
+    let mut hasher = D::new();
+    for_each_chunk(File::open(path)?, |chunk| hasher.update(chunk))?;
     Ok(encode_hex(&hasher.finalize()))
+}
+
+fn calculate_md5_sync(path: &Path) -> Result<String> {
+    digest_file::<Md5>(path)
 }
 
 fn calculate_sha256(path: &Path) -> Result<String> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha256::new();
-    let mut buffer = [0; 8192];
-
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-
-    Ok(encode_hex(&hasher.finalize()))
+    digest_file::<Sha256>(path)
 }
 
 fn calculate_sha512(path: &Path) -> Result<String> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Sha512::new();
-    let mut buffer = [0; 8192];
-
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-
-    Ok(encode_hex(&hasher.finalize()))
+    digest_file::<Sha512>(path)
 }
 
 fn calculate_blake3(path: &Path) -> Result<String> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
     let mut hasher = Blake3Hasher::new();
-    let mut buffer = [0; 8192];
-
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-    }
-
+    for_each_chunk(File::open(path)?, |chunk| {
+        hasher.update(chunk);
+    })?;
     Ok(hasher.finalize().to_string())
 }
 
@@ -163,7 +139,7 @@ fn calculate_blake3(path: &Path) -> Result<String> {
 /// its inherited input with this; the digests equal [`calculate_all_hashes`]
 /// of the same bytes.
 pub fn hash_reader<R: Read>(
-    mut reader: R,
+    reader: R,
     head: &mut Vec<u8>,
     head_len: usize,
 ) -> std::io::Result<Hashes> {
@@ -171,24 +147,14 @@ pub fn hash_reader<R: Read>(
     let mut sha256 = Sha256::new();
     let mut sha512 = Sha512::new();
     let mut blake3 = Blake3Hasher::new();
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let count = match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => count,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        let chunk = &buffer[..count];
-        if head.len() < head_len {
-            let take = (head_len - head.len()).min(chunk.len());
-            head.extend_from_slice(&chunk[..take]);
-        }
+    for_each_chunk(reader, |chunk| {
+        let take = head_len.saturating_sub(head.len()).min(chunk.len());
+        head.extend_from_slice(&chunk[..take]);
         md5.update(chunk);
         sha256.update(chunk);
         sha512.update(chunk);
         blake3.update(chunk);
-    }
+    })?;
     Ok(Hashes {
         md5: encode_hex(&md5.finalize()),
         sha256: encode_hex(&sha256.finalize()),

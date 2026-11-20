@@ -258,14 +258,8 @@ async fn mcp_server_for(scope: ScopeArgs) -> Result<McpTransportServer> {
     match scope.isolation {
         isolation::IsolationProfile::None => {}
         isolation::IsolationProfile::Bwrap => {
-            let worker = std::env::current_exe().map_err(|error| {
-                isolation::IsolationError::WorkerExecutable {
-                    path: "the running executable".to_string(),
-                    reason: error.to_string(),
-                }
-            })?;
             // The roots are opened now; every file is later opened beneath them.
-            let sandbox = isolation::Sandbox::detect(&worker, &config.allow_roots).await?;
+            let sandbox = isolation::Sandbox::detect_running(&config.allow_roots).await?;
             eprintln!(
                 "file-scanner: --isolation bwrap: only analyze_file sections [\"metadata\"] runs, \
                  in a sandbox ({}, {} MiB address space per process, {} s deadline); every other \
@@ -356,13 +350,18 @@ enum Commands {
         #[arg(help = "Path to JAR/WAR/EAR/APK/AAR or class file")]
         file_path: PathBuf,
     },
+    /// Internal: the sandboxed metadata worker that `--isolation bwrap` starts
+    /// inside bubblewrap. It reads only its stdin.
+    #[command(name = isolation::WORKER_ARG, hide = true)]
+    IsolatedMetadataWorker,
 }
 
 fn main() -> Result<()> {
-    // The sandboxed metadata worker (`--isolation bwrap`): handled before the
-    // argument parser and the async runtime, so the worker starts no thread
-    // and reads nothing but its stdin.
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(isolation::WORKER_ARG)) {
+    let args = Args::parse();
+    // The sandboxed metadata worker (`--isolation bwrap`) runs before the
+    // async runtime exists, so it starts no thread and reads nothing but its
+    // stdin.
+    if matches!(args.command, Some(Commands::IsolatedMetadataWorker)) {
         std::process::exit(isolation::worker_main());
     }
     // An explicit runtime instead of `#[tokio::main]`: dropping a runtime waits
@@ -371,16 +370,17 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let outcome = runtime.block_on(run());
+    let outcome = runtime.block_on(run(args));
     runtime.shutdown_timeout(std::time::Duration::from_millis(100));
     outcome
 }
 
-async fn run() -> Result<()> {
-    let args = Args::parse();
-
+async fn run(args: Args) -> Result<()> {
     // Handle commands
     match args.command {
+        Some(Commands::IsolatedMetadataWorker) => {
+            anyhow::bail!("the isolated metadata worker runs before the async runtime starts");
+        }
         Some(Commands::McpStdio { scope }) => {
             return mcp_server_for(scope).await?.run_stdio().await;
         }

@@ -49,30 +49,37 @@ pub fn mime_type_of(head: &[u8]) -> &'static str {
     let mut buffer = [0_u8; MIME_HEADER_BYTES];
     let count = head.len().min(MIME_HEADER_BYTES);
     buffer[..count].copy_from_slice(&head[..count]);
-    match &buffer[..] {
-        b if b.starts_with(b"\x7FELF") => "application/x-elf",
-        b if b.starts_with(b"MZ") => "application/x-dosexec",
-        // CAFEBABE is a universal Mach-O or a Java class file: the
-        // four bytes after it are an architecture count or a class version.
-        b if crate::binary_parser::is_java_class_header(b) => "application/java-vm",
-        b if crate::binary_parser::is_fat_macho(b)
-            || b.starts_with(b"\xFE\xED\xFA")
-            || b.starts_with(b"\xCF\xFA\xED\xFE")
-            || b.starts_with(b"\xCE\xFA\xED\xFE") =>
-        {
-            "application/x-mach-binary"
-        }
-        b if b.starts_with(b"#!/") => "text/x-shellscript",
-        b if b.starts_with(b"\x89PNG") => "image/png",
-        b if b.starts_with(b"\xFF\xD8\xFF") => "image/jpeg",
-        b if b.starts_with(b"GIF8") => "image/gif",
-        b if b.starts_with(b"PK\x03\x04") => "application/zip",
-        b if b.starts_with(b"\x1F\x8B") => "application/gzip",
-        b if b.starts_with(b"BZh") => "application/x-bzip2",
-        b if b.starts_with(b"%PDF") => "application/pdf",
-        _ => "application/octet-stream",
+    // CAFEBABE is a universal Mach-O or a Java class file: the four bytes
+    // after it are an architecture count or a class version.
+    if crate::binary_parser::is_java_class_header(&buffer) {
+        return "application/java-vm";
     }
+    if crate::binary_parser::is_fat_macho(&buffer) {
+        return "application/x-mach-binary";
+    }
+    MAGIC_PREFIXES
+        .iter()
+        .find(|(magic, _)| buffer.starts_with(magic))
+        .map_or("application/octet-stream", |(_, mime)| *mime)
 }
+
+/// Leading bytes and the MIME type they mean. No two entries (nor CAFEBABE,
+/// handled above) share a first byte, so the order cannot change a result.
+const MAGIC_PREFIXES: [(&[u8], &str); 13] = [
+    (b"\x7FELF", "application/x-elf"),
+    (b"MZ", "application/x-dosexec"),
+    (b"\xFE\xED\xFA", "application/x-mach-binary"),
+    (b"\xCF\xFA\xED\xFE", "application/x-mach-binary"),
+    (b"\xCE\xFA\xED\xFE", "application/x-mach-binary"),
+    (b"#!/", "text/x-shellscript"),
+    (b"\x89PNG", "image/png"),
+    (b"\xFF\xD8\xFF", "image/jpeg"),
+    (b"GIF8", "image/gif"),
+    (b"PK\x03\x04", "application/zip"),
+    (b"\x1F\x8B", "application/gzip"),
+    (b"BZh", "application/x-bzip2"),
+    (b"%PDF", "application/pdf"),
+];
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileMetadata {
@@ -497,5 +504,39 @@ mod tests {
         }
         assert_eq!(mime_type_of(b"\x7FELF"), "application/x-elf");
         assert_eq!(mime_type_of(b""), "application/octet-stream");
+    }
+
+    /// Every branch of the legacy matcher, pinned to the type it returned.
+    #[test]
+    fn mime_type_of_keeps_every_legacy_answer() {
+        let cases: [(&[u8], &str); 17] = [
+            (b"\x7FELF", "application/x-elf"),
+            (b"MZ\x90\x00", "application/x-dosexec"),
+            // Java class (major version 52) versus universal Mach-O (2 slices).
+            (b"\xCA\xFE\xBA\xBE\x00\x00\x00\x34", "application/java-vm"),
+            (
+                b"\xCA\xFE\xBA\xBE\x00\x00\x00\x02",
+                "application/x-mach-binary",
+            ),
+            (
+                b"\xCA\xFE\xBA\xBF\x00\x00\x00\x02",
+                "application/x-mach-binary",
+            ),
+            (b"\xFE\xED\xFA\xCE", "application/x-mach-binary"),
+            (b"\xCF\xFA\xED\xFE", "application/x-mach-binary"),
+            (b"\xCE\xFA\xED\xFE", "application/x-mach-binary"),
+            (b"#!/usr/bin/env python3", "text/x-shellscript"),
+            (b"\x89PNG\r\n\x1a\n", "image/png"),
+            (b"\xFF\xD8\xFF\xE0", "image/jpeg"),
+            (b"GIF89a", "image/gif"),
+            (b"PK\x03\x04", "application/zip"),
+            (b"\x1F\x8B\x08", "application/gzip"),
+            (b"BZh9", "application/x-bzip2"),
+            (b"%PDF-1.4", "application/pdf"),
+            (b"#!", "application/octet-stream"),
+        ];
+        for (head, expected) in cases {
+            assert_eq!(mime_type_of(head), expected, "{head:?}");
+        }
     }
 }
