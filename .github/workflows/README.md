@@ -165,10 +165,12 @@ docker run --rm -v /path/to/files:/data:ro ghcr.io/threatflux/file-scanner /data
 
 ## Maintenance
 
-Dependabot checks nightly for updates to Cargo (root workspace and
-`threatflux-package-security`), GitHub Actions and the Dockerfile. When updating
-an action by hand, pin the commit SHA that its release tag resolves to and keep
-the tag in the trailing comment. Refresh the Wolfi runtime digest with:
+At 06:00 UTC every day, Dependabot checks Cargo (the root workspace and
+`threatflux-package-security`), GitHub Actions and the Dockerfile for routine
+version updates in one `nightly-dependencies` pull request. Dependabot security
+updates follow the repository's security settings. When updating an action by
+hand, pin the commit SHA that its release tag resolves to and keep the tag in
+the trailing comment. Refresh the Wolfi runtime digest with:
 
 ```bash
 docker buildx imagetools inspect cgr.dev/chainguard/glibc-dynamic:latest | awk '/^Digest:/{print $2; exit}'

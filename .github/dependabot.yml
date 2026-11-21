@@ -1,69 +1,37 @@
 version: 2
+multi-ecosystem-groups:
+  nightly-dependencies:
+    schedule:
+      interval: "cron"
+      cronjob: "0 6 * * *"
+      timezone: "UTC"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
 updates:
-  # Enable version updates for Rust dependencies
   - package-ecosystem: "cargo"
-    directory: "/"
-    schedule:
-      interval: "cron"
-      cronjob: "0 6 * * *"
-    reviewers:
-      - "vtriple"
-    commit-message:
-      prefix: "deps"
-      include: "scope"
+    directories:
+      - "/"
+      - "/threatflux-package-security"
+    patterns: ["*"]
+    multi-ecosystem-group: "nightly-dependencies"
     labels:
       - "dependencies"
       - "rust"
-    open-pull-requests-limit: 10
 
-  # Enable version updates for the standalone package security crate
-  - package-ecosystem: "cargo"
-    directory: "/threatflux-package-security"
-    schedule:
-      interval: "cron"
-      cronjob: "0 6 * * *"
-    reviewers:
-      - "vtriple"
-    commit-message:
-      prefix: "deps"
-      include: "scope"
-    labels:
-      - "dependencies"
-      - "rust"
-    open-pull-requests-limit: 5
-
-  # Enable version updates for GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
-    schedule:
-      interval: "cron"
-      cronjob: "0 6 * * *"
-    reviewers:
-      - "vtriple"
-    commit-message:
-      prefix: "ci"
-      include: "scope"
+    patterns: ["*"]
+    multi-ecosystem-group: "nightly-dependencies"
     labels:
       - "ci/cd"
       - "github-actions"
-    open-pull-requests-limit: 5
-    groups:
-      codeql-action:
-        patterns:
-          - "github/codeql-action/*"
 
-  # Enable version updates for Docker
   - package-ecosystem: "docker"
     directory: "/"
-    schedule:
-      interval: "cron"
-      cronjob: "0 6 * * *"
-    reviewers:
-      - "vtriple"
-    commit-message:
-      prefix: "docker"
-      include: "scope"
+    patterns: ["*"]
+    multi-ecosystem-group: "nightly-dependencies"
     labels:
       - "docker"
       - "infrastructure"
-    open-pull-requests-limit: 5
