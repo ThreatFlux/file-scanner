@@ -431,7 +431,7 @@ mod tests {
             let outside = dir.path().join("outside.txt");
             std::fs::write(&outside, b"benign outside bytes").unwrap();
             std::fs::write(root.join("inside.bin"), INSIDE).unwrap();
-            let admission = Admission::open(&[root.clone()]).unwrap();
+            let admission = Admission::open(std::slice::from_ref(&root)).unwrap();
             Fixture {
                 _dir: dir,
                 root,
