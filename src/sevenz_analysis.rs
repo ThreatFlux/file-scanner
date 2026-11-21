@@ -384,7 +384,9 @@ struct FileRecord {
 
 fn filetime(value: u64) -> Option<String> {
     let secs = i64::try_from(value / 10_000_000).ok()? - 11_644_473_600;
-    chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
+    jiff::Timestamp::new(secs, 0)
+        .ok()
+        .map(|dt| dt.strftime("%Y-%m-%d %H:%M:%SZ").to_string())
 }
 
 /// The files of a header: the first [`MAX_ENTRIES`] in full, the rest counted.

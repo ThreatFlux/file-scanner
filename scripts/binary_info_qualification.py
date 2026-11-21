@@ -372,7 +372,7 @@ def plan(paths):
     for label, path in paths.items():
         call((label, "overview"), "analyze_file", {"file_path": str(path)})
         call(
-            (label, "sections"),
+            (label, "analysis"),
             "analyze_file",
             {
                 "file_path": str(path),
@@ -383,7 +383,7 @@ def plan(paths):
         if label != TEXT:
             for name in LISTS:
                 call(
-                    (label, name),
+                    (label, "page", name),
                     "query_analysis",
                     {
                         "file_path": str(path),
@@ -408,7 +408,7 @@ def answer(by_id, ids, key):
             raise TypeError
         return value
     except (ValueError, KeyError, IndexError, TypeError):
-        raise Refused(f"{key[0]}: the {key[1]} call failed") from None
+        raise Refused(f"{key[0]}: the {key[-1]} call failed") from None
 
 
 def source_facts():
@@ -484,9 +484,9 @@ def fixture_records(paths, by_id, ids):
     for label, path in paths.items():
         data = path.read_bytes()
         overview = answer(by_id, ids, (label, "overview"))
-        sections = answer(by_id, ids, (label, "sections"))
+        sections = answer(by_id, ids, (label, "analysis"))
         pages = (
-            {name: answer(by_id, ids, (label, name)) for name in LISTS}
+            {name: answer(by_id, ids, (label, "page", name)) for name in LISTS}
             if label != TEXT
             else {}
         )

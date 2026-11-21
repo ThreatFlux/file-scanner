@@ -413,8 +413,8 @@ fn tar_entry(
         .mtime()
         .ok()
         .and_then(|secs| i64::try_from(secs).ok())
-        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%SZ").to_string());
+        .and_then(|secs| jiff::Timestamp::new(secs, 0).ok())
+        .map(|dt| dt.strftime("%Y-%m-%d %H:%M:%SZ").to_string());
     let path_bytes = long_name.unwrap_or_else(|| header.path_bytes().into_owned());
     let path = String::from_utf8_lossy(&path_bytes).into_owned();
     let link_target = long_link

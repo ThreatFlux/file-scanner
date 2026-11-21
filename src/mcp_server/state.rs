@@ -16,7 +16,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::Utc;
+use jiff::Timestamp;
 use rmcp::model::JsonObject;
 use serde_json::Value;
 
@@ -1364,7 +1364,7 @@ impl ServerState {
             tool_name: "analyze_file".to_string(),
             tool_args: to_args_map(raw_args),
             result: entry_result,
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             file_size,
             execution_time_ms: elapsed_ms(started),
         };
@@ -1410,7 +1410,7 @@ impl ServerState {
             tool_name: "yara_scan_file".to_string(),
             tool_args: to_args_map(raw_args),
             result: result.clone(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             file_size: 0,
             execution_time_ms: elapsed_ms(started),
         };
@@ -1811,7 +1811,7 @@ mod tests {
             tool_name: "analyze_file".into(),
             tool_args: HashMap::new(),
             result: json!({}),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             file_size: 1,
             execution_time_ms: 1,
         };
@@ -1832,8 +1832,13 @@ mod tests {
         std::fs::write(&path, b"first content").unwrap();
         // Old enough that its timestamps can be trusted: the change time is the
         // moment of the write above, so wait out the racy window.
-        let old = filetime::FileTime::from_unix_time(1_000_000, 0);
-        filetime::set_file_mtime(&path, old).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         std::thread::sleep(RACY_WINDOW + std::time::Duration::from_millis(300));
         let state = ServerState::default();
         let first = state.file_sha256(&path).await.unwrap();
@@ -1859,7 +1864,12 @@ mod tests {
         assert_ne!(second, first);
         // Same length, modification time put back: the change time still moves.
         std::fs::write(&path, b"SECOND, LONGER CONTENT").unwrap();
-        filetime::set_file_mtime(&path, old).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         let third = state.file_sha256(&path).await.unwrap();
         assert_ne!(third, second);
         // A file that does not exist is an error naming it.

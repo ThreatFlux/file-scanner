@@ -132,7 +132,12 @@ fn benign_file(dir: &Path) -> PathBuf {
     let mut bytes = b"\x7FELF\x02\x01\x01\x00".to_vec();
     bytes.extend_from_slice(&b"benign isolation fixture ".repeat(64));
     std::fs::write(&path, bytes).unwrap();
-    filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_600_000_000, 0)).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000))
+        .unwrap();
     path
 }
 

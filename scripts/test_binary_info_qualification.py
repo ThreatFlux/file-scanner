@@ -41,6 +41,17 @@ PE_ENTRIES = (4096, 5368713216)
 
 
 class Receipt(unittest.TestCase):
+    def test_analyze_result_and_sections_page_have_distinct_request_ids(self):
+        messages, ids = Q.plan({Q.PE: pathlib.Path("/q/samples/pe_fixture.exe")})
+        calls = {
+            message["id"]: message["params"]["name"]
+            for message in messages
+            if message["method"] == "tools/call"
+        }
+        self.assertEqual(set(ids.values()), set(calls))
+        self.assertEqual(calls[ids[(Q.PE, "analysis")]], "analyze_file")
+        self.assertEqual(calls[ids[(Q.PE, "page", "sections")]], "query_analysis")
+
     def test_text_control_must_be_unsupported_everywhere(self):
         record, checks = Q.text_record(UNSUPPORTED, RAW)
         self.assertTrue(all(checks.values()))
@@ -164,9 +175,16 @@ class Receipt(unittest.TestCase):
                 }
             }
         }
-        with self.assertRaises(Q.Refused) as refused:
-            Q.answer(by_id, {(Q.ELF, "sections"): 7}, (Q.ELF, "sections"))
-        self.assertEqual(str(refused.exception), f"{Q.ELF}: the sections call failed")
+        for key, name in (
+            ((Q.ELF, "analysis"), "analysis"),
+            ((Q.ELF, "page", "sections"), "sections"),
+        ):
+            with self.subTest(key=key):
+                with self.assertRaises(Q.Refused) as refused:
+                    Q.answer(by_id, {key: 7}, key)
+                self.assertEqual(
+                    str(refused.exception), f"{Q.ELF}: the {name} call failed"
+                )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # Reviewed stable YARA-X runtime/crypto patch
 
 Repository-built binaries and containers select the official YARA-X 1.23.0
-source with Wasmtime 50.0.1 and stable RSA 0.10.0. The upstream manifest still
+source with Wasmtime 50.0.3 and stable RSA 0.10.0. The upstream manifest still
 requires Wasmtime 48.0.8 and a prerelease RSA requirement. This explicit patch
 changes the actual parent requirements instead of forcing lockfile transitives.
 
@@ -10,7 +10,7 @@ changes the actual parent requirements instead of forcing lockfile transitives.
 - Upstream commit: [`afe4585b12f56c698794dc80b3d28ddb87b56c0a`](https://github.com/VirusTotal/yara-x/tree/afe4585b12f56c698794dc80b3d28ddb87b56c0a/lib).
 - The BSD-3-Clause license is retained from that exact upstream commit (the crate archive omits it); SHA256 `fdf05444c9178e662fa28810d94a1fa6ec32d7be798241c98094213317265880`. Upstream source/build assets are preserved.
 - [Exact local diff](yara-x-1.23.0.patch): stable RSA 0.10 with its newly required
-  `pkcs1v15` feature, Wasmtime 50.0.1, current `rsa::PublicKey` aliases, and the
+  `pkcs1v15` feature, Wasmtime 50.0.3, current `rsa::PublicKey` aliases, and the
   independent OpenSSL signature regression retained from the previous patch.
   Original workspace/lock/VCS metadata and benchmark declarations are omitted.
 

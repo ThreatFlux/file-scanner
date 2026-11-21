@@ -1,7 +1,7 @@
 {
   "analysis_provenance": "Historical native analysis IDs and raw fixtures are retained. The 1.23.0 source/call paths were diff-reviewed on 2026-11-12; the new simulated path fixture is not a fresh native CodeQL run. Hosted native output must be reviewed before merge.",
   "call_path_sha256": {
-    "vendor/yara-x-1.23.0/Cargo.toml": "964e59098b41ec356300e677e476c43657edaf172f9078fc6e91ac50a389873f",
+    "vendor/yara-x-1.23.0/Cargo.toml": "105be3bdc7169a9ef70edfef9252f37f2f0e52f4f2ff5a6bda5d9fc53a2c61cf",
     "vendor/yara-x-1.23.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
     "vendor/yara-x-1.23.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
     "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs": "5a8804fc660f5db558324ab6f99181059200eb6a4569e534c4b51fdef518c30e",
@@ -11,7 +11,7 @@
     "vendor/yara-x-1.23.0/src/modules/utils/crypto.rs": "19792550f440fd66573cf438e4e0bf717e704df35d476b7b872e5630bc8e099a"
   },
   "dependency_versions": {
-    "wasmtime": "50.0.1",
+    "wasmtime": "50.0.3",
     "yara-x": "1.23.0"
   },
   "policy": "Only the nine exact reviewed rule/path/full-region/raw-message tuples may be annotated. Every other result remains uploaded. Raw SARIF is preserved; annotated evidence includes accepted external false-positive justifications. Source, caller inventory, dependency, duplicate, or manifest guard failures retain unfiltered raw output and fail the job.",

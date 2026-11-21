@@ -43,10 +43,10 @@
     clippy::ignored_unit_patterns
 )]
 
-use chrono::Utc;
 use file_scanner::string_tracker_compat::{
     StringContext, StringEntry, StringFilter, StringOccurrence, StringStatistics, StringTracker,
 };
+use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
@@ -932,8 +932,8 @@ fn test_serialization_roundtrip() {
     // Test StringEntry serialization
     let entry = StringEntry {
         value: "test_string".to_string(),
-        first_seen: Utc::now(),
-        last_seen: Utc::now(),
+        first_seen: Timestamp::now(),
+        last_seen: Timestamp::now(),
         total_occurrences: 5,
         unique_files: ["hash1", "hash2"]
             .iter()
@@ -943,7 +943,7 @@ fn test_serialization_roundtrip() {
             file_path: "/test/file.txt".to_string(),
             file_hash: "hash1".to_string(),
             tool_name: "test_tool".to_string(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             context: StringContext::Import {
                 library: "test.dll".to_string(),
             },
