@@ -4,9 +4,8 @@ updates:
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
+      interval: "cron"
+      cronjob: "0 6 * * *"
     reviewers:
       - "vtriple"
     commit-message:
@@ -21,9 +20,8 @@ updates:
   - package-ecosystem: "cargo"
     directory: "/threatflux-package-security"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
+      interval: "cron"
+      cronjob: "0 6 * * *"
     reviewers:
       - "vtriple"
     commit-message:
@@ -38,9 +36,8 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
+      interval: "cron"
+      cronjob: "0 6 * * *"
     reviewers:
       - "vtriple"
     commit-message:
@@ -59,9 +56,8 @@ updates:
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "06:00"
+      interval: "cron"
+      cronjob: "0 6 * * *"
     reviewers:
       - "vtriple"
     commit-message:
