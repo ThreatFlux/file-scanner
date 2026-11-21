@@ -64,6 +64,9 @@ impl FileScannerMcp {
         )
     )]
     async fn yara_scan_file_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("yara_scan_file", &args) {
+            return Ok(refused);
+        }
         Ok(self.run_yara_scan(args).await)
     }
 }

@@ -68,8 +68,13 @@ fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 async fn a_same_length_rewrite_with_the_mtime_restored_is_not_answered_from_the_old_hash() {
     let dir = TempDir::new().unwrap();
     let path = write(dir.path(), "a.bin", b"hello_alpha_string_one\n");
-    let old = filetime::FileTime::from_unix_time(1_000_000, 0);
-    filetime::set_file_mtime(&path, old).unwrap();
+    let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
     let client = client().await;
     let ask = || json!({"file_path": path, "query": "_string_", "min_length": 6});
 
@@ -82,7 +87,12 @@ async fn a_same_length_rewrite_with_the_mtime_restored_is_not_answered_from_the_
         let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         file.write_all(b"world_omega_string_two\n").unwrap();
     }
-    filetime::set_file_mtime(&path, old).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
 
     let second = call(&client, "search_strings", ask()).await;
     assert_ne!(second["sha256"].as_str().unwrap(), first_sha, "{second}");

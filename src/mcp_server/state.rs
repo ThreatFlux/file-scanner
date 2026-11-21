@@ -64,6 +64,10 @@ pub struct StateConfig {
     pub section_cache_max_entries: usize,
     /// Most analyses running at once across every transport; further calls wait.
     pub max_concurrent_analyses: usize,
+    /// `--isolation bwrap`: the verified sandbox that runs the metadata section
+    /// of `analyze_file`. When set, every other analysis is refused (see
+    /// `FileScannerMcp::isolation_refusal`). `None`: in-process analysis.
+    pub sandbox: Option<Arc<crate::isolation::Sandbox>>,
 }
 
 impl Default for StateConfig {
@@ -79,6 +83,7 @@ impl Default for StateConfig {
             max_concurrent_analyses: std::thread::available_parallelism()
                 .map_or(4, std::num::NonZero::get)
                 .max(4),
+            sandbox: None,
         }
     }
 }
@@ -915,6 +920,18 @@ impl ServerState {
         self.config.cache_enabled
     }
 
+    /// The sandbox of `--isolation bwrap`, or `None` for in-process analysis.
+    pub fn sandbox(&self) -> Option<&Arc<crate::isolation::Sandbox>> {
+        self.config.sandbox.as_ref()
+    }
+
+    /// Wait for one of the analysis slots [`Self::run_blocking`] also uses,
+    /// for work that runs outside the blocking pool (a sandboxed worker).
+    pub async fn analysis_slot(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        // The semaphore is never closed, so acquiring cannot fail.
+        self.slots.acquire().await.ok()
+    }
+
     /// The process-wide analysis cache (the one `/cache/*` reads).
     ///
     /// If the cache directory cannot be created or written the cache is
@@ -1303,9 +1320,10 @@ impl ServerState {
         strings: Option<Vec<String>>,
         entry_result: Value,
         sha256: &str,
-        file_size: u64,
+        file_size_and_stat: (u64, Option<&std::fs::Metadata>),
         started: Instant,
     ) {
+        let (file_size, admitted_stat) = file_size_and_stat;
         if let Some(strings) = strings {
             let tracker = self.string_tracker();
             let cache = self.section_cache_handle();
@@ -1350,10 +1368,13 @@ impl ServerState {
             file_size,
             execution_time_ms: elapsed_ms(started),
         };
-        let mtime = super::paths::expand_tilde(raw_path)
-            .ok()
-            .and_then(|path| FileIdentity::stat(&path))
-            .map(|stamp| stamp.mtime_ms());
+        let mtime = match admitted_stat {
+            Some(stat) => FileIdentity::from_metadata(stat),
+            None => super::paths::expand_tilde(raw_path)
+                .ok()
+                .and_then(|path| FileIdentity::stat(&path)),
+        }
+        .map(|stamp| stamp.mtime_ms());
         let _ = self
             .analysis_cache()
             .add_entry_with_mtime(entry, mtime)
@@ -1440,6 +1461,10 @@ struct FileIdentity {
 impl FileIdentity {
     fn stat(path: &Path) -> Option<Self> {
         let meta = std::fs::metadata(path).ok()?;
+        Self::from_metadata(&meta)
+    }
+
+    fn from_metadata(meta: &std::fs::Metadata) -> Option<Self> {
         #[cfg(unix)]
         let (inode, device, changed) = {
             use std::os::unix::fs::MetadataExt;
@@ -1807,8 +1832,13 @@ mod tests {
         std::fs::write(&path, b"first content").unwrap();
         // Old enough that its timestamps can be trusted: the change time is the
         // moment of the write above, so wait out the racy window.
-        let old = filetime::FileTime::from_unix_time(1_000_000, 0);
-        filetime::set_file_mtime(&path, old).unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         std::thread::sleep(RACY_WINDOW + std::time::Duration::from_millis(300));
         let state = ServerState::default();
         let first = state.file_sha256(&path).await.unwrap();
@@ -1834,7 +1864,12 @@ mod tests {
         assert_ne!(second, first);
         // Same length, modification time put back: the change time still moves.
         std::fs::write(&path, b"SECOND, LONGER CONTENT").unwrap();
-        filetime::set_file_mtime(&path, old).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         let third = state.file_sha256(&path).await.unwrap();
         assert_ne!(third, second);
         // A file that does not exist is an error naming it.

@@ -31,7 +31,6 @@ serde_yaml = { package = "serde-saphyr", version = "2.2.0" }
 clap = { version = "4.6.9", features = ["derive", "env"] }
 
 # File and system utilities
-filetime = "0.2.30"
 jiff = { version = "1.0.1", default-features = false, features = ["std", "serde"] }
 memmap2 = "0.9.12"
 walkdir = "2.5.1"
@@ -182,7 +181,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 clap = { workspace = true }
-filetime = { workspace = true }
 jiff = { workspace = true }
 
 # Hash calculations (temporary during migration)
@@ -237,6 +235,11 @@ tar = { workspace = true }
 # XML and data processing
 quick-xml = { workspace = true }
 base64 = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# `--isolation bwrap`: setrlimit and close_range between fork and exec of the
+# sandbox (src/isolation.rs). Already in the tree; same pinned version.
+libc = { workspace = true }
 
 [dev-dependencies]
 # The SDK client, compiled only for tests (in-process MCP tests).

@@ -118,7 +118,7 @@ input schema from the request struct, and the REST `/tools/*` routes use the sam
 - **Binary Parsing**: `goblin`, `object`
 - **String Processing**: `regex`, `encoding_rs`
 - **Serialization**: `serde`, `serde_json`, `serde_yaml` (a source alias of `serde-saphyr`)
-- **System Info**: `jiff`, `filetime`
+- **System Info**: `jiff`
 - **MCP**: `rmcp` (Model Context Protocol SDK, serves stdio and Streamable HTTP), `schemars`
 - **YARA**: `yara-x`
 - **HTTP Server**: `axum`, `tower-http` (CORS), `tokio-util`
@@ -211,7 +211,11 @@ working on the code.
   except `/health`; no CORS wildcard. Options: `--port`, `--host`, `--allowed-host`, `--allowed-origin`.
 - `mcp-sse`: deprecated alias of `mcp-http`. The SSE transport and `/sse` route no longer exist.
 - All three take `--allow-root <dir>` (repeatable; `FILE_SCANNER_ALLOWED_ROOTS`, `:`-separated), `--cache-dir`
-  (`FILE_SCANNER_CACHE_DIR`) and `--no-cache`.
+  (`FILE_SCANNER_CACHE_DIR`), `--no-cache` and `--isolation none|bwrap` (`FILE_SCANNER_ISOLATION`). With `bwrap`
+  (Linux, needs `--allow-root`, `src/isolation.rs`) only `analyze_file` `sections: ["metadata"]` runs: one `openat2`
+  descriptor beneath a preopened root, hashed and read only inside a bubblewrap sandbox, cached under
+  `metadata:bwrap-v1:`. Every other analysis tool is refused by `FileScannerMcp::isolation_refusal`, which every new
+  tool wrapper must call first.
 - Protocol revisions 2024-11-05 through 2026-07-28 are negotiated by the SDK.
 
 ### Tools (17)
@@ -268,7 +272,8 @@ Design rules every tool follows:
   `~/.cache/file-scanner` (Linux) or `~/Library/Caches/file-scanner` (macOS). Mode 0700 directory, 0600 files. An
   unusable directory degrades to memory-only with one line on stderr.
 - `FILE_SCANNER_CACHE_DISK_MB` and `FILE_SCANNER_SECTION_CACHE_MB` set the budgets. The only `FILE_SCANNER_*`
-  variables are these two plus `FILE_SCANNER_CACHE_DIR`, `FILE_SCANNER_ALLOWED_ROOTS` and `FILE_SCANNER_AUTH_TOKEN`.
+  variables are these two plus `FILE_SCANNER_CACHE_DIR`, `FILE_SCANNER_ALLOWED_ROOTS`, `FILE_SCANNER_AUTH_TOKEN` and
+  `FILE_SCANNER_ISOLATION`.
 
 ### Client configuration
 

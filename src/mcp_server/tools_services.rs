@@ -91,6 +91,9 @@ impl FileScannerMcp {
         )
     )]
     async fn search_strings_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("search_strings", &args) {
+            return Ok(refused);
+        }
         Ok(self.run_search_strings(args).await)
     }
 
