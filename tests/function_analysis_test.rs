@@ -101,35 +101,22 @@ fn test_analyze_symbols_with_elf() {
 
 #[test]
 fn test_analyze_symbols_with_real_binary() {
-    // Try with the test binary if it exists
-    let test_binary = Path::new("./target/debug/file-scanner");
+    let test_binary = Path::new(env!("CARGO_BIN_EXE_file-scanner"));
+    let symbol_table = analyze_symbols(test_binary).unwrap();
+    let functions: Vec<_> = symbol_table
+        .functions
+        .iter()
+        .filter(|function| !function.name.starts_with("[note] "))
+        .collect();
 
-    if test_binary.exists() {
-        match analyze_symbols(test_binary) {
-            Ok(symbol_table) => {
-                println!("Found {} functions", symbol_table.functions.len());
-
-                // Should find at least some functions
-                assert!(!symbol_table.functions.is_empty());
-
-                // Check stats consistency
-                assert_eq!(
-                    symbol_table.symbol_count.total_functions,
-                    symbol_table.functions.len()
-                );
-
-                // Look for main function
-                let main_fn = symbol_table
-                    .functions
-                    .iter()
-                    .find(|f| f.name.contains("main"));
-                assert!(main_fn.is_some(), "Should find main function");
-            }
-            Err(e) => {
-                eprintln!("Function analysis failed (may be expected): {e}");
-            }
-        }
-    }
+    assert!(!functions.is_empty());
+    assert_eq!(symbol_table.symbol_count.total_functions, functions.len());
+    assert!(
+        functions
+            .iter()
+            .any(|function| function.name.contains("main")),
+        "Should find main function"
+    );
 }
 
 #[test]
@@ -839,55 +826,44 @@ fn test_analyze_symbols_error_conditions_comprehensive() {
 
 #[test]
 fn test_symbol_table_statistics_accuracy() {
-    let test_binary = Path::new("./target/debug/file-scanner");
+    let test_binary = Path::new(env!("CARGO_BIN_EXE_file-scanner"));
+    let symbol_table = analyze_symbols(test_binary).unwrap();
+    let functions: Vec<_> = symbol_table
+        .functions
+        .iter()
+        // Truncation notices are displayed as rows but represent no symbol.
+        .filter(|function| !function.name.starts_with("[note] "))
+        .collect();
 
-    if test_binary.exists() {
-        let symbol_table = analyze_symbols(test_binary).unwrap();
+    let manual_total = functions.len();
+    let manual_local = functions
+        .iter()
+        .filter(|function| matches!(function.function_type, FunctionType::Local))
+        .count();
+    let manual_imported = functions
+        .iter()
+        .filter(|function| function.is_imported)
+        .count();
+    let manual_exported = functions
+        .iter()
+        .filter(|function| function.is_exported)
+        .count();
+    let manual_variables = symbol_table.global_variables.len();
+    let manual_xrefs = symbol_table.cross_references.len();
 
-        // Manually count and verify statistics
-        let manual_total = symbol_table.functions.len();
-        let manual_local = symbol_table
-            .functions
-            .iter()
-            .filter(|f| matches!(f.function_type, FunctionType::Local))
-            .count();
-        let manual_imported = symbol_table
-            .functions
-            .iter()
-            .filter(|f| f.is_imported)
-            .count();
-        let manual_exported = symbol_table
-            .functions
-            .iter()
-            .filter(|f| f.is_exported)
-            .count();
-        let manual_variables = symbol_table.global_variables.len();
-        let manual_xrefs = symbol_table.cross_references.len();
-
-        // Verify all statistics match
-        assert_eq!(manual_total, symbol_table.symbol_count.total_functions);
-        assert_eq!(manual_local, symbol_table.symbol_count.local_functions);
-        assert_eq!(
-            manual_imported,
-            symbol_table.symbol_count.imported_functions
-        );
-        assert_eq!(
-            manual_exported,
-            symbol_table.symbol_count.exported_functions
-        );
-        assert_eq!(manual_variables, symbol_table.symbol_count.global_variables);
-        assert_eq!(manual_xrefs, symbol_table.symbol_count.cross_references);
-
-        // Test total counts make sense
-        assert!(manual_total >= manual_local + manual_imported);
-
-        println!("Statistics verification passed:");
-        println!("  Total functions: {manual_total}");
-        println!(
-            "  Local: {manual_local}, Imported: {manual_imported}, Exported: {manual_exported}"
-        );
-        println!("  Variables: {manual_variables}, Cross-references: {manual_xrefs}");
-    }
+    assert_eq!(manual_total, symbol_table.symbol_count.total_functions);
+    assert_eq!(manual_local, symbol_table.symbol_count.local_functions);
+    assert_eq!(
+        manual_imported,
+        symbol_table.symbol_count.imported_functions
+    );
+    assert_eq!(
+        manual_exported,
+        symbol_table.symbol_count.exported_functions
+    );
+    assert_eq!(manual_variables, symbol_table.symbol_count.global_variables);
+    assert_eq!(manual_xrefs, symbol_table.symbol_count.cross_references);
+    assert!(manual_total >= manual_local + manual_imported);
 }
 
 #[test]
