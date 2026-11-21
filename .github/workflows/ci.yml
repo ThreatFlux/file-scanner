@@ -537,6 +537,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang lld pkg-config libssl-dev
 
+      - name: Verify the binary_info qualification receipt rules
+        run: make binary-info-qualification-check
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
@@ -556,6 +559,21 @@ jobs:
       - name: MCP handshake smoke test (initialize, 17 tools, overview, cached drill-down)
         run: |
           python3 scripts/mcp-smoke.py target/release/file-scanner
+
+      # Compiles the benign ELF and PE fixtures from tests/fixtures/binary_info_qualification
+      # and asks the server about them and the text control; the receipt holds no local paths.
+      - name: Qualify binary_info on benign compiled fixtures and a text control
+        run: |
+          python3 scripts/binary_info_qualification.py target/release/file-scanner \
+            --receipt "${RUNNER_TEMP}/binary-info-qualification.json"
+
+      - name: Preserve the binary_info qualification receipt
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-info-qualification
+          path: ${{ runner.temp }}/binary-info-qualification.json
+          if-no-files-found: warn
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
