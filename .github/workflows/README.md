@@ -20,19 +20,21 @@ finding.
 - `performance.yml` (push and pull request to `main`, weekly): Criterion
   benchmarks; results from `main` are published to GitHub Pages.
 - `validate.yml` (workflow changes): yamllint, actionlint and zizmor.
-- `auto-release.yml` (successful CI and Security Audit on `main`, manual): cuts the
-  next release with the reusable ThreatFlux auto-release workflow.
+- `auto-release.yml` (successful CI and Security Audit on `main`, manual): opens
+  a release PR or publishes an approved release after it lands on `main`.
 - `release.yml` (`v*.*.*` tags, manual): builds the release binaries and the SBOM,
   uploads them to the GitHub Release, and handles crates.io.
 
 ## Releasing
 
-Releases are automatic. After CI and Security Audit pass on `main`,
+Release preparation is automatic. After CI and Security Audit pass on `main`,
 `auto-release.yml` calls `ThreatFlux/github_actions`'s reusable auto-release
 workflow. It derives the next version from the conventional commits since the
 last tag (`fix:` is a patch, `feat:` a minor release; `ci:`, `build:`,
-`chore:`, `docs:` and `test:` do not release), bumps `Cargo.toml`, and creates
-the tag and GitHub Release as the `threatflux-automation` GitHub App
+`chore:`, `docs:` and `test:` do not release) and proposes the version bump
+in a pull request for code-owner review. After the release PR merges and CI
+and Security Audit pass on that `main` commit, the workflow creates the tag and
+GitHub Release as the `threatflux-automation` GitHub App
 (`TF_AUTOMATION_APP_ID` / `TF_AUTOMATION_APP_PRIVATE_KEY`). Because the App
 pushes the tag, the tag push itself starts `release.yml` and `docker.yml`.
 
@@ -94,9 +96,10 @@ release version in two places:
 on pushes to `main`. It checks that `server.json` and both Dockerfile defaults hold the placeholder and runs
 the unit tests of the stamping script, so a broken template fails CI before a release can be cut.
 
-Nothing is committed back to `main` after a release. The auto-release commit changes only `Cargo.toml` and
-`Cargo.lock`, and `docker.yml` promotes `latest` and `main` only while the built commit is still the head of
-`main`: a follow-up commit would stop `latest` from ever being promoted.
+The release PR changes only `Cargo.toml` and `Cargo.lock`. After tagging,
+`docker.yml` promotes `latest` and `main` only while the built commit is still
+the head of `main`. Avoid a follow-up release metadata commit that would move
+`main` before promotion.
 
 ### crates.io
 
