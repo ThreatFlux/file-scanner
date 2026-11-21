@@ -13,6 +13,12 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 
 ### Added
 
+- First isolated analysis (#316): the MCP subcommands take `--isolation none|bwrap` (`FILE_SCANNER_ISOLATION`).
+  `none`, the default, changes nothing. `bwrap` (Linux, requires `--allow-root`) runs only the `metadata` section
+  of `analyze_file`: the file is opened once with `openat2` beneath a root opened at start-up and handed as that
+  one descriptor to a bubblewrap sandbox (no network, read-only runtime binds, 1 GiB address space per process,
+  120 s deadline, 2 GiB input cap). Every other analysis is refused with a tool error; cache-only tools keep working.
+  Sandboxed results have their own cache key. The server does not start when the sandbox cannot be verified.
 - `binary_info` qualification in CI (`scripts/binary_info_qualification.py`, run by the MCP Stdio Tests job). It
   compiles two benign fixtures from `tests/fixtures/binary_info_qualification` (an x86_64 ELF and a freestanding
   x86_64 PE without imports), asks `analyze_file` and `query_analysis` over `mcp-stdio` about them and a plain-text

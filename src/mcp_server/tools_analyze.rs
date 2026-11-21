@@ -7,6 +7,7 @@
 
 mod compare;
 mod inspect;
+mod isolated;
 mod llm;
 mod query;
 mod sections;
@@ -143,6 +144,9 @@ impl FileScannerMcp {
         )
     )]
     async fn query_analysis_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("query_analysis", &args) {
+            return Ok(refused);
+        }
         Ok(self.run_query_analysis(args).await)
     }
 
@@ -160,6 +164,9 @@ impl FileScannerMcp {
         )
     )]
     async fn llm_analyze_file_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("llm_analyze_file", &args) {
+            return Ok(refused);
+        }
         Ok(self.run_llm_analyze_file(args).await)
     }
 
@@ -177,6 +184,9 @@ impl FileScannerMcp {
         )
     )]
     async fn disassemble_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("disassemble", &args) {
+            return Ok(refused);
+        }
         Ok(self.run_disassemble(args).await)
     }
 
@@ -194,6 +204,9 @@ impl FileScannerMcp {
         )
     )]
     async fn read_hex_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("read_hex", &args) {
+            return Ok(refused);
+        }
         Ok(self.run_read_hex(args).await)
     }
 
@@ -211,6 +224,9 @@ impl FileScannerMcp {
         )
     )]
     async fn compare_files_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("compare_files", &args) {
+            return Ok(refused);
+        }
         Ok(self.run_compare_files(args).await)
     }
 }
@@ -359,6 +375,14 @@ impl FileScannerMcp {
             Ok(names) => names,
             Err(message) => return tool_error(message),
         };
+        // `--isolation bwrap`: the sandboxed metadata section or a refusal,
+        // never an analysis in this process. The path is not resolved, stat'ed
+        // or opened here: the sandbox admits it by one descriptor.
+        if self.state.sandbox().is_some() {
+            return self
+                .run_isolated_analyze_file(&raw_path, &names, budget, &raw_args, started)
+                .await;
+        }
         let path = match self
             .state
             .resolve_path(&raw_path, "File", Expect::FileOrDir)
@@ -602,7 +626,13 @@ impl FileScannerMcp {
         };
         self.state
             .record_analyze_file(
-                &raw_args, &raw_path, strings, entry, &sha256, file_size, started,
+                &raw_args,
+                &raw_path,
+                strings,
+                entry,
+                &sha256,
+                (file_size, None),
+                started,
             )
             .await;
         respond_text(text)

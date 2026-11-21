@@ -238,6 +238,11 @@ tar = { workspace = true }
 quick-xml = { workspace = true }
 base64 = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# `--isolation bwrap`: setrlimit and close_range between fork and exec of the
+# sandbox (src/isolation.rs). Already in the tree; same pinned version.
+libc = { workspace = true }
+
 [dev-dependencies]
 # The SDK client, compiled only for tests (in-process MCP tests).
 rmcp = { workspace = true, features = ["client"] }

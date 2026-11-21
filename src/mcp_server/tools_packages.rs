@@ -238,6 +238,9 @@ impl FileScannerMcp {
         &self,
         args: JsonObject,
     ) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("analyze_npm_package", &args) {
+            return Ok(refused);
+        }
         let (request, budget, _raw) = match parse_request::<NpmAnalysisRequest>(args) {
             Ok(parsed) => parsed,
             Err(message) => return Ok(tool_error(message)),
@@ -272,6 +275,9 @@ impl FileScannerMcp {
         &self,
         args: JsonObject,
     ) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("analyze_python_package", &args) {
+            return Ok(refused);
+        }
         let (request, budget, _raw) = match parse_request::<PythonAnalysisRequest>(args) {
             Ok(parsed) => parsed,
             Err(message) => return Ok(tool_error(message)),

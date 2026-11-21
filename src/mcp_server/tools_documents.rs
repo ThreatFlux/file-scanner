@@ -79,6 +79,9 @@ impl FileScannerMcp {
         )
     )]
     async fn analyze_document_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("analyze_document", &args) {
+            return Ok(refused);
+        }
         let (request, budget, _raw) = match parse_request::<DocumentRequest>(args) {
             Ok(parsed) => parsed,
             Err(message) => return Ok(tool_error(message)),
@@ -110,6 +113,9 @@ impl FileScannerMcp {
         )
     )]
     async fn analyze_script_tool(&self, args: JsonObject) -> Result<CallToolResult, ErrorData> {
+        if let Some(refused) = self.isolation_refusal("analyze_script", &args) {
+            return Ok(refused);
+        }
         let (request, budget, _raw) = match parse_request::<ScriptRequest>(args) {
             Ok(parsed) => parsed,
             Err(message) => return Ok(tool_error(message)),
