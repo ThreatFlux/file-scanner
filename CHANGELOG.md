@@ -132,6 +132,8 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 
 ### Changed
 
+- Public Rust timestamp fields now use `jiff::Timestamp`. Existing serialized
+  UTC timestamps remain RFC 3339 strings.
 - HTTP security defaults. The server binds `127.0.0.1` instead of all interfaces. The `Host` header must be a
   loopback name or an `--allowed-host`, and a present `Origin` header must be a loopback origin or an
   `--allowed-origin` (403 otherwise) on every route. The wildcard `Access-Control-Allow-Origin: *` is gone.

@@ -1259,8 +1259,9 @@ fn string_details_value(
         out["categories"] = json!(sorted_categories(&entry));
         out["entropy"] = ((entry.entropy * 100.0).round() / 100.0).into();
         out["suspicious"] = entry.is_suspicious.into();
-        out["first_seen"] = entry.first_seen.to_rfc3339().into();
-        out["last_seen"] = entry.last_seen.to_rfc3339().into();
+        let utc = jiff::tz::Offset::UTC;
+        out["first_seen"] = entry.first_seen.display_with_offset(utc).to_string().into();
+        out["last_seen"] = entry.last_seen.display_with_offset(utc).to_string().into();
         out["related"] = related
             .iter()
             .map(|(value, score)| {
@@ -2088,7 +2089,7 @@ mod tests {
                 tool_name: "yara_scan_file".into(),
                 tool_args: HashMap::new(),
                 result: Value::Null,
-                timestamp: chrono::Utc::now(),
+                timestamp: jiff::Timestamp::now(),
                 file_size: 1,
                 execution_time_ms: 1,
             })

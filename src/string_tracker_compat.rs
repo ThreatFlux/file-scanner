@@ -4,7 +4,7 @@
 //! the upstream library's bounded tracking, fixed-width counts and validation.
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -12,7 +12,7 @@ use threatflux_string_analysis as current;
 
 type StringCountVec = Vec<(String, usize)>;
 type StringScoreVec = Vec<(String, f64)>;
-type DateTimeRange = (DateTime<Utc>, DateTime<Utc>);
+type DateTimeRange = (Timestamp, Timestamp);
 
 /// Context in which a string was found
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +84,7 @@ pub struct StringOccurrence {
     /// Name of the tool that discovered this string
     pub tool_name: String,
     /// Timestamp when the string was discovered
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     /// Context in which the string was found
     pub context: StringContext,
 }
@@ -95,9 +95,9 @@ pub struct StringEntry {
     /// The actual string value
     pub value: String,
     /// Timestamp when this string was first discovered
-    pub first_seen: DateTime<Utc>,
+    pub first_seen: Timestamp,
     /// Timestamp when this string was last seen
-    pub last_seen: DateTime<Utc>,
+    pub last_seen: Timestamp,
     /// Total number of times this string has been found
     pub total_occurrences: usize,
     /// Set of unique file paths where this string was found
@@ -208,12 +208,32 @@ fn legacy_count(count: u64) -> usize {
     usize::try_from(count).unwrap_or(usize::MAX)
 }
 
+// Upstream still uses Chrono and can represent years outside Jiff's range.
+fn tracker_timestamp(seconds: i64, nanos: u32) -> Timestamp {
+    let billion = 1_000_000_000;
+    Timestamp::new(
+        seconds + i64::from(nanos / billion),
+        (nanos % billion) as i32,
+    )
+    .unwrap_or(if seconds < 0 {
+        Timestamp::MIN
+    } else {
+        Timestamp::MAX
+    })
+}
+
 impl From<current::StringEntry> for StringEntry {
     fn from(entry: current::StringEntry) -> Self {
         Self {
             value: entry.value,
-            first_seen: entry.first_seen,
-            last_seen: entry.last_seen,
+            first_seen: tracker_timestamp(
+                entry.first_seen.timestamp(),
+                entry.first_seen.timestamp_subsec_nanos(),
+            ),
+            last_seen: tracker_timestamp(
+                entry.last_seen.timestamp(),
+                entry.last_seen.timestamp_subsec_nanos(),
+            ),
             total_occurrences: legacy_count(entry.total_occurrences),
             unique_files: entry
                 .unique_file_identities
@@ -227,7 +247,10 @@ impl From<current::StringEntry> for StringEntry {
                     file_path: occurrence.file_path,
                     file_hash: occurrence.file_hash,
                     tool_name: occurrence.tool_name,
-                    timestamp: occurrence.timestamp,
+                    timestamp: tracker_timestamp(
+                        occurrence.timestamp.timestamp(),
+                        occurrence.timestamp.timestamp_subsec_nanos(),
+                    ),
                     context: occurrence.context.into(),
                 })
                 .collect(),
@@ -282,7 +305,14 @@ impl From<&StringFilter> for current::StringFilter {
             regex_pattern: filter.regex_pattern.clone(),
             min_entropy: filter.min_entropy,
             max_entropy: filter.max_entropy,
-            date_range: filter.date_range,
+            date_range: filter.date_range.map(|(start, end)| {
+                // Convert through RFC 3339 so Windows SystemTime granularity
+                // cannot round away nanoseconds at a filter boundary.
+                let parse = |timestamp: Timestamp| {
+                    timestamp.to_string().parse().expect("valid UTC timestamp")
+                };
+                (parse(start), parse(end))
+            }),
         }
     }
 }

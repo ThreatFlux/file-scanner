@@ -500,8 +500,9 @@ fn parse_v5_file(
                 format!("method {method}")
             },
             last_modified: mtime.and_then(|secs| {
-                chrono::DateTime::from_timestamp(i64::from(secs), 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%SZ").to_string())
+                jiff::Timestamp::new(i64::from(secs), 0)
+                    .ok()
+                    .map(|dt| dt.strftime("%Y-%m-%d %H:%M:%SZ").to_string())
             }),
             crc32: crc,
             is_encrypted: encrypted,

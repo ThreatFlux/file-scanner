@@ -16,7 +16,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::Utc;
+use jiff::Timestamp;
 use rmcp::model::JsonObject;
 use serde_json::Value;
 
@@ -1346,7 +1346,7 @@ impl ServerState {
             tool_name: "analyze_file".to_string(),
             tool_args: to_args_map(raw_args),
             result: entry_result,
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             file_size,
             execution_time_ms: elapsed_ms(started),
         };
@@ -1389,7 +1389,7 @@ impl ServerState {
             tool_name: "yara_scan_file".to_string(),
             tool_args: to_args_map(raw_args),
             result: result.clone(),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             file_size: 0,
             execution_time_ms: elapsed_ms(started),
         };
@@ -1786,7 +1786,7 @@ mod tests {
             tool_name: "analyze_file".into(),
             tool_args: HashMap::new(),
             result: json!({}),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             file_size: 1,
             execution_time_ms: 1,
         };

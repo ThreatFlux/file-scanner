@@ -118,7 +118,7 @@ input schema from the request struct, and the REST `/tools/*` routes use the sam
 - **Binary Parsing**: `goblin`, `object`
 - **String Processing**: `regex`, `encoding_rs`
 - **Serialization**: `serde`, `serde_json`, `serde_yaml` (a source alias of `serde-saphyr`)
-- **System Info**: `chrono`, `filetime`
+- **System Info**: `jiff`, `filetime`
 - **MCP**: `rmcp` (Model Context Protocol SDK, serves stdio and Streamable HTTP), `schemars`
 - **YARA**: `yara-x`
 - **HTTP Server**: `axum`, `tower-http` (CORS), `tokio-util`
