@@ -1,0 +1,2 @@
+file-scanner binary_info qualification control.
+This plain text file is not an executable; binary_info must not report executable metadata for it.

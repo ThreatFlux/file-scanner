@@ -288,6 +288,10 @@ cargo test --test mcp_tools_analyze_test --test mcp_transport_stdio_test --test 
 # Real handshake against a built binary
 python3 scripts/mcp-smoke.py ./target/debug/file-scanner
 
+# binary_info qualification (needs clang and lld): benign ELF/PE fixtures and a text control, receipt on stdout
+python3 scripts/binary_info_qualification.py ./target/release/file-scanner
+make binary-info-qualification-check   # receipt rules only, no build
+
 # Interactive: the MCP Inspector against a stdio server
 npx @modelcontextprotocol/inspector ./target/release/file-scanner mcp-stdio
 ```

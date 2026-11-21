@@ -13,6 +13,12 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 
 ### Added
 
+- `binary_info` qualification in CI (`scripts/binary_info_qualification.py`, run by the MCP Stdio Tests job). It
+  compiles two benign fixtures from `tests/fixtures/binary_info_qualification` (an x86_64 ELF and a freestanding
+  x86_64 PE without imports), asks `analyze_file` and `query_analysis` over `mcp-stdio` about them and a plain-text
+  control, and uploads a receipt (`binary-info-qualification`) that keeps reported, empty, absent and unsupported
+  fields apart and holds no local paths. Scanner behavior is unchanged; `make binary-info-qualification-check` tests
+  the receipt rules.
 - Release metadata: `server.json` is now a template with the placeholder version 0.0.0, and each release cut from
   now on attaches a copy stamped with the release version as the asset `server.json`
   (`scripts/stamp_server_json.py`; `make release-metadata-check` runs in CI). The `Dockerfile` default for the
