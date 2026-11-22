@@ -26,9 +26,8 @@ transport file because two unit tests contain a certificate error message.
 That transport is feature-gated and the scanner does not enable it.
 
 The SDK clock uses Jiff. The backport preserves timestamp and duration
-formatting, the protocol data model, and both MCP transports. Until the
-ThreatFlux dependency releases are selected, string analysis and threat
-detection still bring Chrono into the scanner's graph.
+formatting, the protocol data model, and both MCP transports. The string
+analysis package is the remaining Chrono parent in the scanner's graph.
 
 Remove this override and its vendor files once a published stable rmcp version
 can be selected without Chrono and the locked graph, hosted MCP tests, and
@@ -56,6 +55,12 @@ The CodeQL inventory binds the new version's source and dependency hashes.
 Its active review list starts empty for 1.24. Historical 1.23 results and
 fixtures retain their original records, so 1.24 findings need native evidence
 and fresh review before any exact match can be applied.
+
+The scanner selects the published threat-detection 0.3.0 crate. Its archive
+SHA-256 is `d31a0389d4c7c1bc8cf35aa031df610b7c70cd4ec5f7bc0d31b77fac46f37740`.
+All sixteen Rust files match the tagged source and invoke no RSA API. Its
+YARA feature contributes the stable `pkcs1v15` feature while retaining the
+shipped protobuf sources. [Published release](https://github.com/ThreatFlux/threatflux-threat-detection/releases/tag/v0.3.0)
 
 Remove this override once a released stable YARA-X version supports the
 required Wasmtime and RSA graph and equivalent verification behavior passes

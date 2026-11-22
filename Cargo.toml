@@ -170,7 +170,7 @@ path = "src/main.rs"
 threatflux-string-analysis = { version = "0.2.5" }
 threatflux-binary-analysis = { version = "0.4.1", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis
-threatflux-threat-detection = { version = "0.2.6", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
+threatflux-threat-detection = { version = "0.3.0", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
 # threatflux-package-security = { version = "0.1.0" } # Not used in actual source code
 
 # Core dependencies (using workspace versions)
