@@ -52,9 +52,12 @@ checks those bounds and retains the existing OpenSSL verification vectors.
   generation opts into the protobuf generator.
 
 The CodeQL inventory binds the new version's source and dependency hashes.
-Its active review list starts empty for 1.24. Historical 1.23 results and
-fixtures retain their original records, so 1.24 findings need native evidence
-and fresh review before any exact match can be applied.
+The nine approved matches come from native analysis 2223686152. They cover
+the public TLSH checksum and bucket constants for ELF similarity and the
+certificate display thumbprint. The built-in signature and chain verification
+paths do not consume the thumbprint. Custom rules can read the PE and optional
+MSI metadata. Mach-O shares ASN.1 parsing and discards the thumbprint. The
+historical analysis and all unmatched results are retained. [Native analysis](https://github.com/ThreatFlux/file-scanner/actions/runs/45004815602/job/137153917782)
 
 The scanner selects the published threat-detection 0.3.0 crate. Its archive
 SHA-256 is `d31a0389d4c7c1bc8cf35aa031df610b7c70cd4ec5f7bc0d31b77fac46f37740`.

@@ -13,10 +13,11 @@ import sys
 import tomllib
 
 
-POLICY_DIGEST = "78c8d932c7856624d21dbedcc78029873cdbcb0796d6bb0d0e151e76263bd752"
+POLICY_DIGEST = "0913e9b0e514f170935e38d40fea6d95838bfeaab155d36d3739873193427cbc"
 SOURCE_TOKENS = (
     "thumbprint", "pearson_hash", "TlshBuilder", "Certificate",
     "CertificateChain", "AuthenticodeSignature", "X509CertificateParser",
+    "AuthenticodeParser", "telfhash",
 )
 SKIP_PATHS = {
     ".git", "target", "threatflux-threat-detection/target",

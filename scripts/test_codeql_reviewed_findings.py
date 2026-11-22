@@ -25,6 +25,7 @@ SPEC.loader.exec_module(REVIEW)
 HISTORICAL_FIXTURE = REPOSITORY / "scripts/codeql-reviewed-findings-fixture.sarif"
 FIXTURE = REPOSITORY / "scripts/codeql-reviewed-findings-fixture-1.23-simulated.sarif"
 RAW_FIXTURE = REPOSITORY / "scripts/codeql-reviewed-findings-raw-25c41d9.sarif.gz"
+NATIVE_124_FIXTURE = REPOSITORY / "scripts/codeql-reviewed-findings-raw-d16f02c.sarif.gz"
 
 
 class ReviewedFindingsTests(unittest.TestCase):
@@ -128,6 +129,33 @@ class ReviewedFindingsTests(unittest.TestCase):
         self.assertEqual(report["omitted_count"], 0)
         self.assertEqual(upload, self.sarif)
         self.assertEqual(annotated, self.sarif)
+
+    def test_native_124_source_bound_matches_keep_first_party_results(self):
+        raw = gzip.decompress(NATIVE_124_FIXTURE.read_bytes())
+        self.assertEqual(
+            hashlib.sha256(raw).hexdigest(),
+            "bf1ab8653b4e66596a6719c5d3af3a2393f2fb28990bbe6c0f6109c41239a3a4",
+        )
+        (self.root / ".github/codeql-reviewed-findings.json").write_text(
+            json.dumps(self.production_policy)
+        )
+        (self.args.input / "rust.sarif").write_bytes(raw)
+        input_results = json.loads(raw)["runs"][0]["results"]
+        status, report, upload, annotated = self.run_review(REVIEW.POLICY_DIGEST)
+        self.assertEqual(status, 0)
+        self.assertEqual((report["raw_count"], report["omitted_count"], report["retained_count"]),
+                         (13, 9, 4))
+        first_party = [
+            item for item in input_results
+            if not item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            .startswith("vendor/")
+        ]
+        self.assertEqual(upload["runs"][0]["results"], first_party)
+        annotated_results = annotated["runs"][0]["results"]
+        self.assertEqual(len(annotated_results), 13)
+        for result in first_party:
+            self.assertIn(result, annotated_results)
+        self.assertEqual((self.args.input / "rust.sarif").read_bytes(), raw)
 
     def test_simulated_raw_regions_match_without_altering_input(self):
         # Only path migration is simulated: do not claim a fresh hosted run.

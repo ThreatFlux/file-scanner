@@ -1,11 +1,15 @@
 {
-  "analysis_provenance": "Historical analysis IDs and fixtures are retained. YARA-X 1.24.0 has its own pinned sources and no active omissions. Hosted native output must be reviewed for the replacement source before merge.",
+  "analysis_provenance": "The YARA-X 1.24.0 exact matches come from native CodeQL analysis 2223686152. The analyzed PR merge and signed PR head have the same Git tree. The YARA-X 1.21 native record, 1.23 native baseline and simulated 1.23 fixtures retain their separate provenance. Four first-party results remain in the CodeQL upload.",
   "call_path_sha256": {
     "vendor/yara-x-1.24.0/Cargo.toml": "ff60da75a843ccea4ae624eb528818f1917524f9ea797fd4119e62db9291a3fb",
     "vendor/yara-x-1.24.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
     "vendor/yara-x-1.24.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
     "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs": "48af14021135472667de5d7ec95f3411afc72acabb71be8fc86757bf4519691f",
+    "vendor/yara-x-1.24.0/src/modules/macho/parser.rs": "de622bcd29f048b4698b0f88850c440c36530bbac35e613cc5cb830aacb71c7a",
+    "vendor/yara-x-1.24.0/src/modules/msi/mod.rs": "be0e265893490a93afc56e5d8db9cf68a9d685fad45766e77f331e2c3ab1cad3",
+    "vendor/yara-x-1.24.0/src/modules/msi/parser.rs": "1874b6e60cf586c1a911e4595aae5f766ea70e8cd5d74b9977e992432a9de0c8",
     "vendor/yara-x-1.24.0/src/modules/pe/mod.rs": "380774be54b2a11ce9938658d0f48bc295b88f7bc8cfa9936735bdb3b935dc88",
+    "vendor/yara-x-1.24.0/src/modules/pe/parser.rs": "d4975eee186649a05462946566eacb24542d6f4d947ff083f679edd2e4f7395b",
     "vendor/yara-x-1.24.0/src/modules/utils/asn1.rs": "713ae4167a6e087092df73734ed8926e3b372910dc7a473c9f8ed543432f2af8",
     "vendor/yara-x-1.24.0/src/modules/utils/authenticode.rs": "1cf890a6f0f5cfa9d6b7c066dbc8f71dbb04beebe33e7fcf90e84ab012560059",
     "vendor/yara-x-1.24.0/src/modules/utils/crypto.rs": "7266c5b6ef5a169344127ab5dcbc6537b3deb84f74a5ff5bb61322eda3e2d09e"
@@ -14,7 +18,7 @@
     "wasmtime": "50.0.3",
     "yara-x": "1.24.0"
   },
-  "policy": "Only exact, active reviewed rule, path, full region and raw message matches may be annotated. The historical 1.23.0 tuples are inactive. Every other result remains uploaded. Raw SARIF and annotated evidence are preserved. Source, caller inventory, dependency, duplicate, or manifest guard failures retain unfiltered raw output and fail the job.",
+  "policy": "Only the nine exact, source-bound active reviewed rule, path, full region and raw message matches may be annotated. Historical tuples stay inactive. Every unmatched result remains uploaded. Raw SARIF and annotated evidence are preserved. Source, caller inventory, dependency, duplicate, or manifest guard failures retain unfiltered raw output and fail the job.",
   "historical_yara_123_findings": [
     {
       "id": "yara-x-1.23-hard-coded-cryptographic-value-305",
@@ -152,9 +156,143 @@
       }
     }
   ],
-  "reviewed_findings": [],
-  "reviewed_merge_commit": "317e1afda545a5259d0f7f739d0949ac723d0ca2",
-  "reviewed_native_analysis_id": 1891303529,
+  "reviewed_findings": [
+    {
+      "id": "yara-x-1.24-hard-coded-cryptographic-value-302",
+      "justification": "Reviewed false positive: this public selector updates the one-byte TLSH checksum. The deterministic value preserves ELF symbol-similarity output.",
+      "match": {
+        "message": "This hard-coded value is used as [a salt](1).",
+        "path": "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs",
+        "region": {
+          "startLine": 302,
+          "startColumn": 21,
+          "endColumn": 22,
+          "endLine": 302
+        },
+        "rule_id": "rust/hard-coded-cryptographic-value"
+      }
+    },
+    {
+      "id": "yara-x-1.24-hard-coded-cryptographic-value-327",
+      "justification": "Reviewed false positive: this public Pearson selector chooses a TLSH bucket for a sliding-window symbol triplet. The deterministic value preserves ELF symbol-similarity output.",
+      "match": {
+        "message": "This hard-coded value is used as [a salt](1).",
+        "path": "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs",
+        "region": {
+          "startLine": 327,
+          "startColumn": 21,
+          "endColumn": 22,
+          "endLine": 327
+        },
+        "rule_id": "rust/hard-coded-cryptographic-value"
+      }
+    },
+    {
+      "id": "yara-x-1.24-hard-coded-cryptographic-value-335",
+      "justification": "Reviewed false positive: this public Pearson selector chooses a TLSH bucket for a sliding-window symbol triplet. The deterministic value preserves ELF symbol-similarity output.",
+      "match": {
+        "message": "This hard-coded value is used as [a salt](1).",
+        "path": "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs",
+        "region": {
+          "startLine": 335,
+          "startColumn": 21,
+          "endColumn": 22,
+          "endLine": 335
+        },
+        "rule_id": "rust/hard-coded-cryptographic-value"
+      }
+    },
+    {
+      "id": "yara-x-1.24-hard-coded-cryptographic-value-343",
+      "justification": "Reviewed false positive: this public Pearson selector chooses a TLSH bucket for a sliding-window symbol triplet. The deterministic value preserves ELF symbol-similarity output.",
+      "match": {
+        "message": "This hard-coded value is used as [a salt](1).",
+        "path": "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs",
+        "region": {
+          "startLine": 343,
+          "startColumn": 21,
+          "endColumn": 22,
+          "endLine": 343
+        },
+        "rule_id": "rust/hard-coded-cryptographic-value"
+      }
+    },
+    {
+      "id": "yara-x-1.24-hard-coded-cryptographic-value-351",
+      "justification": "Reviewed false positive: this public Pearson selector chooses a TLSH bucket for a sliding-window symbol triplet. The deterministic value preserves ELF symbol-similarity output.",
+      "match": {
+        "message": "This hard-coded value is used as [a salt](1).",
+        "path": "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs",
+        "region": {
+          "startLine": 351,
+          "startColumn": 21,
+          "endColumn": 22,
+          "endLine": 351
+        },
+        "rule_id": "rust/hard-coded-cryptographic-value"
+      }
+    },
+    {
+      "id": "yara-x-1.24-hard-coded-cryptographic-value-359",
+      "justification": "Reviewed false positive: this public Pearson selector chooses a TLSH bucket for a sliding-window symbol triplet. The deterministic value preserves ELF symbol-similarity output.",
+      "match": {
+        "message": "This hard-coded value is used as [a salt](1).",
+        "path": "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs",
+        "region": {
+          "startLine": 359,
+          "startColumn": 21,
+          "endColumn": 23,
+          "endLine": 359
+        },
+        "rule_id": "rust/hard-coded-cryptographic-value"
+      }
+    },
+    {
+      "id": "yara-x-1.24-hard-coded-cryptographic-value-367",
+      "justification": "Reviewed false positive: this public Pearson selector chooses a TLSH bucket for a sliding-window symbol triplet. The deterministic value preserves ELF symbol-similarity output.",
+      "match": {
+        "message": "This hard-coded value is used as [a salt](1).",
+        "path": "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs",
+        "region": {
+          "startLine": 367,
+          "startColumn": 21,
+          "endColumn": 23,
+          "endLine": 367
+        },
+        "rule_id": "rust/hard-coded-cryptographic-value"
+      }
+    },
+    {
+      "id": "yara-x-1.24-hard-coded-cryptographic-value-9",
+      "justification": "Reviewed false positive: this public Pearson permutation table is fixed by TLSH and implements compatible ELF symbol-similarity output.",
+      "match": {
+        "message": "This hard-coded value is used as [a salt](1).",
+        "path": "vendor/yara-x-1.24.0/src/modules/elf/tlsh/helper.rs",
+        "region": {
+          "startLine": 9,
+          "startColumn": 39,
+          "endLine": 26,
+          "endColumn": 2
+        },
+        "rule_id": "rust/hard-coded-cryptographic-value"
+      }
+    },
+    {
+      "id": "yara-x-1.24-weak-sensitive-data-hashing-248",
+      "justification": "Reviewed false positive: the SHA-1 digest of public X.509 certificate DER is an Authenticode report thumbprint. Built-in signature and chain validation use the certificate identities, parsed public keys and signatures rather than the thumbprint. PE and optional MSI can expose it to custom rules. The Mach-O consumer shares ASN.1 parsing and discards the thumbprint.",
+      "match": {
+        "message": "[Sensitive data (certificate)](1) is used in a hashing algorithm (SHA1) that is insecure.",
+        "path": "vendor/yara-x-1.24.0/src/modules/utils/asn1.rs",
+        "region": {
+          "startLine": 248,
+          "startColumn": 62,
+          "endColumn": 72,
+          "endLine": 248
+        },
+        "rule_id": "rust/weak-sensitive-data-hashing"
+      }
+    }
+  ],
   "schema_version": 1,
   "source_inventory_excluded_paths": [
     ".git",
@@ -170,9 +308,11 @@
     "Certificate",
     "CertificateChain",
     "AuthenticodeSignature",
-    "X509CertificateParser"
+    "X509CertificateParser",
+    "AuthenticodeParser",
+    "telfhash"
   ],
-  "source_review_date": "2026-11-12",
+  "source_review_date": "2026-11-22",
   "token_source_inventory": {
     "src/entropy_analysis.rs": "0ed6bac8809e04a046e8627cf1d8bdbbc9afaded17abcab5dc31b49d75c58a93",
     "src/java_analysis.rs": "09b146487001962f5aee03a3e2e5b5ab292a5abd541fdbfed416229044d4f836",
@@ -189,14 +329,17 @@
     "vendor/threatflux-binary-analysis-0.3.1/src/formats/pe.rs": "5a14e6d0ddc08aa7992f6f51a76423d9e68f194e90b0878d095d58f3e105e92b",
     "vendor/yara-x-1.24.0/src/modules/field_docs.rs": "6c1b55eec284e7ef934e6daafa965d3a664265136bba92de92a37f3f151be639",
     "vendor/yara-x-1.24.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
+    "vendor/yara-x-1.24.0/src/modules/elf/tests/mod.rs": "75534bdf69c550e70b553a8f166e6761fc95d0e81d8d996610c4f4de7ff6a806",
     "vendor/yara-x-1.24.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
     "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs": "48af14021135472667de5d7ec95f3411afc72acabb71be8fc86757bf4519691f",
     "vendor/yara-x-1.24.0/src/modules/elf/tlsh/tests.rs": "9f6c4f88fef0b1c9a09a973cc595bbb41daadf05e564c47e2c6d01f040f91acc",
     "vendor/yara-x-1.24.0/src/modules/macho/parser.rs": "de622bcd29f048b4698b0f88850c440c36530bbac35e613cc5cb830aacb71c7a",
+    "vendor/yara-x-1.24.0/src/modules/msi/parser.rs": "1874b6e60cf586c1a911e4595aae5f766ea70e8cd5d74b9977e992432a9de0c8",
     "vendor/yara-x-1.24.0/src/modules/pe/parser.rs": "d4975eee186649a05462946566eacb24542d6f4d947ff083f679edd2e4f7395b",
     "vendor/yara-x-1.24.0/src/modules/protos/generated/macho.rs": "193c995226a2bb4fc81efb3acb2b7946530a035368698581562caf90e18ec6e1",
     "vendor/yara-x-1.24.0/src/modules/protos/generated/pe.rs": "a3f9fc4f10be465b00e3cb2b7e8fd67e798384cd1369b9e5774b71b1e5fdbeaf",
     "vendor/yara-x-1.24.0/src/modules/protos/generated/sandbox.rs": "140468fa34ac8d10f18f51d1918a6df6fabd62d58df16edbf038f08ae431e77b",
+    "vendor/yara-x-1.24.0/src/modules/protos/generated/titan.rs": "ad6a6d2723d3a7d87d590f210165579d17fcf1230de455421fdedc6e3ddf43a5",
     "vendor/yara-x-1.24.0/src/modules/protos/generated/vtnet.rs": "fb03ed3fa5790604defb3afd764cab5b03c69dc340a474844a506d60e9046a7d",
     "vendor/yara-x-1.24.0/src/modules/utils/asn1.rs": "713ae4167a6e087092df73734ed8926e3b372910dc7a473c9f8ed543432f2af8",
     "vendor/yara-x-1.24.0/src/modules/utils/authenticode.rs": "1cf890a6f0f5cfa9d6b7c066dbc8f71dbb04beebe33e7fcf90e84ab012560059",
@@ -213,5 +356,24 @@
     "published_crate_sha256": "46490aa1d13df1247f106e9620f4221fc8a13b351a9aeef5a34a9b0eaafd78cb",
     "upstream_commit": "ff2052503a06d660e71fb5acac4d4c43334c4b86",
     "version": "1.24.0"
+  },
+  "historical_yara_121_native": {
+    "analysis_id": 1891303529,
+    "analyzed_merge_commit": "317e1afda545a5259d0f7f739d0949ac723d0ca2"
+  },
+  "historical_yara_123_native": {
+    "pr_head": "4105211505cb03d1ef4449f01eb594a218e82450",
+    "workflow_run": 44989976671,
+    "artifact_id": 14741289116,
+    "raw_sarif_sha256": "2e12e5544fd52572755b746b4c7e80a605590a3cd21ab4f4eaccde2490dfa3b2"
+  },
+  "reviewed_yara_124_native": {
+    "analysis_id": 2223686152,
+    "workflow_run": 45004815602,
+    "artifact_id": 14748530267,
+    "pr_head": "d16f02c3355f6bf4d9875adbeb4812050539edde",
+    "analyzed_merge_commit": "dcd938413fb5106608685087977a28a28021ae62",
+    "shared_git_tree": "5cb0b131a6ccc24e9e8fd5a807413322ab5c0526",
+    "raw_sarif_sha256": "bf1ab8653b4e66596a6719c5d3af3a2393f2fb28990bbe6c0f6109c41239a3a4"
   }
 }
