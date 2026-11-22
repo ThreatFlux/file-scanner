@@ -10,14 +10,11 @@ DOCKER_TAG ?= latest
 # Directory mounted read-only by docker-run-http
 SAMPLES_DIR ?= $(CURDIR)
 
-# Define all ThreatFlux libraries
-LIBRARIES := threatflux-package-security
-
-.PHONY: all help init build test test-parallel test-unit test-hash test-mcp test-analysis test-integration test-legacy install clean run-debug run-release docker-build docker-run docker-run-http lint fmt check deps update security-audit dev dev-full ci ci-full prepare-release coverage coverage-html setup-optimization libs-% parallel-% \
+.PHONY: all help init build test test-parallel test-unit test-hash test-mcp test-analysis test-integration test-legacy install clean run-debug run-release docker-build docker-run docker-run-http lint fmt check deps update security-audit dev dev-full ci ci-full prepare-release coverage coverage-html setup-optimization \
          fmt-check test-no-features test-mcp-features build-examples test-doc doc-check doc-links \
-         deny outdated security-geiger security-supply-chain semver-check feature-test feature-test-full \
+         deny outdated security-geiger security-supply-chain semver-check \
          msrv msrv-install security-enhanced ci-local validate analyze examples release-prep docs \
-         hooks-install test-all test-package-security lint-package-security bench-check workflow-check codeql-review-check container-review-check native-zlib-check release-metadata-check \
+         hooks-install test-all bench-check workflow-check codeql-review-check container-review-check native-zlib-check release-metadata-check \
          binary-info-qualification-check
 
 # Default target
@@ -28,10 +25,8 @@ all: setup-optimization fmt lint build test security-audit
 ci-local:
 	$(MAKE) fmt-check
 	$(MAKE) lint
-	$(MAKE) lint-package-security
 	$(MAKE) build
 	$(MAKE) test-all
-	$(MAKE) feature-test
 	$(MAKE) doc-check
 	$(MAKE) bench-check
 	$(MAKE) msrv
@@ -44,7 +39,7 @@ ci-local:
 	@echo "✅ CI checks passed!"
 
 # Full validation (everything)
-validate: all coverage test-parallel libs-test
+validate: all coverage test-parallel
 	@echo "🎉 Full validation complete!"
 
 # Complete analysis (all tools, all checks)
@@ -88,21 +83,6 @@ help:
 	@echo "  docker-run    - Run Docker container"
 	@echo "  docker-run-http - Run Docker container in MCP HTTP mode (127.0.0.1:3111, needs FILE_SCANNER_AUTH_TOKEN)"
 	@echo ""
-	@echo "LIBRARY COMMANDS:"
-	@echo "  libs-build    - Build all ThreatFlux libraries"
-	@echo "  libs-test     - Test all ThreatFlux libraries"
-	@echo "  libs-fmt      - Format all ThreatFlux libraries"
-	@echo "  libs-clippy   - Lint all ThreatFlux libraries"
-	@echo "  libs-clean    - Clean all ThreatFlux libraries"
-	@echo "  parallel-fmt  - Format all libraries in parallel"
-	@echo "  parallel-clippy - Lint all libraries in parallel"
-	@echo "  parallel-test - Test all libraries in parallel"
-	@echo ""
-	@echo "INDIVIDUAL LIBRARY COMMANDS:"
-	@echo "  <library>-<command> - Run command on specific library"
-	@echo "  Available libraries: $(LIBRARIES)"
-	@echo "  Available commands: build, test, fmt, clippy, clean"
-	@echo ""
 	@echo "MISC COMMANDS:"
 	@echo "  deps          - Update dependencies"
 	@echo "  test-programs - Compile all test programs"
@@ -119,7 +99,6 @@ init:
 	rustup toolchain install $(RUST_TOOLCHAIN)
 	rustup component add --toolchain $(RUST_TOOLCHAIN) clippy rustfmt llvm-tools-preview
 	$(CARGO) +$(RUST_TOOLCHAIN) fetch --locked
-	$(CARGO) +$(RUST_TOOLCHAIN) fetch --locked --manifest-path threatflux-package-security/Cargo.toml
 	@echo "Project initialized successfully!"
 
 # Build debug version
@@ -184,25 +163,14 @@ test-no-features:
 test-mcp-features: test-mcp
 	@echo "✅ MCP tests passed"
 
-# Full suites include the separately excluded package-security workspace.
 test-all:
 	$(CARGO) test --locked --workspace --all-features
-	$(MAKE) test-package-security
-
-test-package-security:
-	$(CARGO) test --locked --manifest-path threatflux-package-security/Cargo.toml --all-features
-
-feature-test:
-	$(CARGO) test --locked --manifest-path threatflux-package-security/Cargo.toml --no-default-features
-
-feature-test-full: test-all feature-test
 
 hooks-install:
 	./scripts/install-hooks.sh
 
 bench-check:
 	$(CARGO) check --locked --workspace --all-features --benches
-	$(CARGO) check --locked --manifest-path threatflux-package-security/Cargo.toml --all-features --benches
 
 workflow-check:
 	./scripts/check-workflows.sh
@@ -305,18 +273,13 @@ lint:
 	@echo "Running clippy..."
 	$(CARGO) clippy --locked --workspace --all-features --all-targets -- -D warnings
 
-lint-package-security:
-	$(CARGO) clippy --locked --manifest-path threatflux-package-security/Cargo.toml --all-features --all-targets -- -D warnings
-
 fmt:
 	@echo "Formatting code..."
 	$(CARGO) fmt --all
-	$(CARGO) fmt --manifest-path threatflux-package-security/Cargo.toml --all
 
 fmt-check:
 	@echo "🔍 Checking code format..."
 	@$(CARGO) fmt --all -- --check
-	@$(CARGO) fmt --manifest-path threatflux-package-security/Cargo.toml --all -- --check
 	@echo "✅ Format check passed"
 
 msrv-install:
@@ -327,14 +290,12 @@ msrv-install:
 msrv: msrv-install
 	@echo "Checking MSRV ($(RUST_MSRV))..."
 	@CARGO_TARGET_DIR="$(MSRV_TARGET_DIR)" rustup run $(RUST_MSRV) cargo check --locked --workspace --all-features --all-targets
-	@CARGO_TARGET_DIR="$(MSRV_TARGET_DIR)" rustup run $(RUST_MSRV) cargo check --locked --manifest-path threatflux-package-security/Cargo.toml --all-features --all-targets
 	@echo "✅ MSRV check passed"
 
 
 check:
 	@echo "Running cargo check..."
 	$(CARGO) check --locked --workspace --all-features --all-targets
-	$(CARGO) check --locked --manifest-path threatflux-package-security/Cargo.toml --all-features --all-targets
 
 # Dependency management
 deps:
@@ -352,13 +313,11 @@ security-audit:
 	$(MAKE) native-zlib-check
 	@$(CARGO) install cargo-audit --version 0.23.0 --locked
 	$(CARGO) audit
-	cd threatflux-package-security && $(CARGO) audit
 
 # Additional security checks
 deny:
 	@echo "🚫 Running cargo-deny checks..."
 	@$(CARGO) deny --locked --workspace --all-features check
-	@$(CARGO) deny --locked --manifest-path threatflux-package-security/Cargo.toml --config deny.toml --all-features check
 	@echo "✅ Cargo deny checks passed"
 
 outdated:
@@ -383,7 +342,6 @@ security-enhanced: security-audit deny outdated
 deny-check:
 	@echo "Running cargo-deny checks..."
 	$(CARGO) deny --locked --workspace --all-features check
-	$(CARGO) deny --locked --manifest-path threatflux-package-security/Cargo.toml --config deny.toml --all-features check
 
 # Check for outdated dependencies
 outdated-check:
@@ -442,7 +400,6 @@ docs:
 doc-check:
 	@echo "📖 Checking documentation..."
 	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked --workspace --all-features --no-deps --document-private-items
-	@RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked --manifest-path threatflux-package-security/Cargo.toml --all-features --no-deps --document-private-items
 	@echo "✅ Documentation check passed"
 
 doc-links:
@@ -453,63 +410,9 @@ doc-links:
 test-doc:
 	@echo "📚 Testing documentation examples..."
 	@$(CARGO) test --locked --workspace --doc --all-features
-	@$(CARGO) test --locked --manifest-path threatflux-package-security/Cargo.toml --doc --all-features
 	@echo "✅ Doc tests passed"
 
 # Version info
 version:
 	@echo "File Scanner version:"
 	@cargo pkgid | cut -d# -f2
-
-# Library-specific targets
-libs-build:
-	@echo "🔨 Building all ThreatFlux libraries..."
-	@for lib in $(LIBRARIES); do \
-		echo "Building $$lib..."; \
-		$(MAKE) -C "$$lib" build || exit $$?; \
-	done
-
-libs-test:
-	@echo "🧪 Testing all ThreatFlux libraries..."
-	@for lib in $(LIBRARIES); do \
-		echo "Testing $$lib..."; \
-		$(MAKE) -C "$$lib" test || exit $$?; \
-	done
-
-libs-fmt:
-	@echo "🎨 Formatting all ThreatFlux libraries..."
-	@for lib in $(LIBRARIES); do \
-		echo "Formatting $$lib..."; \
-		$(MAKE) -C "$$lib" fmt || exit $$?; \
-	done
-
-libs-clippy:
-	@echo "📎 Linting all ThreatFlux libraries..."
-	@for lib in $(LIBRARIES); do \
-		echo "Linting $$lib..."; \
-		$(MAKE) -C "$$lib" clippy || exit $$?; \
-	done
-
-libs-clean:
-	@echo "🧹 Cleaning all ThreatFlux libraries..."
-	@for lib in $(LIBRARIES); do \
-		echo "Cleaning $$lib..."; \
-		$(MAKE) -C "$$lib" clean || exit $$?; \
-	done
-
-# Parallel targets for faster execution
-parallel-fmt:
-	@echo "🎨 Formatting all ThreatFlux libraries in parallel..."
-	@echo $(LIBRARIES) | tr ' ' '\n' | xargs -I {} -P 6 sh -c 'cd {} && make fmt'
-
-parallel-clippy:
-	@echo "📎 Linting all ThreatFlux libraries in parallel..."
-	@echo $(LIBRARIES) | tr ' ' '\n' | xargs -I {} -P 6 sh -c 'cd {} && make clippy'
-
-parallel-test:
-	@echo "🧪 Testing all ThreatFlux libraries in parallel..."
-	@echo $(LIBRARIES) | tr ' ' '\n' | xargs -I {} -P 6 sh -c 'cd {} && make test'
-
-# Individual library targets
-threatflux-package-security-%:
-	@cd threatflux-package-security && make $*

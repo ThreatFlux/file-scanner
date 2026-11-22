@@ -38,9 +38,8 @@ env:
   BINARY_NAME: file-scanner
   BINARY_PACKAGE: threatflux-file-scanner
   SBOM_MANIFEST_PATH: Cargo.toml
-  # Crates this repository may publish, in publish order. The standalone
-  # threatflux-package-security crate and the vendored yara-x source are never
-  # published from here.
+  # Crates this repository may publish, in publish order. The vendored yara-x
+  # source is never published from here.
   PUBLISH_PACKAGES: threatflux-file-scanner
   # Only workflow_dispatch can set this; tag pushes always perform a real release.
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'true' || 'false' }}

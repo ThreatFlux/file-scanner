@@ -297,7 +297,6 @@
   "source_inventory_excluded_paths": [
     ".git",
     "target",
-    "threatflux-package-security/target",
     "threatflux-threat-detection/target"
   ],
   "source_inventory_matching": "case-insensitive substring, including generated getters/setters/takers and serialized field-name literals",
@@ -323,7 +322,6 @@
     "tests/java_analysis_test.rs": "b2188807dce8292680720c03d61162f5663edb8c1f47a99d61681f25aeb32bf5",
     "tests/pdf_analysis_test.rs": "4192eca28de9f953c215fe2f47b7e4b2c8a6aaa7d41be6ec4f01783347f8f943",
     "tests/signature_test.rs": "fbd98e0f800e12b67b3355ffc453ba6f88bf141c0235fe7cec40c4e172412f2c",
-    "threatflux-package-security/src/analyzers/java.rs": "fa8a8c65e7f864d40ecd57ce757c8d8d79acea0745295adc01d77d6004fb03e9",
     "vendor/rmcp-3.11.0/src/transport/auth.rs": "fdb25ca4ac3dc9e288ced710a1afb6db8074548fc6140ab8bc435b352f7ffd11",
     "vendor/yara-x-1.24.0/src/modules/field_docs.rs": "6c1b55eec284e7ef934e6daafa965d3a664265136bba92de92a37f3f151be639",
     "vendor/yara-x-1.24.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",

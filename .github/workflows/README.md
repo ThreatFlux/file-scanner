@@ -113,9 +113,9 @@ The crate is published as `threatflux-file-scanner`: crates.io treats `-` and
 `_` alike, so the unrelated `file_scanner` crate owns the `file-scanner` name.
 The binary stays `file-scanner` and the library stays `file_scanner`. The
 package `include` list ships only `src/`, the manifest, `Cargo.lock`, the README,
-the changelog and the license. The standalone `threatflux-package-security`
-crate and the vendored YARA-X source are never published from this repository,
-and the published crate builds against the upstream YARA-X release (see
+the changelog and the license. The vendored YARA-X source is never published
+from this repository, and the published crate builds against the upstream
+YARA-X release (see
 [vendor/README.md](../../vendor/README.md#distribution-scope)).
 
 Publishing from the workflow is disabled with the repository variable
@@ -168,8 +168,8 @@ docker run --rm -v /path/to/files:/data:ro ghcr.io/threatflux/file-scanner /data
 
 ## Maintenance
 
-At 06:00 UTC every day, Dependabot checks Cargo (the root workspace and
-`threatflux-package-security`), GitHub Actions and the Dockerfile for routine
+At 06:00 UTC every day, Dependabot checks Cargo, GitHub Actions and the
+Dockerfile for routine
 version updates in one `nightly-dependencies` pull request. Dependabot security
 updates follow the repository's security settings. When updating an action by
 hand, pin the commit SHA that its release tag resolves to and keep the tag in

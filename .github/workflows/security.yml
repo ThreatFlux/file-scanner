@@ -60,12 +60,10 @@ jobs:
       - name: Run cargo audit
         run: |
           cargo audit
-          cargo audit --file threatflux-package-security/Cargo.lock
 
       - name: Run cargo deny
         run: |
           cargo deny --locked --workspace --all-features check
-          cargo deny --locked --manifest-path threatflux-package-security/Cargo.toml --config deny.toml --all-features check
 
 
   dependency-review:
@@ -116,7 +114,6 @@ jobs:
       - name: Build project
         run: |
           cargo build --workspace --release --all-features --locked
-          cargo build --manifest-path threatflux-package-security/Cargo.toml --release --all-features --locked
 
 
       - name: Perform CodeQL Analysis
@@ -164,7 +161,6 @@ jobs:
         run: |
           cargo install cargo-cyclonedx --locked --version 0.5.10
           cargo cyclonedx --all-features --format json --spec-version 1.5 --override-filename sbom
-          cargo cyclonedx --manifest-path threatflux-package-security/Cargo.toml --all-features --format json --spec-version 1.5 --override-filename sbom
 
       - name: Upload SBOM
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

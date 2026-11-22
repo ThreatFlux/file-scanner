@@ -51,11 +51,10 @@ src/
 
 ### Libraries it uses
 
-Three ThreatFlux crates from crates.io do part of the work: `threatflux-binary-analysis` (format parsing;
-the build uses a vendored copy under `vendor/`), `threatflux-string-analysis` (string tracking, wrapped by
+Three ThreatFlux crates from crates.io do part of the work: `threatflux-binary-analysis` (format parsing),
+`threatflux-string-analysis` (string tracking, wrapped by
 `string_tracker_compat.rs`) and `threatflux-threat-detection` (YARA engine and built-in rules, wrapped by
-`threat_detection.rs`). Hashing, caching and package analysis are in this crate. The directory
-`threatflux-package-security/` is a separate crate that is excluded from the workspace and is not used.
+`threat_detection.rs`). Hashing, caching and package analysis are in this crate.
 
 YARA rules run on `yara-x` (vendored under `vendor/`). The MCP runtime is the `rmcp` SDK, and the HTTP
 server is `axum`.

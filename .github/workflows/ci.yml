@@ -154,13 +154,11 @@ jobs:
       - name: Check formatting
         run: |
           cargo fmt --all -- --check
-          cargo fmt --manifest-path threatflux-package-security/Cargo.toml --all -- --check
 
 
       - name: Run clippy
         run: |
           cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-          cargo clippy --manifest-path threatflux-package-security/Cargo.toml --all-targets --all-features --locked -- -D warnings
 
 
   test:
@@ -252,24 +250,18 @@ jobs:
         run: |
           cargo test --workspace --all-features --locked --verbose --jobs 2 -- --skip signature::tests::
           cargo test --workspace --all-features --locked --verbose --jobs 2 signature::tests:: -- --test-threads=1
-          cargo test --manifest-path threatflux-package-security/Cargo.toml --all-features --locked --jobs 2
 
       - name: Run doc tests
         run: |
           cargo test --workspace --all-features --locked --doc --verbose
-          cargo test --manifest-path threatflux-package-security/Cargo.toml --all-features --locked --doc
           echo "📊 Final disk space:"
           df -h
 
-      - name: Test isolated feature configurations
-        run: |
-          cargo test --manifest-path threatflux-package-security/Cargo.toml --no-default-features --locked
-      - name: Build strict workspace and standalone documentation
+      - name: Build strict workspace documentation
         env:
           RUSTDOCFLAGS: -D warnings
         run: |
           cargo doc --workspace --all-features --locked --no-deps
-          cargo doc --manifest-path threatflux-package-security/Cargo.toml --all-features --locked --no-deps
   yara-crypto-compat:
     name: YARA Stable Crypto Compatibility
     runs-on: ubuntu-latest
@@ -482,7 +474,6 @@ jobs:
       - name: Run security audit
         run: |
           cargo audit
-          cargo audit --file threatflux-package-security/Cargo.lock
 
   benchmark:
     name: Benchmarks
@@ -629,7 +620,6 @@ jobs:
       - name: Check all targets at the declared MSRV
         run: |
           cargo check --workspace --all-targets --all-features --locked
-          cargo check --manifest-path threatflux-package-security/Cargo.toml --all-targets --all-features --locked
 defaults:
   run:
     shell: bash

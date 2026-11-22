@@ -341,6 +341,12 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
 - The unselected historical `vendor/threatflux-binary-analysis-0.3.1` source. Builds have used the published crate
   since 0.3.2. The 48-line patch and its provenance notes stay in `vendor/`, the full source stays in Git history,
   and its two files leave the CodeQL review inventory.
+- The in-tree `threatflux-package-security` 0.1.0 crate, which no file-scanner code used, and its hooks in CI,
+  the security workflow, Dependabot, the `Makefile` (`test-package-security`, `lint-package-security`,
+  `feature-test`, `feature-test-full`, `libs-*`, `parallel-*`) and the RSA and CodeQL guard scripts. The maintained
+  crate is [ThreatFlux/threatflux-package-security](https://github.com/ThreatFlux/threatflux-package-security) (0.2.x, a
+  redesign). The 0.1 source, including Maven project parsing and install-script patterns that 0.2 does not have,
+  stays in Git history.
 
 ### Security
 
