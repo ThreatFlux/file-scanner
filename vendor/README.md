@@ -1,3 +1,39 @@
+# Temporary rmcp Chrono patch
+
+Repository-built binaries and containers use the official rmcp 3.11.0 source
+with the optional Chrono changes proposed upstream. The scanner explicitly
+enables the SDK's existing server, macros, base64, stdio and Streamable HTTP
+features. Tests additionally enable the client. The scanner uses neither of
+the two annotation builders that take a Chrono timestamp.
+
+- [Official crate archive](https://static.crates.io/crates/rmcp/rmcp-3.11.0.crate)
+  SHA-256 `391f153431ab68664d946513ea0cb3edbca78eaf99c5a983036cacab6220d85b`,
+  verified against [crates.io](https://index.crates.io/rm/cp/rmcp).
+- [Released source](https://github.com/modelcontextprotocol/rust-sdk/tree/165f8fd514afb8f6d1be3e86260ee9abfce58541/crates/rmcp)
+  and [Apache-2.0 license](rmcp-3.11.0/LICENSE). The binary archives and
+  container include the license as `LICENSE.rmcp`.
+- [Upstream change](https://github.com/modelcontextprotocol/rust-sdk/pull/1474)
+  at `9043cdfa8694d83bf506c2f3eb0313ec173edd7e`. The library changes come
+  from that diff. The normalized Cargo manifest carries the same dependency
+  and feature changes.
+- [Exact local diff](rmcp-3.11.0.patch). The archive's private lockfile,
+  original workspace manifest, VCS metadata and integration test suite are
+  omitted. The SDK's library unit tests are retained. The build script is
+  disabled and omitted because it installs Git hooks inside a checkout.
+
+The CodeQL source inventory includes the unchanged upstream authentication
+transport file because two unit tests contain a certificate error message.
+That transport is feature-gated and the scanner does not enable it.
+
+The SDK clock uses Jiff. The backport preserves timestamp and duration
+formatting, the protocol data model, and both MCP transports. Until the
+ThreatFlux dependency releases are selected, string analysis and threat
+detection still bring Chrono into the scanner's graph.
+
+Remove this override and its vendor files once a published stable rmcp version
+can be selected without Chrono and the locked graph, hosted MCP tests, and
+release and container SBOMs verify the replacement.
+
 # Reviewed stable YARA-X runtime/crypto patch
 
 Repository-built binaries and containers select the official YARA-X 1.23.0

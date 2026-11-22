@@ -183,6 +183,7 @@
     "tests/pdf_analysis_test.rs": "4192eca28de9f953c215fe2f47b7e4b2c8a6aaa7d41be6ec4f01783347f8f943",
     "tests/signature_test.rs": "fbd98e0f800e12b67b3355ffc453ba6f88bf141c0235fe7cec40c4e172412f2c",
     "threatflux-package-security/src/analyzers/java.rs": "fa8a8c65e7f864d40ecd57ce757c8d8d79acea0745295adc01d77d6004fb03e9",
+    "vendor/rmcp-3.11.0/src/transport/auth.rs": "fdb25ca4ac3dc9e288ced710a1afb6db8074548fc6140ab8bc435b352f7ffd11",
     "vendor/threatflux-binary-analysis-0.3.1/src/formats/pe.rs": "5a14e6d0ddc08aa7992f6f51a76423d9e68f194e90b0878d095d58f3e105e92b",
     "vendor/threatflux-binary-analysis-0.3.1/src/types.rs": "c0aae54abd85fbbe01b61302f90c0ec84c34bb5e635e00cb4fda036997a35955",
     "vendor/yara-x-1.23.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",

@@ -267,6 +267,7 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           cp "target/${TARGET}/release/${BINARY_NAME}" LICENSE README.md dist/
+          cp vendor/rmcp-3.11.0/LICENSE dist/LICENSE.rmcp
           tar -czf "${ARCHIVE}" -C dist .
           shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
 
@@ -279,6 +280,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item "target/${env:TARGET}/release/${env:BINARY_NAME}.exe", LICENSE, README.md -Destination dist/
+          Copy-Item vendor/rmcp-3.11.0/LICENSE -Destination dist/LICENSE.rmcp
           Compress-Archive -Path dist/* -DestinationPath $env:ARCHIVE
           $hash = (Get-FileHash $env:ARCHIVE -Algorithm SHA256).Hash.ToLowerInvariant()
           # The "<hash>  <file>" line shasum writes, with an LF ending, so
