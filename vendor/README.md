@@ -34,9 +34,36 @@ Remove this override and its vendor files once a published stable rmcp version
 can be selected without Chrono and the locked graph, hosted MCP tests, and
 release and container SBOMs verify the replacement.
 
-# Reviewed stable YARA-X runtime/crypto patch
+# YARA-X 1.24 runtime and verification patch
 
-Repository-built binaries and containers select the official YARA-X 1.23.0
+Repository builds use the released YARA-X 1.24.0 source with Wasmtime 50.0.3
+and stable RSA 0.10.0. The patch preserves the public key decoder's default
+RSA modulus limits, including its 1024-bit minimum. The hosted crypto harness
+checks those bounds and retains the existing OpenSSL verification vectors.
+
+- [Official crate archive](https://static.crates.io/crates/yara-x/yara-x-1.24.0.crate)
+  SHA-256 `46490aa1d13df1247f106e9620f4221fc8a13b351a9aeef5a34a9b0eaafd78cb`.
+- [Released source](https://github.com/VirusTotal/yara-x/tree/ff2052503a06d660e71fb5acac4d4c43334c4b86/lib)
+  and [BSD-3-Clause license](yara-x-1.24.0/LICENSE) from that exact commit.
+  Binary archives and containers include the license as `LICENSE.yara-x`.
+- [Exact local diff](yara-x-1.24.0.patch). The vendor excludes the upstream
+  private lockfile, workspace manifest, VCS metadata, top-level integration
+  tests and benches. The source, build script and bundled assets are retained.
+  Default builds use the shipped protobuf sources. Module documentation
+  generation opts into the protobuf generator.
+
+The CodeQL inventory binds the new version's source and dependency hashes.
+Its active review list starts empty for 1.24. Historical 1.23 results and
+fixtures retain their original records, so 1.24 findings need native evidence
+and fresh review before any exact match can be applied.
+
+Remove this override once a released stable YARA-X version supports the
+required Wasmtime and RSA graph and equivalent verification behavior passes
+the hosted checks.
+
+# Historical YARA-X 1.23 runtime/crypto patch
+
+The previous repository-built binaries and containers select the official YARA-X 1.23.0
 source with Wasmtime 50.0.3 and stable RSA 0.10.0. The upstream manifest still
 requires Wasmtime 48.0.8 and a prerelease RSA requirement. This explicit patch
 changes the actual parent requirements instead of forcing lockfile transitives.

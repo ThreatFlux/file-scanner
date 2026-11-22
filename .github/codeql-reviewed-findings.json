@@ -1,21 +1,21 @@
 {
-  "analysis_provenance": "Historical native analysis IDs and raw fixtures are retained. The 1.23.0 source/call paths were diff-reviewed on 2026-11-12; the new simulated path fixture is not a fresh native CodeQL run. Hosted native output must be reviewed before merge.",
+  "analysis_provenance": "Historical analysis IDs and fixtures are retained. YARA-X 1.24.0 has its own pinned sources and no active omissions. Hosted native output must be reviewed for the replacement source before merge.",
   "call_path_sha256": {
-    "vendor/yara-x-1.23.0/Cargo.toml": "2509e8e00560bdd5a15c3b3e4082678a3f5d4dced26ad8d2197f69e936c6c795",
-    "vendor/yara-x-1.23.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
-    "vendor/yara-x-1.23.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
-    "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs": "5a8804fc660f5db558324ab6f99181059200eb6a4569e534c4b51fdef518c30e",
-    "vendor/yara-x-1.23.0/src/modules/pe/mod.rs": "6ced8194e0bb3a331dcfb6443ac8ce2653f313e83ab0bf9e41dd3273609f7d63",
-    "vendor/yara-x-1.23.0/src/modules/utils/asn1.rs": "7252226e48ef2ae72c9ded24ee888a23df48fe4a20f940386b2a5c5feee0801c",
-    "vendor/yara-x-1.23.0/src/modules/utils/authenticode.rs": "4ee557e61db02cfe2f07c9c4238a9e172386167e9d939e8f432fbad4c2d0de29",
-    "vendor/yara-x-1.23.0/src/modules/utils/crypto.rs": "19792550f440fd66573cf438e4e0bf717e704df35d476b7b872e5630bc8e099a"
+    "vendor/yara-x-1.24.0/Cargo.toml": "ff60da75a843ccea4ae624eb528818f1917524f9ea797fd4119e62db9291a3fb",
+    "vendor/yara-x-1.24.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
+    "vendor/yara-x-1.24.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
+    "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs": "48af14021135472667de5d7ec95f3411afc72acabb71be8fc86757bf4519691f",
+    "vendor/yara-x-1.24.0/src/modules/pe/mod.rs": "380774be54b2a11ce9938658d0f48bc295b88f7bc8cfa9936735bdb3b935dc88",
+    "vendor/yara-x-1.24.0/src/modules/utils/asn1.rs": "713ae4167a6e087092df73734ed8926e3b372910dc7a473c9f8ed543432f2af8",
+    "vendor/yara-x-1.24.0/src/modules/utils/authenticode.rs": "1cf890a6f0f5cfa9d6b7c066dbc8f71dbb04beebe33e7fcf90e84ab012560059",
+    "vendor/yara-x-1.24.0/src/modules/utils/crypto.rs": "7266c5b6ef5a169344127ab5dcbc6537b3deb84f74a5ff5bb61322eda3e2d09e"
   },
   "dependency_versions": {
     "wasmtime": "50.0.3",
-    "yara-x": "1.23.0"
+    "yara-x": "1.24.0"
   },
-  "policy": "Only the nine exact reviewed rule/path/full-region/raw-message tuples may be annotated. Every other result remains uploaded. Raw SARIF is preserved; annotated evidence includes accepted external false-positive justifications. Source, caller inventory, dependency, duplicate, or manifest guard failures retain unfiltered raw output and fail the job.",
-  "reviewed_findings": [
+  "policy": "Only exact, active reviewed rule, path, full region and raw message matches may be annotated. The historical 1.23.0 tuples are inactive. Every other result remains uploaded. Raw SARIF and annotated evidence are preserved. Source, caller inventory, dependency, duplicate, or manifest guard failures retain unfiltered raw output and fail the job.",
+  "historical_yara_123_findings": [
     {
       "id": "yara-x-1.23-hard-coded-cryptographic-value-305",
       "justification": "Reviewed false positive: this public constant is a deterministic TLSH/Pearson bucket selector or permutation, used solely to compute ELF symbol-similarity telfhash. The identical table and selectors are specified in Trend Micro TLSH; they are not cryptographic keys, password salts or secret material. Randomizing them would invalidate compatible similarity hashes.",
@@ -152,6 +152,7 @@
       }
     }
   ],
+  "reviewed_findings": [],
   "reviewed_merge_commit": "317e1afda545a5259d0f7f739d0949ac723d0ca2",
   "reviewed_native_analysis_id": 1891303529,
   "schema_version": 1,
@@ -175,30 +176,31 @@
   "token_source_inventory": {
     "src/entropy_analysis.rs": "0ed6bac8809e04a046e8627cf1d8bdbbc9afaded17abcab5dc31b49d75c58a93",
     "src/java_analysis.rs": "09b146487001962f5aee03a3e2e5b5ab292a5abd541fdbfed416229044d4f836",
-    "src/mcp_server/tools_analyze.rs": "09fac0e0f5400909ff9e99d9941be06bc739b6408d8a52100c434a93e1276810",
     "src/pdf_analysis.rs": "c740b874c3d70a974aeb9edf2de79521f1d1d9177851887b5404874a23e8fc2d",
     "src/signature.rs": "bf7b9a7e5cd5d974fcc830d9d4a8855b41308e8e08d87116fae5509aa9ef2c25",
+    "src/mcp_server/tools_analyze.rs": "09fac0e0f5400909ff9e99d9941be06bc739b6408d8a52100c434a93e1276810",
     "tests/binary_formats_test.rs": "3559346ac6ac9c5553292cf20d502e25e30e2bbf55e25e437185273a26bff30f",
     "tests/java_analysis_test.rs": "b2188807dce8292680720c03d61162f5663edb8c1f47a99d61681f25aeb32bf5",
     "tests/pdf_analysis_test.rs": "4192eca28de9f953c215fe2f47b7e4b2c8a6aaa7d41be6ec4f01783347f8f943",
     "tests/signature_test.rs": "fbd98e0f800e12b67b3355ffc453ba6f88bf141c0235fe7cec40c4e172412f2c",
     "threatflux-package-security/src/analyzers/java.rs": "fa8a8c65e7f864d40ecd57ce757c8d8d79acea0745295adc01d77d6004fb03e9",
     "vendor/rmcp-3.11.0/src/transport/auth.rs": "fdb25ca4ac3dc9e288ced710a1afb6db8074548fc6140ab8bc435b352f7ffd11",
-    "vendor/threatflux-binary-analysis-0.3.1/src/formats/pe.rs": "5a14e6d0ddc08aa7992f6f51a76423d9e68f194e90b0878d095d58f3e105e92b",
     "vendor/threatflux-binary-analysis-0.3.1/src/types.rs": "c0aae54abd85fbbe01b61302f90c0ec84c34bb5e635e00cb4fda036997a35955",
-    "vendor/yara-x-1.23.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
-    "vendor/yara-x-1.23.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
-    "vendor/yara-x-1.23.0/src/modules/elf/tlsh/mod.rs": "5a8804fc660f5db558324ab6f99181059200eb6a4569e534c4b51fdef518c30e",
-    "vendor/yara-x-1.23.0/src/modules/elf/tlsh/tests.rs": "9f6c4f88fef0b1c9a09a973cc595bbb41daadf05e564c47e2c6d01f040f91acc",
-    "vendor/yara-x-1.23.0/src/modules/field_docs.rs": "e49cc9498e6de4a4384c23484a4756242265331c19ba657e57fdd8898bc321af",
-    "vendor/yara-x-1.23.0/src/modules/macho/parser.rs": "e654e8a8c83304d356184f243993bf674e796f70c3e1b6415916cab81d74e8d5",
-    "vendor/yara-x-1.23.0/src/modules/pe/parser.rs": "8ea3dba0390dcdfd26f90239d7c4209589360e41c53ed5174ec3e71ed03e7b88",
-    "vendor/yara-x-1.23.0/src/modules/protos/generated/macho.rs": "193c995226a2bb4fc81efb3acb2b7946530a035368698581562caf90e18ec6e1",
-    "vendor/yara-x-1.23.0/src/modules/protos/generated/pe.rs": "a3f9fc4f10be465b00e3cb2b7e8fd67e798384cd1369b9e5774b71b1e5fdbeaf",
-    "vendor/yara-x-1.23.0/src/modules/protos/generated/sandbox.rs": "9490cc0e6628510855303b45f38afd2f9297bf55d1b2b105acc0881dda1dad3a",
-    "vendor/yara-x-1.23.0/src/modules/protos/generated/vtnet.rs": "88f6a6ed8244b3dd2b61dbcab1c182aa1ea658373c92a1b015604f4f2ebed92b",
-    "vendor/yara-x-1.23.0/src/modules/utils/asn1.rs": "7252226e48ef2ae72c9ded24ee888a23df48fe4a20f940386b2a5c5feee0801c",
-    "vendor/yara-x-1.23.0/src/modules/utils/authenticode.rs": "4ee557e61db02cfe2f07c9c4238a9e172386167e9d939e8f432fbad4c2d0de29"
+    "vendor/threatflux-binary-analysis-0.3.1/src/formats/pe.rs": "5a14e6d0ddc08aa7992f6f51a76423d9e68f194e90b0878d095d58f3e105e92b",
+    "vendor/yara-x-1.24.0/src/modules/field_docs.rs": "6c1b55eec284e7ef934e6daafa965d3a664265136bba92de92a37f3f151be639",
+    "vendor/yara-x-1.24.0/src/modules/elf/mod.rs": "58ec563f932c9eeb8283944e5aecc1843bf1fb3dd0b5aad2581d09784852a9a3",
+    "vendor/yara-x-1.24.0/src/modules/elf/tlsh/helper.rs": "8e826b7186bc2e1a343daf3367c3e1efde232929e47e43e7fa341e871ace44de",
+    "vendor/yara-x-1.24.0/src/modules/elf/tlsh/mod.rs": "48af14021135472667de5d7ec95f3411afc72acabb71be8fc86757bf4519691f",
+    "vendor/yara-x-1.24.0/src/modules/elf/tlsh/tests.rs": "9f6c4f88fef0b1c9a09a973cc595bbb41daadf05e564c47e2c6d01f040f91acc",
+    "vendor/yara-x-1.24.0/src/modules/macho/parser.rs": "de622bcd29f048b4698b0f88850c440c36530bbac35e613cc5cb830aacb71c7a",
+    "vendor/yara-x-1.24.0/src/modules/pe/parser.rs": "d4975eee186649a05462946566eacb24542d6f4d947ff083f679edd2e4f7395b",
+    "vendor/yara-x-1.24.0/src/modules/protos/generated/macho.rs": "193c995226a2bb4fc81efb3acb2b7946530a035368698581562caf90e18ec6e1",
+    "vendor/yara-x-1.24.0/src/modules/protos/generated/pe.rs": "a3f9fc4f10be465b00e3cb2b7e8fd67e798384cd1369b9e5774b71b1e5fdbeaf",
+    "vendor/yara-x-1.24.0/src/modules/protos/generated/sandbox.rs": "140468fa34ac8d10f18f51d1918a6df6fabd62d58df16edbf038f08ae431e77b",
+    "vendor/yara-x-1.24.0/src/modules/protos/generated/vtnet.rs": "fb03ed3fa5790604defb3afd764cab5b03c69dc340a474844a506d60e9046a7d",
+    "vendor/yara-x-1.24.0/src/modules/utils/asn1.rs": "713ae4167a6e087092df73734ed8926e3b372910dc7a473c9f8ed543432f2af8",
+    "vendor/yara-x-1.24.0/src/modules/utils/authenticode.rs": "1cf890a6f0f5cfa9d6b7c066dbc8f71dbb04beebe33e7fcf90e84ab012560059",
+    "vendor/yara-x-1.24.0/src/scanner/tests.rs": "f3cd3e41a45c0cc1305541fe522bef2fd7b2e48942b4f0bd215fd694973753e9"
   },
   "upstream_sources": [
     "https://github.com/trendmicro/tlsh/blob/master/src/tlsh_impl.cpp",
@@ -207,9 +209,9 @@
   ],
   "vendor": {
     "name": "yara-x",
-    "path": "vendor/yara-x-1.23.0",
-    "published_crate_sha256": "e8a5ff1e1bb43734cc68f3ddc94646c9740c8c559d38fae559f0c79076f801db",
-    "upstream_commit": "afe4585b12f56c698794dc80b3d28ddb87b56c0a",
-    "version": "1.23.0"
+    "path": "vendor/yara-x-1.24.0",
+    "published_crate_sha256": "46490aa1d13df1247f106e9620f4221fc8a13b351a9aeef5a34a9b0eaafd78cb",
+    "upstream_commit": "ff2052503a06d660e71fb5acac4d4c43334c4b86",
+    "version": "1.24.0"
   }
 }

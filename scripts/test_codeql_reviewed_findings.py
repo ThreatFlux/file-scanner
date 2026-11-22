@@ -1,4 +1,4 @@
-"""Retain historical SARIF; test source-re-reviewed 1.23 tuples with simulated paths."""
+"""Retain historical SARIF and exercise retired matching rules in an isolated fixture."""
 
 import argparse
 import contextlib
@@ -37,7 +37,12 @@ class ReviewedFindingsTests(unittest.TestCase):
         summary_environment.start()
         self.addCleanup(summary_environment.stop)
         self.root = self.base / "repository"
-        self.policy = REVIEW.load_policy(REPOSITORY)
+        self.production_policy = REVIEW.load_policy(REPOSITORY)
+        self.policy = copy.deepcopy(self.production_policy)
+        # Historical matches are enabled only in the temporary test policy.
+        # The production policy never matches a retired result.
+        self.policy["reviewed_findings"] = self.policy["historical_yara_123_findings"]
+        self.test_policy_digest = REVIEW.canonical_digest(self.policy)
         paths = set(self.policy["token_source_inventory"])
         paths.update(self.policy["call_path_sha256"])
         paths.update(["Cargo.toml", "Cargo.lock", ".github/codeql-reviewed-findings.json"])
@@ -45,6 +50,9 @@ class ReviewedFindingsTests(unittest.TestCase):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(REPOSITORY / relative, destination)
+        (self.root / ".github/codeql-reviewed-findings.json").write_text(
+            json.dumps(self.policy)
+        )
         self.args = argparse.Namespace(input=self.base / "raw", output=self.base / "upload",
                                        annotated=self.base / "annotated", report=self.base / "report.json")
         self.args.input.mkdir()
@@ -54,9 +62,10 @@ class ReviewedFindingsTests(unittest.TestCase):
     def save_input(self, document):
         (self.args.input / "rust.sarif").write_text(json.dumps(document))
 
-    def run_review(self):
+    def run_review(self, policy_digest=None):
         self.stdout, self.stderr = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(self.stdout), contextlib.redirect_stderr(self.stderr):
+        with (mock.patch.object(REVIEW, "POLICY_DIGEST", policy_digest or self.test_policy_digest),
+              contextlib.redirect_stdout(self.stdout), contextlib.redirect_stderr(self.stderr)):
             status = REVIEW.process_directory(self.root, self.args)
         report = json.loads(self.args.report.read_text())
         upload = json.loads((self.args.output / "rust.sarif").read_text())
@@ -109,6 +118,16 @@ class ReviewedFindingsTests(unittest.TestCase):
                 self.assertEqual(upload, self.sarif)
                 self.assertEqual(annotated, self.sarif)
                 self.assertEqual((self.args.input / "rust.sarif").read_bytes(), data)
+
+    def test_production_policy_keeps_retired_matches(self):
+        (self.root / ".github/codeql-reviewed-findings.json").write_text(
+            json.dumps(self.production_policy)
+        )
+        status, report, upload, annotated = self.run_review(REVIEW.POLICY_DIGEST)
+        self.assertEqual(status, 0)
+        self.assertEqual(report["omitted_count"], 0)
+        self.assertEqual(upload, self.sarif)
+        self.assertEqual(annotated, self.sarif)
 
     def test_simulated_raw_regions_match_without_altering_input(self):
         # Only path migration is simulated: do not claim a fresh hosted run.
@@ -202,7 +221,7 @@ class ReviewedFindingsTests(unittest.TestCase):
                 self.assertEqual(REVIEW.filter_documents(documents, keys), documents)
 
     def test_changed_existing_verification_call_path_blocks_every_omission(self):
-        path = self.root / "vendor/yara-x-1.23.0/src/modules/utils/crypto.rs"
+        path = self.root / "vendor/yara-x-1.24.0/src/modules/utils/crypto.rs"
         path.write_text(path.read_text() + "\n// Changed verification implementation.\n")
         self.assert_blocked_without_omissions()
 
@@ -213,7 +232,7 @@ class ReviewedFindingsTests(unittest.TestCase):
         self.assert_blocked_without_omissions()
 
     def test_added_vendor_caller_blocks_every_omission(self):
-        path = self.root / "vendor/yara-x-1.23.0/src/new_authentication.rs"
+        path = self.root / "vendor/yara-x-1.24.0/src/new_authentication.rs"
         path.write_text('fn authenticate(cert: Certificate) -> bool { cert.thumbprint == "trusted" }\n')
         self.assert_blocked_without_omissions()
 
@@ -242,7 +261,7 @@ class ReviewedFindingsTests(unittest.TestCase):
                 path.unlink()
 
     def test_missing_reviewed_source_blocks_every_omission(self):
-        (self.root / "vendor/yara-x-1.23.0/src/modules/utils/asn1.rs").unlink()
+        (self.root / "vendor/yara-x-1.24.0/src/modules/utils/asn1.rs").unlink()
         self.assert_blocked_without_omissions()
 
     def test_duplicate_reviewed_finding_blocks_every_omission(self):
@@ -259,8 +278,8 @@ class ReviewedFindingsTests(unittest.TestCase):
 
     def test_changed_yara_graph_blocks_every_omission(self):
         path = self.root / "Cargo.lock"
-        text = path.read_text().replace('name = "yara-x"\nversion = "1.23.0"',
-                                        'name = "yara-x"\nversion = "1.24.0"')
+        text = path.read_text().replace('name = "yara-x"\nversion = "1.24.0"',
+                                        'name = "yara-x"\nversion = "1.23.0"')
         path.write_text(text)
         self.assert_blocked_without_omissions()
 

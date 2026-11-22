@@ -485,9 +485,9 @@ dependencies = [
 
 [[package]]
 name = "bstr"
-version = "1.13.1"
+version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+checksum = "a680398c10c7bc0488067c4612226ea905a85f607134b69f3068d505d58c4214"
 dependencies = [
  "memchr",
  "regex-automata",
@@ -2263,12 +2263,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
-name = "leb128"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c83bff1d572d6b9aeef67ddfc8448e4a3737909cb28e81f97c791b9018703e52"
-
-[[package]]
 name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3005,9 +2999,9 @@ dependencies = [
 
 [[package]]
 name = "psl"
-version = "2.1.253"
+version = "2.1.261"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82576eafaa94759a92a0cf047f34d227665811d5cdf70f4b11e25cd813f3de54"
+checksum = "3058f918351d1ee290ff4e70243e419b33269dcb83bc8cd46c5afa8a97a90012"
 dependencies = [
  "psl-types",
 ]
@@ -4858,14 +4852,13 @@ dependencies = [
 
 [[package]]
 name = "walrus"
-version = "0.27.3"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5691aeb3546554822fe2c13d63149c26a027cd07d900a72c7c7f37f4321bfaea"
+checksum = "04f034ddbc5b46d705409d64c617d01b9ed8c6c9ccac0ab6483e907d525bbf37"
 dependencies = [
  "anyhow",
  "gimli 0.32.3",
  "id-arena",
- "leb128",
  "log",
  "walrus-macro",
  "wasm-encoder 0.245.1",
@@ -5500,7 +5493,7 @@ checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
 name = "yara-x"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "annotate-snippets",
  "anyhow",
@@ -5565,9 +5558,9 @@ dependencies = [
 
 [[package]]
 name = "yara-x-macros"
-version = "1.23.0"
+version = "1.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc0df20854de457fdeaa3207e6fa08e439d22c63628e37e5608ae4113ebd8a2a"
+checksum = "5d9568f7c8c3ce9a14a8ef472612bb86668cad05854155173de85b53c2c7189b"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -5577,9 +5570,9 @@ dependencies = [
 
 [[package]]
 name = "yara-x-parser"
-version = "1.23.0"
+version = "1.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "336c1ef292d1d554526b10908198b71920f64dd58e56f39c8689b298fe858a1d"
+checksum = "a7b6d18b9aeceb80d3516efc6658589d4311ee07bc4d29f1d740c28201b37109"
 dependencies = [
  "ascii_tree",
  "bitflags",
