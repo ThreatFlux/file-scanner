@@ -103,6 +103,11 @@ fn test_analyze_symbols_with_elf() {
 fn test_analyze_symbols_with_real_binary() {
     let test_binary = Path::new(env!("CARGO_BIN_EXE_file-scanner"));
     let symbol_table = analyze_symbols(test_binary).unwrap();
+    let symbol_names_truncated = symbol_table.functions.iter().any(|function| {
+        function
+            .name
+            .starts_with("[note] Symbol names were kept only up to a budget of ")
+    });
     let functions: Vec<_> = symbol_table
         .functions
         .iter()
@@ -112,10 +117,11 @@ fn test_analyze_symbols_with_real_binary() {
     assert!(!functions.is_empty());
     assert_eq!(symbol_table.symbol_count.total_functions, functions.len());
     assert!(
-        functions
-            .iter()
-            .any(|function| function.name.contains("main")),
-        "Should find main function"
+        symbol_names_truncated
+            || functions
+                .iter()
+                .any(|function| function.name.contains("main")),
+        "Should find main function when the symbol name budget was not exhausted"
     );
 }
 
