@@ -11,7 +11,7 @@
 # Dependabot tracks both image references. See docs/security for fix evidence.
 
 # rust 1.100.0 on Debian 13 (trixie); multi-arch index digest
-FROM rust:1.100.0-trixie@sha256:e19840879045c951c905d0eaa9887f3439c62000e429963371b376bac8d38c31 AS rust-base
+FROM rust:1.100.0-trixie@sha256:223cc32ddca8f3ee90c436dbc94b6b5f052ea7f9653c5201e9612f08ad7d21b8 AS rust-base
 
 # Install every requested component before the nonroot builder enters the repo.
 ENV RUST_VERSION=1.100.0
@@ -85,7 +85,7 @@ RUN mkdir -p /home/builder/out/bin /home/builder/out/doc /home/builder/runtime-s
     cp vendor/yara-x-1.24.0/LICENSE /home/builder/out/doc/LICENSE.yara-x
 
 # Wolfi glibc 2.44, nonroot uid/gid 65532; amd64/arm64 multi-arch index digest
-FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:48ce6d7d3006f17054a54ef41aac5222ac308282db6d67ed508cf024a6df04de AS runtime
+FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:3359c6ba6b3bcf3b1d2179849f782365564cb262789e732e2833b25b9a8c00f1 AS runtime
 
 # Placeholder: docker.yml passes the git ref name (vX.Y.Z on release tags) and the release
 # dry run passes vX.Y.Z with --build-arg VERSION. A build without it is labelled 0.0.0.
