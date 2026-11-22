@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(unix)]
@@ -87,9 +87,9 @@ pub struct FileMetadata {
     pub file_name: String,
     pub file_size: u64,
     pub size: u64, // Alias for compatibility
-    pub created: Option<DateTime<Utc>>,
-    pub modified: Option<DateTime<Utc>>,
-    pub accessed: Option<DateTime<Utc>>,
+    pub created: Option<Timestamp>,
+    pub modified: Option<Timestamp>,
+    pub accessed: Option<Timestamp>,
     pub permissions: String,
     pub is_executable: bool,
     pub mime_type: Option<String>,
@@ -203,15 +203,15 @@ impl FileMetadata {
         }
 
         if let Ok(modified) = metadata.modified() {
-            self.modified = Some(DateTime::from(modified));
+            self.modified = Timestamp::try_from(modified).ok();
         }
 
         if let Ok(accessed) = metadata.accessed() {
-            self.accessed = Some(DateTime::from(accessed));
+            self.accessed = Timestamp::try_from(accessed).ok();
         }
 
         if let Ok(created) = metadata.created() {
-            self.created = Some(DateTime::from(created));
+            self.created = Timestamp::try_from(created).ok();
         }
     }
 
@@ -451,10 +451,10 @@ mod tests {
         assert!(metadata.accessed.is_some());
 
         // Verify timestamps are recent (within last minute)
-        let now = Utc::now();
+        let now = Timestamp::now();
         if let Some(modified) = metadata.modified {
-            let diff = now.signed_duration_since(modified);
-            assert!(diff.num_seconds() < 60 && diff.num_seconds() >= 0);
+            let diff = now.duration_since(modified);
+            assert!(diff.as_secs() < 60 && diff.as_secs() >= 0);
         }
     }
 

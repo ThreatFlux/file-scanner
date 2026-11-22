@@ -43,10 +43,10 @@
     clippy::ignored_unit_patterns
 )]
 
-use chrono::{Duration, Utc};
 use file_scanner::cache::{
     AnalysisCache, CacheEntry, CacheMetadata, CacheSearchQuery, CacheStatistics,
 };
+use jiff::{SignedDuration, Timestamp};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -62,7 +62,7 @@ fn create_test_entry(file_hash: &str, tool_name: &str, file_path: &str) -> Cache
             .cloned()
             .collect(),
         result: serde_json::json!({"result": "test"}),
-        timestamp: Utc::now(),
+        timestamp: Timestamp::now(),
         file_size: 1024,
         execution_time_ms: 100,
     }
@@ -75,7 +75,7 @@ fn create_custom_entry(
     file_path: &str,
     file_size: u64,
     execution_time_ms: u64,
-    timestamp: chrono::DateTime<Utc>,
+    timestamp: Timestamp,
 ) -> CacheEntry {
     CacheEntry {
         file_path: file_path.to_string(),
@@ -201,8 +201,12 @@ mod entry_operations_tests {
         let temp_dir = TempDir::new().unwrap();
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
-        let now = Utc::now();
-        let timestamps = [now - Duration::hours(2), now - Duration::hours(1), now];
+        let now = Timestamp::now();
+        let timestamps = [
+            now - SignedDuration::from_hours(2),
+            now - SignedDuration::from_hours(1),
+            now,
+        ];
 
         for timestamp in &timestamps {
             let entry = create_custom_entry(
@@ -228,7 +232,7 @@ mod entry_operations_tests {
         let temp_dir = TempDir::new().unwrap();
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
 
         // Add entries for different tools with different timestamps
         let entry1 = create_custom_entry(
@@ -237,7 +241,7 @@ mod entry_operations_tests {
             "/test/file.bin",
             1024,
             100,
-            now - Duration::hours(1),
+            now - SignedDuration::from_hours(1),
         );
         let entry2 = create_custom_entry("hash123", "tool2", "/test/file.bin", 1024, 200, now);
         let entry3 = create_custom_entry(
@@ -246,7 +250,7 @@ mod entry_operations_tests {
             "/test/file.bin",
             1024,
             150,
-            now - Duration::minutes(30),
+            now - SignedDuration::from_mins(30),
         );
 
         cache.add_entry(entry1).await.unwrap();
@@ -256,7 +260,7 @@ mod entry_operations_tests {
         let latest_tool1 = cache.get_latest_analysis("hash123", "tool1").await.unwrap();
         let latest_tool2 = cache.get_latest_analysis("hash123", "tool2").await.unwrap();
 
-        assert_eq!(latest_tool1.timestamp, now - Duration::minutes(30));
+        assert_eq!(latest_tool1.timestamp, now - SignedDuration::from_mins(30));
         assert_eq!(latest_tool2.timestamp, now);
     }
 
@@ -373,12 +377,27 @@ mod search_functionality_tests {
         let temp_dir = TempDir::new().unwrap();
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let test_data = vec![
-            ("hash1", "tool", "/file1.bin", now - Duration::days(2)),
-            ("hash2", "tool", "/file2.bin", now - Duration::hours(1)),
+            (
+                "hash1",
+                "tool",
+                "/file1.bin",
+                now - SignedDuration::from_hours(48),
+            ),
+            (
+                "hash2",
+                "tool",
+                "/file2.bin",
+                now - SignedDuration::from_hours(1),
+            ),
             ("hash3", "tool", "/file3.bin", now),
-            ("hash4", "tool", "/file4.bin", now + Duration::hours(1)),
+            (
+                "hash4",
+                "tool",
+                "/file4.bin",
+                now + SignedDuration::from_hours(1),
+            ),
         ];
 
         for (hash, tool, path, timestamp) in test_data {
@@ -389,8 +408,8 @@ mod search_functionality_tests {
         let query = CacheSearchQuery {
             tool_name: None,
             file_path_pattern: None,
-            start_time: Some(now - Duration::hours(2)),
-            end_time: Some(now + Duration::minutes(30)),
+            start_time: Some(now - SignedDuration::from_hours(2)),
+            end_time: Some(now + SignedDuration::from_mins(30)),
             min_file_size: None,
             max_file_size: None,
         };
@@ -412,7 +431,7 @@ mod search_functionality_tests {
         ];
 
         for (hash, tool, path, size) in test_data {
-            let entry = create_custom_entry(hash, tool, path, size, 100, Utc::now());
+            let entry = create_custom_entry(hash, tool, path, size, 100, Timestamp::now());
             cache.add_entry(entry).await.unwrap();
         }
 
@@ -434,14 +453,14 @@ mod search_functionality_tests {
         let temp_dir = TempDir::new().unwrap();
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let test_data = vec![
             (
                 "hash1",
                 "hash_tool",
                 "/bin/ls",
                 1024,
-                now - Duration::hours(1),
+                now - SignedDuration::from_hours(1),
             ),
             ("hash2", "string_tool", "/bin/cat", 2048, now),
             ("hash3", "hash_tool", "/usr/bin/grep", 512, now),
@@ -450,7 +469,7 @@ mod search_functionality_tests {
                 "hash_tool",
                 "/home/file.txt",
                 1536,
-                now - Duration::days(1),
+                now - SignedDuration::from_hours(24),
             ),
         ];
 
@@ -462,7 +481,7 @@ mod search_functionality_tests {
         let query = CacheSearchQuery {
             tool_name: Some("hash_tool".to_string()),
             file_path_pattern: Some("bin".to_string()),
-            start_time: Some(now - Duration::hours(2)),
+            start_time: Some(now - SignedDuration::from_hours(2)),
             end_time: None,
             min_file_size: Some(500),
             max_file_size: Some(2000),
@@ -518,7 +537,7 @@ mod statistics_tests {
         assert_eq!(metadata.total_entries, 3);
         assert_eq!(metadata.total_unique_files, 2);
         assert!(metadata.cache_size_bytes > 0);
-        assert!(metadata.last_updated <= Utc::now());
+        assert!(metadata.last_updated <= Timestamp::now());
     }
 
     #[tokio::test]
@@ -535,7 +554,7 @@ mod statistics_tests {
         ];
 
         for (hash, tool, path, exec_time) in test_data {
-            let entry = create_custom_entry(hash, tool, path, 1024, exec_time, Utc::now());
+            let entry = create_custom_entry(hash, tool, path, 1024, exec_time, Timestamp::now());
             cache.add_entry(entry).await.unwrap();
         }
 
@@ -941,7 +960,7 @@ mod serialization_tests {
                     "timestamp": "2024-01-01T00:00:00Z"
                 }
             }),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             file_size: 4096,
             execution_time_ms: 500,
         };
@@ -965,7 +984,7 @@ mod serialization_tests {
             total_entries: 100,
             total_unique_files: 50,
             cache_size_bytes: 1048576,
-            last_updated: Utc::now(),
+            last_updated: Timestamp::now(),
         };
 
         let json = serde_json::to_string_pretty(&metadata).unwrap();
@@ -981,8 +1000,8 @@ mod serialization_tests {
         let query = CacheSearchQuery {
             tool_name: Some("test_tool".to_string()),
             file_path_pattern: Some("/test/pattern".to_string()),
-            start_time: Some(Utc::now() - Duration::hours(1)),
-            end_time: Some(Utc::now()),
+            start_time: Some(Timestamp::now() - SignedDuration::from_hours(1)),
+            end_time: Some(Timestamp::now()),
             min_file_size: Some(1024),
             max_file_size: Some(1048576),
         };
@@ -1147,7 +1166,8 @@ mod edge_case_tests {
         ];
 
         for (hash, tool, exec_time) in test_data {
-            let entry = create_custom_entry(hash, tool, "/file.bin", 1024, exec_time, Utc::now());
+            let entry =
+                create_custom_entry(hash, tool, "/file.bin", 1024, exec_time, Timestamp::now());
             cache.add_entry(entry).await.unwrap();
         }
 

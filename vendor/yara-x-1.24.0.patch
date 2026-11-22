@@ -1,0 +1,242 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -76,7 +76,6 @@
+     "default-modules",
+     "exact-atoms",
+     "fast-regexp",
+-    "generate-proto-code",
+ ]
+ default-modules = [
+     "console-module",
+@@ -112,7 +111,7 @@
+ ]
+ exact-atoms = []
+ fast-regexp = []
+-generate-module-docs = ["protoc"]
++generate-module-docs = ["generate-proto-code", "protoc"]
+ generate-proto-code = [
+     "dep:protobuf-codegen",
+     "dep:protobuf-parse",
+@@ -186,29 +185,6 @@
+ name = "yara_x"
+ path = "src/lib.rs"
+ 
+-[[test]]
+-name = "external_module"
+-path = "tests/external_module.rs"
+-
+-[[test]]
+-name = "wasm"
+-path = "tests/wasm.rs"
+-
+-[[bench]]
+-name = "dex"
+-path = "benches/dex.rs"
+-harness = false
+-
+-[[bench]]
+-name = "pe"
+-path = "benches/pe.rs"
+-harness = false
+-
+-[[bench]]
+-name = "scanner"
+-path = "benches/scanner.rs"
+-harness = false
+-
+ [dependencies.annotate-snippets]
+ version = "0.12.18"
+ 
+@@ -486,7 +462,7 @@
+ optional = true
+ 
+ [target.'cfg(not(target_family = "wasm"))'.dependencies.wasmtime]
+-version = "48.0.10"
++version = "50.0.3"
+ features = [
+     "cranelift",
+     "runtime",
+--- a/src/modules/utils/crypto.rs
++++ b/src/modules/utils/crypto.rs
+@@ -168,23 +168,14 @@
+     }
+ }
+ 
+-/// Minimum RSA modulus size, in bits, accepted when decoding public keys.
+-///
+-/// `rsa` rejects moduli shorter than `rsa::PublicKey::MIN_SIZE` (1024 bits)
+-/// by default, but signatures in older files use shorter keys. Like rsa
+-/// 0.10.0-rc.19, which only applied that minimum to key generation, we
+-/// don't impose any minimum here.
+-const RSA_MIN_KEY_BITS: usize = 1;
+-
+ /// Object identifier for `id-RSASSA-PSS` (RFC 4055).
+ const ID_RSASSA_PSS: rsa::pkcs8::ObjectIdentifier =
+     rsa::pkcs8::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.10");
+ 
+ /// Decodes a PKCS#1 `RSAPublicKey` from DER.
+ ///
+-/// This is equivalent to `rsa::pkcs1::DecodeRsaPublicKey::from_pkcs1_der`,
+-/// except that it accepts moduli shorter than 1024 bits. See
+-/// [`RSA_MIN_KEY_BITS`].
++/// Use the stable RSA decoder's default modulus bounds, as in the previous
++/// scanner release.
+ fn rsa_key_from_pkcs1_der(
+     der: &[u8],
+ ) -> Result<rsa::PublicKey, PublicKeyError> {
+@@ -202,18 +193,15 @@
+             .map_err(|_| rsa::pkcs1::Error::KeyMalformed)
+     };
+ 
+-    Ok(rsa::PublicKey::new_with_size_limits(
++    Ok(rsa::PublicKey::new(
+         to_uint(key.modulus.as_bytes())?,
+         to_uint(key.public_exponent.as_bytes())?,
+-        RSA_MIN_KEY_BITS..=rsa::PublicKey::MAX_SIZE,
+     )?)
+ }
+ 
+ /// Decodes an RSA `SubjectPublicKeyInfo` from DER.
+ ///
+-/// This is equivalent to `rsa::pkcs8::DecodePublicKey::from_public_key_der`,
+-/// including its validation of the algorithm identifier, except that it
+-/// accepts moduli shorter than 1024 bits. See [`RSA_MIN_KEY_BITS`].
++/// Validate the algorithm identifier and preserve the default RSA modulus bounds.
+ fn rsa_key_from_spki_der(
+     der: &[u8],
+ ) -> Result<rsa::PublicKey, PublicKeyError> {
+@@ -359,10 +347,10 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use rsa::traits::PublicKeyParts;
+     use x509_parser::prelude::FromDer;
+ 
+-    // Keys and signatures below were generated with OpenSSL. Each signature
+-    // is a PKCS#1 v1.5 signature of SHA-256("yara-x").
++    // Public keys below were generated with OpenSSL.
+ 
+     // 512-bit modulus.
+     const RSA_512_N: &str = "bc105b6c2b1df59226754717564eee86388a8593eb089d2e\
+@@ -373,20 +361,12 @@
+         4100bc105b6c2b1df59226754717564eee86388a8593eb089d2ee69ec2dfd98fef93f7\
+         2f759103b287253dbeeeb6e1f0d9912fb4d64f004940b1eda87555a6bc796d02030100\
+         01";
+-
+-    const RSA_512_SIG: &str = "7a02b771937d159883bbbbdd4bdd9abdf5c64719445299\
+-        311d126f30161924c9da8fcc7090372ede54811852f031b9afd471ad1704797f06915d\
+-        dac375aabbd7";
+ 
+     // 520-bit modulus, which isn't a multiple of the 64-bit limb size.
+     const RSA_520_SPKI: &str = "305d300d06092a864886f70d0101010500034c00304902\
+         4200ba54b8e7c013161f78e9dfed5ccc9222629726f65b9f3165da6531fbebb1acb062\
+         c90671d22efc435fd61d732cd61c564181c3e32775f7e9602711c276af72e09b020301\
+         0001";
+-
+-    const RSA_520_SIG: &str = "52bed10da0486862e86bbd4b0fe26a1b583314944cf4ae\
+-        87b722ef3856f90ac33cc307e48a38fe1764e973359fbe513ff490027f07c5d991911c\
+-        5c9984adbe4660";
+ 
+     // Contents of the OBJECT IDENTIFIERs used below.
+     const OID_RSA_ENCRYPTION: &[u8] =
+@@ -452,20 +432,24 @@
+         PublicKey::try_from(&spki)
+     }
+ 
+-    fn assert_verifies(key: &PublicKey, sig: &str) {
+-        let sig = hex::decode(sig).unwrap();
+-        assert!(key.verify_digest::<Sha256>(Sha256::digest(b"yara-x"), &sig));
+-        assert!(!key.verify_digest::<Sha256>(Sha256::digest(b"yara"), &sig));
++    fn valid_modulus() -> Box<[u8]> {
++        rsa::PublicKey::from_public_key_der(include_bytes!(
++            "testdata/stable-rsa-public.der"
++        ))
++        .unwrap()
++        .n_bytes()
+     }
+ 
+     #[test]
+-    fn rsa_keys_shorter_than_1024_bits_verify() {
+-        for (spki, sig) in
+-            [(RSA_512_SPKI, RSA_512_SIG), (RSA_520_SPKI, RSA_520_SIG)]
+-        {
++    fn rsa_keys_shorter_than_1024_bits_are_rejected() {
++        for spki in [RSA_512_SPKI, RSA_520_SPKI] {
+             let der = hex::decode(spki).unwrap();
+-            assert_verifies(&from_der(&der).unwrap(), sig);
+-            assert_verifies(&from_spki(&der).unwrap(), sig);
++            for result in [from_der(&der), from_spki(&der)] {
++                assert!(matches!(
++                    result,
++                    Err(PublicKeyError::Rsa(rsa::Error::ModulusTooSmall))
++                ));
++            }
+         }
+     }
+ 
+@@ -479,7 +463,7 @@
+ 
+     #[test]
+     fn rsa_spki_algorithm_parameters() {
+-        let key = pkcs1(&n_512(), E_65537);
++        let key = pkcs1(&valid_modulus(), E_65537);
+ 
+         // `rsaEncryption` requires NULL parameters.
+         assert!(from_der(&spki(OID_RSA_ENCRYPTION, Some(NULL), &key)).is_ok());
+@@ -516,7 +500,7 @@
+     #[test]
+     fn invalid_rsa_keys() {
+         // Even modulus.
+-        let mut n = n_512();
++        let mut n = valid_modulus();
+         *n.last_mut().unwrap() &= 0xfe;
+         let key = pkcs1(&n, E_65537);
+         assert!(matches!(
+@@ -538,7 +522,7 @@
+ 
+         // Public exponent too small.
+         assert!(matches!(
+-            rsa_key_from_pkcs1_der(&pkcs1(&n_512(), &[0x01])),
++            rsa_key_from_pkcs1_der(&pkcs1(&valid_modulus(), &[0x01])),
+             Err(PublicKeyError::Rsa(rsa::Error::PublicExponentTooSmall))
+         ));
+ 
+@@ -549,3 +533,38 @@
+         ));
+     }
+ }
++
++#[cfg(test)]
++mod stable_rsa_tests {
++    use super::*;
++
++    #[test]
++    fn stable_rsa_verifies_openssl_sha256_signatures() {
++        // Generated with OpenSSL, independent of either Rust digest API.
++        let key = PublicKey::Rsa(
++            rsa_key_from_spki_der(include_bytes!(
++                "testdata/stable-rsa-public.der"
++            ))
++            .unwrap(),
++        );
++        let digest = Sha256::digest(b"YARA-X stable RSA compatibility regression\n");
++        assert!(
++            key.verify_digest::<Sha256>(digest, include_bytes!("testdata/stable-rsa-prefixed.sig"))
++        );
++        // Preserve upstream compatibility with old, unprefixed signatures.
++        assert!(
++            key.verify_digest::<Sha256>(
++                digest,
++                include_bytes!("testdata/stable-rsa-unprefixed.sig")
++            )
++        );
++        let wrong_digest = Sha256::digest(b"modified message");
++        assert!(!key.verify_digest::<Sha256>(
++            wrong_digest,
++            include_bytes!("testdata/stable-rsa-prefixed.sig")
++        ));
++        let mut corrupt = *include_bytes!("testdata/stable-rsa-prefixed.sig");
++        corrupt[0] ^= 1;
++        assert!(!key.verify_digest::<Sha256>(digest, &corrupt));
++    }
++}

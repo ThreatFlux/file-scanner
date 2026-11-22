@@ -1,5 +1,5 @@
-use chrono::{DateTime, Utc};
 use file_scanner::metadata::FileMetadata;
+use jiff::Timestamp;
 
 pub mod fixtures;
 
@@ -22,11 +22,11 @@ pub mod utils {
     }
 
     /// Check if a timestamp is recent (within last minute)
-    pub fn is_recent_timestamp(time: &Option<DateTime<Utc>>) -> bool {
+    pub fn is_recent_timestamp(time: &Option<Timestamp>) -> bool {
         if let Some(t) = time {
-            let now = Utc::now();
-            let elapsed = now.signed_duration_since(*t);
-            return elapsed.num_seconds() < 60 && elapsed.num_seconds() >= 0;
+            let now = Timestamp::now();
+            let elapsed = now.duration_since(*t);
+            return elapsed.as_secs() < 60 && elapsed.as_secs() >= 0;
         }
         false
     }

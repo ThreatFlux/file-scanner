@@ -80,7 +80,9 @@ RUN cargo install cargo-cyclonedx --locked --version 0.5.10 && \
 # because the runtime has no shell to mkdir with.
 RUN mkdir -p /home/builder/out/bin /home/builder/out/doc /home/builder/runtime-skel/data && \
     cp "target/release/${BINARY_NAME}" /home/builder/out/bin/file-scanner && \
-    cp "/build/${BINARY_NAME}-sbom.json" /home/builder/out/doc/sbom.cdx.json
+    cp "/build/${BINARY_NAME}-sbom.json" /home/builder/out/doc/sbom.cdx.json && \
+    cp vendor/rmcp-3.11.0/LICENSE /home/builder/out/doc/LICENSE.rmcp && \
+    cp vendor/yara-x-1.24.0/LICENSE /home/builder/out/doc/LICENSE.yara-x
 
 # Wolfi glibc 2.44, nonroot uid/gid 65532; amd64/arm64 multi-arch index digest
 FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:48ce6d7d3006f17054a54ef41aac5222ac308282db6d67ed508cf024a6df04de AS runtime

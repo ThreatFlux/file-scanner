@@ -1,7 +1,79 @@
-# Reviewed stable YARA-X runtime/crypto patch
+# Temporary rmcp Chrono patch
 
-Repository-built binaries and containers select the official YARA-X 1.23.0
-source with Wasmtime 50.0.1 and stable RSA 0.10.0. The upstream manifest still
+Repository-built binaries and containers use the official rmcp 3.11.0 source
+with the optional Chrono changes proposed upstream. The scanner explicitly
+enables the SDK's existing server, macros, base64, stdio and Streamable HTTP
+features. Tests additionally enable the client. The scanner uses neither of
+the two annotation builders that take a Chrono timestamp.
+
+- [Official crate archive](https://static.crates.io/crates/rmcp/rmcp-3.11.0.crate)
+  SHA-256 `391f153431ab68664d946513ea0cb3edbca78eaf99c5a983036cacab6220d85b`,
+  verified against [crates.io](https://index.crates.io/rm/cp/rmcp).
+- [Released source](https://github.com/modelcontextprotocol/rust-sdk/tree/165f8fd514afb8f6d1be3e86260ee9abfce58541/crates/rmcp)
+  and [Apache-2.0 license](rmcp-3.11.0/LICENSE). The binary archives and
+  container include the license as `LICENSE.rmcp`.
+- [Upstream change](https://github.com/modelcontextprotocol/rust-sdk/pull/1474)
+  at `9043cdfa8694d83bf506c2f3eb0313ec173edd7e`. The library changes come
+  from that diff. The normalized Cargo manifest carries the same dependency
+  and feature changes.
+- [Exact local diff](rmcp-3.11.0.patch). The archive's private lockfile,
+  original workspace manifest, VCS metadata and integration test suite are
+  omitted. The SDK's library unit tests are retained. The build script is
+  disabled and omitted because it installs Git hooks inside a checkout.
+
+The CodeQL source inventory includes the unchanged upstream authentication
+transport file because two unit tests contain a certificate error message.
+That transport is feature-gated and the scanner does not enable it.
+
+The SDK clock uses Jiff. The backport preserves timestamp and duration
+formatting, the protocol data model, and both MCP transports. The scanner
+also selects published string-analysis 1.0.0 and threat-detection 0.3.0 to
+remove Chrono from its locked dependency graph.
+
+Remove this override and its vendor files once a published stable rmcp version
+can be selected without Chrono and the locked graph, hosted MCP tests, and
+release and container SBOMs verify the replacement.
+
+# YARA-X 1.24 runtime and verification patch
+
+Repository builds use the released YARA-X 1.24.0 source with Wasmtime 50.0.3
+and stable RSA 0.10.0. The patch preserves the public key decoder's default
+RSA modulus limits, including its 1024-bit minimum. The hosted crypto harness
+checks those bounds and retains the existing OpenSSL verification vectors.
+
+- [Official crate archive](https://static.crates.io/crates/yara-x/yara-x-1.24.0.crate)
+  SHA-256 `46490aa1d13df1247f106e9620f4221fc8a13b351a9aeef5a34a9b0eaafd78cb`.
+- [Released source](https://github.com/VirusTotal/yara-x/tree/ff2052503a06d660e71fb5acac4d4c43334c4b86/lib)
+  and [BSD-3-Clause license](yara-x-1.24.0/LICENSE) from that exact commit.
+  Binary archives and containers include the license as `LICENSE.yara-x`.
+- [Exact local diff](yara-x-1.24.0.patch). The vendor excludes the upstream
+  private lockfile, workspace manifest, VCS metadata, top-level integration
+  tests and benches. The source, build script and bundled assets are retained.
+  Default builds use the shipped protobuf sources. Module documentation
+  generation opts into the protobuf generator.
+
+The CodeQL inventory binds the new version's source and dependency hashes.
+The nine approved matches come from native analysis 2223686152. They cover
+the public TLSH checksum and bucket constants for ELF similarity and the
+certificate display thumbprint. The built-in signature and chain verification
+paths do not consume the thumbprint. Custom rules can read the PE and optional
+MSI metadata. Mach-O shares ASN.1 parsing and discards the thumbprint. The
+historical analysis and all unmatched results are retained. [Native analysis](https://github.com/ThreatFlux/file-scanner/actions/runs/45004815602/job/137153917782)
+
+The scanner selects the published threat-detection 0.3.0 crate. Its archive
+SHA-256 is `d31a0389d4c7c1bc8cf35aa031df610b7c70cd4ec5f7bc0d31b77fac46f37740`.
+All sixteen Rust files match the tagged source and invoke no RSA API. Its
+YARA feature contributes the stable `pkcs1v15` feature while retaining the
+shipped protobuf sources. [Published release](https://github.com/ThreatFlux/threatflux-threat-detection/releases/tag/v0.3.0)
+
+Remove this override once a released stable YARA-X version supports the
+required Wasmtime and RSA graph and equivalent verification behavior passes
+the hosted checks.
+
+# Historical YARA-X 1.23 runtime/crypto patch
+
+The previous repository-built binaries and containers select the official YARA-X 1.23.0
+source with Wasmtime 50.0.3 and stable RSA 0.10.0. The upstream manifest still
 requires Wasmtime 48.0.8 and a prerelease RSA requirement. This explicit patch
 changes the actual parent requirements instead of forcing lockfile transitives.
 
@@ -10,9 +82,17 @@ changes the actual parent requirements instead of forcing lockfile transitives.
 - Upstream commit: [`afe4585b12f56c698794dc80b3d28ddb87b56c0a`](https://github.com/VirusTotal/yara-x/tree/afe4585b12f56c698794dc80b3d28ddb87b56c0a/lib).
 - The BSD-3-Clause license is retained from that exact upstream commit (the crate archive omits it); SHA256 `fdf05444c9178e662fa28810d94a1fa6ec32d7be798241c98094213317265880`. Upstream source/build assets are preserved.
 - [Exact local diff](yara-x-1.23.0.patch): stable RSA 0.10 with its newly required
-  `pkcs1v15` feature, Wasmtime 50.0.1, current `rsa::PublicKey` aliases, and the
+  `pkcs1v15` feature, Wasmtime 50.0.3, current `rsa::PublicKey` aliases, and the
   independent OpenSSL signature regression retained from the previous patch.
   Original workspace/lock/VCS metadata and benchmark declarations are omitted.
+
+The vendored default features use the protobuf bindings shipped in the official
+archive. All default modules and rule-compiler optimizations are enabled.
+Build-time generation remains available through `generate-proto-code`; keeping
+it opt-in removes the `yara-x-proto` and Chrono dependency path from normal
+scanner builds, including the YARA dependency from the threat-detection crate.
+The optional `generate-module-docs` feature enables both protobuf code
+generation and `protoc` for module documentation builds.
 
 YARA-X 1.23's global-linker implementation compiles against Wasmtime 50 without a
 runtime source bridge. RSA 0.10 shares the current digest/PKCS8 generation, so

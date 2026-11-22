@@ -1,7 +1,7 @@
 name: Auto Release
 
 concurrency:
-  # A publishing release must finish its commit, tag and downstream dispatch.
+  # A release operation must finish its proposal or tag and downstream dispatch.
   # Dry runs and other repositories never share the real release queue.
   group: auto-release-${{ github.event.workflow_run.head_repository.full_name || github.repository }}-${{ github.event.workflow_run.head_branch || github.ref_name || 'main' }}${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '-dry-run' || '' }}
   cancel-in-progress: false
@@ -9,9 +9,9 @@ concurrency:
 
 # workflow_run only starts the reusable release on this repository's main: the
 # reusable workflow refuses runs that did not succeed or that come from another
-# repository (fork pull requests), and it releases the triggering commit only
-# after every required workflow passed for it. Nothing from the triggering run
-# (artifacts, caches or untrusted inputs) is consumed.
+# repository (fork pull requests). It proposes or publishes a release only
+# after every required workflow passed for the target commit. Nothing from the
+# triggering run (artifacts, caches or untrusted inputs) is consumed.
 on:
   workflow_run:  # zizmor: ignore[dangerous-triggers]
     workflows: ["CI", "Security Audit"]
@@ -51,11 +51,12 @@ jobs:
       actions: write
       contents: write
       pull-requests: write
-    uses: ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml@c0af79c1d1cbce16cb627d1301942ac668c98beb # v0.7.11
+    uses: ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml@a3f85c010afd18769e799aae3bd3cc17496605a7 # signed release guard candidate
     with:
       bump: ${{ github.event.inputs.version_bump || 'auto' }}
-      # Only a manual dispatch can request a dry run; workflow_run always releases.
+      # Only a manual dispatch can request a dry run.
       dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+      create-pr: true
       required-workflows: ci.yml,security.yml
       # The threatflux-automation GitHub App cuts the release, so its tag push
       # starts release.yml and docker.yml through their `push: tags` triggers

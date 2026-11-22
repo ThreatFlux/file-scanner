@@ -13,7 +13,7 @@
 //! stderr); it never panics and never fails a tool call.
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -214,7 +214,8 @@ pub struct CacheEntry {
     pub tool_name: String,
     pub tool_args: HashMap<String, serde_json::Value>,
     pub result: serde_json::Value,
-    pub timestamp: DateTime<Utc>,
+    #[schema(value_type = String, format = DateTime)]
+    pub timestamp: Timestamp,
     pub file_size: u64,
     pub execution_time_ms: u64,
 }
@@ -224,7 +225,7 @@ pub struct CacheMetadata {
     pub total_entries: usize,
     pub total_unique_files: usize,
     pub cache_size_bytes: u64,
-    pub last_updated: DateTime<Utc>,
+    pub last_updated: Timestamp,
 }
 
 /// An entry without its result: what the index holds and what listings show.
@@ -239,7 +240,7 @@ pub struct EntrySummary {
     /// Digest of the full arguments; lookups compare it, not `tool_args`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub args_digest: String,
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     pub file_size: u64,
     /// Modification time of the file when it was analyzed (Unix milliseconds),
     /// when the caller recorded it; lets a lookup skip hashing the file.
@@ -309,7 +310,7 @@ fn entry_file_name(hash: &str) -> String {
 }
 
 fn now_ms() -> u64 {
-    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0)
+    u64::try_from(Timestamp::now().as_millisecond()).unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -577,7 +578,7 @@ impl AnalysisCache {
             total_entries: state.slots.values().map(|s| s.rows.len()).sum(),
             total_unique_files: state.slots.len(),
             cache_size_bytes: state.slots.values().map(|s| s.bytes).sum(),
-            last_updated: Utc::now(),
+            last_updated: Timestamp::now(),
         }
     }
 
@@ -788,7 +789,7 @@ impl AnalysisCache {
     }
 
     pub async fn search_entries(&self, query: &CacheSearchQuery) -> Vec<CacheEntry> {
-        let wanted: Vec<(String, DateTime<Utc>)> = self
+        let wanted: Vec<(String, Timestamp)> = self
             .list_summaries(query)
             .into_iter()
             .map(|row| (row.file_hash, row.timestamp))
@@ -905,7 +906,7 @@ fn matches_query(
     query: &CacheSearchQuery,
     tool: &str,
     path: &str,
-    timestamp: DateTime<Utc>,
+    timestamp: Timestamp,
     size: u64,
 ) -> bool {
     query.tool_name.as_ref().is_none_or(|t| tool == t)
@@ -1074,8 +1075,10 @@ fn load_index(state: &mut State, dir: &Path, max_file_bytes: u64) {
 pub struct CacheSearchQuery {
     pub tool_name: Option<String>,
     pub file_path_pattern: Option<String>,
-    pub start_time: Option<DateTime<Utc>>,
-    pub end_time: Option<DateTime<Utc>>,
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub start_time: Option<Timestamp>,
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub end_time: Option<Timestamp>,
     pub min_file_size: Option<u64>,
     pub max_file_size: Option<u64>,
 }
@@ -1092,7 +1095,7 @@ pub struct CacheStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Utc};
+    use jiff::{SignedDuration, Timestamp};
     use tempfile::TempDir;
 
     fn create_test_entry(file_hash: &str, tool_name: &str, file_path: &str) -> CacheEntry {
@@ -1105,10 +1108,21 @@ mod tests {
                 .cloned()
                 .collect(),
             result: serde_json::json!({"result": "test"}),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             file_size: 1024,
             execution_time_ms: 100,
         }
+    }
+
+    #[test]
+    fn cache_entry_reads_existing_rfc3339_timestamp() {
+        let entry = create_test_entry("hash123", "test_tool", "/test/file.bin");
+        let mut persisted = serde_json::to_value(entry).unwrap();
+        persisted["timestamp"] = serde_json::json!("2026-10-05T12:34:56.123456Z");
+
+        let loaded: CacheEntry = serde_json::from_value(persisted).unwrap();
+        let serialized = serde_json::to_value(loaded).unwrap();
+        assert_eq!(serialized["timestamp"], "2026-10-05T12:34:56.123456Z");
     }
 
     #[tokio::test]
@@ -1162,9 +1176,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut entry1 = create_test_entry("hash123", "test_tool", "/test/file.bin");
-        entry1.timestamp = now - Duration::hours(1);
+        entry1.timestamp = now - SignedDuration::from_hours(1);
 
         let mut entry2 = create_test_entry("hash123", "test_tool", "/test/file.bin");
         entry2.timestamp = now;
@@ -1310,9 +1324,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let cache = AnalysisCache::new(temp_dir.path()).unwrap();
 
-        let now = Utc::now();
-        let hour_ago = now - Duration::hours(1);
-        let two_hours_ago = now - Duration::hours(2);
+        let now = Timestamp::now();
+        let hour_ago = now - SignedDuration::from_hours(1);
+        let two_hours_ago = now - SignedDuration::from_hours(2);
 
         let mut entry1 = create_test_entry("hash1", "tool", "/test/file1.bin");
         entry1.timestamp = two_hours_ago;
@@ -1330,8 +1344,8 @@ mod tests {
         let query = CacheSearchQuery {
             tool_name: None,
             file_path_pattern: None,
-            start_time: Some(hour_ago - Duration::minutes(30)),
-            end_time: Some(now + Duration::minutes(30)),
+            start_time: Some(hour_ago - SignedDuration::from_mins(30)),
+            end_time: Some(now + SignedDuration::from_mins(30)),
             min_file_size: None,
             max_file_size: None,
         };
@@ -1459,7 +1473,7 @@ mod tests {
                 .cloned()
                 .collect(),
             result: serde_json::json!({"result": "success"}),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             file_size: 2048,
             execution_time_ms: 250,
         };
@@ -1481,7 +1495,7 @@ mod tests {
             total_entries: 10,
             total_unique_files: 5,
             cache_size_bytes: 1024,
-            last_updated: Utc::now(),
+            last_updated: Timestamp::now(),
         };
 
         // Test JSON serialization
@@ -1498,8 +1512,8 @@ mod tests {
         let query = CacheSearchQuery {
             tool_name: Some("test_tool".to_string()),
             file_path_pattern: Some("/test/".to_string()),
-            start_time: Some(Utc::now()),
-            end_time: Some(Utc::now()),
+            start_time: Some(Timestamp::now()),
+            end_time: Some(Timestamp::now()),
             min_file_size: Some(100),
             max_file_size: Some(1000),
         };
@@ -1610,7 +1624,7 @@ mod storage_tests {
             tool_name: tool.to_string(),
             tool_args: HashMap::new(),
             result,
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             file_size: 10,
             execution_time_ms: 1,
         }

@@ -25,16 +25,15 @@ thiserror = "2.0.21"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # Retain the source API alias while replacing unmaintained serde_yaml/libyaml.
-serde_yaml = { package = "serde-saphyr", version = "2.1.1" }
+serde_yaml = { package = "serde-saphyr", version = "2.2.0" }
 
 # CLI and configuration
-clap = { version = "4.6.7", features = ["derive", "env"] }
+clap = { version = "4.6.9", features = ["derive", "env"] }
 
 # File and system utilities
-filetime = "0.2.29"
-chrono = { version = "0.4.45", features = ["serde"] }
+jiff = { version = "1.0.1", default-features = false, features = ["std", "serde"] }
 memmap2 = "0.9.12"
-walkdir = "2.5.0"
+walkdir = "2.5.1"
 
 # Hashing algorithms
 sha2 = "0.11.1"
@@ -42,7 +41,7 @@ md-5 = "0.11.0"
 blake3 = "1.8.7"
 
 # String processing
-regex = "1.13.1"
+regex = "1.13.2"
 encoding_rs = "0.8.44"
 
 # Binary parsing
@@ -53,7 +52,7 @@ object = "0.41.0"
 ring = "0.17.14"
 
 # MCP SDK
-rmcp = { version = "=3.10.0", features = ["transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "=3.11.0", default-features = false, features = ["base64", "macros", "server", "transport-io", "transport-streamable-http-server"] }
 schemars = "1.2.3"
 tokio-util = "0.7.20"
 
@@ -63,10 +62,10 @@ axum = { version = "0.8.9", features = ["ws"] }
 tower-http = { version = "0.7.1", features = ["cors"] }
 tower = "0.5.3"
 hyper = "1.12.0"
-uuid = { version = "1.29.2", features = ["v4"] }
+uuid = { version = "1.29.3", features = ["v4"] }
 
 # OpenAPI documentation
-utoipa = { version = "6.0.0", features = ["axum_extras", "chrono", "uuid"] }
+utoipa = { version = "6.0.0", features = ["axum_extras", "uuid"] }
 
 # Static analysis
 addr2line = "0.27.1"
@@ -76,7 +75,7 @@ petgraph = "0.8.3"
 # Threat detection
 # Keep the source-reviewed stable runtime/crypto patch selected. A caret
 # update could silently bypass the reviewed Wasmtime and RSA requirements.
-yara-x = "=1.23.0"
+yara-x = "=1.24.0"
 
 # Not used by src/ since the repository-integrity module was removed. Kept because it
 # is what links the reviewed, patched libz-sys (scripts/check-native-zlib.py); remove
@@ -87,7 +86,7 @@ reqwest = { version = "0.13.5", features = ["json", "blocking"] }
 
 # Archive handling
 cfb = "0.16.0"
-zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+zip = { version = "9.8.1", default-features = false, features = ["deflate"] }
 flate2 = "1.1.11"
 tar = "0.4.46"
 
@@ -107,7 +106,7 @@ serial_test = "4.0.1"
 predicates = "3.1.4"
 assert_fs = "1.1.4"
 assert_cmd = "2.2.2"
-rand = "0.10.3"
+rand = "0.10.4"
 libc = "0.2.191"
 tokio-test = "0.4.6"
 wiremock = "0.6.5"
@@ -168,10 +167,10 @@ path = "src/main.rs"
 
 [dependencies]
 # ThreatFlux libraries - migrated to crates.io
-threatflux-string-analysis = { version = "0.2.5" }
-threatflux-binary-analysis = { version = "0.3.3", features = ["serde-support"] }
+threatflux-string-analysis = { version = "1.0.0" }
+threatflux-binary-analysis = { version = "0.4.1", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis
-threatflux-threat-detection = { version = "0.2.6", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
+threatflux-threat-detection = { version = "0.3.0", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }
 # threatflux-package-security = { version = "0.1.0" } # Not used in actual source code
 
 # Core dependencies (using workspace versions)
@@ -182,8 +181,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 clap = { workspace = true }
-filetime = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 
 # Hash calculations (temporary during migration)
 sha2 = { workspace = true }
@@ -304,5 +302,7 @@ debug = 2
 # Temporary stable YARA-X patch: use the security-fixed stable Wasmtime runtime.
 # Remove when published YARA-X resolves a patched Wasmtime release.
 [patch.crates-io]
-yara-x = { path = "vendor/yara-x-1.23.0" }
+yara-x = { path = "vendor/yara-x-1.24.0" }
 libz-sys = { path = "vendor/libz-sys-1.1.33" }
+# Remove when a published rmcp release can be resolved without Chrono.
+rmcp = { path = "vendor/rmcp-3.11.0" }

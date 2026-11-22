@@ -6,7 +6,18 @@ export RUST_TEST_THREADS=${RUST_TEST_THREADS:-2}
 export CARGO_PROFILE_TEST_DEBUG=${CARGO_PROFILE_TEST_DEBUG:-0}
 export CARGO_PROFILE_TEST_INCREMENTAL=${CARGO_PROFILE_TEST_INCREMENTAL:-false}
 # Keep compiled dependencies between batches; deleting them forces full rebuilds.
-cargo test --locked --workspace --all-features --lib --bins "$@"
-cargo test --locked --workspace --all-features --tests "$@"
+test_with_serial_signatures() {
+  cargo test --locked --workspace --all-features "$@" -- --skip signature::tests::
+  cargo test --locked --workspace --all-features "$@" signature::tests:: -- --test-threads=1
+}
+
+if [[ $# -eq 0 ]]; then
+  test_with_serial_signatures --lib --bins
+  test_with_serial_signatures --tests
+else
+  # Keep caller-supplied Cargo and test filters intact.
+  cargo test --locked --workspace --all-features --lib --bins "$@"
+  cargo test --locked --workspace --all-features --tests "$@"
+fi
 cargo test --locked --workspace --all-features --doc "$@"
 cargo test --locked --manifest-path threatflux-package-security/Cargo.toml --all-features "$@"

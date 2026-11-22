@@ -431,7 +431,7 @@ mod tests {
             let outside = dir.path().join("outside.txt");
             std::fs::write(&outside, b"benign outside bytes").unwrap();
             std::fs::write(root.join("inside.bin"), INSIDE).unwrap();
-            let admission = Admission::open(&[root.clone()]).unwrap();
+            let admission = Admission::open(std::slice::from_ref(&root)).unwrap();
             Fixture {
                 _dir: dir,
                 root,
@@ -563,7 +563,11 @@ mod tests {
             let f = fixture();
             let path = f.root.join("inside.bin");
             // Settled: modified long ago, so its stat identity is trusted.
-            filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_600_000_000, 0))
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000))
                 .unwrap();
             let admitted = f.admission.admit(&raw(&path)).unwrap();
             assert_eq!(f.admission.known_sha256(admitted.stat()), None);

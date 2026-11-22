@@ -23,14 +23,14 @@ def main():
         if any(dependency.split()[0] == "rsa" for dependency in package.get("dependencies", []))
     ]
     yara = [package for package in users if package["name"] == "yara-x"]
-    require(len(yara) == 1 and yara[0]["version"] == "1.23.0",
+    require(len(yara) == 1 and yara[0]["version"] == "1.24.0",
             "YARA-X verification parent changed")
     require("source" not in yara[0], "YARA-X no longer uses reviewed local source")
     shim = [package for package in users if package["name"] == "threatflux-threat-detection"]
-    # This immutable published producer enables RSA's pkcs1v15 feature for
-    # upstream YARA. Every Rust source file was checked: it invokes no RSA API.
-    require(len(users) == 2 and len(shim) == 1 and shim[0]["version"] == "0.2.6"
-            and shim[0].get("checksum") == "3bfc8941319d8f7ccfcccbbcdf489eb1a46bfa0daef0dd9b3c6d9550bd29d130",
+    # The published producer contributes the pkcs1v15 feature for YARA.
+    # All 16 Rust files match the tagged source and invoke no RSA API.
+    require(len(users) == 2 and len(shim) == 1 and shim[0]["version"] == "0.3.0"
+            and shim[0].get("checksum") == "d31a0389d4c7c1bc8cf35aa031df610b7c70cd4ec5f7bc0d31b77fac46f37740",
             "RSA feature-only producer shim changed")
     for relative in (".cargo/audit.toml", "deny.toml"):
         require("RUSTSEC-2023-0071" not in (root / relative).read_text(),
@@ -38,11 +38,11 @@ def main():
     standalone = tomllib.loads((root / "threatflux-package-security/Cargo.lock").read_text())["package"]
     require(not any(package["name"] == "rsa" for package in standalone), "standalone crate now uses RSA")
 
-    vendor = root / "vendor/yara-x-1.23.0"
+    vendor = root / "vendor/yara-x-1.24.0"
     crypto = vendor / "src/modules/utils/crypto.rs"
     require(
         hashlib.sha256(crypto.read_bytes()).hexdigest()
-        == "19792550f440fd66573cf438e4e0bf717e704df35d476b7b872e5630bc8e099a",
+        == "7266c5b6ef5a169344127ab5dcbc6537b3deb84f74a5ff5bb61322eda3e2d09e",
         "reviewed public-key verification source changed",
     )
     rsa_use = re.compile(r"\brsa\s*::|\b(?:use|extern\s+crate)\s+rsa\b|\bRsaPrivateKey\b")

@@ -600,7 +600,7 @@ async fn a_rooted_server_shows_no_cache_entry_or_string_of_a_file_outside_its_ro
                 tool_name: "analyze_file".into(),
                 tool_args: Default::default(),
                 result: json!({"marker": value}),
-                timestamp: chrono::Utc::now(),
+                timestamp: jiff::Timestamp::now(),
                 file_size: 10,
                 execution_time_ms: 1,
             })
@@ -681,7 +681,7 @@ async fn rest_cache_routes_print_the_canonical_path_and_match_on_it() {
             tool_name: "analyze_file".into(),
             tool_args: [("file_path".to_string(), json!(stored))].into(),
             result: json!({"path": stored}),
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
             file_size: 4,
             execution_time_ms: 1,
         })

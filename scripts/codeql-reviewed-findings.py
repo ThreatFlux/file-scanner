@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Annotate nine source-pinned forensic hash false positives; preserve all others."""
+"""Annotate exact source-pinned forensic hash false positives and preserve all others."""
 
 import argparse
 import copy
@@ -13,10 +13,11 @@ import sys
 import tomllib
 
 
-POLICY_DIGEST = "e31f6f72cbe2ff86f3793ae4c11e15caa0ee0bdc38c3a180698810a3e631e377"
+POLICY_DIGEST = "0913e9b0e514f170935e38d40fea6d95838bfeaab155d36d3739873193427cbc"
 SOURCE_TOKENS = (
     "thumbprint", "pearson_hash", "TlshBuilder", "Certificate",
     "CertificateChain", "AuthenticodeSignature", "X509CertificateParser",
+    "AuthenticodeParser", "telfhash",
 )
 SKIP_PATHS = {
     ".git", "target", "threatflux-threat-detection/target",
