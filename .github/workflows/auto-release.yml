@@ -51,7 +51,7 @@ jobs:
       actions: write
       contents: write
       pull-requests: write
-    uses: ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml@6d753d2ddd850402ebbd921ff3c00840f9f762a6 # signed release guard candidate
+    uses: ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml@f93f740ead8fc6e1ea89885c0baaec9395f82837 # signed release guard candidate
     with:
       bump: ${{ github.event.inputs.version_bump || 'auto' }}
       # Only a manual dispatch can request a dry run.
