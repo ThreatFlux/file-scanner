@@ -11,9 +11,7 @@ multi-ecosystem-groups:
 
 updates:
   - package-ecosystem: "cargo"
-    directories:
-      - "/"
-      - "/threatflux-package-security"
+    directory: "/"
     patterns: ["*"]
     multi-ecosystem-group: "nightly-dependencies"
     labels:

@@ -132,8 +132,19 @@ that its Java parser retains the reviewed fallible ZIP-name bridge. Its only
 additional source changes are formatting, the CP437 archive-name regression,
 the wasmparser range API migration with explicit bounds validation and tests,
 and the equivalent `as_chunks` pattern iteration. The active root patch is
-removed; the historical source and exact diff below remain for provenance.
+removed; the exact diff below remains for provenance.
 Hosted archive, native and security checks validate the registry replacement.
+
+The historical source directory `threatflux-binary-analysis-0.3.1/` was removed
+from the tree on 2026-11-22. It held the crates.io 0.3.1 archive (upstream tag
+`v0.3.1`, commit `64856368e7007d1292ad7b2603b8cd5ccd3dd7df`; archive SHA-256
+below) with the diff below applied. No manifest selected it, and a comparison
+with that upstream tag found no file that existed only in the copy: the manifest
+and Java parser changes in the diff were its only differences. The ZIP fix is
+upstream since `v0.3.2` (commit `bc036556bd4a3cc6487d52b06e38ea8709902bf1`),
+which also added a CP437 entry-name regression test. The complete source of the
+copy is preserved in this repository's Git history, last present in
+`e5d08129be37cbcc5baece0e5a4ad10ecc51d624`.
 
 The final consumer refresh selects published `threatflux-binary-analysis` 0.3.3,
 archive SHA256 `eb4c328cb03697698d3cc7ee8e890364426c371409684c627565684f22408b39`,
@@ -156,7 +167,8 @@ extraction-specific paths are not called here.
 - SHA-256: `ac8769597acfe127518ffacbc8819c4f3ff8094241dd7ae7211502e008d79eb0`.
 - Verified against the [official crates.io index](https://index.crates.io/th/re/threatflux-binary-analysis) on 2026-10-21.
 - Upstream VCS commit: [`64856368e7007d1292ad7b2603b8cd5ccd3dd7df`](https://github.com/ThreatFlux/threatflux-binary-analysis/tree/64856368e7007d1292ad7b2603b8cd5ccd3dd7df).
-- MIT [LICENSE](threatflux-binary-analysis-0.3.1/LICENSE), source, tests, examples and shipped documentation are retained from the archive.
+- The vendored copy retained the MIT LICENSE, source, tests, examples and shipped documentation from the
+  archive; it is now in Git history only (see above).
 - Exact changes: [manifest and Java parser diff](threatflux-binary-analysis-0.3.1.patch).
 
 The normalized Cargo manifest bumps normal and development ZIP dependencies

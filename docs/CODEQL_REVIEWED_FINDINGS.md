@@ -107,6 +107,19 @@ chain built from `codesign` authority names, and the tests of those. The file
 does not import YARA-X and consumes no YARA-X certificate, thumbprint or TLSH
 value. The nine exact reviewed result tuples are unchanged.
 
+The 2026-11-22 cleanup removes the unselected historical
+`vendor/threatflux-binary-analysis-0.3.1` source, so its two files
+(`src/formats/pe.rs` and `src/types.rs`) leave the token inventory. No remaining
+inventoried file changed, no source was re-reviewed, and the exact reviewed
+result tuples are unchanged. The policy digest was refreshed for the two removed
+entries only.
+
+The same cleanup removes the unused in-tree `threatflux-package-security` 0.1.0
+crate, so `src/analyzers/java.rs` of that crate leaves the token inventory and
+its `target` directory leaves the excluded paths. It never imported YARA-X and
+the root crate never imported it. The digest was refreshed again for these two
+items only.
+
 The historical API fixture `scripts/codeql-reviewed-findings-fixture.sarif` and
 compressed CLI evidence `scripts/codeql-reviewed-findings-raw-25c41d9.sarif.gz`
 remain byte-for-byte intact. They describe 1.21.0 and are **not** fresh 1.22.0

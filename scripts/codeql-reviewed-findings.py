@@ -13,7 +13,7 @@ import sys
 import tomllib
 
 
-POLICY_DIGEST = "0913e9b0e514f170935e38d40fea6d95838bfeaab155d36d3739873193427cbc"
+POLICY_DIGEST = "6473067b37c77df7cab67f0fd4d373895981b6609ec3397261e00983e6adc6a5"
 SOURCE_TOKENS = (
     "thumbprint", "pearson_hash", "TlshBuilder", "Certificate",
     "CertificateChain", "AuthenticodeSignature", "X509CertificateParser",
@@ -21,7 +21,6 @@ SOURCE_TOKENS = (
 )
 SKIP_PATHS = {
     ".git", "target", "threatflux-threat-detection/target",
-    "threatflux-package-security/target",
     "ci/yara-crypto-compat/target",
 }
 

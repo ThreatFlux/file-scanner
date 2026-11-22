@@ -20,4 +20,3 @@ else
   cargo test --locked --workspace --all-features --tests "$@"
 fi
 cargo test --locked --workspace --all-features --doc "$@"
-cargo test --locked --manifest-path threatflux-package-security/Cargo.toml --all-features "$@"
