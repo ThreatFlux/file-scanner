@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795319645544,
+  "lastUpdate": 1795356229867,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -15164,6 +15164,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
             "value": 268633.34966795245,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f13a1c540c11f67f70ec2fd67be41de8ec3eb9a5",
+          "message": "feat(deps): group nightly updates, refresh Rust dependencies, and add code owners (#326)\n\n* chore(deps): check for Dependabot updates nightly\n\n* fix(deps): refresh stable crates and patch the Wasmtime audit failures\n\n* feat(deps): group nightly version updates and add repository code owners\n\n* fix: repair binary metadata qualification and Linux lint\n\nGive analyze_file and the paginated sections request distinct qualification keys. Preserve the fixture identity checks and remove the unnecessary PathBuf clone flagged by Linux Clippy.\n\n* ci(release): send automated version bumps through code-owner review\n\n* test: count symbol rows consistently in analyzer tests\n\n* test: use harmless fixtures for npm hook risk\n\n* test: use a reserved domain for npm download risk\n\n* test: avoid temporary executable GPG stubs\n\n* fix(ci): serialize detached-signature fixture tests\n\n* fix(deps): use prebuilt YARA-X protobuf bindings\n\n* fix(deps): restore YARA-X module documentation generation\n\n* test(symbols): account for truncated symbol listings\n\n* fix(release): use the signed release proposal guards\n\n* fix(deps): backport optional Chrono support in rmcp\n\n* fix(deps): update reviewed YARA-X runtime to 1.24.0\n\n* fix(deps): select published Chrono-free threat detection\n\n* fix(security): refresh exact reviewed YARA CodeQL matches\n\n* fix(deps): select Chrono-free string analysis\n\n* fix(deps): select patched URL dependency",
+          "timestamp": "2026-11-22T08:26:55-05:00",
+          "tree_id": "66f80b3c6bbee29abd1fd47dc2210eb783a002af",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/f13a1c540c11f67f70ec2fd67be41de8ec3eb9a5"
+        },
+        "date": 1795356228801,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 5328.682753119382,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_large_binary",
+            "value": 63693.345517713,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_pe",
+            "value": 6341.301861132621,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 1842860.4064946782,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 2496137.057000001,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 257322.30214705993,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2200923.6160869566,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 61014.45539870718,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 35413.922617834854,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 201889.91213037734,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 1853416.8676621786,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 39485.29835180794,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 23100.06646461928,
+            "unit": "ns"
+          },
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2195340.094347825,
+            "unit": "ns"
+          },
+          {
+            "name": "string_categorization/extract_with_categorization",
+            "value": 805484.4591157244,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/10000_strings",
+            "value": 8466463.219999997,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/1000_strings",
+            "value": 977170.646864413,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/100_strings",
+            "value": 170491.9476539801,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_16",
+            "value": 8207313.448571434,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_4",
+            "value": 8467348.073333336,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_8",
+            "value": 8417765.456666669,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_16",
+            "value": 925100.3485204482,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_4",
+            "value": 966674.8533582544,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_8",
+            "value": 1013973.2086038833,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_16",
+            "value": 147639.956153404,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_4",
+            "value": 168092.79643169712,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
+            "value": 203082.07688281088,
             "unit": "ns"
           }
         ]
