@@ -338,6 +338,9 @@ to loopback, the tool output shapes changed, and some arguments and routes are g
   `MCP_REFACTORING_SUMMARY.md`; the unused `typosquatting_detection` and `repository_integrity` modules; and the
   dependencies only they or the old transport used (`async-trait`, `tokio-stream`, `futures-util`,
   `threatflux-hashing`, `utoipa-redoc`, `utoipa-swagger-ui`). `tower` is now a dev-dependency.
+- The unselected historical `vendor/threatflux-binary-analysis-0.3.1` source. Builds have used the published crate
+  since 0.3.2. The 48-line patch and its provenance notes stay in `vendor/`, the full source stays in Git history,
+  and its two files leave the CodeQL review inventory.
 
 ### Security
 
