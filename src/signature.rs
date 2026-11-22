@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -205,7 +205,7 @@ pub fn verify_signature_with(
     // Check for GPG signatures
     let (side_file, refused, unreadable) = pick_side_file_full(path, resolve);
     if let Some(side_file) = &side_file {
-        if let Ok(gpg_info) = run_gpg_verify(path, Command::new("gpg"), side_file) {
+        if let Ok(gpg_info) = run_gpg_verify(path, "gpg", side_file) {
             return Ok(gpg_info);
         }
         if !tool_available("gpg") {
@@ -542,11 +542,11 @@ pub(crate) fn detached_signature_candidates(path: &Path) -> Vec<std::path::PathB
 
 #[cfg(test)]
 fn check_gpg_signature(path: &Path) -> Result<SignatureInfo> {
-    check_gpg_signature_with(path, Command::new("gpg"))
+    check_gpg_signature_with(path, "gpg")
 }
 
 #[cfg(test)]
-fn check_gpg_signature_with(path: &Path, program: Command) -> Result<SignatureInfo> {
+fn check_gpg_signature_with(path: &Path, program: &str) -> Result<SignatureInfo> {
     match pick_side_file(path, &follow_links).0 {
         Some(sig_file) => run_gpg_verify(path, program, &sig_file),
         None => anyhow::bail!("No GPG signature found"),
@@ -554,35 +554,39 @@ fn check_gpg_signature_with(path: &Path, program: Command) -> Result<SignatureIn
 }
 
 /// Verify `path` against the detached signature `sig_file` with `program`.
-fn run_gpg_verify(path: &Path, mut program: Command, sig_file: &Path) -> Result<SignatureInfo> {
-    let output = program
-        .arg("--verify")
-        .arg(sig_file)
-        .arg(path)
-        .output()
-        .context("Failed to run GPG verification")?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
+fn run_gpg_verify(path: &Path, program: &str, sig_file: &Path) -> Result<SignatureInfo> {
+    {
+        if let Ok(output) = Command::new(program)
+            .arg("--verify")
+            .arg(sig_file)
+            .arg(path)
+            .output()
+        {
+            let stderr = String::from_utf8_lossy(&output.stderr);
 
-    if stderr.contains("Good signature") {
-        return Ok(SignatureInfo {
-            is_signed: true,
-            signature_type: Some("GPG".to_string()),
-            signer: extract_gpg_signer(&stderr),
-            timestamp: extract_gpg_timestamp(&stderr),
-            certificate_chain: Vec::new(),
-            verification_status: "Valid".to_string(),
-        });
+            if stderr.contains("Good signature") {
+                return Ok(SignatureInfo {
+                    is_signed: true,
+                    signature_type: Some("GPG".to_string()),
+                    signer: extract_gpg_signer(&stderr),
+                    timestamp: extract_gpg_timestamp(&stderr),
+                    certificate_chain: Vec::new(),
+                    verification_status: "Valid".to_string(),
+                });
+            }
+            let first = stderr.lines().next().unwrap_or("no output").trim();
+            return Ok(SignatureInfo {
+                is_signed: false,
+                signature_type: Some("GPG".to_string()),
+                signer: None,
+                timestamp: None,
+                certificate_chain: Vec::new(),
+                verification_status: format!("Detached signature present, not verified ({first})"),
+            });
+        }
     }
 
-    let first = stderr.lines().next().unwrap_or("no output").trim();
-    Ok(SignatureInfo {
-        is_signed: false,
-        signature_type: Some("GPG".to_string()),
-        signer: None,
-        timestamp: None,
-        certificate_chain: Vec::new(),
-        verification_status: format!("Detached signature present, not verified ({first})"),
-    })
+    anyhow::bail!("No GPG signature found")
 }
 
 fn check_macos_codesign(path: &Path) -> Result<SignatureInfo> {
@@ -845,7 +849,8 @@ mod tests {
         fs::write(&sig_path, b"dummy signature").unwrap();
 
         // A stub gpg that rejects the signature: always the same outcome
-        let info = check_gpg_signature_with(&file_path, stub_gpg("gpg: BAD signature")).unwrap();
+        let stub = stub_gpg(sig_path.parent().unwrap(), "gpg: BAD signature");
+        let info = check_gpg_signature_with(&file_path, stub.to_str().unwrap()).unwrap();
         assert!(!info.is_signed);
         assert!(info
             .verification_status
@@ -862,7 +867,8 @@ mod tests {
         let asc_path = file_path.with_extension("asc");
         fs::write(&asc_path, b"dummy ascii signature").unwrap();
 
-        let info = check_gpg_signature_with(&file_path, stub_gpg("gpg: BAD signature")).unwrap();
+        let stub = stub_gpg(asc_path.parent().unwrap(), "gpg: BAD signature");
+        let info = check_gpg_signature_with(&file_path, stub.to_str().unwrap()).unwrap();
         assert!(!info.is_signed);
         assert!(info
             .verification_status
@@ -870,11 +876,16 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn stub_gpg(stderr_line: &str) -> Command {
-        // Run the system shell to avoid executing a file just written by the test.
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "printf '%s\\n' \"$1\" >&2", "stub-gpg", stderr_line]);
-        command
+    fn stub_gpg(dir: &Path, stderr_line: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let stub = dir.join("stub-gpg.sh");
+        fs::write(
+            &stub,
+            format!("#!/bin/sh\necho '{stderr_line}' >&2\nexit 0\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        stub
     }
 
     /// Run `verify_signature` on another thread with a generous deadline, so a
@@ -1035,8 +1046,8 @@ mod tests {
         let bare = temp_dir.path().join("sample");
         fs::write(&bare, b"payload").unwrap();
         fs::write(temp_dir.path().join("sample.sig"), b"sig").unwrap();
-        let stub = stub_gpg("gpg: Good signature from \"A <a@b.c>\"");
-        let info = check_gpg_signature_with(&bare, stub).unwrap();
+        let stub = stub_gpg(temp_dir.path(), "gpg: Good signature from \"A <a@b.c>\"");
+        let info = check_gpg_signature_with(&bare, stub.to_str().unwrap()).unwrap();
         assert!(info.is_signed);
         assert_eq!(info.signature_type.as_deref(), Some("GPG"));
         assert_eq!(info.verification_status, "Valid");
@@ -1050,7 +1061,8 @@ mod tests {
         let bare = temp_dir.path().join("sample.bin");
         fs::write(&bare, b"payload").unwrap();
         fs::write(temp_dir.path().join("sample.bin.asc"), b"sig").unwrap();
-        let info = check_gpg_signature_with(&bare, stub_gpg("gpg: BAD signature")).unwrap();
+        let stub = stub_gpg(temp_dir.path(), "gpg: BAD signature");
+        let info = check_gpg_signature_with(&bare, stub.to_str().unwrap()).unwrap();
         assert!(!info.is_signed);
         assert!(info
             .verification_status
@@ -1444,8 +1456,8 @@ gpg: WARNING: This key is not certified with a trusted signature!
             let sig_path = std::path::PathBuf::from(sig_name);
             fs::write(&sig_path, b"dummy sig").unwrap();
 
-            let info =
-                check_gpg_signature_with(&file_path, stub_gpg("gpg: BAD signature")).unwrap();
+            let stub = stub_gpg(temp_dir.path(), "gpg: BAD signature");
+            let info = check_gpg_signature_with(&file_path, stub.to_str().unwrap()).unwrap();
             assert!(!info.is_signed);
             assert!(info
                 .verification_status

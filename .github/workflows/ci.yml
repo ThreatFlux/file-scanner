@@ -244,11 +244,14 @@ jobs:
         run: |
           echo "📊 Disk space before tests:"
           df -h
-          ./scripts/test-fast.sh
+          # Detached-signature tests create executable fixtures. Run that group serially.
+          ./scripts/test-fast.sh -- --skip signature::tests::
+          ./scripts/test-fast.sh signature::tests:: -- --test-threads=1
 
       - name: Run tests with all features
         run: |
-          cargo test --workspace --all-features --locked --verbose --jobs 2
+          cargo test --workspace --all-features --locked --verbose --jobs 2 -- --skip signature::tests::
+          cargo test --workspace --all-features --locked --verbose --jobs 2 signature::tests:: -- --test-threads=1
           cargo test --manifest-path threatflux-package-security/Cargo.toml --all-features --locked --jobs 2
 
       - name: Run doc tests
@@ -425,7 +428,10 @@ jobs:
           export CARGO_BUILD_JOBS=2
           # Generate coverage for main package only, not entire workspace
           # This reduces memory usage and build time significantly
-          cargo llvm-cov --locked --all-features --lib --bins --lcov --output-path lcov.info
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked --all-features --lib --bins --no-report -- --skip signature::tests::
+          cargo llvm-cov --locked --all-features --lib --bins --no-report -- signature::tests:: --test-threads=1
+          cargo llvm-cov report --lcov --output-path lcov.info
           test -s lcov.info
           # Clean up immediately after
           rm -rf target/llvm-cov-target
