@@ -208,14 +208,12 @@ fn legacy_count(count: u64) -> usize {
     usize::try_from(count).unwrap_or(usize::MAX)
 }
 
-// Upstream still uses Chrono and can represent years outside Jiff's range.
-fn tracker_timestamp(seconds: i64, nanos: u32) -> Timestamp {
-    let billion = 1_000_000_000;
-    Timestamp::new(
-        seconds + i64::from(nanos / billion),
-        (nanos % billion) as i32,
-    )
-    .unwrap_or(if seconds < 0 {
+// Normalize legacy leap seconds to the next second and clamp timestamps
+// outside the range of the scanner's public Jiff type.
+fn tracker_timestamp(timestamp: current::Timestamp) -> Timestamp {
+    let seconds = timestamp.unix_timestamp();
+    let normalized = seconds + i64::from(timestamp.is_leap_second());
+    Timestamp::new(normalized, timestamp.nanosecond() as i32).unwrap_or(if seconds < 0 {
         Timestamp::MIN
     } else {
         Timestamp::MAX
@@ -226,14 +224,8 @@ impl From<current::StringEntry> for StringEntry {
     fn from(entry: current::StringEntry) -> Self {
         Self {
             value: entry.value,
-            first_seen: tracker_timestamp(
-                entry.first_seen.timestamp(),
-                entry.first_seen.timestamp_subsec_nanos(),
-            ),
-            last_seen: tracker_timestamp(
-                entry.last_seen.timestamp(),
-                entry.last_seen.timestamp_subsec_nanos(),
-            ),
+            first_seen: tracker_timestamp(entry.first_seen),
+            last_seen: tracker_timestamp(entry.last_seen),
             total_occurrences: legacy_count(entry.total_occurrences),
             unique_files: entry
                 .unique_file_identities
@@ -247,10 +239,7 @@ impl From<current::StringEntry> for StringEntry {
                     file_path: occurrence.file_path,
                     file_hash: occurrence.file_hash,
                     tool_name: occurrence.tool_name,
-                    timestamp: tracker_timestamp(
-                        occurrence.timestamp.timestamp(),
-                        occurrence.timestamp.timestamp_subsec_nanos(),
-                    ),
+                    timestamp: tracker_timestamp(occurrence.timestamp),
                     context: occurrence.context.into(),
                 })
                 .collect(),
@@ -306,12 +295,11 @@ impl From<&StringFilter> for current::StringFilter {
             min_entropy: filter.min_entropy,
             max_entropy: filter.max_entropy,
             date_range: filter.date_range.map(|(start, end)| {
-                // Convert through RFC 3339 so Windows SystemTime granularity
-                // cannot round away nanoseconds at a filter boundary.
-                let parse = |timestamp: Timestamp| {
-                    timestamp.to_string().parse().expect("valid UTC timestamp")
+                let convert = |timestamp: Timestamp| {
+                    current::Timestamp::from_unix_timestamp_nanos(timestamp.as_nanosecond())
+                        .expect("Jiff timestamp fits the tracker range")
                 };
-                (parse(start), parse(end))
+                (convert(start), convert(end))
             }),
         }
     }

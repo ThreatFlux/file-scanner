@@ -572,16 +572,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chrono"
-version = "0.4.45"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
-dependencies = [
- "num-traits",
- "serde",
-]
-
-[[package]]
 name = "ciborium"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4312,14 +4302,14 @@ dependencies = [
 
 [[package]]
 name = "threatflux-string-analysis"
-version = "0.2.5"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad6766309e6fe81f6049a477792bfef1c5df0af5b786f8cc941a232b54d19df7"
+checksum = "78a85d843935d717c5e5a1482eb8d0ec9be7ca7c2fd0b3cd2185082cdfec5f5a"
 dependencies = [
- "chrono",
  "regex",
  "serde",
  "thiserror 2.0.21",
+ "time",
 ]
 
 [[package]]

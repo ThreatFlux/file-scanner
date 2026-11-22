@@ -167,7 +167,7 @@ path = "src/main.rs"
 
 [dependencies]
 # ThreatFlux libraries - migrated to crates.io
-threatflux-string-analysis = { version = "0.2.5" }
+threatflux-string-analysis = { version = "1.0.0" }
 threatflux-binary-analysis = { version = "0.4.1", features = ["serde-support"] }
 # Enhanced threat detection with YARA integration and malware analysis
 threatflux-threat-detection = { version = "0.3.0", default-features = false, features = ["yara-engine", "builtin-rules", "pattern-matching", "serde-support"] }

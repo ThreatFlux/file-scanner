@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn adapts_tracker_timestamps_without_losing_precision() {
+    let before_epoch = "1969-12-31T23:59:59.500000001Z";
+    assert_eq!(
+        tracker_timestamp(before_epoch.parse().unwrap()),
+        before_epoch.parse::<Timestamp>().unwrap()
+    );
+    assert_eq!(
+        tracker_timestamp("2016-12-31T23:59:60.123456789Z".parse().unwrap()),
+        "2017-01-01T00:00:00.123456789Z"
+            .parse::<Timestamp>()
+            .unwrap()
+    );
+    assert_eq!(
+        tracker_timestamp("-10000-01-01T00:00:00Z".parse().unwrap()),
+        Timestamp::MIN
+    );
+    assert_eq!(
+        tracker_timestamp("+10000-01-01T00:00:00Z".parse().unwrap()),
+        Timestamp::MAX
+    );
+
+    let instant = before_epoch.parse::<Timestamp>().unwrap();
+    let filter = StringFilter {
+        date_range: Some((instant, instant)),
+        ..StringFilter::default()
+    };
+    let (start, end) = current::StringFilter::from(&filter).date_range.unwrap();
+    assert_eq!(tracker_timestamp(start), instant);
+    assert_eq!(tracker_timestamp(end), instant);
+}
+
+#[test]
 fn preserves_legacy_entry_fields_and_context_offsets() {
     let tracker = StringTracker::new();
     tracker

@@ -26,8 +26,9 @@ transport file because two unit tests contain a certificate error message.
 That transport is feature-gated and the scanner does not enable it.
 
 The SDK clock uses Jiff. The backport preserves timestamp and duration
-formatting, the protocol data model, and both MCP transports. The string
-analysis package is the remaining Chrono parent in the scanner's graph.
+formatting, the protocol data model, and both MCP transports. The scanner
+also selects published string-analysis 1.0.0 and threat-detection 0.3.0 to
+remove Chrono from its locked dependency graph.
 
 Remove this override and its vendor files once a published stable rmcp version
 can be selected without Chrono and the locked graph, hosted MCP tests, and
