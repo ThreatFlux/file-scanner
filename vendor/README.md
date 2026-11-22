@@ -19,6 +19,8 @@ archive. All default modules and rule-compiler optimizations are enabled.
 Build-time generation remains available through `generate-proto-code`; keeping
 it opt-in removes the `yara-x-proto` and Chrono dependency path from normal
 scanner builds, including the YARA dependency from the threat-detection crate.
+The optional `generate-module-docs` feature enables both protobuf code
+generation and `protoc` for module documentation builds.
 
 YARA-X 1.23's global-linker implementation compiles against Wasmtime 50 without a
 runtime source bridge. RSA 0.10 shares the current digest/PKCS8 generation, so

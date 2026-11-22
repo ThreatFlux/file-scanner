@@ -111,7 +111,7 @@ elf-module = [
 ]
 exact-atoms = []
 fast-regexp = []
-generate-module-docs = ["protoc"]
+generate-module-docs = ["generate-proto-code", "protoc"]
 generate-proto-code = [
     "dep:protobuf-codegen",
     "dep:protobuf-parse",

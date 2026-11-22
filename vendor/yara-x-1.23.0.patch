@@ -8,6 +8,15 @@
  ]
  default-modules = [
      "console-module",
+@@ -112,7 +111,7 @@
+ ]
+ exact-atoms = []
+ fast-regexp = []
+-generate-module-docs = ["protoc"]
++generate-module-docs = ["generate-proto-code", "protoc"]
+ generate-proto-code = [
+     "dep:protobuf-codegen",
+     "dep:protobuf-parse",
 @@ -186,21 +185,6 @@
  name = "yara_x"
  path = "src/lib.rs"
