@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795370880630,
+  "lastUpdate": 1795374275066,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -15641,6 +15641,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
             "value": 261966.00379998598,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "wyattroersma@gmail.com",
+            "name": "Wyatt Roersma",
+            "username": "wroersma"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3e2e67fe1297e14d136fd997c21992fd5f0cb107",
+          "message": "chore(deps): remove unused vendored binary-analysis source and in-tree package-security crate (#329)\n\n* chore(deps): remove the unselected binary-analysis 0.3.1 vendor source\n\nvendor/threatflux-binary-analysis-0.3.1 was added on 2026-10-21 as a temporary\n[patch.crates-io] override for three RustSec ZIP advisories. The override was\ndropped on 2026-11-12 when the build moved to the published crate (0.3.2 then,\n0.4.1 from the registry now), so no manifest has selected the directory since.\n\nThe directory held the crates.io 0.3.1 archive (upstream tag v0.3.1, commit\n6485636). Compared with that tag, no file exists only in the copy. Its only\ndifferences are the manifest and Java parser changes recorded in\nvendor/threatflux-binary-analysis-0.3.1.patch, and upstream has carried the\nJava change since v0.3.2 (bc03655). Nothing needs porting back.\n\nKept: the 48-line patch and the provenance notes in vendor/README.md, as was\ndone for yara-x 1.22.0 and libz-sys 1.1.31. The README now records the\nupstream version, tag and commit of the archive. The full source stays in Git\nhistory, last present in e5d0812.\n\nThe two files the copy contributed to the CodeQL token source inventory\n(src/formats/pe.rs, src/types.rs) are removed from the policy and\nPOLICY_DIGEST is refreshed for those two entries only. No remaining\ninventoried file changed and the reviewed result tuples are unchanged.\n\nCo-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>\n\n* chore(ci): remove the unused in-tree threatflux-package-security 0.1.0 crate\n\nthreatflux-package-security/ was the original 0.1.0 crate left over from the\nAugust 2025 library split. It was excluded from the workspace, its dependency\nline was commented out, and no file-scanner source, test or benchmark imports\nthreatflux_package_security: the scanner has its own npm, Python and Java\nanalyzers under src/. It was still formatted, linted, tested, audited, SBOM'd\nand Dependabot-bumped here as a second project.\n\nThe maintained crate is ThreatFlux/threatflux-package-security, redesigned at\n0.2.0 (now 0.2.6). The three files that existed only here (the placeholder\nvulnerability_db/updater.rs and two old test files) were deleted there on\npurpose in 0.2.0. About 430 lines added here in #185 (Maven project parsing,\nnpm install-script and setup.py patterns, PackageType and two summary types)\nwere never taken by the standalone crate, whose 0.2 changelog removes the same\nkind of claims. They are not ported; the source stays in Git history, last\npresent in e5d0812.\n\nRemoved with the directory:\n- CI: its fmt, clippy, test, doctest, no-default-features, rustdoc, audit and\n  MSRV commands; security workflow: its audit, deny, build and SBOM commands\n- Dependabot: its directory in the grouped cargo entry\n- Makefile: test-package-security, lint-package-security, feature-test,\n  feature-test-full, the libs-* and parallel-* targets and the LIBRARIES list\n- scripts: its lockfile and source checks in check-rsa-exception.py and its\n  line in test-parallel-ci.sh\n- CodeQL review policy: its java.rs inventory entry and its target directory\n  in the excluded paths; POLICY_DIGEST refreshed for those two items only\n- Cargo.toml: the workspace exclude and two stale comments\n\ndocs/ARCHITECTURE.md also said the build used a vendored binary-analysis copy;\nit has used the published crate since 2026-11-12.\n\nCo-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Fable 5.2 <noreply@anthropic.com>",
+          "timestamp": "2026-11-22T13:20:09-05:00",
+          "tree_id": "eed9663f63d1f4b31c778e9bbcd479a00b4d51a0",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/3e2e67fe1297e14d136fd997c21992fd5f0cb107"
+        },
+        "date": 1795374274339,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 6760.3559975352455,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_large_binary",
+            "value": 81446.22303838261,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_pe",
+            "value": 8037.640202052283,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2387721.6180952378,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3304607.463125,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 328336.9835110185,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2863297.770555556,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 76761.02316067563,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 44722.99499175793,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 259201.1030026583,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2392700.263333333,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 49277.13003142309,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 28179.40084174107,
+            "unit": "ns"
+          },
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2854912.929444445,
+            "unit": "ns"
+          },
+          {
+            "name": "string_categorization/extract_with_categorization",
+            "value": 1065773.4667969325,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/10000_strings",
+            "value": 11149584.212000003,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/1000_strings",
+            "value": 1271815.8277817816,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/100_strings",
+            "value": 224235.03284336958,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_16",
+            "value": 10803922.67,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_4",
+            "value": 11104407.599999998,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_8",
+            "value": 11068913.556000002,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_16",
+            "value": 1216777.8976180153,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_4",
+            "value": 1272104.8728221827,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_8",
+            "value": 1303348.0830879256,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_16",
+            "value": 193186.22649617388,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_4",
+            "value": 222534.44930794786,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
+            "value": 263891.28722381213,
             "unit": "ns"
           }
         ]
