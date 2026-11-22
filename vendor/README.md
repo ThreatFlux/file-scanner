@@ -14,6 +14,12 @@ changes the actual parent requirements instead of forcing lockfile transitives.
   independent OpenSSL signature regression retained from the previous patch.
   Original workspace/lock/VCS metadata and benchmark declarations are omitted.
 
+The vendored default features use the protobuf bindings shipped in the official
+archive. All default modules and rule-compiler optimizations are enabled.
+Build-time generation remains available through `generate-proto-code`; keeping
+it opt-in removes the `yara-x-proto` and Chrono dependency path from normal
+scanner builds, including the YARA dependency from the threat-detection crate.
+
 YARA-X 1.23's global-linker implementation compiles against Wasmtime 50 without a
 runtime source bridge. RSA 0.10 shares the current digest/PKCS8 generation, so
 the old RSA 0.9-specific digest aliases are no longer needed. Only public-key

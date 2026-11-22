@@ -76,7 +76,6 @@ default = [
     "default-modules",
     "exact-atoms",
     "fast-regexp",
-    "generate-proto-code",
 ]
 default-modules = [
     "console-module",
