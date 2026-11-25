@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795587193386,
+  "lastUpdate": 1795621634957,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -16436,6 +16436,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
             "value": 261442.70161675557,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "dd19d381881e3367cc20cc16441d1d47478eacad",
+          "message": "deps(deps): bump chainguard/glibc-dynamic (#334)\n\nBumps the nightly-dependencies group with 1 update: [chainguard/glibc-dynamic](https://github.com/chainguard-images/images).\n\n\nUpdates `chainguard/glibc-dynamic` from `d553920` to `838b58d`\n- [Commits](https://github.com/chainguard-images/images/commits)\ndeps(deps): bump jiff\n\nBumps the nightly-dependencies group with 1 update: [jiff](https://github.com/BurntSushi/jiff).\n\n\nUpdates `jiff` from 1.0.1 to 1.0.2\n- [Changelog](https://github.com/BurntSushi/jiff/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/BurntSushi/jiff/compare/1.0.1...1.0.2)\n\n---\nupdated-dependencies:\n- dependency-name: chainguard/glibc-dynamic\n  dependency-version: latest\n  dependency-type: direct:production\n  dependency-group: nightly-dependencies\n- dependency-name: jiff\n  dependency-version: 1.0.2\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: nightly-dependencies\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-11-25T10:05:02-05:00",
+          "tree_id": "485da995d2f94ca349205426d5fccca7004b517f",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/dd19d381881e3367cc20cc16441d1d47478eacad"
+        },
+        "date": 1795621634319,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 5971.420769258501,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_large_binary",
+            "value": 80462.34514269549,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_pe",
+            "value": 7340.872111109685,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2178237.0178260873,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3095616.014705884,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 308573.49152925285,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2612555.061,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 77171.02620531827,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 51703.03896063948,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 234034.3819456376,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2136944.0466666683,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 48541.7905043636,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 29622.73097804611,
+            "unit": "ns"
+          },
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2624765.6568421065,
+            "unit": "ns"
+          },
+          {
+            "name": "string_categorization/extract_with_categorization",
+            "value": 1042616.78114932,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/10000_strings",
+            "value": 10174167.514,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/1000_strings",
+            "value": 1171768.3298990852,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/100_strings",
+            "value": 221218.96391651576,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_16",
+            "value": 9762335.809999997,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_4",
+            "value": 10167619.886000002,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_8",
+            "value": 10018571.469999999,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_16",
+            "value": 1120613.5830350437,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_4",
+            "value": 1170841.2739949771,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_8",
+            "value": 1209301.6596650484,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_16",
+            "value": 197510.56564333505,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_4",
+            "value": 221377.78476645384,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
+            "value": 266609.60715965444,
             "unit": "ns"
           }
         ]
