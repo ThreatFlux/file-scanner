@@ -99,7 +99,7 @@ jobs:
       - name: Verify reviewed CodeQL source conditions and guard tests
         run: make codeql-review-check
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           languages: ${{ matrix.language }}
 
@@ -117,7 +117,7 @@ jobs:
 
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           category: "/language:${{matrix.language}}"
           output: ${{ runner.temp }}/codeql-raw
@@ -130,7 +130,7 @@ jobs:
             --annotated "$RUNNER_TEMP/codeql-review/annotated" --report "$RUNNER_TEMP/codeql-review/report.json"
 
       - name: Upload reviewed CodeQL analysis
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
         with:
           sarif_file: ${{ runner.temp }}/codeql-reviewed
           category: "/language:${{matrix.language}}"
@@ -225,7 +225,7 @@ jobs:
           WORKFLOW_VALUE_3: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_VALUE_4: ${{ github.event.pull_request.head.sha }}
       - name: Report informational verified TruffleHog findings
-        uses: trufflesecurity/trufflehog@d232362a64a09a9e7d58267b8f5acef00ae90e23 # v3.100.0
+        uses: trufflesecurity/trufflehog@4ef51f69ca6347aaa76a5e64a87eac9c0c909f71 # v3.100.1
         with:
           path: ./
           base: ${{ steps.scan-strategy.outputs.base }}
