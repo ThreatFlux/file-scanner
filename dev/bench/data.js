@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795445924819,
+  "lastUpdate": 1795587193386,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -16277,6 +16277,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
             "value": 265385.4931600951,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "24f46b2716591aa40c9d15fa9df375a77cc9d001",
+          "message": "deps(deps): bump the nightly-dependencies group with 4 updates (#333)\n\nBumps the nightly-dependencies group with 4 updates: [github/codeql-action/upload-sarif](https://github.com/github/codeql-action), [github/codeql-action/init](https://github.com/github/codeql-action), [github/codeql-action/analyze](https://github.com/github/codeql-action) and [trufflesecurity/trufflehog](https://github.com/trufflesecurity/trufflehog).\n\n\nUpdates `github/codeql-action/upload-sarif` from 4.39.3 to 4.39.4\n- [Release notes](https://github.com/github/codeql-action/releases)\n- [Changelog](https://github.com/github/codeql-action/blob/main/CHANGELOG.md)\n- [Commits](https://github.com/github/codeql-action/compare/33d7b85da1a04171e211befe2c739303b9a4c066...1bd86f2fdb4b86187fa4059f16f31a3202acc9ea)\n\nUpdates `github/codeql-action/init` from 4.39.3 to 4.39.4\n- [Release notes](https://github.com/github/codeql-action/releases)\n- [Changelog](https://github.com/github/codeql-action/blob/main/CHANGELOG.md)\n- [Commits](https://github.com/github/codeql-action/compare/33d7b85da1a04171e211befe2c739303b9a4c066...1bd86f2fdb4b86187fa4059f16f31a3202acc9ea)\n\nUpdates `github/codeql-action/analyze` from 4.39.3 to 4.39.4\n- [Release notes](https://github.com/github/codeql-action/releases)\n- [Changelog](https://github.com/github/codeql-action/blob/main/CHANGELOG.md)\n- [Commits](https://github.com/github/codeql-action/compare/33d7b85da1a04171e211befe2c739303b9a4c066...1bd86f2fdb4b86187fa4059f16f31a3202acc9ea)\n\nUpdates `trufflesecurity/trufflehog` from 3.100.0 to 3.100.1\n- [Release notes](https://github.com/trufflesecurity/trufflehog/releases)\n- [Commits](https://github.com/trufflesecurity/trufflehog/compare/d232362a64a09a9e7d58267b8f5acef00ae90e23...4ef51f69ca6347aaa76a5e64a87eac9c0c909f71)\ndeps(deps): bump chainguard/glibc-dynamic\n\nBumps the nightly-dependencies group with 1 update: [chainguard/glibc-dynamic](https://github.com/chainguard-images/images).\n\n\nUpdates `chainguard/glibc-dynamic` from `3359c6b` to `d553920`\n- [Commits](https://github.com/chainguard-images/images/commits)\n\n---\nupdated-dependencies:\n- dependency-name: github/codeql-action/upload-sarif\n  dependency-version: 4.39.4\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: nightly-dependencies\n- dependency-name: github/codeql-action/init\n  dependency-version: 4.39.4\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: nightly-dependencies\n- dependency-name: github/codeql-action/analyze\n  dependency-version: 4.39.4\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: nightly-dependencies\n- dependency-name: trufflesecurity/trufflehog\n  dependency-version: 3.100.1\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: nightly-dependencies\n- dependency-name: chainguard/glibc-dynamic\n  dependency-version: latest\n  dependency-type: direct:production\n  dependency-group: nightly-dependencies\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-11-25T00:29:56-05:00",
+          "tree_id": "c1c3a0c4e08647b8e3d361e33cc7850b57c969d9",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/24f46b2716591aa40c9d15fa9df375a77cc9d001"
+        },
+        "date": 1795587192423,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 5933.122563759693,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_large_binary",
+            "value": 73990.64067799984,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_pe",
+            "value": 7238.377706851977,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 2188087.505217391,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 3094525.393529411,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 312096.14034661127,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2586450.6064999998,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 81628.57094004113,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 47226.55399897227,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 232803.6896922338,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 2136732.0191666675,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 47721.6461549562,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 29707.777418377736,
+            "unit": "ns"
+          },
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2617676.7630000003,
+            "unit": "ns"
+          },
+          {
+            "name": "string_categorization/extract_with_categorization",
+            "value": 1025138.6674000997,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/10000_strings",
+            "value": 10146493.264000002,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/1000_strings",
+            "value": 1167843.072968904,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/100_strings",
+            "value": 217299.2145789094,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_16",
+            "value": 9700066.516666666,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_4",
+            "value": 10154698.22,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_8",
+            "value": 10037224.718000004,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_16",
+            "value": 1113211.9422035993,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_4",
+            "value": 1172639.3137068232,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_8",
+            "value": 1200256.3107958315,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_16",
+            "value": 194795.47432907752,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_4",
+            "value": 217558.2082629985,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
+            "value": 261442.70161675557,
             "unit": "ns"
           }
         ]
