@@ -96,7 +96,7 @@ base64 = "0.23.1"
 tempfile = "3.27.0"
 mockall = "0.15.0"
 proptest = "1.12.0"
-rstest = "0.28.0"
+rstest = "0.29.0"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 pretty_assertions = "1.4.1"
 test-case = "3.4.1"
