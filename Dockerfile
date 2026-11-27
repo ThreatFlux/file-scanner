@@ -85,7 +85,7 @@ RUN mkdir -p /home/builder/out/bin /home/builder/out/doc /home/builder/runtime-s
     cp vendor/yara-x-1.24.0/LICENSE /home/builder/out/doc/LICENSE.yara-x
 
 # Wolfi glibc 2.44, nonroot uid/gid 65532; amd64/arm64 multi-arch index digest
-FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:eaa0c377a38e4c67f4192fd5fe9d24d39d51c4531613d97731537f9d33460ae4 AS runtime
+FROM cgr.dev/chainguard/glibc-dynamic:latest@sha256:ae815f889199ee018b0072f05939ecef65b1b3a831d1c768fa82d1860f889942 AS runtime
 
 # Placeholder: docker.yml passes the git ref name (vX.Y.Z on release tags) and the release
 # dry run passes vX.Y.Z with --build-arg VERSION. A build without it is labelled 0.0.0.
