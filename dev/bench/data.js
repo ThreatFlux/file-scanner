@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795621634957,
+  "lastUpdate": 1795747836471,
   "repoUrl": "https://github.com/ThreatFlux/file-scanner",
   "entries": {
     "Rust Benchmark": [
@@ -16595,6 +16595,165 @@ window.BENCHMARK_DATA = {
           {
             "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
             "value": 266609.60715965444,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "eeacba1400b0a4091f84b0870f2c4335c22f9cb2",
+          "message": "deps(deps): bump ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml (#335)\n\nBumps the nightly-dependencies group with 1 update: [ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml](https://github.com/threatflux/github_actions).\n\n\nUpdates `ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml` from f93f740ead8fc6e1ea89885c0baaec9395f82837 to 3c0371d7dfb3ef18aa8505fd76f7d83b2e8fcaad\n- [Release notes](https://github.com/threatflux/github_actions/releases)\n- [Changelog](https://github.com/ThreatFlux/github_actions/blob/main/docs/CHANGELOG.md)\n- [Commits](https://github.com/threatflux/github_actions/compare/f93f740ead8fc6e1ea89885c0baaec9395f82837...3c0371d7dfb3ef18aa8505fd76f7d83b2e8fcaad)\ndeps(deps): bump chainguard/glibc-dynamic\n\nBumps the nightly-dependencies group with 1 update: [chainguard/glibc-dynamic](https://github.com/chainguard-images/images).\n\n\nUpdates `chainguard/glibc-dynamic` from `838b58d` to `eaa0c37`\n- [Commits](https://github.com/chainguard-images/images/commits)\ndeps(deps): bump rstest\n\nBumps the nightly-dependencies group with 1 update: [rstest](https://github.com/la10736/rstest).\n\n\nUpdates `rstest` from 0.28.0 to 0.29.0\n- [Release notes](https://github.com/la10736/rstest/releases)\n- [Changelog](https://github.com/la10736/rstest/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/la10736/rstest/compare/v0.28.0...v0.29.0)\n\n---\nupdated-dependencies:\n- dependency-name: ThreatFlux/github_actions/.github/workflows/reusable-auto-release.yml\n  dependency-version: 3c0371d7dfb3ef18aa8505fd76f7d83b2e8fcaad\n  dependency-type: direct:production\n  dependency-group: nightly-dependencies\n- dependency-name: chainguard/glibc-dynamic\n  dependency-version: latest\n  dependency-type: direct:production\n  dependency-group: nightly-dependencies\n- dependency-name: rstest\n  dependency-version: 0.29.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: nightly-dependencies\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>",
+          "timestamp": "2026-11-26T21:14:19-05:00",
+          "tree_id": "2d676820485b9cd5840c537c06dd62de16500fc8",
+          "url": "https://github.com/ThreatFlux/file-scanner/commit/eeacba1400b0a4091f84b0870f2c4335c22f9cb2"
+        },
+        "date": 1795747835792,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_parsing/parse_elf",
+            "value": 5275.439503781663,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_large_binary",
+            "value": 64294.27861333612,
+            "unit": "ns"
+          },
+          {
+            "name": "binary_parsing/parse_pe",
+            "value": 6276.495259614113,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/concurrent_hashing",
+            "value": 1840940.018112037,
+            "unit": "ns"
+          },
+          {
+            "name": "concurrent_hashing/sequential_hashing",
+            "value": 2572057.8060000003,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/100KB",
+            "value": 252019.86789760418,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1024KB",
+            "value": 2207353.7556521734,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/10KB",
+            "value": 60507.400194626345,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_all_hashes/1KB",
+            "value": 34324.25763980357,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/100KB",
+            "value": 202930.29767006397,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1024KB",
+            "value": 1853473.0330695496,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/10KB",
+            "value": 38837.19544580648,
+            "unit": "ns"
+          },
+          {
+            "name": "hash_calculations/calculate_md5_only/1KB",
+            "value": 22851.4018473026,
+            "unit": "ns"
+          },
+          {
+            "name": "individual_hash_algorithms/all_hashes_1mb",
+            "value": 2197356.6604347844,
+            "unit": "ns"
+          },
+          {
+            "name": "string_categorization/extract_with_categorization",
+            "value": 805619.8476452401,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/10000_strings",
+            "value": 8319755.1416666685,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/1000_strings",
+            "value": 951850.2189017202,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings/100_strings",
+            "value": 166632.88035233895,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_16",
+            "value": 8094495.141428572,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_4",
+            "value": 8328801.410000002,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/10000_strings_min_8",
+            "value": 8320627.495000006,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_16",
+            "value": 907427.3207104808,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_4",
+            "value": 952755.7708518729,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/1000_strings_min_8",
+            "value": 983126.3817595189,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_16",
+            "value": 146744.13923380652,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_4",
+            "value": 166900.9164620397,
+            "unit": "ns"
+          },
+          {
+            "name": "string_extraction/extract_strings_min_len/100_strings_min_8",
+            "value": 202876.58411142507,
             "unit": "ns"
           }
         ]
